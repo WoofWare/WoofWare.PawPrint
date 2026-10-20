@@ -30,6 +30,7 @@
         <Compile Include="MetadataAccess.fs" />
         <Compile Include="AssemblyLoad.fs" />
         <Compile Include="BaseChainLoading.fs" />
+        <Compile Include="PEKindAndMachine.fs" />
         <Compile Include="ImageAdmission.fs" />
         <Compile Include="AssemblyProbe.fs" />
         <Compile Include="AssemblyBinding.fs" />
