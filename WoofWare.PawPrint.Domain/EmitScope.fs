@@ -159,6 +159,8 @@ type MemberRefParent =
     | TypeRef of TypeRefRid
     /// A vararg call site's signature, naming the method it calls.
     | MethodDef of MethodDefRid
+    /// A member of a generic instantiation, or of another type only a signature can name.
+    | TypeSpec of TypeSpecRid
 
 /// ECMA-335 II.24.2.6's `MethodDefOrRef` coded index.
 [<RequireQualifiedAccess>]
@@ -789,6 +791,7 @@ module EmitScope =
         | MemberRefParent.TypeDef rid -> requireRid operation "TypeDef" scope.TypeDefs.Count rid.Rid
         | MemberRefParent.TypeRef rid -> requireRid operation "TypeRef" scope.TypeRefs.Count rid.Rid
         | MemberRefParent.MethodDef rid -> requireRid operation "MethodDef" scope.MethodDefs.Count rid.Rid
+        | MemberRefParent.TypeSpec rid -> requireRid operation "TypeSpec" scope.TypeSpecs.Count rid.Rid
 
         requireString operation scope row.Name
         requireBlob operation scope row.Signature

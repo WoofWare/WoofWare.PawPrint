@@ -306,6 +306,7 @@ module TestEmitScopeImage =
                 | MemberRefParent.TypeDef rid -> 0x02000000 ||| rid.Rid
                 | MemberRefParent.TypeRef rid -> 0x01000000 ||| rid.Rid
                 | MemberRefParent.MethodDef rid -> 0x06000000 ||| rid.Rid
+                | MemberRefParent.TypeSpec rid -> 0x1B000000 ||| rid.Rid
             )
 
             checkString scope reader expected.Name actual.Name

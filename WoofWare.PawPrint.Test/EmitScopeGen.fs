@@ -487,8 +487,7 @@ module EmitScopeGen =
                         match p with
                         | TypeDefOrRef.TypeDef rid -> yield MemberRefParent.TypeDef rid
                         | TypeDefOrRef.TypeRef rid -> yield MemberRefParent.TypeRef rid
-                        // `MemberRefParent` holds no TypeSpec yet: no QCall adds a member of one.
-                        | TypeDefOrRef.TypeSpec _ -> ()
+                        | TypeDefOrRef.TypeSpec rid -> yield MemberRefParent.TypeSpec rid
                 ]
 
             let name, applied = intern name applied
