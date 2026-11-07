@@ -88,6 +88,8 @@ public static class Statics
 public class OnXml : System.Xml.XmlDocument
 {
     public static U Make<U>() => default!;
+    public static V Struct<V>() where V : struct => default!;
+    public static W StructInMethod<W>() where W : struct => Struct<W>();
 }
 
 public class XmlHolder<T> : System.Xml.XmlDocument
@@ -342,12 +344,16 @@ public static class Program
 
     /// Methods on classes whose base is in an assembly nothing else loads, each resolved by a run of
     /// its own so that the resolution is the first thing to touch that assembly, and the method the
-    /// real runtime was measured to answer with: a MethodSpec over a MethodDef, and one over a
-    /// MemberRef.
+    /// real runtime was measured to answer with: a MethodSpec over a MethodDef, one over a MemberRef,
+    /// and one over a MethodDef whose arguments violate its constraints.
     let private firstTouch : (string * string * string * string) list =
         [
             "Sites", "OnXmlMake", "none", "OnXml.Make<int>"
             "Sites", "XmlHolderMake", "none", "XmlHolder<int>.Make<long>"
+            "OnXml",
+            "StructInMethod",
+            "m=string",
+            "!VerificationException|Method OnXml.Struct: type argument 'System.String' violates the constraint of type parameter 'V'."
         ]
 
     let private checkArgs (cases : (string * string * string * string) list) : string list =
@@ -386,6 +392,7 @@ public static class Program
 
     [<TestCase 0>]
     [<TestCase 1>]
+    [<TestCase 2>]
     let ``PawPrint resolves a MethodSpec on a class whose base is in an unloaded assembly`` (index : int) : unit =
         let typeName, methodName, context, expected = firstTouch.[index]
 
