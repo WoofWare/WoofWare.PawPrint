@@ -2,6 +2,9 @@ namespace WoofWare.PawPrint
 
 open System.IO
 
+/// The assembly that embeds `VmLaidOutClasses.tsv`, which `VmLaidOutClass.all` reads.
+type private VmLaidOutClassResource = class end
+
 /// The CoreLib types whose objects CoreCLR's native code lays out as a C++ class of its own
 /// (`vm/object.h` and its neighbours: `StringObject` for `System.String`, `ExceptionObject` for
 /// `System.Exception`, `ReflectFieldObject` for `System.RuntimeFieldInfoStub`), through which it
@@ -17,7 +20,7 @@ module VmLaidOutClass =
     /// Each such type, by its full name (`TypeInfo.fullName`), with the C++ class that lays it out.
     let all : Lazy<Set<string * string>> =
         lazy
-            (let assembly = typeof<EmulatedRuntime>.Assembly
+            (let assembly = typeof<VmLaidOutClassResource>.Assembly
              let name = "WoofWare.PawPrint.Semantics.VmLaidOutClasses.tsv"
 
              use stream =

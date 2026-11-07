@@ -17,8 +17,6 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Compile Include="EmulatedRuntime.fs" />
-        <Compile Include="InstantiationCheck.fs" />
         <Compile Include="SynchronizedMethodHelpers.fs" />
         <Compile Include="ContextSwitchPrior.fs" />
         <Compile Include="OpcodeFaults.fs" />
