@@ -4502,6 +4502,24 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // The `MethodBase` of a `Reflection.Emit` method's captured frame is the
+                // `DynamicMethod` itself, recovered through `RuntimeMethodHandle.GetResolver`.
+                // Verified to exit 0 on real .NET 10 and 11.
+                FileName = "DynamicMethodFrameMethodBase.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // What a `Reflection.Emit` method's frame looks like in a rendered stack trace:
                 // no qualifying type name, because it has no declaring type. The guest-visible
                 // consequence of #988's representation choice, and the one thing that would have
