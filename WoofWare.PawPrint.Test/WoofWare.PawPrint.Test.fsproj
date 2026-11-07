@@ -234,6 +234,7 @@
     <Compile Include="TestPropertySignatureDecoding.fs" />
     <Compile Include="TestSignatureComparison.fs" />
     <Compile Include="TestNativeSignature.fs" />
+    <Compile Include="TestSignatureParameterOffset.fs" />
     <Compile Include="TestNativeCustomAttribute.fs" />
     <Compile Include="NativeRuntimeFieldHandleFixture.fs" />
     <Compile Include="TestNativeRuntimeFieldHandleGetValue.fs" />
