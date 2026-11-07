@@ -2,6 +2,9 @@ namespace WoofWare.PawPrint
 
 open System.IO
 
+/// The assembly that embeds `VmBoundFields.tsv`, which `VmBoundField.all` reads.
+type private VmBoundFieldResource = class end
+
 /// The fields of CoreLib that CoreCLR's native code binds by name, through the rows of its
 /// `vm/corelib.h`: each `DEFINE_FIELD`, by which the VM finds a field to read or write, and each
 /// `DEFINE_FIELD_U`, which checks that a managed field lies where a field of a native object does.
@@ -18,7 +21,7 @@ module VmBoundField =
     /// Each such field, by its declaring type's full name (`TypeInfo.fullName`) and its own name.
     let all : Lazy<Set<string * string>> =
         lazy
-            (let assembly = typeof<EmulatedRuntime>.Assembly
+            (let assembly = typeof<VmBoundFieldResource>.Assembly
              let name = "WoofWare.PawPrint.Semantics.VmBoundFields.tsv"
 
              use stream =
