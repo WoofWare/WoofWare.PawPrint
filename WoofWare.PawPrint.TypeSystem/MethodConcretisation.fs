@@ -11,6 +11,69 @@ open Microsoft.Extensions.Logging
 [<RequireQualifiedAccess>]
 module MethodConcretisation =
 
+    /// Whether CoreCLR creates the instantiation `methodGenerics` of `method`, declared on
+    /// `declaringType`, as far as its type parameters' constraints decide it
+    /// (`InstantiatedMethodDesc::NewInstantiatedMethodDesc`, genmeth.cpp, which checks them once the
+    /// instantiation is well formed and before the method's signature is read). A violation is the
+    /// refusal `TypeLoadRefusal.MethodConstraintsViolated`; an argument whose verdict
+    /// `ConstraintSatisfaction` leaves undecided is a failure PawPrint does not model.
+    let private methodConstraints
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (method : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (declaringType : ConcreteTypeHandle)
+        (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
+        (state : TypeSystemState)
+        : TypeSystemState * Result<unit, TypeBindingFailure>
+        =
+        if method.Generics.IsEmpty then
+            state, Ok ()
+        else
+
+        // CoreCLR exempts an instantiation with an argument in its canonical form, which only code
+        // shared between instantiations names. PawPrint runs every instantiation exactly, and none
+        // of its arguments is canonical; CoreCLR checks each exact instantiation too, as it creates
+        // it, which in shared code is when the instruction naming it first runs.
+        let declaring =
+            match AllConcreteTypes.lookup declaringType state.ConcreteTypes with
+            | Some declaring -> declaring
+            | None ->
+                failwith
+                    $"BUG: the declaring type %O{declaringType} of %s{method.Name}, which concretisation returned, is not registered"
+
+        match
+            ConstraintSatisfaction.satisfiesClosed
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                state
+                (MethodOwner.requireDeclaringType "checking a method instantiation's constraints" method.Owner)
+                    .AssemblyFullName
+                declaring.Generics
+                methodGenerics
+                method.Generics
+                (List.ofSeq methodGenerics)
+        with
+        | state, Error failure -> state, Error failure
+        | state, Ok ConstraintVerdict.Satisfied -> state, Ok ()
+        | state, Ok (ConstraintVerdict.Violated violation) ->
+            state,
+            Error (
+                TypeBindingFailure.Refused (
+                    TypeLoadRefusal.MethodConstraintsViolated (declaring.Identity, method.Name, violation.Parameter)
+                )
+            )
+        | state, Ok (ConstraintVerdict.Undecided (parameter, required)) ->
+            state,
+            Error (
+                TypeBindingFailure.Unmodelled
+                    {
+                        Diagnostic =
+                            $"TODO: the argument %d{parameter} of the instantiation of %s{method.Name} on %O{declaring.Identity} is abstract and can be cast to %O{required}, an interface declaring static abstract methods; CoreCLR then requires each of them to resolve on the argument, which PawPrint does not decide"
+                    }
+            )
+
     let concretizeMethodWithAllGenerics
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
@@ -36,10 +99,12 @@ module MethodConcretisation =
         | Some hit -> state, Ok (hit.Method, hit.DeclaringTypeHandle)
         | None ->
 
-        let concretizedMethod, newConcreteTypes, newAssemblies =
-            Concretization.concretizeMethod
+        let loader = TypeResolution.directoryLoader loggerFactory dotnetRuntimeDirs
+
+        let declaringTypeHandle, newConcreteTypes, newAssemblies =
+            Concretization.concretizeMethodDeclaringType
                 state.ConcreteTypes
-                (TypeResolution.directoryLoader loggerFactory dotnetRuntimeDirs)
+                loader
                 state._LoadedAssemblies
                 baseClassTypes
                 methodToCall
@@ -53,19 +118,43 @@ module MethodConcretisation =
             }
 
         // A failure is not memoised: binding the method again fails the same way.
+        match declaringTypeHandle with
+        | Error failure -> state, Error failure
+        | Ok declaringTypeHandle ->
+
+        match
+            methodConstraints
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                methodToCall
+                declaringTypeHandle
+                methodGenerics
+                state
+        with
+        | state, Error failure -> state, Error failure
+        | state, Ok () ->
+
+        let concretizedMethod, newConcreteTypes, newAssemblies =
+            Concretization.concretizeMethodSignatureOn
+                state.ConcreteTypes
+                loader
+                state._LoadedAssemblies
+                baseClassTypes
+                methodToCall
+                typeGenerics
+                methodGenerics
+                declaringTypeHandle
+
+        let state =
+            { state with
+                ConcreteTypes = newConcreteTypes
+                _LoadedAssemblies = newAssemblies
+            }
+
         match concretizedMethod with
         | Error failure -> state, Error failure
         | Ok concretizedMethod ->
-
-        let declaringTypeHandle =
-            match
-                AllConcreteTypes.findExistingConcreteType
-                    state.ConcreteTypes
-                    concretizedMethod.RequiredDeclaringType.Identity
-                    concretizedMethod.DeclaringTypeGenerics
-            with
-            | Some handle -> handle
-            | None -> failwith "Concretized method's declaring type not found in ConcreteTypes"
 
         let state =
             match key with

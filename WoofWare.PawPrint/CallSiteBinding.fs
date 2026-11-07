@@ -13,6 +13,9 @@ type internal CompilationFailure =
     /// The token names a type CoreCLR refuses as the instruction's operand (`TypeOperand.refusal`),
     /// or names its member through one: `InvalidProgramException`.
     | RefusesTypeOperand of TypeOperandRefusal
+    /// The token names an instantiation whose constraints reject its arguments: `TypeLoadException`
+    /// for the declaring type's, `VerificationException` for the method's.
+    | ViolatesConstraints of ConstraintRefusal
 
 /// Which accessor of a multi-dimensional array type a `call` names.
 [<RequireQualifiedAccess>]
@@ -231,6 +234,8 @@ module internal CallSiteBinding =
         | state, MethodTokenBinding.Unbound unbound -> state, CallSiteBinding.Unbound unbound
         | state, MethodTokenBinding.RefusedParent refusal ->
             state, CallSiteBinding.CompilationFails (CompilationFailure.RefusesTypeOperand refusal)
+        | state, MethodTokenBinding.ViolatesConstraints refusal ->
+            state, CallSiteBinding.CompilationFails (CompilationFailure.ViolatesConstraints refusal)
         | state, MethodTokenBinding.Method (concretized, fromMetadata) ->
 
         match constrained with

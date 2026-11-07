@@ -36,9 +36,9 @@
         <Compile Include="FieldBlittability.fs" />
         <Compile Include="StructLayoutFacts.fs" />
         <Compile Include="MemberReferenceInstantiation.fs" />
-        <Compile Include="MethodConcretisation.fs" />
         <Compile Include="TypeAssignability.fs" />
         <Compile Include="ConstraintSatisfaction.fs" />
+        <Compile Include="MethodConcretisation.fs" />
         <Compile Include="ConcreteMethodTable.fs" />
         <Compile Include="ConcreteInterfaceDispatch.fs" />
         <Compile Include="DefaultInterfaceImplementation.fs" />

@@ -46,6 +46,12 @@ type TypeLoadRefusal =
         declaringType : ResolvedTypeIdentity *
         method : string *
         fault : MethodInstantiationFault
+    /// An instantiation of the generic method `method` of `declaringType` whose argument for the
+    /// method's type parameter at index `parameter` that parameter's constraints reject, which
+    /// CoreCLR checks as it creates the instantiated method
+    /// (`InstantiatedMethodDesc::NewInstantiatedMethodDesc`, genmeth.cpp). `VerificationException`
+    /// (`IDS_EE_METHOD_CONSTRAINTS_VIOLATION`).
+    | MethodConstraintsViolated of declaringType : ResolvedTypeIdentity * method : string * parameter : int
     /// A signature spelled `named` as `spelled`, and the definition is the other kind.
     /// `TypeLoadException` (`BFA_CLASSLOAD_VALUETYPEMISMATCH`) naming `named`.
     | KindMismatch of named : ResolvedTypeIdentity * spelled : SignatureTypeKind
@@ -81,6 +87,8 @@ module TypeLoadRefusal =
                     $"the method declares %d{declared} generic parameter(s), and the instantiation names %d{supplied} argument(s)"
 
             $"CoreCLR refuses an instantiation of the generic method %s{method} of %O{declaringType} with BadImageFormatException: %s{why}"
+        | TypeLoadRefusal.MethodConstraintsViolated (declaringType, method, parameter) ->
+            $"CoreCLR refuses an instantiation of the generic method %s{method} of %O{declaringType} with VerificationException: its argument %d{parameter} violates that type parameter's constraints"
         | TypeLoadRefusal.KindMismatch (named, spelled) ->
             $"CoreCLR refuses to load %O{named} with TypeLoadException: a signature spells it %O{spelled}, which it is not"
         | TypeLoadRefusal.WrongArity (definition, declared, supplied) ->

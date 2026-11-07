@@ -282,3 +282,49 @@ module ConstraintSatisfaction =
             )
 
         state, verdict |> Result.map (Option.defaultValue ConstraintVerdict.Satisfied)
+
+    /// <summary>
+    /// Whether <paramref name="instantiation" /> satisfies its own type parameters' constraints, as
+    /// CoreCLR's <c>SatisfiesClassConstraints</c> (typehandle.cpp) checks them as
+    /// <c>MethodTable::DoFullyLoad</c> completes the type's load, raising <c>TypeLoadException</c>
+    /// (<c>IDS_EE_CLASS_CONSTRAINTS_VIOLATION</c>). A nominal type with no type parameters, and a
+    /// structural type, have none to satisfy.
+    /// </summary>
+    /// <remarks>
+    /// This checks the type's own arguments only, not the types its full load brings with it (its
+    /// parent, interfaces, arguments and value-type fields), whose violations CoreCLR raises too.
+    /// CoreCLR checks only a type it loads in full, so whether a verdict of <c>Violated</c> is
+    /// raised where it is asked is the caller's to decide.
+    /// </remarks>
+    let classConstraints
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : TypeSystemState)
+        (instantiation : ConcreteTypeHandle)
+        : TypeSystemState * Result<ConstraintVerdict, TypeBindingFailure>
+        =
+        if state._SatisfiedClassConstraints.Contains instantiation then
+            state, Ok ConstraintVerdict.Satisfied
+        else
+
+        match TypeSystemState.tryGetConcreteTypeInfo state instantiation with
+        | None -> state, Ok ConstraintVerdict.Satisfied
+        | Some (concrete, _) when concrete.Generics.IsEmpty -> state, Ok ConstraintVerdict.Satisfied
+        | Some (concrete, typeInfo) ->
+
+        match
+            satisfiesClosed
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                state
+                typeInfo.AssemblyFullName
+                concrete.Generics
+                ImmutableArray.Empty
+                typeInfo.Generics
+                (List.ofSeq concrete.Generics)
+        with
+        | state, Ok ConstraintVerdict.Satisfied ->
+            state.WithSatisfiedClassConstraints instantiation, Ok ConstraintVerdict.Satisfied
+        | state, verdict -> state, verdict

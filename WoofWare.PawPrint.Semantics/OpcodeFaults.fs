@@ -51,9 +51,11 @@ type ResolutionFault =
     /// names, with one of the same: a byref or `System.Void` as the type operand of any instruction
     /// but `ldtoken` (`InvalidProgramException`), `call` or `ldftn` of an abstract method
     /// (`BadImageFormatException`), `box` of a byref-like type that it does not fold away
-    /// (`InvalidProgramException`; `BoxPattern`), or `newarr` of one (`TypeLoadException`). CoreCLR's JIT resolves every token of a method as it
-    /// compiles it, so it raises most of these where the method is called, before any of its
-    /// instructions runs.
+    /// (`InvalidProgramException`; `BoxPattern`), or `newarr` of one (`TypeLoadException`). Or it
+    /// names a generic instantiation whose arguments its type parameters' constraints reject: a
+    /// type's (`TypeLoadException`) or a method's (`VerificationException`). CoreCLR's JIT resolves
+    /// every token of a method as it compiles it, so it raises most of these where the method is
+    /// called, before any of its instructions runs.
     | TokenBinding
     /// The method is a `DynamicMethod`, and the token names an entry of its scope that the
     /// instruction cannot use: past the scope's end (`ArgumentOutOfRangeException`, from the
@@ -224,6 +226,7 @@ module ResolutionFault =
                 "System.MissingFieldException"
                 "System.MissingMethodException"
                 "System.InvalidProgramException"
+                "System.Security.VerificationException"
             ]
         | ResolutionFault.ScopeEntry ->
             [
