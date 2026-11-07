@@ -249,9 +249,7 @@ public class H2_BaseThenMarker<A, B> where A : BaseType where B : IMarker { }
             typeof<string[]>
         ]
 
-    /// `GenericArguments[N]` opens both the CLR's message and PawPrint's, which is the only part of
-    /// the two formats that agrees. (PawPrint's diagnostic deliberately says *which* constraint was
-    /// violated where the CLR names only the parameter, so nothing past the index is comparable.)
+    /// `GenericArguments[N]` opens the CLR's message, naming the parameter it rejected.
     let private violatedIndex (message : string) : int option =
         let m = Regex.Match (message, @"^GenericArguments\[(\d+)\]")
 
@@ -299,12 +297,7 @@ public class H2_BaseThenMarker<A, B> where A : BaseType where B : IMarker { }
         let state, violation =
             NativeRuntimeTypeHelpers.validateConstraints loggerFactory bct state (guestType holder) argHandles
 
-        match violation with
-        | None -> state, None
-        | Some message ->
-            match violatedIndex message with
-            | Some i -> state, Some i
-            | None -> failwith $"PawPrint's violation message for %s{holder} is unparseable: %s{message}"
+        state, violation |> Option.map (fun violation -> violation.Parameter.SequenceNumber)
 
     [<Test>]
     let ``every single-parameter (constraint, argument) pair agrees with the host CLR`` () : unit =

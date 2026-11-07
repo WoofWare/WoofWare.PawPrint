@@ -1431,7 +1431,7 @@ module internal UnsafeAccessorDispatch =
             baseClassTypes.InvalidProgramException, "Generic type constraints do not match."
         | UnsafeAccessorRefusal.MethodConstraintsViolation (targetType, methodName, typeArgument, typeParameter) ->
             baseClassTypes.VerificationException,
-            $"Method %s{targetType}.%s{methodName}: type argument '%s{typeArgument}' violates the constraint of type parameter '%s{typeParameter}'."
+            NativeRuntimeTypeHelpers.methodConstraintsViolationMessage targetType methodName typeArgument typeParameter
         | UnsafeAccessorRefusal.CantInstantiateAbstractClass ->
             baseClassTypes.InvalidOperationException, "Instances of abstract classes cannot be created."
         | UnsafeAccessorRefusal.NotSupported message -> baseClassTypes.NotSupportedException, message

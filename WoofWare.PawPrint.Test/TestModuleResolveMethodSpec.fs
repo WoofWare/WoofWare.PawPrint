@@ -4,7 +4,6 @@ open System.IO
 open System.Reflection.Metadata
 open System.Reflection.Metadata.Ecma335
 open System.Reflection.PortableExecutable
-open FsUnitTyped
 open NUnit.Framework
 open WoofWare.PawPrint
 
@@ -18,19 +17,22 @@ open WoofWare.PawPrint
 /// A spec whose arguments, or whose MemberRef's parent, name a generic parameter the caller's context
 /// does not supply raises <c>BadImageFormatException</c>, which <c>RuntimeModule.ResolveMethod</c>
 /// wraps in <c>ArgumentException</c>. One whose arguments violate the method's constraints raises
-/// <c>VerificationException</c>, which PawPrint refuses.
+/// <c>VerificationException</c>, whose message names the method's declaring type as instantiated,
+/// the method, and the first violating argument and the parameter it violates.
 /// </remarks>
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestModuleResolveMethodSpec =
 
-    /// Each method of `Sites`, and `Caller`, `CallerS`, `InContext` and `MakeInMethod`, calls exactly
-    /// one method through a MethodSpec. `Main` resolves each token it is given, in the context given
+    /// Each method of `Sites`, and each method of `Statics` and `Holder` whose body is a call, calls
+    /// exactly one method through a MethodSpec. `Main` resolves each token it is given, in the context given
     /// beside it, and returns 0 if every answer is the one given beside it, or one more than the index
     /// of the first that is not. An answer is either a key of `Expected`, which the resolved method
     /// must be the very `MethodInfo` of, or `!` and the names of the exception resolving must raise and
-    /// of its inner exceptions, separated by `/`. A `BadImageFormatException` among them must carry
-    /// the HResult and message CoreCLR gives it.
+    /// of its inner exceptions, separated by `/`, optionally followed by `|` and the outermost
+    /// exception's message. A `BadImageFormatException` or `VerificationException` among them must
+    /// carry the HResult CoreCLR gives it, and a `BadImageFormatException` its message too. A context
+    /// is `none`, or `t=` and `m=` each followed by a comma-separated list of type names.
     let private source =
         """
 using System;
@@ -49,6 +51,10 @@ public class Holder<T>
     public T InContext() => Convert<T>();
     public int ParentInContext() => Convert<int>();
     public static W MakeInMethod<W>() => Make<W>();
+    public static V Struct<V>() where V : struct => default!;
+    public static W StructInMethod<W>() where W : struct => Struct<W>();
+    public static V WithT<V>() where V : T => default!;
+    public static W WithTInMethod<W>() where W : T => WithT<W>();
 }
 
 public struct SBox<T> : IConvert
@@ -69,6 +75,12 @@ public static class Statics
     public static V Two<V, W>() => default!;
     public static V Constrained<V>() where V : struct => default!;
     public static W CallerS<W>() where W : struct => Constrained<W>();
+    public static V Class<V>() where V : class => default!;
+    public static W CallerC<W>() where W : class => Class<W>();
+    public static void ClassThenStruct<A, B>() where A : class where B : struct { }
+    public static void SecondViolates<B>() where B : struct => ClassThenStruct<string, B>();
+    public static void BothStruct<A, B>() where A : struct where B : struct { }
+    public static void BothViolate<X>() where X : struct => BothStruct<X, X>();
 }
 
 // Each derives from a type in an assembly that nothing else in this program loads, so that
@@ -76,6 +88,8 @@ public static class Statics
 public class OnXml : System.Xml.XmlDocument
 {
     public static U Make<U>() => default!;
+    public static V Struct<V>() where V : struct => default!;
+    public static W StructInMethod<W>() where W : struct => Struct<W>();
 }
 
 public class XmlHolder<T> : System.Xml.XmlDocument
@@ -110,6 +124,10 @@ public static class Program
             case "Statics.Generic<string>": return typeof(Statics).GetMethod("Generic").MakeGenericMethod(typeof(string));
             case "Statics.Two<int,string>": return typeof(Statics).GetMethod("Two").MakeGenericMethod(typeof(int), typeof(string));
             case "Statics.Constrained<int>": return typeof(Statics).GetMethod("Constrained").MakeGenericMethod(typeof(int));
+            case "Statics.Class<string>": return typeof(Statics).GetMethod("Class").MakeGenericMethod(typeof(string));
+            case "Statics.ClassThenStruct<string,int>": return typeof(Statics).GetMethod("ClassThenStruct").MakeGenericMethod(typeof(string), typeof(int));
+            case "Holder<int>.Struct<long>": return typeof(Holder<int>).GetMethod("Struct").MakeGenericMethod(typeof(long));
+            case "Holder<object>.WithT<string>": return typeof(Holder<object>).GetMethod("WithT").MakeGenericMethod(typeof(string));
             case "Holder<int>.Convert<long>": return typeof(Holder<int>).GetMethod("Convert").MakeGenericMethod(typeof(long));
             case "Holder<int>.Convert<int>": return typeof(Holder<int>).GetMethod("Convert").MakeGenericMethod(typeof(int));
             case "Holder<string>.Convert<string>": return typeof(Holder<string>).GetMethod("Convert").MakeGenericMethod(typeof(string));
@@ -135,16 +153,38 @@ public static class Program
             && (e.HResult != unchecked((int)0x8007000B)
                 || e.Message != "An attempt was made to load a program with an incorrect format.\n (0x8007000B)"))
             return false;
+        if (e is System.Security.VerificationException && e.HResult != unchecked((int)0x8013150D))
+            return false;
         return e.InnerException == null || Faithful(e.InnerException);
+    }
+
+    static Type Named(string name)
+    {
+        switch (name)
+        {
+            case "int": return typeof(int);
+            case "long": return typeof(long);
+            case "string": return typeof(string);
+            case "object": return typeof(object);
+            default: throw new Exception("test bug: no type named " + name);
+        }
+    }
+
+    static Type[] Context(string context, string key)
+    {
+        foreach (string part in context.Split(' '))
+        {
+            if (part.StartsWith(key))
+                return part.Substring(key.Length).Split(',').Select(Named).ToArray();
+        }
+
+        return null;
     }
 
     static bool Answers(int token, string context, string expected)
     {
-        Type[] typeArgs = context.Contains("t=int") ? new[] { typeof(int) } : null;
-        Type[] methodArgs =
-            context.Contains("m=int") ? new[] { typeof(int) }
-            : context.Contains("m=string") ? new[] { typeof(string) }
-            : null;
+        Type[] typeArgs = Context(context, "t=");
+        Type[] methodArgs = Context(context, "m=");
 
         MethodBase m;
         try
@@ -153,7 +193,8 @@ public static class Program
         }
         catch (Exception e)
         {
-            return expected == "!" + Describe(e) && Faithful(e);
+            string actual = "!" + Describe(e) + (expected.Contains('|') ? "|" + e.Message : "");
+            return expected == actual && Faithful(e);
         }
 
         if (expected.StartsWith("!"))
@@ -268,22 +309,52 @@ public static class Program
             "Holder`1", "ParentInContext", "none", "!ArgumentException/BadImageFormatException"
             // Arguments are read before constraints are checked.
             "Statics", "CallerS", "none", "!ArgumentException/BadImageFormatException"
+            // The message names the first violating parameter in declaration order, as a type name
+            // with its namespace, and the declaring type as the MemberRef's parent instantiates it.
+            "Statics",
+            "CallerS",
+            "m=string",
+            "!VerificationException|Method Statics.Constrained: type argument 'System.String' violates the constraint of type parameter 'V'."
+            "Statics", "CallerC", "m=string", "Statics.Class<string>"
+            "Statics",
+            "CallerC",
+            "m=int",
+            "!VerificationException|Method Statics.Class: type argument 'System.Int32' violates the constraint of type parameter 'V'."
+            "Statics", "SecondViolates", "m=int", "Statics.ClassThenStruct<string,int>"
+            "Statics",
+            "SecondViolates",
+            "m=string",
+            "!VerificationException|Method Statics.ClassThenStruct: type argument 'System.String' violates the constraint of type parameter 'B'."
+            "Statics",
+            "BothViolate",
+            "m=string",
+            "!VerificationException|Method Statics.BothStruct: type argument 'System.String' violates the constraint of type parameter 'A'."
+            "Holder`1", "StructInMethod", "t=int m=long", "Holder<int>.Struct<long>"
+            "Holder`1",
+            "StructInMethod",
+            "t=int m=string",
+            "!VerificationException|Method Holder`1[System.Int32].Struct: type argument 'System.String' violates the constraint of type parameter 'V'."
+            // The constraint mentions the declaring type's parameter, read in the caller's type context.
+            "Holder`1", "WithTInMethod", "t=object m=string", "Holder<object>.WithT<string>"
+            "Holder`1",
+            "WithTInMethod",
+            "t=string m=object",
+            "!VerificationException|Method Holder`1[System.String].WithT: type argument 'System.Object' violates the constraint of type parameter 'V'."
         ]
 
     /// Methods on classes whose base is in an assembly nothing else loads, each resolved by a run of
     /// its own so that the resolution is the first thing to touch that assembly, and the method the
-    /// real runtime was measured to answer with: a MethodSpec over a MethodDef, and one over a
-    /// MemberRef.
+    /// real runtime was measured to answer with: a MethodSpec over a MethodDef, one over a MemberRef,
+    /// and one over a MethodDef whose arguments violate its constraints.
     let private firstTouch : (string * string * string * string) list =
         [
             "Sites", "OnXmlMake", "none", "OnXml.Make<int>"
             "Sites", "XmlHolderMake", "none", "XmlHolder<int>.Make<long>"
+            "OnXml",
+            "StructInMethod",
+            "m=string",
+            "!VerificationException|Method OnXml.Struct: type argument 'System.String' violates the constraint of type parameter 'V'."
         ]
-
-    /// The cases PawPrint refuses, the exception the real runtime was measured to raise, and text
-    /// PawPrint's refusal must contain.
-    let private refused : (string * string * string * string * string) list =
-        [ "Statics", "CallerS", "m=string", "!VerificationException", "violates" ]
 
     let private checkArgs (cases : (string * string * string * string) list) : string list =
         [
@@ -293,13 +364,9 @@ public static class Program
                 yield expected
         ]
 
-    let private refusedCase (index : int) : string * string * string * string =
-        let typeName, methodName, context, expected, _ = refused.[index]
-        typeName, methodName, context, expected
-
     [<Test>]
     let ``The real runtime answers as measured`` () : unit =
-        let cases = answered @ firstTouch @ List.init refused.Length refusedCase
+        let cases = answered @ firstTouch
 
         match realRuntime (checkArgs cases) with
         | 0 -> ()
@@ -324,23 +391,8 @@ public static class Program
         | other -> failwith $"expected the guest to exit, got %A{other}"
 
     [<TestCase 0>]
-    let ``PawPrint refuses a MethodSpec that CoreCLR rejects`` (index : int) : unit =
-        let typeName, methodName, _, expected, refusal = refused.[index]
-        let token = methodSpecToken (image.Force ()) typeName methodName
-
-        let exn =
-            Assert.Catch (fun () ->
-                underPawPrint $"ModuleResolveMethodSpecRefused%d{index}" (checkArgs [ refusedCase index ])
-                |> ignore<RunOutcome>
-            )
-
-        exn.Message |> shouldContainText "ModuleHandle.ResolveMethod"
-        exn.Message |> shouldContainText (expected.TrimStart '!')
-        exn.Message |> shouldContainText refusal
-        exn.Message |> shouldContainText $"0x%08x{token}"
-
-    [<TestCase 0>]
     [<TestCase 1>]
+    [<TestCase 2>]
     let ``PawPrint resolves a MethodSpec on a class whose base is in an unloaded assembly`` (index : int) : unit =
         let typeName, methodName, context, expected = firstTouch.[index]
 

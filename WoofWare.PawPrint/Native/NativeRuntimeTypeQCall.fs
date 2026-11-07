@@ -494,7 +494,7 @@ module NativeRuntimeTypeQCall =
                     validateConstraints ctx.LoggerFactory ctx.BaseClassTypes state typeInfo genericArguments
 
             match constraintViolation with
-            | Some _message ->
+            | Some _ ->
                 NativeHandlerResult.raiseException ctx.BaseClassTypes.ArgumentException state
                 |> Some
             | None ->
@@ -1487,7 +1487,6 @@ module NativeRuntimeTypeQCall =
                 (state : IlMachineState)
                 : IlMachineState *
                   (WoofWare.PawPrint.MethodInfo<TypeDefn, GenericParamFromMetadata, TypeDefn> *
-                  ImmutableArray<TypeDefn> *
                   ImmutableArray<ConcreteTypeHandle>) option
                 =
                 // Surface typeInstantiation/methodInstantiation as TypeDefn arrays so the
@@ -1564,7 +1563,36 @@ module NativeRuntimeTypeQCall =
                     )
                     |> Tuple.rmap (fun b -> b.ToImmutable ())
 
-                state, Some (method, extractedTypeArgs, declaringTypeGenerics)
+                state, Some (method, declaringTypeGenerics)
+
+            // The declaring type of `method`, instantiated at `declaringTypeGenerics`.
+            let concretizeDeclaringType
+                (state : IlMachineState)
+                (method : WoofWare.PawPrint.MethodInfo<TypeDefn, GenericParamFromMetadata, TypeDefn>)
+                (declaringTypeGenerics : ImmutableArray<ConcreteTypeHandle>)
+                : IlMachineState * ConcreteTypeHandle
+                =
+                let declaringType = method.RequiredDeclaringType
+
+                // Resolving a MethodDef can be the first thing to touch the type, and classifying it
+                // needs its base chain, which `lookupTypeDefn` loads. Its answer is the typical type,
+                // over the type's own parameters, which `declaringTypeGenerics` then substitute.
+                let state, typicalDeclaringType =
+                    IlMachineState.lookupTypeDefn
+                        ctx.LoggerFactory
+                        ctx.BaseClassTypes
+                        state
+                        (state.TypeSystem._LoadedAssemblies.ByDefinitionName declaringType.AssemblyFullName)
+                        declaringType.Definition.Get
+
+                IlMachineState.concretizeType
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    state
+                    declaringType.AssemblyFullName
+                    declaringTypeGenerics
+                    ImmutableArray.Empty
+                    (BindingStop.bound typicalDeclaringType)
 
             match MetadataToken.ofInt methodToken with
             | MetadataToken.MethodDef h ->
@@ -1629,7 +1657,7 @@ module NativeRuntimeTypeQCall =
 
                 match resolveMemberReference typeInstantiation methodInstantiation h state with
                 | state, None -> raiseMissingContext state
-                | state, Some (method, extractedTypeArgs, declaringTypeGenerics) ->
+                | state, Some (method, declaringTypeGenerics) ->
 
                 // The caller's method instantiation is a substitution context, never the
                 // method's instantiation: with `strictMetadataChecks` unset for a MemberRef,
@@ -1663,35 +1691,10 @@ module NativeRuntimeTypeQCall =
                         value
                 else
 
-                let declaringType = method.RequiredDeclaringType
-
-                let declaringTypeKind =
-                    LoadedTypeInfo.signatureTypeKind
-                        ctx.BaseClassTypes
-                        state.TypeSystem._LoadedAssemblies
-                        (state.TypeSystem._LoadedAssemblies
-                            .ByDefinitionName(declaringType.AssemblyFullName)
-                            .TypeDefs.[declaringType.Definition.Get])
-
                 refuseGenericVirtualOnValueType "MemberRef" state method
 
-                let declaringTypeDefn =
-                    let definition = TypeDefn.FromDefinition (declaringType.Identity, declaringTypeKind)
-
-                    if extractedTypeArgs.IsEmpty then
-                        definition
-                    else
-                        TypeDefn.GenericInstantiation (definition, extractedTypeArgs)
-
                 let state, declaringHandle =
-                    IlMachineState.concretizeType
-                        ctx.LoggerFactory
-                        ctx.BaseClassTypes
-                        state
-                        method.DeclaringAssemblyFullName
-                        ImmutableArray.Empty
-                        ImmutableArray.Empty
-                        declaringTypeDefn
+                    concretizeDeclaringType state method declaringTypeGenerics
 
                 // CoreCLR takes the method from the parent's canonical method table, and on
                 // a shared one (`Holder<__Canon>` for `Holder<string>`) the answer is not the
@@ -1784,9 +1787,7 @@ module NativeRuntimeTypeQCall =
                             ImmutableArray.Empty
                         )
                     | MetadataToken.MemberReference r ->
-                        match resolveMemberReference typeInstantiation methodInstantiation r state with
-                        | state, None -> state, None
-                        | state, Some (method, _, declaringTypeGenerics) -> state, Some (method, declaringTypeGenerics)
+                        resolveMemberReference typeInstantiation methodInstantiation r state
                     | other ->
                         failwith
                             $"%s{operation}: MethodSpec token 0x%08x{methodToken} names %O{other}, which is neither a MethodDef nor a MemberRef"
@@ -1815,8 +1816,39 @@ module NativeRuntimeTypeQCall =
 
                 match constraintViolation with
                 | Some violation ->
-                    failwith
-                        $"TODO: %s{operation} of MethodSpec token 0x%08x{methodToken}: its instantiation of %s{method.Name} violates a constraint (%s{violation}); CoreCLR raises VerificationException, which PawPrint does not model"
+                    // The message names the declaring type as the MemberRef's parent instantiates
+                    // it, and renders the method's formal parameter as a type, as it renders the
+                    // other two (`SatisfiesMethodConstraintsForInstantiation`, genmeth.cpp:359-372).
+                    let state, declaringHandle =
+                        concretizeDeclaringType state method declaringTypeGenerics
+
+                    let render (target : RuntimeTypeHandleTarget) : string =
+                        NativeRuntimeTypeHelpers.runtimeTypeHandleName
+                            operation
+                            ctx.BaseClassTypes
+                            state
+                            NativeRuntimeTypeHelpers.formatNamespaceFlag
+                            target
+
+                    let formalParameter =
+                        RuntimeTypeHandleTarget.MethodGenericParameter (
+                            method.RequiredDeclaringType.Identity,
+                            ComparableMethodDefinitionHandle.Make (MethodInfo.requireMetadata operation method).Handle,
+                            violation.Parameter.SequenceNumber
+                        )
+
+                    let message =
+                        NativeRuntimeTypeHelpers.methodConstraintsViolationMessage
+                            (render (RuntimeTypeHandleTarget.Closed declaringHandle))
+                            method.Name
+                            (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                            (render formalParameter)
+
+                    NativeHandlerResult.raiseExceptionWithMessage
+                        ctx.BaseClassTypes.VerificationException
+                        (Some message)
+                        state
+                    |> Some
                 | None ->
 
                 let state, concretizedResult =

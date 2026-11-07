@@ -16,6 +16,17 @@ type SzArrayElementRefusal =
     /// type key is validated, and its message names the *element* rather than the array.
     | ValueClassTooLarge
 
+/// A generic argument that the constraints of the parameter it is bound to refuse. CoreCLR reports a
+/// violation as this pair (`IDS_EE_METHOD_CONSTRAINTS_VIOLATION` names the argument and the
+/// parameter, and no particular constraint).
+type GenericConstraintViolation =
+    {
+        /// The refusing parameter, from the parameter list being validated.
+        Parameter : GenericParameter
+        /// The argument bound to `Parameter`.
+        Argument : ConcreteTypeHandle
+    }
+
 module NativeRuntimeTypeHelpers =
     let primitiveCorElementType (primitive : PrimitiveType) : int32 =
         match primitive with
@@ -1435,12 +1446,6 @@ module NativeRuntimeTypeHelpers =
                 state, None
         | _ -> state, None
 
-    /// A display name for a constraint type, for the diagnostic message only.
-    let private constraintDisplayName (state : IlMachineState) (handle : ConcreteTypeHandle) : string =
-        match nominalTypeInfoOfArgument state handle with
-        | Some typeInfo -> $"%s{typeInfo.Namespace}.%s{typeInfo.Name}"
-        | None -> string<ConcreteTypeHandle> handle
-
     /// Validate the generic-parameter constraints declared by a *generic parameter list*, whoever
     /// owns it: a generic type's, via `validateConstraints` below, or a generic method's, via
     /// `RuntimeMethodHandle_GetStubIfNeededSlow`. Both owners reach the same CoreCLR check while
@@ -1480,22 +1485,12 @@ module NativeRuntimeTypeHelpers =
     /// interface constraint carrying unimplemented virtual statics) is likewise not implemented:
     /// it needs `ResolveVirtualStaticMethod`, which PawPrint does not have.
     ///
-    /// Returns `Some message` describing the first violation, or `None` if every constraint is
-    /// satisfied. `ownerDisplayName` appears only in that diagnostic; callers currently use the
-    /// `Some`/`None` as a predicate and raise a message-less guest exception.
-    ///
-    /// That message is a PawPrint diagnostic, not the CLR's. It shares only the leading
-    /// `GenericArguments[i]`: the CLR emits one shape for every kind of violation, naming the
-    /// *argument* and then the *parameter* ("GenericArguments[0], 'System.Object', on 'C`1[T]'
-    /// violates the constraint of type 'T'."), whereas this names which constraint was violated,
-    /// which is far more useful when debugging the interpreter. It must therefore not be handed to
-    /// a guest verbatim without first being rewritten into the CLR's shape.
-    ///
-    /// CoreCLR throws either `ArgumentException` or `VerificationException` depending on the
-    /// call path; we always raise `ArgumentException`, matching the most commonly observed
-    /// user-facing exception from `RuntimeType.MakeGenericType`. TODO: revisit if a different
-    /// surface (e.g. a guest path that goes through verification rather than reflection) needs
-    /// the other exception type.
+    /// Returns the first parameter, in declaration order, whose constraints refuse its argument, as
+    /// CoreCLR checks them parameter by parameter; or `None` if every constraint is satisfied.
+    /// Which exception that becomes, and its message, is the caller's: CoreCLR raises
+    /// `VerificationException` for a method's list and `TypeLoadException` for a type's, and
+    /// `RuntimeMethodInfo.MakeGenericMethod` and `RuntimeType.MakeGenericType` each rewrite theirs as
+    /// `ArgumentException`. `ownerDisplayName` appears only in PawPrint's own diagnostics.
     let validateConstraintsOn
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -1506,16 +1501,13 @@ module NativeRuntimeTypeHelpers =
         (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
         (generics : GenericParamFromMetadata ImmutableArray)
         (genericArguments : ConcreteTypeHandle list)
-        : IlMachineState * string option
+        : IlMachineState * GenericConstraintViolation option
         =
         if generics.Length <> List.length genericArguments then
             // Arity mismatch: defer to downstream to surface a more specific error. (`Seq.zip`
             // below would silently truncate without this guard.)
             state, None
         else
-
-        let violation (param : GenericParameter) (constraintName : string) : string =
-            $"GenericArguments[%i{param.SequenceNumber}], '%s{param.Name}', on '%s{ownerDisplayName}', violates the constraint of type '%s{constraintName}'."
 
         let declaringAssembly =
             state.LoadedAssembly declaringAssemblyFullName
@@ -1534,65 +1526,44 @@ module NativeRuntimeTypeHelpers =
                     ReflectedTypeTarget.ReflectionVariableBinding.Bound methodGenerics
             }
 
-        /// The flag-style constraints plus the byref-like rejection. None of these need to load
-        /// anything, so they stay off the state-threading path.
-        let specialViolationFor
-            (param : GenericParameter)
-            (paramMd : GenericParamMetadata)
-            (arg : ConcreteTypeHandle)
-            : string option
-            =
+        /// Whether the flag-style constraints or the byref-like rejection refuse `arg`. None of
+        /// these need to load anything, so they stay off the state-threading path.
+        let violatesSpecialConstraint (paramMd : GenericParamMetadata) (arg : ConcreteTypeHandle) : bool =
             let isValue = argumentIsValueType baseClassTypes state arg
 
-            let valueTypeViolation () =
-                if paramMd.RequiresNonNullableValueType then
-                    if not isValue || argumentIsNullable baseClassTypes state arg then
-                        Some (violation param "System.ValueType")
-                    else
-                        None
-                else
-                    None
+            let violatesValueType () =
+                paramMd.RequiresNonNullableValueType
+                && (not isValue || argumentIsNullable baseClassTypes state arg)
 
-            let referenceTypeViolation () =
-                if paramMd.RequiresReferenceType && isValue then
-                    Some (violation param "class")
-                else
-                    None
+            let violatesReferenceType () =
+                paramMd.RequiresReferenceType && isValue
 
-            let newConstraintViolation () =
-                if
-                    paramMd.RequiresParameterlessConstructor
-                    && not (argumentSatisfiesNewConstraint baseClassTypes state arg)
-                then
-                    Some (violation param "new()")
-                else
-                    None
+            let violatesNew () =
+                paramMd.RequiresParameterlessConstructor
+                && not (argumentSatisfiesNewConstraint baseClassTypes state arg)
 
-            let byRefLikeViolation () =
-                if not paramMd.AllowsByRefLike && argumentIsByRefLike baseClassTypes state arg then
-                    Some (violation param "allows ref struct")
-                else
-                    None
+            let violatesByRefLike () =
+                not paramMd.AllowsByRefLike && argumentIsByRefLike baseClassTypes state arg
 
-            valueTypeViolation ()
-            |> Option.orElseWith referenceTypeViolation
-            |> Option.orElseWith newConstraintViolation
-            |> Option.orElseWith byRefLikeViolation
+            violatesValueType ()
+            || violatesReferenceType ()
+            || violatesNew ()
+            || violatesByRefLike ()
 
-        /// The general "must be assignable to" constraints. Concretizing them can load assemblies
-        /// and register types, hence the state threading.
-        let generalViolationFor
+        /// Whether the general "must be assignable to" constraints refuse `arg`. Concretizing them
+        /// can load assemblies and register types, hence the state threading.
+        let violatesGeneralConstraint
             (state : IlMachineState)
             (param : GenericParameter)
             (paramMd : GenericParamMetadata)
             (arg : ConcreteTypeHandle)
-            : IlMachineState * string option
+            : IlMachineState * bool
             =
-            ((state, None), paramMd.Constraints)
-            ||> Seq.fold (fun (state, found) constraintTypeDefn ->
-                match found with
-                | Some _ -> state, found
-                | None ->
+            ((state, false), paramMd.Constraints)
+            ||> Seq.fold (fun (state, violated) constraintTypeDefn ->
+                if violated then
+                    state, true
+                else
 
                 let state, constraintTarget =
                     ReflectedTypeTarget.reflectedTypeTarget
@@ -1618,7 +1589,7 @@ module NativeRuntimeTypeHelpers =
                     | _ -> false
 
                 if isObjectConstraint then
-                    state, None
+                    state, false
                 else
 
                 let state, satisfied =
@@ -1629,16 +1600,7 @@ module NativeRuntimeTypeHelpers =
                         (RuntimeTypeHandleTarget.Closed arg)
                         constraintTarget
 
-                if satisfied then
-                    state, None
-                else
-                    let constraintName =
-                        match constraintTarget with
-                        | RuntimeTypeHandleTarget.Closed constraintHandle ->
-                            constraintDisplayName state constraintHandle
-                        | open' -> string<RuntimeTypeHandleTarget> open'
-
-                    state, Some (violation param constraintName)
+                state, not satisfied
             )
 
         ((state, None), Seq.zip generics genericArguments)
@@ -1647,9 +1609,21 @@ module NativeRuntimeTypeHelpers =
             | Some _ -> state, found
             | None ->
 
-            match specialViolationFor param paramMd arg with
-            | Some message -> state, Some message
-            | None -> generalViolationFor state param paramMd arg
+            let state, violated =
+                if violatesSpecialConstraint paramMd arg then
+                    state, true
+                else
+                    violatesGeneralConstraint state param paramMd arg
+
+            if violated then
+                state,
+                Some
+                    {
+                        GenericConstraintViolation.Parameter = param
+                        GenericConstraintViolation.Argument = arg
+                    }
+            else
+                state, None
         )
 
     /// `validateConstraintsOn` for a generic *type*'s parameter list. The type's own generic
@@ -1660,7 +1634,7 @@ module NativeRuntimeTypeHelpers =
         (state : IlMachineState)
         (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>)
         (genericArguments : ConcreteTypeHandle list)
-        : IlMachineState * string option
+        : IlMachineState * GenericConstraintViolation option
         =
         validateConstraintsOn
             loggerFactory
@@ -1672,6 +1646,19 @@ module NativeRuntimeTypeHelpers =
             ImmutableArray.Empty
             typeInfo.Generics
             genericArguments
+
+    /// `IDS_EE_METHOD_CONSTRAINTS_VIOLATION`, the message of the `VerificationException` CoreCLR raises
+    /// while instantiating a generic method at an argument one of its type parameters refuses. Each
+    /// argument is spelled as `TypeString::AppendType` spells it there: the method's declaring type as
+    /// instantiated, the method's name, the refused type argument, and the name of the parameter.
+    let methodConstraintsViolationMessage
+        (declaringType : string)
+        (methodName : string)
+        (typeArgument : string)
+        (typeParameter : string)
+        : string
+        =
+        $"Method %s{declaringType}.%s{methodName}: type argument '%s{typeArgument}' violates the constraint of type parameter '%s{typeParameter}'."
 
     let getOrAllocateRuntimeAssembly
         (loggerFactory : ILoggerFactory)
