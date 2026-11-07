@@ -1817,24 +1817,32 @@ module NativeRuntimeTypeQCall =
                 match constraintViolation with
                 | Some violation ->
                     // The message names the declaring type as the MemberRef's parent instantiates
-                    // it (`SatisfiesMethodConstraintsForInstantiation`, genmeth.cpp:359-372).
+                    // it, and renders the method's formal parameter as a type, as it renders the
+                    // other two (`SatisfiesMethodConstraintsForInstantiation`, genmeth.cpp:359-372).
                     let state, declaringHandle =
                         concretizeDeclaringType state method declaringTypeGenerics
 
-                    let render (handle : ConcreteTypeHandle) : string =
+                    let render (target : RuntimeTypeHandleTarget) : string =
                         NativeRuntimeTypeHelpers.runtimeTypeHandleName
                             operation
                             ctx.BaseClassTypes
                             state
                             NativeRuntimeTypeHelpers.formatNamespaceFlag
-                            (RuntimeTypeHandleTarget.Closed handle)
+                            target
+
+                    let formalParameter =
+                        RuntimeTypeHandleTarget.MethodGenericParameter (
+                            method.RequiredDeclaringType.Identity,
+                            ComparableMethodDefinitionHandle.Make (MethodInfo.requireMetadata operation method).Handle,
+                            violation.Parameter.SequenceNumber
+                        )
 
                     let message =
                         NativeRuntimeTypeHelpers.methodConstraintsViolationMessage
-                            (render declaringHandle)
+                            (render (RuntimeTypeHandleTarget.Closed declaringHandle))
                             method.Name
-                            (render violation.Argument)
-                            violation.Parameter.Name
+                            (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                            (render formalParameter)
 
                     NativeHandlerResult.raiseExceptionWithMessage
                         ctx.BaseClassTypes.VerificationException
