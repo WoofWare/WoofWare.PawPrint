@@ -2303,6 +2303,38 @@ module NativeRuntimeMethodHandle =
         | "System.Private.CoreLib",
           "System",
           "RuntimeMethodHandle",
+          "GetResolver",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System", "RuntimeMethodHandleInternal", generics) ],
+          MethodReturnType.Returns (CorelibType state.TypeSystem.ConcreteTypes ("System", "Resolver", retGenerics)) when
+            generics.IsEmpty && retGenerics.IsEmpty
+            ->
+            // CoreCLR (runtimehandles.cpp:1754): for an LCG method, the managed `DynamicResolver`
+            // its `LCGMethodResolver` holds, which `ModuleHandle_GetDynamicMethod` attached when
+            // the method was minted; null for any other method. `RuntimeType.GetMethodBase`
+            // (RuntimeType.CoreCLR.cs:1825) asks this of a no-metadata method, and answers the
+            // resolver's `GetDynamicMethod()`.
+            //
+            // CoreCLR holds the resolver through a long weak handle; PawPrint never collects, so
+            // the registry's strong address answers the same (see `DynamicMethodDefinition`).
+            let operation = "RuntimeMethodHandle.GetResolver"
+
+            let resolver =
+                match MethodHandleResolution.resolveMethodHandleFromArg operation state instruction.Arguments.[0] with
+                | MethodHandle.FromMetadata _ -> None
+                | MethodHandle.FromDynamic dynamicHandle ->
+                    match MethodHandleRegistry.resolveDynamicMethod dynamicHandle state.MethodHandles with
+                    | Some definition -> definition.GetResolver ()
+                    | None ->
+                        failwith
+                            $"%s{operation}: %O{dynamicHandle} is not registered in the method-handle registry, but only ModuleHandle_GetDynamicMethod mints a dynamic method handle, and it registers each one; this is an interpreter bug"
+
+            let state =
+                IlMachineState.pushToEvalStack (CliType.ObjectRef resolver) ctx.Thread state
+
+            NativeHandlerResult.completed state |> Some
+        | "System.Private.CoreLib",
+          "System",
+          "RuntimeMethodHandle",
           "GetMethodTable",
           [ CorelibType state.TypeSystem.ConcreteTypes ("System", "RuntimeMethodHandleInternal", generics) ],
           MethodReturnType.Returns (ConcretePointer (CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
