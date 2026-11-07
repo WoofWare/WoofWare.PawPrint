@@ -45,11 +45,16 @@ type internal EntryImage =
 /// driver (`MultiProgram`) then runs tick by tick as it runs `Main`.
 [<RequireQualifiedAccess>]
 module internal ProgramStartup =
-    /// Read the guest assembly from `image`, and check that its entry point is one PawPrint
-    /// can run: a non-generic `Main` taking nothing or a `string[]`, returning `void` or
-    /// `int`. Fails loudly otherwise.
+    /// Read the guest assembly from `image`, and check that CoreCLR would load it for execution
+    /// (`ImageAdmission.refusal`) and that its entry point is one PawPrint can run: a non-generic
+    /// `Main` taking nothing or a `string[]`, returning `void` or `int`. Fails loudly otherwise.
     let read (loggerFactory : ILoggerFactory) (originalPath : string option) (image : Stream) : EntryImage =
         let dumped = Assembly.read loggerFactory originalPath image
+
+        ImageAdmission.require
+            (originalPath
+             |> Option.defaultValue $"the entry assembly %s{dumped.DefinitionFullName}")
+            dumped
 
         let entryPoint =
             match dumped.MainMethod with

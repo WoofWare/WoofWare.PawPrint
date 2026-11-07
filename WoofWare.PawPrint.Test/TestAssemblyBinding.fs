@@ -556,7 +556,7 @@ module TestAssemblyBinding =
             let _messages, loggerFactory = LoggerFactory.makeTest ()
 
             expectRefusal
-                "32-bit"
+                "built for one machine"
                 (fun () ->
                     AssemblyBinding.tryBind
                         loggerFactory
@@ -630,7 +630,7 @@ module TestAssemblyBinding =
         | AssemblyBindResult.Bound (_, bound) -> failwith $"expected NotFound, bound %s{bound.Name.FullName}"
 
     /// `PEAssembly::ValidateForExecution` refuses an image whose manifest carries
-    /// `ReferenceAssemblyAttribute`, raising `BadImageFormatException`, which this binder does not
+    /// `ReferenceAssemblyAttribute`, raising `BadImageFormatException`, which PawPrint does not
     /// report.
     [<Test>]
     let ``a probed reference assembly is refused`` () : unit =
@@ -660,8 +660,31 @@ module TestAssemblyBinding =
         finally
             Directory.Delete (root, true)
 
+    /// The binder asks an assembly already in the load context whether CoreCLR would load it too:
+    /// a caller may build the context from images no probe has read.
+    [<Test>]
+    let ``an already-loaded reference assembly is refused`` () : unit =
+        let image =
+            Roslyn.compileAssembly
+                "RefLoaded"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [
+                    "[assembly: System.Runtime.CompilerServices.ReferenceAssembly] public class C { }"
+                ]
+
+        let _messages, loggerFactory = LoggerFactory.makeTest ()
+        use stream = new MemoryStream (image)
+
+        let assemblies =
+            LoadedAssemblies.ofAssemblies [ Assembly.read loggerFactory None stream ]
+
+        expectRefusal
+            "reference assembly"
+            (fun () -> AssemblyBinding.tryBind loggerFactory [] (plainRequest "RefLoaded") assemblies)
+
     /// `PEAssembly::ValidateForExecution` refuses a manifest whose processor-architecture field is
-    /// `afPA_NoPlatform` (0x70), raising `BadImageFormatException`, which this binder does not report.
+    /// `afPA_NoPlatform` (0x70), raising `BadImageFormatException`, which PawPrint does not report.
     [<Test>]
     let ``a manifest marked NoPlatform is refused`` () : unit =
         let root =
@@ -685,10 +708,11 @@ module TestAssemblyBinding =
         finally
             Directory.Delete (root, true)
 
-    /// An IL image built for one machine binds only in a process of that architecture, which the
-    /// binder does not model; CoreCLR reports one built for another as not found.
+    /// A PE32 image whose machine is AMD64 has no processor architecture CoreCLR knows
+    /// (`TranslatePEToArchitectureType` takes AMD64 only from a PE32+ image), so CoreCLR refuses it
+    /// in every process.
     [<Test>]
-    let ``a probed image built for one machine is refused`` () : unit =
+    let ``a probed PE32 image for AMD64 is refused`` () : unit =
         let root =
             Path.Combine (Path.GetTempPath (), "PawPrint-" + Guid.NewGuid().ToString "N")
 
@@ -708,7 +732,7 @@ module TestAssemblyBinding =
             let _messages, loggerFactory = LoggerFactory.makeTest ()
 
             expectRefusal
-                "built for the machine"
+                "no processor architecture"
                 (fun () ->
                     AssemblyBinding.tryBind
                         loggerFactory
@@ -740,8 +764,8 @@ module TestAssemblyBinding =
                     )
             )
 
-    /// An I386 image that is not IL-only is x86 to CoreCLR (`TranslatePEToArchitectureType`), not
-    /// architecture-neutral, so it binds only in an x86 process.
+    /// An I386 image that is not IL-only holds native code, which CoreCLR does not run on Unix and
+    /// PawPrint cannot run at all.
     [<Test>]
     let ``a probed I386 image that is not IL-only is refused`` () : unit =
         let root =
@@ -765,7 +789,7 @@ module TestAssemblyBinding =
             let _messages, loggerFactory = LoggerFactory.makeTest ()
 
             expectRefusal
-                "built for the machine"
+                "not IL-only"
                 (fun () ->
                     AssemblyBinding.tryBind
                         loggerFactory

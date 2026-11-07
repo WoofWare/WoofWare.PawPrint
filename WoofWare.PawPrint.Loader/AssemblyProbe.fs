@@ -24,7 +24,8 @@ module AssemblyProbe =
     /// Read <c>&lt;simpleName&gt;.dll</c> from the first of <paramref name="dotnetRuntimeDirs"/>
     /// that holds it, matching the file name ignoring case. A directory that does not exist
     /// holds nothing, and neither does an entry that cannot be opened, such as a dangling
-    /// symlink; a directory that exists but cannot be listed is an error.
+    /// symlink; a directory that exists but cannot be listed is an error, and so is an image
+    /// CoreCLR would not load for execution (<see cref="ImageAdmission.refusal"/>).
     /// </summary>
     /// <remarks>
     /// CoreCLR's table of trusted platform assemblies compares simple names ignoring case
@@ -78,10 +79,17 @@ module AssemblyProbe =
 
                 // Listed is not the same as openable: a dangling symlink lists under its name and
                 // then cannot be read, and holds nothing, so the probe goes on to the next dir.
-                try
-                    Assembly.readFile loggerFactory single |> Some
-                with :? FileNotFoundException ->
-                    None
+                let read =
+                    try
+                        Assembly.readFile loggerFactory single |> Some
+                    with :? FileNotFoundException ->
+                        None
+
+                // CoreCLR's table of trusted platform assemblies holds one file per simple name, so
+                // an image it refuses is the answer, not a reason to look further.
+                read |> Option.iter (fun read -> ImageAdmission.require single read)
+
+                read
             | several ->
                 failwith
                     $"TODO: %s{dir} holds %d{List.length several} files named %s{fileName} differing only by case (%A{several}); CoreCLR binds whichever the host listed first among its trusted platform assemblies, an order PawPrint does not reproduce"

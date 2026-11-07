@@ -11,15 +11,17 @@ which crosses assemblies freely. This library holds the rules for all of that, a
 code. What the runtime builds from the definitions once they are found — concrete instantiations and
 method tables — is `WoofWare.PawPrint.TypeSystem`'s.
 
-It answers four kinds of question:
+It answers five kinds of question:
 
 * which image an assembly reference binds to, from an ordered list of runtime directories, keeping
   the identity a reference names apart from the identity of the image it bound to;
+* whether CoreCLR would load an image for execution at all, which every image read from the runtime
+  directories, and the entry assembly, must pass;
 * which definition a type reference, a forwarded type or a namespace-qualified name denotes, what
   its base chain makes it (a value type, an enum, byref-like), whether two method signatures from
   different assemblies agree, and which field a member reference names;
 * whether CoreCLR's class loader can load a type, or a member reference's parent, and which
-  exception it raises where it cannot.
+  exception it raises where it cannot;
 * which methods the class loader makes callable with runtime async's calling convention, which
   it decides from a method's metadata and the type its signature returns.
 
