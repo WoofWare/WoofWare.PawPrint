@@ -334,6 +334,18 @@ module TypeDefn =
         | TypeDefn.Modified m -> stripCustomModifiers m.Unmodified
         | t -> t
 
+    /// Whether a generic type parameter (`!i`) occurs anywhere in this type, inside custom
+    /// modifiers and function-pointer signatures included: whether reading it needs the type
+    /// arguments of its context.
+    let mentionsGenericTypeParameter (t : TypeDefn) : bool =
+        failwith "TODO: TypeDefn.mentionsGenericTypeParameter"
+
+    /// Whether a generic method parameter (`!!i`) occurs anywhere in this type, inside custom
+    /// modifiers and function-pointer signatures included: whether reading it needs the method
+    /// arguments of its context.
+    let mentionsGenericMethodParameter (t : TypeDefn) : bool =
+        failwith "TODO: TypeDefn.mentionsGenericMethodParameter"
+
     /// The width a field of this type occupies, when that follows from the signature's head alone.
     ///
     /// This is CoreCLR's `FieldDesc::LoadSize` (field.cpp:655): it reads the field's normalised
