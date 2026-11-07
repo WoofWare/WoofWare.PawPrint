@@ -1487,7 +1487,6 @@ module NativeRuntimeTypeQCall =
                 (state : IlMachineState)
                 : IlMachineState *
                   (WoofWare.PawPrint.MethodInfo<TypeDefn, GenericParamFromMetadata, TypeDefn> *
-                  ImmutableArray<TypeDefn> *
                   ImmutableArray<ConcreteTypeHandle>) option
                 =
                 // Surface typeInstantiation/methodInstantiation as TypeDefn arrays so the
@@ -1564,43 +1563,36 @@ module NativeRuntimeTypeQCall =
                     )
                     |> Tuple.rmap (fun b -> b.ToImmutable ())
 
-                state, Some (method, extractedTypeArgs, declaringTypeGenerics)
+                state, Some (method, declaringTypeGenerics)
 
-            // The declaring type of `method`, instantiated at `typeArguments`, which are closed: the
-            // arguments the parent of the MemberRef naming `method` spells, or none for a method on a
-            // non-generic type.
+            // The declaring type of `method`, instantiated at `declaringTypeGenerics`.
             let concretizeDeclaringType
                 (state : IlMachineState)
                 (method : WoofWare.PawPrint.MethodInfo<TypeDefn, GenericParamFromMetadata, TypeDefn>)
-                (typeArguments : ImmutableArray<TypeDefn>)
+                (declaringTypeGenerics : ImmutableArray<ConcreteTypeHandle>)
                 : IlMachineState * ConcreteTypeHandle
                 =
                 let declaringType = method.RequiredDeclaringType
 
-                let declaringTypeKind =
-                    LoadedTypeInfo.signatureTypeKind
+                // Resolving a MethodDef can be the first thing to touch the type, and classifying it
+                // needs its base chain, which `lookupTypeDefn` loads. Its answer is the typical type,
+                // over the type's own parameters, which `declaringTypeGenerics` then substitute.
+                let state, typicalDeclaringType =
+                    IlMachineState.lookupTypeDefn
+                        ctx.LoggerFactory
                         ctx.BaseClassTypes
-                        state.TypeSystem._LoadedAssemblies
-                        (state.TypeSystem._LoadedAssemblies
-                            .ByDefinitionName(declaringType.AssemblyFullName)
-                            .TypeDefs.[declaringType.Definition.Get])
-
-                let declaringTypeDefn =
-                    let definition = TypeDefn.FromDefinition (declaringType.Identity, declaringTypeKind)
-
-                    if typeArguments.IsEmpty then
-                        definition
-                    else
-                        TypeDefn.GenericInstantiation (definition, typeArguments)
+                        state
+                        (state.TypeSystem._LoadedAssemblies.ByDefinitionName declaringType.AssemblyFullName)
+                        declaringType.Definition.Get
 
                 IlMachineState.concretizeType
                     ctx.LoggerFactory
                     ctx.BaseClassTypes
                     state
-                    method.DeclaringAssemblyFullName
+                    declaringType.AssemblyFullName
+                    declaringTypeGenerics
                     ImmutableArray.Empty
-                    ImmutableArray.Empty
-                    declaringTypeDefn
+                    (BindingStop.bound typicalDeclaringType)
 
             match MetadataToken.ofInt methodToken with
             | MetadataToken.MethodDef h ->
@@ -1665,7 +1657,7 @@ module NativeRuntimeTypeQCall =
 
                 match resolveMemberReference typeInstantiation methodInstantiation h state with
                 | state, None -> raiseMissingContext state
-                | state, Some (method, extractedTypeArgs, declaringTypeGenerics) ->
+                | state, Some (method, declaringTypeGenerics) ->
 
                 // The caller's method instantiation is a substitution context, never the
                 // method's instantiation: with `strictMetadataChecks` unset for a MemberRef,
@@ -1701,7 +1693,8 @@ module NativeRuntimeTypeQCall =
 
                 refuseGenericVirtualOnValueType "MemberRef" state method
 
-                let state, declaringHandle = concretizeDeclaringType state method extractedTypeArgs
+                let state, declaringHandle =
+                    concretizeDeclaringType state method declaringTypeGenerics
 
                 // CoreCLR takes the method from the parent's canonical method table, and on
                 // a shared one (`Holder<__Canon>` for `Holder<string>`) the answer is not the
@@ -1791,7 +1784,6 @@ module NativeRuntimeTypeQCall =
                             |> MethodInfo.mapTypeGenerics (fun (par, _) ->
                                 TypeDefn.GenericTypeParameter par.SequenceNumber
                             ),
-                            ImmutableArray.Empty,
                             ImmutableArray.Empty
                         )
                     | MetadataToken.MemberReference r ->
@@ -1802,7 +1794,7 @@ module NativeRuntimeTypeQCall =
 
                 match resolvedMethod with
                 | state, None -> raiseMissingContext state
-                | state, Some (method, declaringTypeArguments, declaringTypeGenerics) ->
+                | state, Some (method, declaringTypeGenerics) ->
 
                 if methodGenerics.Length <> method.Generics.Length then
                     failwith
@@ -1827,7 +1819,7 @@ module NativeRuntimeTypeQCall =
                     // The message names the declaring type as the MemberRef's parent instantiates
                     // it (`SatisfiesMethodConstraintsForInstantiation`, genmeth.cpp:359-372).
                     let state, declaringHandle =
-                        concretizeDeclaringType state method declaringTypeArguments
+                        concretizeDeclaringType state method declaringTypeGenerics
 
                     let render (handle : ConcreteTypeHandle) : string =
                         NativeRuntimeTypeHelpers.runtimeTypeHandleName
