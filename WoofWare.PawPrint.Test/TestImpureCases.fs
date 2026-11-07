@@ -1684,6 +1684,34 @@ module TestImpureCases =
                 [ 0x15uy ; 0x12uy ; 0x0Duy ; 0x02uy ; 0x0Euy ; 0x08uy ]
             ]
 
+    /// `ModuleBuilderMemberRefFromSignature.cs` has named three members of `List<int>`, `Add` twice. This
+    /// checks the module's MemberRef rows as .NET 10 reports them: each member once, its parent the one
+    /// TypeSpec, `List<int>`, and its signature built from the generic definition (`Add` takes `!0`).
+    let private assertMemberRefsOfTypeSpec (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.typeSpecs scope
+        |> Seq.map (fun row -> EmitScope.blobAt row.Signature scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual [ [ 0x15uy ; 0x12uy ; 0x09uy ; 0x01uy ; 0x08uy ] ]
+
+        let listOfInt = MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid 1 scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, EmitScope.blobAt row.Signature scope |> List.ofSeq
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                listOfInt, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                listOfInt, "Add", [ 0x20uy ; 0x01uy ; 0x01uy ; 0x13uy ; 0x00uy ]
+                listOfInt, "get_Count", [ 0x20uy ; 0x00uy ; 0x08uy ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5218,6 +5246,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertTypeSpecRows
+            }
+            {
+                // `ModuleBuilder_GetMemberRefFromSignature`, through calls to members of `List<int>`:
+                // each a MemberRef whose parent is the instantiation's TypeSpec, found before it is
+                // added; `assertMemberRefsOfTypeSpec` reads the rows. Dynamic-code switch overridden to
+                // true like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderMemberRefFromSignature.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMemberRefsOfTypeSpec
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
