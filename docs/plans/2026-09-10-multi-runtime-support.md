@@ -879,10 +879,11 @@ mutation-testing skill applies to each table/classifier they introduce.
      writes each thread's managed id into its own slot when the thread starts, as RC1's VM does
      (`InitializeCurrentThreadsStaticData`), so every reader of the slot sees it. It accounted for
      the `LockHeldByOtherThread.cs` mismatch too;
-   * the narrow float-to-integer conversions, which RC1 saturates to the target's own range
-     (`(byte)300.0` is 255, where net10 gives 44): the first behaviour fact of the opcode set
-     itself to differ, so a runtime-keyed rule for `conv.i1`/`u1`/`i2`/`u2` and `char`, with
-     `ConvFloatSaturating.cs` stating each runtime's results;
+   * **(landed)** the narrow float-to-integer conversions, which RC1 saturates to the target's
+     own range (`(byte)300.0` is 255, where net10 gives 44): the first behaviour fact of the
+     opcode set itself to differ. `NarrowFloatConversion` names the rule each runtime's JIT
+     follows for `conv.i1`/`u1`/`i2`/`u2` (and so `char`), held to each runtime's
+     `fgMorphExpandCast`, and `ConvFloatSaturating.cs` states each runtime's results;
    * **(landed, for the analysis)** `ExceptionMaking` per runtime: RC1's VM runs what makes an
      exception (a fault's, a failed bind's, a QCall's, a refused compilation's, or the wrapper of a
      thrown non-exception) through an `[UnmanagedCallersOnly]` wrapper, and throws what that
