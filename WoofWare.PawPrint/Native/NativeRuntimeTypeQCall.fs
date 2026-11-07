@@ -494,7 +494,7 @@ module NativeRuntimeTypeQCall =
                     validateConstraints ctx.LoggerFactory ctx.BaseClassTypes state typeInfo genericArguments
 
             match constraintViolation with
-            | Some _message ->
+            | Some _ ->
                 NativeHandlerResult.raiseException ctx.BaseClassTypes.ArgumentException state
                 |> Some
             | None ->
@@ -1566,6 +1566,42 @@ module NativeRuntimeTypeQCall =
 
                 state, Some (method, extractedTypeArgs, declaringTypeGenerics)
 
+            // The declaring type of `method`, instantiated at `typeArguments`, which are closed: the
+            // arguments the parent of the MemberRef naming `method` spells, or none for a method on a
+            // non-generic type.
+            let concretizeDeclaringType
+                (state : IlMachineState)
+                (method : WoofWare.PawPrint.MethodInfo<TypeDefn, GenericParamFromMetadata, TypeDefn>)
+                (typeArguments : ImmutableArray<TypeDefn>)
+                : IlMachineState * ConcreteTypeHandle
+                =
+                let declaringType = method.RequiredDeclaringType
+
+                let declaringTypeKind =
+                    LoadedTypeInfo.signatureTypeKind
+                        ctx.BaseClassTypes
+                        state.TypeSystem._LoadedAssemblies
+                        (state.TypeSystem._LoadedAssemblies
+                            .ByDefinitionName(declaringType.AssemblyFullName)
+                            .TypeDefs.[declaringType.Definition.Get])
+
+                let declaringTypeDefn =
+                    let definition = TypeDefn.FromDefinition (declaringType.Identity, declaringTypeKind)
+
+                    if typeArguments.IsEmpty then
+                        definition
+                    else
+                        TypeDefn.GenericInstantiation (definition, typeArguments)
+
+                IlMachineState.concretizeType
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    state
+                    method.DeclaringAssemblyFullName
+                    ImmutableArray.Empty
+                    ImmutableArray.Empty
+                    declaringTypeDefn
+
             match MetadataToken.ofInt methodToken with
             | MetadataToken.MethodDef h ->
                 // The caller's `typeInstArgs`/`methodInstArgs` are not consulted for a MethodDef
@@ -1663,35 +1699,9 @@ module NativeRuntimeTypeQCall =
                         value
                 else
 
-                let declaringType = method.RequiredDeclaringType
-
-                let declaringTypeKind =
-                    LoadedTypeInfo.signatureTypeKind
-                        ctx.BaseClassTypes
-                        state.TypeSystem._LoadedAssemblies
-                        (state.TypeSystem._LoadedAssemblies
-                            .ByDefinitionName(declaringType.AssemblyFullName)
-                            .TypeDefs.[declaringType.Definition.Get])
-
                 refuseGenericVirtualOnValueType "MemberRef" state method
 
-                let declaringTypeDefn =
-                    let definition = TypeDefn.FromDefinition (declaringType.Identity, declaringTypeKind)
-
-                    if extractedTypeArgs.IsEmpty then
-                        definition
-                    else
-                        TypeDefn.GenericInstantiation (definition, extractedTypeArgs)
-
-                let state, declaringHandle =
-                    IlMachineState.concretizeType
-                        ctx.LoggerFactory
-                        ctx.BaseClassTypes
-                        state
-                        method.DeclaringAssemblyFullName
-                        ImmutableArray.Empty
-                        ImmutableArray.Empty
-                        declaringTypeDefn
+                let state, declaringHandle = concretizeDeclaringType state method extractedTypeArgs
 
                 // CoreCLR takes the method from the parent's canonical method table, and on
                 // a shared one (`Holder<__Canon>` for `Holder<string>`) the answer is not the
@@ -1781,19 +1791,18 @@ module NativeRuntimeTypeQCall =
                             |> MethodInfo.mapTypeGenerics (fun (par, _) ->
                                 TypeDefn.GenericTypeParameter par.SequenceNumber
                             ),
+                            ImmutableArray.Empty,
                             ImmutableArray.Empty
                         )
                     | MetadataToken.MemberReference r ->
-                        match resolveMemberReference typeInstantiation methodInstantiation r state with
-                        | state, None -> state, None
-                        | state, Some (method, _, declaringTypeGenerics) -> state, Some (method, declaringTypeGenerics)
+                        resolveMemberReference typeInstantiation methodInstantiation r state
                     | other ->
                         failwith
                             $"%s{operation}: MethodSpec token 0x%08x{methodToken} names %O{other}, which is neither a MethodDef nor a MemberRef"
 
                 match resolvedMethod with
                 | state, None -> raiseMissingContext state
-                | state, Some (method, declaringTypeGenerics) ->
+                | state, Some (method, declaringTypeArguments, declaringTypeGenerics) ->
 
                 if methodGenerics.Length <> method.Generics.Length then
                     failwith
@@ -1815,8 +1824,31 @@ module NativeRuntimeTypeQCall =
 
                 match constraintViolation with
                 | Some violation ->
-                    failwith
-                        $"TODO: %s{operation} of MethodSpec token 0x%08x{methodToken}: its instantiation of %s{method.Name} violates a constraint (%s{violation}); CoreCLR raises VerificationException, which PawPrint does not model"
+                    // The message names the declaring type as the MemberRef's parent instantiates
+                    // it (`SatisfiesMethodConstraintsForInstantiation`, genmeth.cpp:359-372).
+                    let state, declaringHandle =
+                        concretizeDeclaringType state method declaringTypeArguments
+
+                    let render (handle : ConcreteTypeHandle) : string =
+                        NativeRuntimeTypeHelpers.runtimeTypeHandleName
+                            operation
+                            ctx.BaseClassTypes
+                            state
+                            NativeRuntimeTypeHelpers.formatNamespaceFlag
+                            (RuntimeTypeHandleTarget.Closed handle)
+
+                    let message =
+                        NativeRuntimeTypeHelpers.methodConstraintsViolationMessage
+                            (render declaringHandle)
+                            method.Name
+                            (render violation.Argument)
+                            violation.Parameter.Name
+
+                    NativeHandlerResult.raiseExceptionWithMessage
+                        ctx.BaseClassTypes.VerificationException
+                        (Some message)
+                        state
+                    |> Some
                 | None ->
 
                 let state, concretizedResult =

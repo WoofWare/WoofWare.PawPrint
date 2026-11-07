@@ -1712,7 +1712,7 @@ module NativeRuntimeMethodHandle =
                     methodInstantiation
 
             match constraintViolation with
-            | Some _message ->
+            | Some _ ->
                 NativeHandlerResult.raiseException ctx.BaseClassTypes.ArgumentException state
                 |> Some
             | None ->
