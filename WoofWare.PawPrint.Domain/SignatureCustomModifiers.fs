@@ -34,7 +34,7 @@ module SignatureCustomModifiers =
 
     let private elementTypeCModReqd : byte = 0x1Fuy
     let private elementTypeCModOpt : byte = 0x20uy
-    let private elementTypeCModInternal : byte = 0x21uy
+    let private elementTypeCModInternal : byte = 0x22uy
     let private elementTypeSentinel : byte = 0x41uy
 
     /// `CorSigUncompressToken` (cor.h).
@@ -67,27 +67,64 @@ module SignatureCustomModifiers =
 
         let expected = if required then elementTypeCModReqd else elementTypeCModOpt
 
-        let rec scan (position : int) (acc : CustomModifierType list) : CustomModifiersAtOffset =
+        // CoreCLR reads the modifiers twice, and the two passes do not agree. The first counts the
+        // modifiers to return, stepping over any number of sentinels, and stops at the first byte
+        // that is neither a sentinel nor a modifier prefix.
+        let rec count (position : int) (found : int) : int voption =
             if position >= signature.Length then
-                CustomModifiersAtOffset.BadSignature
+                ValueNone
             else
                 let b = signature.[position]
 
                 if b = elementTypeCModReqd || b = elementTypeCModOpt then
+                    SignatureParameterOffset.skipData signature (position + 1)
+                    |> ValueOption.bind (fun next -> count next (if b = expected then found + 1 else found))
+                elif b = elementTypeCModInternal then
+                    if position + 1 >= signature.Length then
+                        ValueNone
+                    else
+                        let matches = (signature.[position + 1] <> 0uy) = required
+
+                        SignatureParameterOffset.skipPointer pointerSize signature (position + 2)
+                        |> ValueOption.bind (fun next -> count next (if matches then found + 1 else found))
+                elif b = elementTypeSentinel then
+                    count (position + 1) found
+                else
+                    ValueSome found
+
+        // The second reads from the start again until it has found as many as the first counted,
+        // and reads every byte that is not CMOD_INTERNAL as a prefix to a token, sentinels and
+        // terminators included. CoreCLR fills its array from the last index down, so prepending
+        // leaves the list in the array's order.
+        let rec populate (position : int) (remaining : int) (acc : CustomModifierType list) : CustomModifiersAtOffset =
+            if remaining = 0 then
+                CustomModifiersAtOffset.Modifiers acc
+            elif position >= signature.Length then
+                CustomModifiersAtOffset.BadSignature
+            else
+                let b = signature.[position]
+
+                if b = elementTypeCModInternal then
+                    if position + 1 >= signature.Length then
+                        CustomModifiersAtOffset.BadSignature
+                    else
+                        let matches = (signature.[position + 1] <> 0uy) = required
+
+                        match SignatureParameterOffset.skipPointer pointerSize signature (position + 2) with
+                        | ValueNone -> CustomModifiersAtOffset.BadSignature
+                        | ValueSome next when matches ->
+                            let handle =
+                                CustomModifierType.RuntimeTypeHandle (signature.Slice (position + 2, pointerSize))
+
+                            populate next (remaining - 1) (handle :: acc)
+                        | ValueSome next -> populate next remaining acc
+                else
                     match token signature (position + 1) with
                     | ValueNone -> CustomModifiersAtOffset.BadSignature
-                    | ValueSome (struct (t, next)) ->
-                        scan
-                            next
-                            (if b = expected then
-                                 CustomModifierType.Token t :: acc
-                             else
-                                 acc)
-                elif b = elementTypeCModInternal then
-                    failwith $"TODO: CMOD_INTERNAL (0x21) at offset %d{position}"
-                elif b = elementTypeSentinel then
-                    scan (position + 1) acc
-                else
-                    CustomModifiersAtOffset.Modifiers acc
+                    | ValueSome (struct (t, next)) when b = expected ->
+                        populate next (remaining - 1) (CustomModifierType.Token t :: acc)
+                    | ValueSome (struct (_, next)) -> populate next remaining acc
 
-        scan offset []
+        match count offset 0 with
+        | ValueNone -> CustomModifiersAtOffset.BadSignature
+        | ValueSome found -> populate offset found []

@@ -282,6 +282,9 @@ module TestSignatureCustomModifiers =
             | CustomModifiersAtOffset.Modifiers modifiers when hostCanLoad modifiers ->
                 cover (Label.Outcome (if modifiers.IsEmpty then "no modifiers" else "modifiers"))
 
+                if hasSentinel then
+                    cover (Label.Outcome "checked with a sentinel")
+
                 if not hasSentinel && not case.Truncated then
                     // Without a sentinel, both of CoreCLR's passes read the modifiers alike.
                     let expected =
@@ -327,7 +330,7 @@ module TestSignatureCustomModifiers =
         let coverage =
             CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 3000) (Arb.fromGen genCase) property
 
-        for outcome in [ "modifiers" ; "no modifiers" ; "bad signature" ] do
+        for outcome in [ "modifiers" ; "no modifiers" ; "bad signature" ; "checked with a sentinel" ] do
             coverage.Count (Label.Outcome outcome) |> shouldBeGreaterThan 100
 
         for contained in

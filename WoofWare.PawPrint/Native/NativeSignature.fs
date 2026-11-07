@@ -1196,9 +1196,6 @@ module NativeSignature =
             // only otherwise is it the declaring type's alone. Both shapes of `_sig`
             // reach here -- `Signature_Init` populates it for field-backed and
             // method-backed signatures alike.
-            // CMOD_INTERNAL (0x21) carries a `void*` that points at a runtime-only
-            // TypeHandle; CoreCLR's own metadata writer never emits it from PE bytes,
-            // so we fail loudly if we encounter one.
             let operation = "Signature.GetCustomModifiersAtOffset"
 
             if instruction.Arguments.Length <> 4 then
@@ -1295,45 +1292,38 @@ module NativeSignature =
                 | None -> declaringTypeGenericsOfSignature operation state signatureObj, ImmutableArray.Empty
 
             let assembly, blobHandle = resolveSignatureBlobHandle operation state sigCliValue
-            let mdReader = assembly.PeReader.GetMetadataReader ()
-            let mutable blobReader = mdReader.GetBlobReader blobHandle
+            let blob = assembly.PeReader.GetMetadataReader().GetBlobContent blobHandle
 
-            if blobReader.Length <> csig then
+            if blob.Length <> csig then
                 failwith
-                    $"%s{operation}: Signature._csig %d{csig} does not match the actual blob length %d{blobReader.Length}"
+                    $"%s{operation}: Signature._csig %d{csig} does not match the actual blob length %d{blob.Length}"
 
             if offset < 0 || offset > csig then
                 failwith $"%s{operation}: offset %d{offset} is out of range for blob of length %d{csig}"
 
-            blobReader.Offset <- offset
-
-            // ECMA II.23.1.16 ELEMENT_TYPE_* constants for custom-modifier prefixes.
-            let CMOD_REQD : byte = 0x1Fuy
-            let CMOD_OPT : byte = 0x20uy
-            let CMOD_INTERNAL : byte = 0x21uy
-            let SENTINEL : byte = 0x41uy
-
-            let modifierHandles = ResizeArray<EntityHandle> ()
-            let mutable continueLoop = true
-
-            while continueLoop do
-                if blobReader.RemainingBytes <= 0 then
+            let modifierTokens =
+                match SignatureCustomModifiers.at NativeRuntimeTypeHelpers.nativeIntSize blob offset fRequired with
+                | CustomModifiersAtOffset.BadSignature ->
                     failwith
-                        $"%s{operation}: signature blob ran out at offset %d{blobReader.Offset} while scanning for custom modifiers"
-
-                let data = blobReader.ReadByte ()
-
-                if data = CMOD_REQD || data = CMOD_OPT then
-                    let handle = blobReader.ReadTypeHandle ()
-                    let isRequired = (data = CMOD_REQD)
-
-                    if isRequired = fRequired then
-                        modifierHandles.Add handle
-                elif data = CMOD_INTERNAL then
-                    failwith
-                        $"TODO: %s{operation} encountered CMOD_INTERNAL (0x21) at offset %d{blobReader.Offset - 1}; not yet supported (only produced by runtime-only signatures)"
-                elif data <> SENTINEL then
-                    continueLoop <- false
+                        $"TODO: %s{operation}: the custom modifiers at offset %d{offset} of the %d{csig}-byte signature run off its end or hold a malformed compressed integer, and CoreCLR throws from IfFailThrow; raise that exception in the guest"
+                | CustomModifiersAtOffset.Modifiers modifiers ->
+                    modifiers
+                    |> List.map (fun modifier ->
+                        match modifier with
+                        | CustomModifierType.Token token ->
+                            match token &&& 0xFF000000 with
+                            | 0x02000000
+                            | 0x01000000
+                            | 0x1B000000 -> MetadataToken.ofInt token
+                            | _ ->
+                                failwith
+                                    $"TODO: %s{operation}: a custom modifier at offset %d{offset} names the token 0x%08X{token}, which is no TypeDef, TypeRef or TypeSpec; CoreCLR's loader throws on it, and that exception is not raised in the guest"
+                        | CustomModifierType.RuntimeTypeHandle _ ->
+                            // Only a runtime writes ELEMENT_TYPE_CMOD_INTERNAL, as a pointer to its
+                            // own TypeHandle, and nothing in PawPrint gives such a pointer meaning.
+                            failwith
+                                $"TODO: %s{operation}: a matching ELEMENT_TYPE_CMOD_INTERNAL (0x22) modifier at offset %d{offset} carries a runtime TypeHandle pointer, which PawPrint does not model"
+                    )
 
             let state, _, typeElementHandle =
                 NativeRuntimeTypeHelpers.concretizeNonGenericCorelibType
@@ -1347,19 +1337,13 @@ module NativeSignature =
                 IlMachineState.allocateArray
                     (ConcreteTypeHandle.OneDimArrayZero typeElementHandle)
                     (fun () -> CliType.ObjectRef None)
-                    modifierHandles.Count
+                    modifierTokens.Length
                     state
 
-            // CoreCLR fills the result array via `SetAt(--cMods, ...)`, counting
-            // down from `count - 1`, so the first matching modifier in scan order
-            // lands at the last index and the last at index 0. Mirror that
-            // ordering exactly: reflection callers comparing array contents
-            // against real .NET expect the modifiers in reverse-of-scan order.
+            // `SignatureCustomModifiers.at` lists the modifiers in the order of CoreCLR's array.
             let state =
-                ((state, modifierHandles.Count - 1), modifierHandles)
-                ||> Seq.fold (fun (state, index) eh ->
-                    let token = MetadataToken.ofEntityHandle eh
-
+                ((state, 0), modifierTokens)
+                ||> List.fold (fun (state, index) token ->
                     let state, typeDefnResult =
                         IlMachineState.resolveTypeMetadataToken
                             ctx.LoggerFactory
@@ -1391,7 +1375,7 @@ module NativeSignature =
                     let state =
                         IlMachineState.setArrayValue arrayAddr (CliType.ObjectRef (Some runtimeTypeAddr)) index state
 
-                    state, index - 1
+                    state, index + 1
                 )
                 |> fst
 
