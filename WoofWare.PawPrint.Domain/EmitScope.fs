@@ -508,7 +508,8 @@ module EmitScope =
         | false, _ -> None
 
     /// The `#US` entry `RegMeta::GetSaveSize` adds to an empty heap: a space, and a final byte of 0.
-    let private spaceUserString : ImmutableArray<byte> = ImmutableArray.Create<byte> [| 0x20uy ; 0uy ; 0uy |]
+    let private spaceUserString : ImmutableArray<byte> =
+        ImmutableArray.Create<byte> [| 0x20uy ; 0uy ; 0uy |]
 
     /// What CoreCLR's emit scope holds once it is opened for a dynamic module: the `Module` row and the
     /// `<Module>` type (RID 1), which owns module-scope members.

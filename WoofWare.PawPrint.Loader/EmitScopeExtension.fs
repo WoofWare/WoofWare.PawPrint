@@ -236,7 +236,8 @@ module EmitScopeExtension =
             yield! heapRewritten HeapIndex.Guid (=) (EmitScope.guids before) (EmitScope.guids after)
 
             // The space every heap starts with is entry 0, so entries count from the first interned.
-            let userStringEntries (scope : EmitScope) = (EmitScope.userStrings scope).RemoveAt 0
+            let userStringEntries (scope : EmitScope) =
+                (EmitScope.userStrings scope).RemoveAt 0
 
             yield!
                 heapRewritten
