@@ -6,9 +6,10 @@ public class ConvFloatSaturating
     // `conv.i`, `conv.u`) on sources that are NaN, infinite, or out of the target's
     // range, from both float64 and float32.
     //
-    // On .NET 9+ every target of 32 bits or more saturates (NaN converts to 0), and
-    // a narrower target takes the low bits of the saturated int32 conversion
-    // rather than saturating to its own range: `(byte)300.0` is 44, not 255.
+    // On .NET 9+ every target of 32 bits or more saturates (NaN converts to 0). On
+    // .NET 10 a narrower target takes the low bits of the saturated int32 conversion
+    // rather than saturating to its own range: `(byte)300.0` is 44. On .NET 11 it
+    // saturates to its own range too: `(byte)300.0` is 255.
     //
     // The sources are static fields so that Roslyn cannot fold the conversions.
 
@@ -64,7 +65,16 @@ public class ConvFloatSaturating
         if ((long)s_negHugeSingle != long.MinValue) return 35;
         if ((uint)s_negHugeSingle != 0u) return 36;
 
-        // Narrow targets wrap the saturated int32.
+        if (Environment.Version.Major == 10)
+        {
+            return NarrowTargetsWrapTheSaturatedInt32();
+        }
+
+        return NarrowTargetsSaturate();
+    }
+
+    private static int NarrowTargetsWrapTheSaturatedInt32()
+    {
         if ((byte)s_threeHundred != 44) return 40;
         if ((sbyte)s_threeHundred != 44) return 41;
         if ((byte)s_minusOne != 255) return 42;
@@ -78,6 +88,31 @@ public class ConvFloatSaturating
         if ((char)s_huge != '￿') return 50;
         if ((byte)s_threeHundredSingle != 44) return 51;
         if ((short)s_negHugeSingle != 0) return 52;
+        if ((byte)s_minusOneAndAHalf != 255) return 53;
+
+        return 0;
+    }
+
+    private static int NarrowTargetsSaturate()
+    {
+        if ((byte)s_threeHundred != 255) return 60;
+        if ((sbyte)s_threeHundred != 127) return 61;
+        if ((byte)s_minusOne != 0) return 62;
+        if ((ushort)s_minusOne != 0) return 63;
+        if ((ushort)s_seventyThousand != 65535) return 64;
+        if ((short)s_seventyThousand != 32767) return 65;
+        if ((ushort)s_huge != 65535) return 66;
+        if ((short)s_huge != 32767) return 67;
+        if ((sbyte)s_negHuge != -128) return 68;
+        if ((byte)s_posInf != 255) return 69;
+        if ((char)s_huge != '\uFFFF') return 70;
+        if ((byte)s_threeHundredSingle != 255) return 71;
+        if ((short)s_negHugeSingle != -32768) return 72;
+        if ((byte)s_minusOneAndAHalf != 0) return 73;
+        if ((sbyte)s_negInf != -128) return 74;
+        if ((short)s_negInf != -32768) return 75;
+        // A source within range truncates toward zero, as on every runtime.
+        if ((sbyte)s_minusOneAndAHalf != -1) return 76;
 
         return 0;
     }

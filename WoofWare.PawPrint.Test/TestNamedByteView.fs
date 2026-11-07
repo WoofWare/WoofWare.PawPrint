@@ -219,7 +219,8 @@ module TestNamedByteView =
                 EvalStackValue.convToUInt16
                 EvalStackValue.convToInt8
                 EvalStackValue.convToInt16
-            ] do
+            ]
+            |> List.map (fun convert -> convert (NarrowFloatConversion.ofRuntime (FrameworkUnderTest.runtime ()))) do
             (fun () -> convert pushed PointerHashState.empty |> ignore) |> shouldFail<exn>
 
             (fun () -> convert narrowedByref PointerHashState.empty |> ignore)

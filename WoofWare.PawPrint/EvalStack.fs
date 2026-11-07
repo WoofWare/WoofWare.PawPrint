@@ -357,7 +357,7 @@ module EvalStackValue =
         | EvalStackValue.ObjectRef _
         | EvalStackValue.UserDefinedValueType _ -> failReferenceConversion "Conv_I" value
 
-    /// `conv.i1`.
+    /// `conv.i1`, converting a float source by `narrowFloat`.
     ///
     /// The narrowing integer conversions (`conv.i1` / `conv.i2` / `conv.i4` and
     /// their unsigned counterparts) take `PointerHashState` because a
@@ -369,7 +369,12 @@ module EvalStackValue =
     /// refuses exactly the shapes a narrowing must refuse — a real byref, whose
     /// address PawPrint does not model, and a cross-array offset, which is a
     /// difference of two such addresses.
-    let convToInt8 (value : EvalStackValue) (counters : PointerHashState) : int32 * PointerHashState =
+    let convToInt8
+        (narrowFloat : NarrowFloatConversion)
+        (value : EvalStackValue)
+        (counters : PointerHashState)
+        : int32 * PointerHashState
+        =
         match value with
         | EvalStackValue.Int32 int32Source ->
             let i = Int32Source.value "Conv_I1" int32Source
@@ -385,14 +390,20 @@ module EvalStackValue =
         | EvalStackValue.NativeInt src ->
             let bits, counters = PointerHashSynthesis.materialiseHashBits "Conv_I1" src counters
             convI1FromInt64 bits, counters
-        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toInt8 |> int32), counters
+        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toInt8 narrowFloat |> int32), counters
         | EvalStackValue.ManagedPointer _
         | EvalStackValue.NullObjectRef
         | EvalStackValue.ObjectRef _
         | EvalStackValue.UserDefinedValueType _ -> failReferenceConversion "Conv_I1" value
 
-    /// `conv.i2`. See `convToInt8` for why this takes `PointerHashState`.
-    let convToInt16 (value : EvalStackValue) (counters : PointerHashState) : int32 * PointerHashState =
+    /// `conv.i2`, converting a float source by `narrowFloat`. See `convToInt8` for why this takes
+    /// `PointerHashState`.
+    let convToInt16
+        (narrowFloat : NarrowFloatConversion)
+        (value : EvalStackValue)
+        (counters : PointerHashState)
+        : int32 * PointerHashState
+        =
         match value with
         | EvalStackValue.Int32 int32Source ->
             let i = Int32Source.value "Conv_I2" int32Source
@@ -404,7 +415,7 @@ module EvalStackValue =
         | EvalStackValue.NativeInt src ->
             let bits, counters = PointerHashSynthesis.materialiseHashBits "Conv_I2" src counters
             convI2FromInt64 bits, counters
-        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toInt16 |> int32), counters
+        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toInt16 narrowFloat |> int32), counters
         | EvalStackValue.ManagedPointer _
         | EvalStackValue.NullObjectRef
         | EvalStackValue.ObjectRef _
@@ -491,9 +502,14 @@ module EvalStackValue =
         | EvalStackValue.ObjectRef _
         | EvalStackValue.UserDefinedValueType _ -> failReferenceConversion "Conv_U8" value
 
-    /// `conv.u1`, then truncates to int32. See `convToInt8` for why this takes
-    /// `PointerHashState`.
-    let convToUInt8 (value : EvalStackValue) (counters : PointerHashState) : int32 * PointerHashState =
+    /// `conv.u1`, converting a float source by `narrowFloat`, then truncates to int32. See
+    /// `convToInt8` for why this takes `PointerHashState`.
+    let convToUInt8
+        (narrowFloat : NarrowFloatConversion)
+        (value : EvalStackValue)
+        (counters : PointerHashState)
+        : int32 * PointerHashState
+        =
         match value with
         | EvalStackValue.Int32 int32Source ->
             let i = Int32Source.value "Conv_U1" int32Source
@@ -505,15 +521,20 @@ module EvalStackValue =
         | EvalStackValue.NativeInt src ->
             let bits, counters = PointerHashSynthesis.materialiseHashBits "Conv_U1" src counters
             convU1FromInt64 bits, counters
-        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toUInt8 |> int32), counters
+        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toUInt8 narrowFloat |> int32), counters
         | EvalStackValue.ManagedPointer _
         | EvalStackValue.NullObjectRef
         | EvalStackValue.ObjectRef _
         | EvalStackValue.UserDefinedValueType _ -> failReferenceConversion "Conv_U1" value
 
-    /// `conv.u2`, then truncates to int32. See `convToInt8` for why this takes
-    /// `PointerHashState`.
-    let convToUInt16 (value : EvalStackValue) (counters : PointerHashState) : int32 * PointerHashState =
+    /// `conv.u2`, converting a float source by `narrowFloat`, then truncates to int32. See
+    /// `convToInt8` for why this takes `PointerHashState`.
+    let convToUInt16
+        (narrowFloat : NarrowFloatConversion)
+        (value : EvalStackValue)
+        (counters : PointerHashState)
+        : int32 * PointerHashState
+        =
         match value with
         | EvalStackValue.Int32 int32Source ->
             let i = Int32Source.value "Conv_U2" int32Source
@@ -525,7 +546,8 @@ module EvalStackValue =
         | EvalStackValue.NativeInt src ->
             let bits, counters = PointerHashSynthesis.materialiseHashBits "Conv_U2" src counters
             convU2FromInt64 bits, counters
-        | EvalStackValue.Float f -> (EvalStackFloat.toDouble f |> FloatToInteger.toUInt16 |> int32), counters
+        | EvalStackValue.Float f ->
+            (EvalStackFloat.toDouble f |> FloatToInteger.toUInt16 narrowFloat |> int32), counters
         | EvalStackValue.ManagedPointer _
         | EvalStackValue.NullObjectRef
         | EvalStackValue.ObjectRef _

@@ -63,14 +63,14 @@ module FloatToInteger =
     // The narrow targets are integer narrowings of an int32, which F# performs unchecked and
     // which ECMA-335 defines as truncation to the low bits.
 
-    /// `conv.i2`.
-    let toInt16 (x : float) : int16 = int16 (toInt32 x)
+    /// `conv.i2`, by `rule`.
+    let toInt16 (rule : NarrowFloatConversion) (x : float) : int16 = int16 (toInt32 x)
 
-    /// `conv.u2`.
-    let toUInt16 (x : float) : uint16 = uint16 (toInt32 x)
+    /// `conv.u2`, by `rule`.
+    let toUInt16 (rule : NarrowFloatConversion) (x : float) : uint16 = uint16 (toInt32 x)
 
-    /// `conv.i1`.
-    let toInt8 (x : float) : int8 = int8 (toInt32 x)
+    /// `conv.i1`, by `rule`.
+    let toInt8 (rule : NarrowFloatConversion) (x : float) : int8 = int8 (toInt32 x)
 
-    /// `conv.u1`.
-    let toUInt8 (x : float) : uint8 = uint8 (toInt32 x)
+    /// `conv.u1`, by `rule`.
+    let toUInt8 (rule : NarrowFloatConversion) (x : float) : uint8 = uint8 (toInt32 x)

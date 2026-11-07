@@ -1515,6 +1515,11 @@ module NullaryIlOp =
                 state
             |> ExecutionResult.stepped
 
+    /// The rule by which the runtime `corelib` belongs to converts a float to an integer narrower
+    /// than 32 bits.
+    let private narrowFloatConversion (corelib : BaseClassTypes<DumpedAssembly>) : NarrowFloatConversion =
+        NarrowFloatConversion.ofRuntime (EmulatedRuntime.ofCoreLib corelib.Corelib)
+
     let internal execute
         (loggerFactory : ILoggerFactory)
         (corelib : BaseClassTypes<DumpedAssembly>)
@@ -2242,7 +2247,9 @@ module NullaryIlOp =
             (state, WhatWeDid.Executed) |> ExecutionResult.stepped
         | Conv_I1 ->
             let popped, state = IlMachineState.popEvalStack currentThread state
-            let conv, counters = EvalStackValue.convToInt8 popped state.PointerHashState
+
+            let conv, counters =
+                EvalStackValue.convToInt8 (narrowFloatConversion corelib) popped state.PointerHashState
 
             let state =
                 { state with
@@ -2255,7 +2262,9 @@ module NullaryIlOp =
             (state, WhatWeDid.Executed) |> ExecutionResult.stepped
         | Conv_I2 ->
             let popped, state = IlMachineState.popEvalStack currentThread state
-            let conv, counters = EvalStackValue.convToInt16 popped state.PointerHashState
+
+            let conv, counters =
+                EvalStackValue.convToInt16 (narrowFloatConversion corelib) popped state.PointerHashState
 
             let state =
                 { state with
@@ -2322,7 +2331,9 @@ module NullaryIlOp =
             |> ExecutionResult.stepped
         | Conv_U1 ->
             let popped, state = IlMachineState.popEvalStack currentThread state
-            let conv, counters = EvalStackValue.convToUInt8 popped state.PointerHashState
+
+            let conv, counters =
+                EvalStackValue.convToUInt8 (narrowFloatConversion corelib) popped state.PointerHashState
 
             let state =
                 { state with
@@ -2335,7 +2346,9 @@ module NullaryIlOp =
             (state, WhatWeDid.Executed) |> ExecutionResult.stepped
         | Conv_U2 ->
             let popped, state = IlMachineState.popEvalStack currentThread state
-            let conv, counters = EvalStackValue.convToUInt16 popped state.PointerHashState
+
+            let conv, counters =
+                EvalStackValue.convToUInt16 (narrowFloatConversion corelib) popped state.PointerHashState
 
             let state =
                 { state with

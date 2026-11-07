@@ -1,9 +1,11 @@
 namespace WoofWare.PawPrint.Test
 
 open System
+open System.IO
 open System.Numerics
 open FsCheck
 open FsCheck.FSharp
+open FsUnitTyped
 open NUnit.Framework
 open WoofWare.PawPrint
 
@@ -113,9 +115,8 @@ module TestFloatToInteger =
     let private referenceU32 (x : float) : uint32 =
         saturate BigInteger.Zero (BigInteger UInt32.MaxValue) x |> uint32
 
-    /// A target narrower than 32 bits takes the low bits of the int32 conversion; it does
-    /// not saturate to its own range. `fgMorphExpandCast` splits every such conversion
-    /// into a saturating one to int32 followed by a truncating integer narrowing.
+    /// The low bits of the int32 conversion, as `NarrowFloatConversion.LowBitsOfSaturatedInt32`
+    /// states for a target narrower than 32 bits.
     let private lowBits (bits : int) (x : float) : BigInteger =
         let modulus = BigInteger.One <<< bits
         let r = BigInteger.Remainder (BigInteger (reference32 x), modulus)
@@ -127,15 +128,43 @@ module TestFloatToInteger =
         else
             unsigned
 
-    let private referenceI8 (x : float) : int8 = lowBits 8 x |> signed 8 |> int8
-    let private referenceU8 (x : float) : uint8 = lowBits 8 x |> uint8
-    let private referenceI16 (x : float) : int16 = lowBits 16 x |> signed 16 |> int16
-    let private referenceU16 (x : float) : uint16 = lowBits 16 x |> uint16
+    /// A conversion to a target of `bits` bits narrower than 32, stated directly for each rule.
+    let private referenceNarrow (rule : NarrowFloatConversion) (bits : int) (isSigned : bool) (x : float) : BigInteger =
+        match rule with
+        | NarrowFloatConversion.LowBitsOfSaturatedInt32 ->
+            if isSigned then
+                lowBits bits x |> signed bits
+            else
+                lowBits bits x
+        | NarrowFloatConversion.Saturates ->
+            if isSigned then
+                saturate (-(BigInteger.One <<< (bits - 1))) ((BigInteger.One <<< (bits - 1)) - BigInteger.One) x
+            else
+                saturate BigInteger.Zero ((BigInteger.One <<< bits) - BigInteger.One) x
 
-    /// Every conversion the interpreter offers, as (name, implementation, reference, host).
-    /// The host column is the test host's own `conv.*`, which on .NET 9 and later is
-    /// CoreCLR's saturating rule on every platform, and so a third, independent opinion.
-    let private conversions : (string * (float -> Int128) * (float -> Int128) * (float -> Int128)) list =
+    /// Both rules, for a fixture that checks each.
+    let rules : TestCaseData list =
+        [
+            NarrowFloatConversion.LowBitsOfSaturatedInt32
+            NarrowFloatConversion.Saturates
+        ]
+        |> List.map (fun rule -> TestCaseData(rule).SetArgDisplayNames (string<NarrowFloatConversion> rule))
+
+    /// The rule of the test host's own runtime, whose `conv.*` the host columns below execute.
+    let private hostRule : NarrowFloatConversion =
+        match EmulatedRuntime.ofCoreLibMajor (typeof<obj>.Assembly.GetName().Version.Major) with
+        | Some runtime -> NarrowFloatConversion.ofRuntime runtime
+        | None -> failwith $"The test host's CoreLib %s{typeof<obj>.Assembly.FullName} is no supported runtime's"
+
+    /// Every conversion the interpreter offers, as (name, implementation, reference, host), with
+    /// the narrow targets converting by `rule`. The host column is the test host's own `conv.*`,
+    /// which on .NET 9 and later is CoreCLR's saturating rule on every platform for a target of
+    /// 32 bits or more, and `hostRule` for a narrower one, and so a third, independent opinion
+    /// where `rule` is `hostRule`.
+    let private conversions
+        (rule : NarrowFloatConversion)
+        : (string * (float -> Int128) * (float -> Int128) * (float -> Int128)) list
+        =
         [
             "int64",
             (fun x -> Int128.op_Implicit (FloatToInteger.toInt64 x)),
@@ -154,30 +183,30 @@ module TestFloatToInteger =
             (fun x -> Int128.op_Implicit (referenceU32 x)),
             (fun x -> Int128.op_Implicit (uint32 x))
             "int16",
-            (fun x -> Int128.op_Implicit (FloatToInteger.toInt16 x)),
-            (fun x -> Int128.op_Implicit (referenceI16 x)),
+            (fun x -> Int128.op_Implicit (FloatToInteger.toInt16 rule x)),
+            (fun x -> Int128.op_Implicit (int16 (referenceNarrow rule 16 true x))),
             (fun x -> Int128.op_Implicit (int16 x))
             "uint16",
-            (fun x -> Int128.op_Implicit (FloatToInteger.toUInt16 x)),
-            (fun x -> Int128.op_Implicit (referenceU16 x)),
+            (fun x -> Int128.op_Implicit (FloatToInteger.toUInt16 rule x)),
+            (fun x -> Int128.op_Implicit (uint16 (referenceNarrow rule 16 false x))),
             (fun x -> Int128.op_Implicit (uint16 x))
             "int8",
-            (fun x -> Int128.op_Implicit (FloatToInteger.toInt8 x)),
-            (fun x -> Int128.op_Implicit (referenceI8 x)),
+            (fun x -> Int128.op_Implicit (FloatToInteger.toInt8 rule x)),
+            (fun x -> Int128.op_Implicit (int8 (referenceNarrow rule 8 true x))),
             (fun x -> Int128.op_Implicit (int8 x))
             "uint8",
-            (fun x -> Int128.op_Implicit (FloatToInteger.toUInt8 x)),
-            (fun x -> Int128.op_Implicit (referenceU8 x)),
+            (fun x -> Int128.op_Implicit (FloatToInteger.toUInt8 rule x)),
+            (fun x -> Int128.op_Implicit (uint8 (referenceNarrow rule 8 false x))),
             (fun x -> Int128.op_Implicit (uint8 x))
         ]
 
     let private describe (x : float) : string =
         $"%.17g{x} (0x%016x{BitConverter.DoubleToUInt64Bits x})"
 
-    [<Test>]
-    let ``every conversion matches the stated rule`` () : unit =
+    [<TestCaseSource(nameof rules)>]
+    let ``every conversion matches the stated rule`` (rule : NarrowFloatConversion) : unit =
         let property (x : float) : bool =
-            for name, implementation, reference, _ in conversions do
+            for name, implementation, reference, _ in conversions rule do
                 let actual = implementation x
                 let expected = reference x
 
@@ -188,24 +217,24 @@ module TestFloatToInteger =
 
         Check.One (propertyConfig, Prop.forAll (Arb.fromGen genDouble) property)
 
-    [<Test>]
-    let ``every boundary value matches the stated rule`` () : unit =
+    [<TestCaseSource(nameof rules)>]
+    let ``every boundary value matches the stated rule`` (rule : NarrowFloatConversion) : unit =
         for x in boundaryDoubles do
-            for name, implementation, reference, _ in conversions do
+            for name, implementation, reference, _ in conversions rule do
                 let actual = implementation x
                 let expected = reference x
 
                 if actual <> expected then
                     failwith $"%s{name} of %s{describe x}: got %O{actual}, expected %O{expected}"
 
-    /// This checks the statement of the rule, not the implementation: if it fails, the
-    /// reference above has misdescribed CoreCLR. It holds only on a host whose own
-    /// conversions saturate, which every .NET 9+ host does and which the test project's
+    /// This checks the statement of the host runtime's rule, not the implementation: if it fails,
+    /// the reference above has misdescribed CoreCLR. It holds only on a host whose own conversions
+    /// to 32 bits or more saturate, which every .NET 9+ host does and which the test project's
     /// target framework guarantees.
     [<Test>]
     let ``the stated rule is the test host's own conversion`` () : unit =
         let property (x : float) : bool =
-            for name, _, reference, host in conversions do
+            for name, _, reference, host in conversions hostRule do
                 let actual = host x
                 let expected = reference x
 
@@ -229,10 +258,10 @@ module TestFloatToInteger =
                     "uint64", Int128.op_Implicit (FloatToInteger.toUInt64 wide), Int128.op_Implicit (uint64 x)
                     "int32", Int128.op_Implicit (FloatToInteger.toInt32 wide), Int128.op_Implicit (int32 x)
                     "uint32", Int128.op_Implicit (FloatToInteger.toUInt32 wide), Int128.op_Implicit (uint32 x)
-                    "int16", Int128.op_Implicit (FloatToInteger.toInt16 wide), Int128.op_Implicit (int16 x)
-                    "uint16", Int128.op_Implicit (FloatToInteger.toUInt16 wide), Int128.op_Implicit (uint16 x)
-                    "int8", Int128.op_Implicit (FloatToInteger.toInt8 wide), Int128.op_Implicit (int8 x)
-                    "uint8", Int128.op_Implicit (FloatToInteger.toUInt8 wide), Int128.op_Implicit (uint8 x)
+                    "int16", Int128.op_Implicit (FloatToInteger.toInt16 hostRule wide), Int128.op_Implicit (int16 x)
+                    "uint16", Int128.op_Implicit (FloatToInteger.toUInt16 hostRule wide), Int128.op_Implicit (uint16 x)
+                    "int8", Int128.op_Implicit (FloatToInteger.toInt8 hostRule wide), Int128.op_Implicit (int8 x)
+                    "uint8", Int128.op_Implicit (FloatToInteger.toUInt8 hostRule wide), Int128.op_Implicit (uint8 x)
                 ]
 
             for name, actual, expected in pairs do
@@ -243,3 +272,51 @@ module TestFloatToInteger =
             true
 
         Check.One (propertyConfig, Prop.forAll (Arb.fromGen genSingle) property)
+
+    let everyRuntime : TestCaseData list = FrameworkUnderTest.everyRuntime
+
+    /// The body of `Compiler::fgMorphExpandCast` in `runtime`'s pinned jit/morph.cpp.
+    let private fgMorphExpandCast (runtime : EmulatedRuntime) : string =
+        let path =
+            Path.Combine (FrameworkUnderTest.requireRuntimeSourceOf runtime, "src", "coreclr", "jit", "morph.cpp")
+
+        let text = File.ReadAllText path
+        let signature = "\nGenTree* Compiler::fgMorphExpandCast(GenTreeCast* tree)\n{"
+
+        match text.IndexOf (signature, StringComparison.Ordinal) with
+        | -1 -> failwith $"%s{path} defines no fgMorphExpandCast of the expected signature"
+        | start ->
+            match text.IndexOf ("\n}\n", start, StringComparison.Ordinal) with
+            | -1 -> failwith $"%s{path}'s fgMorphExpandCast has no closing brace in the first column"
+            | finish -> text.Substring (start, finish - start)
+
+    /// On x64 and Arm64, the targets PawPrint describes, `fgMorphExpandCast` saturates an
+    /// unchecked conversion to a narrow integer by clamping its source to the target's bounds
+    /// (`smallMin` and `smallMax`) before converting it to int32; without that clamp, the
+    /// conversion to int32 is narrowed by truncation alone.
+    [<TestCaseSource(nameof everyRuntime)>]
+    let ``each runtime's rule is what its JIT's fgMorphExpandCast does`` (runtime : EmulatedRuntime) : unit =
+        let body = fgMorphExpandCast runtime
+
+        let clamps =
+            body.Contains ("gtNewDconNode(smallMin, srcType)", StringComparison.Ordinal)
+
+        // The narrowing to int32 that both rules end in, so that a reshaped function fails here
+        // rather than reading as the rule without a clamp.
+        if
+            not (
+                body.Contains (
+                    "oper = gtNewCastNodeL(TYP_INT, oper, /* fromUnsigned */ false, TYP_INT);",
+                    StringComparison.Ordinal
+                )
+            )
+        then
+            failwith $"%A{runtime}'s fgMorphExpandCast no longer converts a narrow target's source to int32 as expected"
+
+        let expected =
+            if clamps then
+                NarrowFloatConversion.Saturates
+            else
+                NarrowFloatConversion.LowBitsOfSaturatedInt32
+
+        NarrowFloatConversion.ofRuntime runtime |> shouldEqual expected
