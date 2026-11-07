@@ -5,13 +5,6 @@ open System.Reflection.Metadata
 
 [<RequireQualifiedAccess>]
 module NativeSignature =
-    /// ECMA II.23.2.4 calling-convention byte for a field signature blob.
-    let private callingConventionField : int = 0x6
-
-    /// ECMA II.23.2.3 low-nibble mask for the calling-convention byte; the
-    /// upper bits are the HASTHIS / EXPLICITTHIS / GENERIC / VARARG flags.
-    let private callingConventionMask : int = 0xF
-
     /// Classify a `void*` COR signature pointer argument as null or as a pointer over a PE byte
     /// range, rejecting anything else.
     let private corSigPeByteRange (operation : string) (sigArg : CliType) : PeByteRangePointer option =
@@ -1433,11 +1426,9 @@ module NativeSignature =
             ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
           MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
             // Static InternalCall: `int GetParameterOffsetInternal(void* sig, int csig, int parameterIndex)`.
-            // Mirrors CoreCLR's `SignatureNative::GetParameterOffsetInternal`: for the
-            // FIELD calling convention (0x06) the only valid parameter index is 0 and
-            // the byte offset to the parameter type is exactly 1 (just past the
-            // single calling-conv byte). Method-shaped calling conventions are not
-            // yet covered.
+            // CoreCLR's `SignatureNative::GetParameterOffsetInternal` returns the parameter's byte
+            // offset, or META_E_BAD_SIGNATURE for a blob its walk cannot read, which the managed
+            // `Signature.GetParameterOffset` throws through `Marshal.ThrowExceptionForHR`.
             let operation = "Signature.GetParameterOffsetInternal"
 
             if instruction.Arguments.Length <> 3 then
@@ -1454,17 +1445,20 @@ module NativeSignature =
             if bytes.Length <> csig then
                 failwith $"%s{operation}: csig %d{csig} does not match the actual blob length %d{bytes.Length}"
 
-            let callConv = int bytes.[0] &&& callingConventionMask
-
             let offset =
-                if callConv = callingConventionField then
-                    if parameterIndex <> 0 then
-                        failwith $"%s{operation}: FIELD signature only has parameterIndex 0, got %d{parameterIndex}"
-
-                    1
-                else
+                match
+                    SignatureParameterOffset.find
+                        NativeRuntimeTypeHelpers.nativeIntSize
+                        (ImmutableArray.Create<byte> bytes)
+                        parameterIndex
+                with
+                | ParameterOffset.Offset offset -> offset
+                | ParameterOffset.BadSignature -> SignatureParameterOffset.metaEBadSignature
+                | ParameterOffset.ParameterIndexOutOfRange (index, greatest) ->
+                    // CoreCLR asserts against this, and a release build walks on past the last
+                    // parameter. CoreLib asks only for the return and the parameters it lists.
                     failwith
-                        $"TODO: %s{operation} non-FIELD calling convention 0x%X{callConv} is not yet implemented (csig=%d{csig}, parameterIndex=%d{parameterIndex})"
+                        $"%s{operation}: parameter index %d{index} is outside 0..%d{greatest} for the signature of %d{csig} bytes; CoreCLR asserts against this"
 
             let state =
                 IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 offset)) ctx.Thread state

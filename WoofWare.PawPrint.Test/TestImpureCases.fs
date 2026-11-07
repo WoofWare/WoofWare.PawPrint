@@ -497,6 +497,22 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """`MethodBuilder.SetImplementationFlags` with `Native` and then `Unmanaged` on a method with no body, measured on .NET 10 to exit 0. `TypeBuilder_SetMethodImpl` refuses each with a TODO, because `MethodInfo.read` refuses a bodiless method that is not managed IL, abstract, an InternalCall or runtime-provided. Un-parked by letting the dynamic image hold such a row until `CreateType`."""
+            {
+                FileName = "DynamicMethodEmitCallReflected.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`ILGenerator.EmitCall` naming a reflected method, measured on .NET 10 to exit 0. The emit succeeds and stores a `VarArgMethod` whose `m_dynamicMethod` is null; the call then stops when `ResolveToken` reaches that entry: "TODO: Call names DynamicScope entry 2, a VarArgMethod whose m_dynamicMethod is null, so it wraps a reflected method; PawPrint does not yet resolve the reflected method such a wrapper names". Un-parked by resolving such a wrapper through its `m_method`."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?

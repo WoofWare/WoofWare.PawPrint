@@ -1001,12 +1001,8 @@ module internal DynamicScopeOperand =
                             $"%s{operation}: DynamicScope entry %d{scopeIndex}'s VarArgMethod.m_dynamicMethod is at %O{inner}, which is not on the heap"
                 | CliType.ObjectRef None ->
                     // A wrapper round a *reflected* method, which `ResolveToken` resolves
-                    // through `m_method`. `EmitCall` never gets as far as storing one: with a
-                    // reflected method it stops during the emit itself, at
-                    // `Signature.GetParameterOffsetInternal` for a non-FIELD calling convention
-                    // (measured). A guest can still construct one through its internal
-                    // constructor and write it into the scope, and real .NET then calls the
-                    // wrapped method (measured).
+                    // through `m_method`. `EmitCall` stores one for every reflected method it is
+                    // given (`sourcesImpure/DynamicMethodEmitCallReflected.cs`, parked here).
                     unsupported
                         $"TODO: %s{operation} names DynamicScope entry %d{scopeIndex}, a VarArgMethod whose m_dynamicMethod is null, so it wraps a reflected method; PawPrint does not yet resolve the reflected method such a wrapper names"
                 | other ->
