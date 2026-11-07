@@ -627,11 +627,13 @@ module TypeResolution =
     /// <summary>
     /// What <paramref name="argument" />, an instantiation's argument once substituted, is that
     /// CoreCLR admits in no instantiation, if it is one: a byref, a pointer, a function pointer,
-    /// <c>TypedReference</c> or <c>void</c>.
+    /// <c>void</c>, or <c>TypedReference</c> on a runtime whose CoreCLR refuses it
+    /// (<c>InstantiationCheck.refusesTypedReference</c>, at the runtime the CoreLib of
+    /// <paramref name="baseClassTypes" /> belongs to).
     /// </summary>
     /// <remarks>
     /// This is CoreCLR's <c>Generics::CheckInstantiation</c> (generics.cpp), which reads the
-    /// argument's element type past its custom modifiers and <c>pinned</c>, and so refuses CoreLib's
+    /// argument's element type past its custom modifiers and <c>pinned</c>, and so judges CoreLib's
     /// <c>System.Void</c> and <c>System.TypedReference</c> however they are spelled. It also admits
     /// every argument from the first generic variable on, but a substituted argument is closed.
     /// </remarks>
@@ -646,7 +648,10 @@ module TypeResolution =
         | TypeDefn.Byref _ -> Some MalformedArgument.Byref
         | TypeDefn.Pointer _ -> Some MalformedArgument.Pointer
         | TypeDefn.FunctionPointer _ -> Some MalformedArgument.FunctionPointer
-        | TypeDefn.FromDefinition (identity, _) when identity = baseClassTypes.TypedReference.Identity ->
+        | TypeDefn.FromDefinition (identity, _) when
+            identity = baseClassTypes.TypedReference.Identity
+            && InstantiationCheck.refusesTypedReference (EmulatedRuntime.ofCoreLib baseClassTypes.Corelib)
+            ->
             Some MalformedArgument.TypedReference
         | TypeDefn.FromDefinition (identity, _) when identity = baseClassTypes.Void.Identity ->
             Some MalformedArgument.Void

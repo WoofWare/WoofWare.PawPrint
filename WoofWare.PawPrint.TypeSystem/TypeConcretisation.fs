@@ -361,11 +361,12 @@ module AllConcreteTypes =
 
     /// The first of an instantiation's arguments, by index, that CoreCLR admits in no instantiation
     /// of a type or a method (`Generics::CheckInstantiation`, generics.cpp), and why: a byref,
-    /// `TypedReference`, `void`, a pointer or a function pointer. CoreCLR stops at the first type
-    /// variable among the arguments; a handle is closed, so never is one. Each nominal argument must
-    /// be interned in `this`.
+    /// `void`, a pointer, a function pointer, or `TypedReference` on a runtime whose CoreCLR refuses
+    /// it (`InstantiationCheck.refusesTypedReference`, at the runtime `baseClassTypes`' CoreLib
+    /// belongs to). CoreCLR stops at the first type variable among the arguments; a handle is
+    /// closed, so never is one. Each nominal argument must be interned in `this`.
     let malformedArgument
-        (baseClassTypes : BaseClassTypes<'corelib>)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (this : AllConcreteTypes)
         (arguments : ConcreteTypeHandle seq)
         : (int * MalformedArgument) option
@@ -382,7 +383,10 @@ module AllConcreteTypes =
             | ConcreteTypeHandle.Concrete id ->
                 match this.Mapping |> Map.tryFind id with
                 | None -> failwith $"BUG: the argument %O{argument} of an instantiation is not interned"
-                | Some concrete when concrete.Identity = baseClassTypes.TypedReference.Identity ->
+                | Some concrete when
+                    concrete.Identity = baseClassTypes.TypedReference.Identity
+                    && InstantiationCheck.refusesTypedReference (EmulatedRuntime.ofCoreLib baseClassTypes.Corelib)
+                    ->
                     Some (index, MalformedArgument.TypedReference)
                 | Some concrete when concrete.Identity = baseClassTypes.Void.Identity ->
                     Some (index, MalformedArgument.Void)
@@ -392,12 +396,11 @@ module AllConcreteTypes =
     /// Intern `ct`, which must not already be interned, as a type CoreCLR's class loader admits.
     ///
     /// This and `addNonGeneric` are the only ways to mint a `Concrete` handle, so every handle in the
-    /// table is an instantiation CoreCLR could create: none of its arguments is a byref,
-    /// `TypedReference`, `void`, a pointer or a function pointer. An instantiation with one is
-    /// refused, as `ClassLoader::LoadTypeHandleForTypeKey` refuses it, and nothing is interned. Its
-    /// arguments must already be interned.
+    /// table is an instantiation CoreCLR could create: none of its arguments is one `malformedArgument`
+    /// reports. An instantiation with one is refused, as `ClassLoader::LoadTypeHandleForTypeKey`
+    /// refuses it, and nothing is interned. Its arguments must already be interned.
     let add
-        (baseClassTypes : BaseClassTypes<'corelib>)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (loaded : LoadedAssemblies)
         (ct : ConcreteType<ConcreteTypeHandle>)
         (this : AllConcreteTypes)
@@ -873,12 +876,12 @@ module TypeConcretization =
     /// before it in the context.
     let private registerNominal
         (loadAssembly : IAssemblyLoad)
-        (ctx : ConcretizationContext<'corelib>)
+        (ctx : ConcretizationContext<DumpedAssembly>)
         (identity : ResolvedTypeIdentity)
         (ns : string)
         (name : string)
         (generics : ConcreteTypeHandle ImmutableArray)
-        : Result<ConcreteTypeHandle, TypeBindingFailure> * ConcretizationContext<'corelib>
+        : Result<ConcreteTypeHandle, TypeBindingFailure> * ConcretizationContext<DumpedAssembly>
         =
         match loadBaseChain loadAssembly ctx identity with
         | Error failure, ctx -> Error failure, ctx
@@ -1015,9 +1018,9 @@ module TypeConcretization =
     /// first, and a type on it that does not bind is the failure.
     let concretizeTypeDefinition
         (loadAssembly : IAssemblyLoad)
-        (ctx : ConcretizationContext<'corelib>)
+        (ctx : ConcretizationContext<DumpedAssembly>)
         (identity : ResolvedTypeIdentity)
-        : Result<ConcreteTypeHandle, TypeBindingFailure> * ConcretizationContext<'corelib>
+        : Result<ConcreteTypeHandle, TypeBindingFailure> * ConcretizationContext<DumpedAssembly>
         =
 
         let assembly = ctx.LoadedAssemblies.ByDefinitionName identity.AssemblyFullName

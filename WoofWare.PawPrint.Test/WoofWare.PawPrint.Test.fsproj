@@ -447,6 +447,7 @@
     <Compile Include="TestDynamicAssemblyRefusals.fs" />
     <Compile Include="TestFabricatedCallArgumentCoercion.fs" />
     <Compile Include="TestFabricatedTypedReferenceInstantiation.fs" />
+    <Compile Include="TestTypedReferenceArgumentPerRuntime.fs" />
     <Compile Include="TestFabricatedEntryPoint.fs" />
     <Compile Include="TestFabricatedIntrinsicWithoutIl.fs" />
     <Compile Include="TestFabricatedMethodWithoutIl.fs" />
