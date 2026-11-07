@@ -276,80 +276,13 @@ module AssemblyBinding =
         let isNeutral (candidate : DumpedAssembly) : bool =
             isNeutralCulture (Some candidate.CultureName)
 
-        // What CoreCLR would refuse to load, or might bind where the comparisons below cannot tell:
-        // an image marked 32-bit-required alone is x86-only, which no platform PawPrint simulates
-        // runs (`COR_IS_32BIT_REQUIRED`), a reference assembly is never loaded for execution
-        // (`PEAssembly::ValidateForExecution`), and a manifest name outside ASCII may fold to the
-        // request under CoreCLR's rules.
-        let requireAdmissible (candidate : DumpedAssembly) : unit =
-            let metadata = candidate.PeReader.GetMetadataReader ()
-
-            // `GetCustomAttributeByName` on the manifest matches the attribute's type by name alone,
-            // whichever assembly defines it.
-            let isReferenceAssembly =
-                metadata.GetAssemblyDefinition().GetCustomAttributes ()
-                |> Seq.exists (fun handle ->
-                    CustomAttribute.constructorParentName
-                        metadata
-                        (fun () -> $"the manifest of %s{candidate.DefinitionFullName}")
-                        (metadata.GetCustomAttribute handle).Constructor = Some (
-                        "System.Runtime.CompilerServices",
-                        "ReferenceAssemblyAttribute"
-                    )
-                )
-
-            if isReferenceAssembly then
-                failwith
-                    $"TODO: %s{describe} found %s{candidate.DefinitionFullName}, a reference assembly, which CoreCLR refuses to load for execution (BadImageFormatException), not an outcome this binder reports"
-
-            // `afPA_NoPlatform`: the manifest's three-bit processor-architecture field all set.
-            if int (metadata.GetAssemblyDefinition().Flags) &&& 0x70 = 0x70 then
-                failwith
-                    $"TODO: %s{describe} found %s{candidate.DefinitionFullName}, whose manifest is marked NoPlatform, which CoreCLR refuses to load for execution (BadImageFormatException), not an outcome this binder reports"
-
-            // An image built for one machine binds only in a process of that architecture
-            // (`AssemblyBinderCommon::IsValidArchitecture` of the PE kind
-            // `TranslatePEToArchitectureType` reads), which this binder does not model, and is
-            // not found in any other. Only an IL-only I386 image is architecture-neutral; one
-            // that is not IL-only is x86. A ReadyToRun image's machine is the one its native code
-            // targets, and its IL runs anywhere; the framework's own assemblies are such images.
-            match candidate.PEImageHeaders.ReadyToRunHeader with
-            | Some _ -> ()
-            | None ->
-                let headers = candidate.PEImageHeaders
-
-                if
-                    headers.Machine <> System.Reflection.PortableExecutable.Machine.I386
-                    || not (headers.CorFlags.HasFlag System.Reflection.PortableExecutable.CorFlags.ILOnly)
-                then
-                    failwith
-                        $"TODO: %s{describe} found %s{candidate.DefinitionFullName}, an image built for the machine %O{headers.Machine} with COR flags %O{headers.CorFlags}, which CoreCLR binds only in a process of that architecture; the process architecture is not modelled"
-
-            let bitness =
-                candidate.PEImageHeaders.CorFlags
-                &&& (System.Reflection.PortableExecutable.CorFlags.Requires32Bit
-                     ||| System.Reflection.PortableExecutable.CorFlags.Prefers32Bit)
-
-            if bitness = System.Reflection.PortableExecutable.CorFlags.Requires32Bit then
-                failwith
-                    $"TODO: %s{describe} found %s{candidate.DefinitionFullName}, an image marked 32-bit-required, which CoreCLR refuses to load on a 64-bit platform (BadImageFormatException), not an outcome this binder reports"
-
+        // A manifest name outside ASCII may fold to the request under CoreCLR's rules, where the
+        // comparisons below cannot tell. Whether CoreCLR would load a probed image at all, the probe
+        // has asked (`ImageAdmission.require`).
+        let requireUnfoldedName (candidate : DumpedAssembly) : unit =
             if mayFoldToSameName candidate.Name.Name request.SimpleName then
                 failwith
                     $"TODO: %s{describe} found %s{candidate.DefinitionFullName}, whose simple name is not ASCII and which CoreCLR's case folding may equate with the request; that folding is not modelled"
-
-        // CoreCLR refuses to load an assembly whose manifest sets any bit of
-        // `afContentType_Mask` (0xE00): the WindowsRuntime value and every reserved one alike
-        // ("The given assembly name was invalid"), whatever the request asked for. Read off
-        // the row's own flags word: `AssemblyName.ContentType` folds the reserved values back
-        // to `Default`.
-        let requireDefaultContentType (candidate : DumpedAssembly) : unit =
-            let rawFlags =
-                int (candidate.PeReader.GetMetadataReader().GetAssemblyDefinition().Flags)
-
-            if rawFlags &&& 0xE00 <> 0 then
-                failwith
-                    $"TODO: %s{describe} found %s{candidate.DefinitionFullName}, whose manifest flags 0x%08X{rawFlags} set a content type; CoreCLR refuses to load such an image (FileLoadException, 'The given assembly name was invalid'), which is not an outcome this binder reports"
 
         let foundVersion (candidate : DumpedAssembly) : Version =
             match candidate.Name.Version with
@@ -384,8 +317,9 @@ module AssemblyBinding =
             // "Can't give higher version than already bound" (assemblybindercommon.cpp): the
             // context holds one assembly per simple name, so an incompatible one is a miss
             // rather than a reason to probe for another.
-            requireDefaultContentType candidate
-            requireAdmissible candidate
+            // A caller may have built the load context from images no probe has read.
+            ImageAdmission.require candidate.DefinitionFullName candidate
+            requireUnfoldedName candidate
 
             if isCompatibleVersion (RequestedAssemblyVersion.forBinding request.Version) (foundVersion candidate) then
                 AssemblyBindResult.Bound (assemblies, candidate)
@@ -423,9 +357,8 @@ module AssemblyBinding =
         | None -> AssemblyBindResult.NotFound
         | Some read ->
             // CoreCLR initialises the image before it compares identities, so an image it
-            // cannot load fails as such whatever its manifest says.
-            requireDefaultContentType read
-            requireAdmissible read
+            // cannot load fails as such whatever its manifest says, as the probe has made it.
+            requireUnfoldedName read
 
             // The file was chosen by its name; the *manifest* must agree
             // (`TestCandidateRefMatchesDef`): `Alias.dll` declaring itself `Real` does not
