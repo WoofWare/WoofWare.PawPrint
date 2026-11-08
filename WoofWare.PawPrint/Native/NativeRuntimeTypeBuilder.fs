@@ -69,7 +69,7 @@ module NativeRuntimeTypeBuilder =
         | None -> failwith $"%s{operation}: %s{what} 0x%08x{token} names no row of the module's scope"
 
     /// The method a `MethodDef` or `MemberRef` token names in `scope`, which is what the managed
-    /// caller's `GetMethodMetadataToken` hands out for a method.
+    /// callers hand out for a method (`GetMethodMetadataToken`, `GetMemberRefToken`).
     let private methodDefOrRef (operation : string) (what : string) (token : int) (scope : EmitScope) : MethodDefOrRef =
         let rid = token &&& 0x00FFFFFF
 
@@ -79,7 +79,7 @@ module NativeRuntimeTypeBuilder =
             | 0x0A -> EmitScope.tryMemberRefRid rid scope |> Option.map MethodDefOrRef.MemberRef
             | _ ->
                 failwith
-                    $"%s{operation}: %s{what} 0x%08x{token} is not a MethodDef or MemberRef token, which the managed caller's GetMethodMetadataToken alone hands out"
+                    $"%s{operation}: %s{what} 0x%08x{token} is not a MethodDef or MemberRef token, which is all the managed callers hand out for a method"
 
         match target with
         | Some target -> target
@@ -440,6 +440,69 @@ module NativeRuntimeTypeBuilder =
             let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
 
             NativeHandlerResult.completed state |> Some
+        | "TypeBuilder_DefineMethodSpec",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Byte)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty
+            ->
+            let operation = "TypeBuilder_DefineMethodSpec"
+
+            if instruction.Arguments.Length <> 4 then
+                failwith $"%s{operation}: expected four native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+
+            // `RegMeta::DefineMethodSpec` takes a MethodDef or a MemberRef. `GetMethodTokenInternal`
+            // passes a MemberRef for a generic method of another module or of a generic type, and the
+            // MethodDef of a generic method of this module otherwise.
+            let parent =
+                methodDefOrRef
+                    operation
+                    "the parent"
+                    (NativeCall.int32Argument operation instruction.Arguments.[1])
+                    held
+
+            let instantiation =
+                NativeCall.readCountedBytes
+                    operation
+                    ctx.BaseClassTypes
+                    state
+                    (NativeCall.managedPointerOfPointerArgument operation "pSignature" instruction.Arguments.[2])
+                    (NativeCall.int32Argument operation instruction.Arguments.[3])
+                |> ImmutableArray.CreateRange
+
+            if instantiation.IsEmpty then
+                failwith
+                    $"%s{operation}: an empty instantiation, which the managed caller never passes: it writes at least the calling convention and a count"
+
+            let methodSpec, extended =
+                EmitScopeReferences.defineMethodSpec parent instantiation held
+
+            let state =
+                // Found rather than added, so there is nothing to re-read.
+                if obj.ReferenceEquals (extended, held) then
+                    state
+                else
+                    state.WithEmitScope ctx.LoggerFactory moduleName extended |> fst
+
+            state
+            |> IlMachineState.pushToEvalStack
+                (CliType.Numeric (CliNumericType.Int32 (0x2B000000 ||| methodSpec.Rid)))
+                ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
         | "TypeBuilder_SetParentType",
           "System.Private.CoreLib",
           "System.Reflection.Emit",
