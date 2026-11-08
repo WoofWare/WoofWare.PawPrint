@@ -40,6 +40,24 @@ module NativeRuntimeAssembly =
             name.Substring (0, idx), name.Substring (idx + 1)
 
     /// <summary>
+    /// The type nested directly in <paramref name="declaring"/> that one nested-name segment of
+    /// <c>AssemblyNative_GetTypeCore</c> names, or <c>None</c> if there is none.
+    /// </summary>
+    let internal tryNestedTypeDefOfSegment
+        (ignoreCase : bool)
+        (assembly : DumpedAssembly)
+        (declaring : System.Reflection.Metadata.TypeDefinitionHandle)
+        (segment : string)
+        : Result<TypeInfo<GenericParamFromMetadata, TypeDefn> option, CaseInsensitiveLookupRefusal>
+        =
+        let _, simple = splitAtLastDot segment
+
+        if ignoreCase then
+            assembly.TryGetNestedTypeDefIgnoreCase declaring simple
+        else
+            assembly.TryGetNestedTypeDef declaring simple |> Ok
+
+    /// <summary>
     /// The eight-byte strong name token of a public key: ECMA-335 II.6.3's low eight bytes of
     /// the key's SHA-1 hash, in reverse order.
     /// </summary>
@@ -583,14 +601,11 @@ module NativeRuntimeAssembly =
         let nestedTypeDef
             (assembly : DumpedAssembly)
             (declaring : System.Reflection.Metadata.TypeDefinitionHandle)
-            (name : string)
+            (segment : string)
             : TypeInfo<GenericParamFromMetadata, TypeDefn> option
             =
-            if ignoreCase then
-                assembly.TryGetNestedTypeDefIgnoreCase declaring name
-                |> orRefuse $"looking up nested type %s{name} in %s{assembly.Name.Name}"
-            else
-                assembly.TryGetNestedTypeDef declaring name
+            tryNestedTypeDefOfSegment ignoreCase assembly declaring segment
+            |> orRefuse $"looking up nested type %s{segment} in %s{assembly.Name.Name}"
 
 
         if instruction.Arguments.Length <> 5 then
@@ -880,13 +895,8 @@ module NativeRuntimeAssembly =
                     =
                     match rest with
                     | [] -> Some parent
-                    | name :: rest ->
-                        // Each nested entry is normally a simple name; keep
-                        // the same split-at-last-'.' rule as CoreCLR uses
-                        // when consumers smuggle a dotted name through.
-                        let _, nestedSimple = splitAtLastDot name
-
-                        match nestedTypeDef definingAssembly parent.TypeDefHandle nestedSimple with
+                    | segment :: rest ->
+                        match nestedTypeDef definingAssembly parent.TypeDefHandle segment with
                         | None -> None
                         | Some child -> walk child rest
 

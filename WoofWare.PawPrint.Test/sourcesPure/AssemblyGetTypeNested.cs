@@ -24,6 +24,19 @@ public class Program
         if (nested == null) return 3;
         if (nested.BaseType.Name != "NameValueCollection") return 4;
 
+        // A nested segment is split at its last '.' into namespace and name, and `Inner`'s
+        // namespace is empty, so a namespace prefix names some other type, which is absent.
+        if (asm.GetType ("Outer+X.Inner") != null) return 5;
+
+        try
+        {
+            asm.GetType ("Outer+X.Inner", throwOnError: true);
+            return 6;
+        }
+        catch (TypeLoadException)
+        {
+        }
+
         return 0;
     }
 }
