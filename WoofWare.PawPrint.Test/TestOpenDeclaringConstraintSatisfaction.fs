@@ -44,6 +44,15 @@ module TestOpenDeclaringConstraintSatisfaction =
             "M_ClassInT", "where U : class, IIn<T>"
             "M_InTAndMarker", "where U : IIn<T>, IMarker"
             "M_InU", "where U : IIn<U>"
+            // An array over the formal: reading these asks whether `T[]` casts to an argument's
+            // own type argument, or the other way round, through `MethodTable::ArrayIsInstanceOf`,
+            // `ArraySupportsBizarreInterface` and System.Array's parents and interfaces. (A
+            // multi-dimensional `T[,]` here makes CoreCLR refuse the declaring type with
+            // `BadImageFormatException`, measured on .NET 10, so the corpus has none.)
+            "M_InArrT", "where U : IIn<T[]>"
+            "M_OutArrT", "where U : IOut<T[]>"
+            "M_InJaggedT", "where U : IIn<T[][]>"
+            "M_EnumerableArrT", "where U : IEnumerable<T[]>"
         ]
 
     /// (C# header, metadata name, methods C# refuses to declare there) for each declaring
@@ -242,6 +251,52 @@ public class D_Self<T> where T : class { public void M_Self<U>() where U : D_Sel
 
             instantiate listInfo typedefof<System.Collections.Generic.List<obj>> [ arg ]
 
+        let corelibType (ns : string) (name : string) : TypeInfo<GenericParamFromMetadata, TypeDefn> =
+            corelib.TryGetTopLevelTypeDef ns name
+            |> Option.defaultWith (fun () -> failwith $"%s{ns}.%s{name} not found in corelib")
+
+        let corelibNonGeneric (ns : string) (name : string) (host : Type) : Argument =
+            let typeInfo = corelibType ns name
+
+            ofCorelib
+                (TypeDefn.FromDefinition (
+                    typeInfo.Identity,
+                    LoadedTypeInfo.signatureTypeKind bct initialState.TypeSystem._LoadedAssemblies typeInfo
+                ))
+                host
+
+        let corelibGeneric (ns : string) (name : string) (host : Type) (args : Argument list) : Argument =
+            instantiate (corelibType ns name) host args
+
+        let mdArray (element : Argument) (rank : int) : Argument =
+            {
+                Name = $"%s{element.Name}[rank %d{rank}]"
+                Defn = TypeDefn.Array (element.Defn, rank)
+                Host = element.Host.MakeArrayType rank
+            }
+
+        let systemArray = corelibNonGeneric "System" "Array" typeof<Array>
+
+        let nonGenericIList =
+            corelibNonGeneric "System.Collections" "IList" typeof<System.Collections.IList>
+
+        let iList (arg : Argument) : Argument =
+            corelibGeneric
+                "System.Collections.Generic"
+                "IList`1"
+                typedefof<System.Collections.Generic.IList<obj>>
+                [ arg ]
+
+        let iEnumerable (arg : Argument) : Argument =
+            corelibGeneric
+                "System.Collections.Generic"
+                "IEnumerable`1"
+                typedefof<System.Collections.Generic.IEnumerable<obj>>
+                [ arg ]
+
+        let iEquatable (arg : Argument) : Argument =
+            corelibGeneric "System" "IEquatable`1" typedefof<IEquatable<obj>> [ arg ]
+
         [
             object'
             string'
@@ -290,6 +345,27 @@ public class D_Self<T> where T : class { public void M_Self<U>() where U : D_Sel
             array string'
             array (generic "IIn`1" [ object' ])
             array (generic "IIn`1" [ string' ])
+            // Candidates for the array-over-formal constraints: what `T[]` casts to depends on
+            // whether `T` is an object reference and on what `T` casts to.
+            generic "IIn`1" [ systemArray ]
+            generic "IIn`1" [ nonGenericIList ]
+            generic "IIn`1" [ iList object' ]
+            generic "IIn`1" [ iList base' ]
+            generic "IIn`1" [ iList int' ]
+            generic "IIn`1" [ iEnumerable object' ]
+            generic "IIn`1" [ iEquatable object' ]
+            generic "IIn`1" [ array object' ]
+            generic "IIn`1" [ array base' ]
+            generic "IIn`1" [ array int' ]
+            generic "IIn`1" [ mdArray object' 2 ]
+            generic "IIn`1" [ mdArray object' 1 ]
+            generic "IIn`1" [ array (array object') ]
+            generic "IIn`1" [ array systemArray ]
+            generic "IOut`1" [ array object' ]
+            generic "IOut`1" [ array string' ]
+            iEnumerable (array object')
+            iEnumerable (array derived)
+            array (array object')
         ]
 
     /// The host's verdict: whether `MakeGenericMethod` binds.
@@ -408,6 +484,10 @@ public class D_Self<T> where T : class { public void M_Self<U>() where U : D_Sel
                 "D_Class`1", "M_InPairT"
                 "D_Class`1", "M_EnumerableInT"
                 "D_Class`1", "M_IListInT"
+                "D_Class`1", "M_InArrT"
+                "D_Base`1", "M_InArrT"
+                "D_None`1", "M_InArrT"
+                "D_Class`1", "M_InJaggedT"
             ] do
             let count = accepted definition methodName
             Assert.That (count, Is.GreaterThan 0, $"%s{definition}.%s{methodName} accepts no argument")
@@ -416,5 +496,8 @@ public class D_Self<T> where T : class { public void M_Self<U>() where U : D_Sel
         // `ConstrainedAsObjRef` must matter somewhere: a formal that may be a value type blocks
         // the contravariant match that a reference-constrained one allows.
         Assert.That (accepted "D_None`1" "M_InT", Is.LessThan (accepted "D_Class`1" "M_InT"))
+        // ... and in an array's element: `T[]` casts to `object[]` or `IList<object>` only when `T`
+        // is an object reference.
+        Assert.That (accepted "D_None`1" "M_InArrT", Is.LessThan (accepted "D_Class`1" "M_InArrT"))
         // Nothing is assignable to an unbound formal.
         Assert.That (accepted "D_Class`1" "M_T", Is.EqualTo 0)
