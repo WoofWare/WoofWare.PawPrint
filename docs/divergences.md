@@ -892,6 +892,46 @@ follows the box and `JitTypeComparison` what the JIT decides about it, and
 refused, with the box reached on every run and no handler of its own, where the two runtimes agree,
 and `RefStructNullTest.cs` the null tests Roslyn emits.
 
+## A generic instantiation whose constraints reject it fails when it is reached, and only partly
+
+**CoreCLR**: a method instantiation whose arguments its type parameters' constraints reject raises
+`VerificationException` as `InstantiatedMethodDesc::NewInstantiatedMethodDesc` creates it
+(genmeth.cpp), and a type instantiation raises `TypeLoadException` as `MethodTable::DoFullyLoad`
+completes its load (`SatisfiesClassConstraints`), with messages naming the instantiation in the
+runtime's own type-name format. For an instruction's token both happen as the JIT compiles the
+method holding it, so, as for an abstract method's `call`, the method runs nothing and no handler
+inside it catches the exception. A full load checks every type it brings along too: the type's
+parent, its interfaces, its arguments and its value-type fields. The JIT also checks each
+instantiation a generic method's instructions spell over its own type variables, with the variables
+standing as arguments (`CEEInfo::GetMethodForSecurity`): `M<U>()` in a method whose `U` lacks `M`'s
+constraint is refused whatever `U` is instantiated at. Measured on .NET 10 and 11 for `struct`,
+`class`, `new()`, an interface constraint and a byref-like argument without `allows ref struct`.
+
+**PawPrint**: checks a method instantiation's constraints wherever it instantiates a method, and an
+instruction's declaring type's own constraints at each instruction that names a method (`call`,
+`callvirt`, `newobj`, `ldftn`, `ldvirtftn`, `ldtoken`), raising each exception when the instruction
+*executes*, with its default message. It does not check what the declaring type's full load brings
+along, nor the instantiations of any other instruction's type operand, nor an instantiation spelled
+over a type variable against that variable's constraints, so those run where CoreCLR refuses them.
+An argument that `ConstraintSatisfaction` cannot decide (an abstract one, for an interface constraint
+that declares static abstract methods) stops the run.
+
+**Spec status**: ECMA-335 II.9.11: "Generic parameters can be instantiated only with generic
+arguments that are assignable-to (§I.8.7.3) (when boxed) each of the declared constraints and that
+satisfy all specified special constraints." It does not say what an implementation does with an
+instantiation that breaks the rule, or when; byref-like types and `allows ref struct` are CoreCLR's.
+
+**Why we chose this**: the timing is as for an abstract method's `call`. PawPrint formats no type
+name as CoreCLR does, and a synthesised `TypeLoadException` cannot carry its type name, so it raises
+each with its default message, as for a byref-like `newarr`. The checks it leaves out need what a
+full load brings, and the rule for a type variable, which TypeSystem does not yet decide.
+
+**Where this lives in code**: `MethodConcretisation.concretizeMethodWithAllGenerics` checks a method
+instantiation (`TypeLoadRefusal.MethodConstraintsViolated`); `ExecutionConcretization.bindMethodForInstruction`
+checks the declaring type (`ConstraintSatisfaction.classConstraints`) before reporting the method's;
+`UnaryMetadataIlOpContext.raiseConstraintRefusal` raises either. `TestFabricatedInstantiationConstraints`
+pins each rule at each instruction, and parks the instantiations spelled over a type variable.
+
 ## A byref or `System.Void` type operand fails when it is reached
 
 **CoreCLR**: every instruction that consumes a type refuses a byref or `System.Void` as its operand,

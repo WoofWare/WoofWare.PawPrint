@@ -508,6 +508,9 @@ module TestTypeLoadValidity =
             | TypeLoadRefusal.InvalidMethodInstantiation _
             | TypeLoadRefusal.TypeParameterOutOfScope _
             | TypeLoadRefusal.MethodParameterOutOfScope _ -> Outcome.BadImageFormat
+            | TypeLoadRefusal.MethodConstraintsViolated _ ->
+                failwith
+                    $"BUG: loading a type signature checked a method instantiation's constraints: %s{TypeLoadRefusal.describe refusal}"
         | Error (TypeBindingFailure.TypeAbsent (TypeResolutionMiss.TopLevelTypeAbsent (_, ns, name)))
         | Error (TypeBindingFailure.BaseTypeAbsent (TypeResolutionMiss.TopLevelTypeAbsent (_, ns, name))) ->
             match ns with

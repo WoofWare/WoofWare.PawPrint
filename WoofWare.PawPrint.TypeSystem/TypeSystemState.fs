@@ -189,6 +189,13 @@ type TypeSystemState =
         ///
         /// Add through `WithConcretisedLocals`, never by assignment.
         _ConcretisedLocals : Map<ConcreteMethodKey, ImmutableArray<ConcreteTypeHandle>>
+        /// The instantiations `ConstraintSatisfaction.classConstraints` found to satisfy their type
+        /// parameters' constraints. Whether one does is a function of the instantiation's handles
+        /// and the metadata, which nothing changes, so an entry is never invalidated; a type found
+        /// not to satisfy them, or not decided, is not recorded, and is checked again.
+        ///
+        /// Add through `WithSatisfiedClassConstraints`, never by assignment.
+        _SatisfiedClassConstraints : Set<ConcreteTypeHandle>
         /// Every concrete type instantiated so far, each identified by its handle.
         ConcreteTypes : AllConcreteTypes
     }
@@ -202,6 +209,7 @@ type TypeSystemState =
             _MemberResolutions = Map.empty
             _ConcretisedMethods = Map.empty
             _ConcretisedLocals = Map.empty
+            _SatisfiedClassConstraints = Set.empty
             ConcreteTypes = AllConcreteTypes.Empty
         }
 
@@ -228,6 +236,11 @@ type TypeSystemState =
     member this.WithConcretisedLocals (key : ConcreteMethodKey) (locals : ImmutableArray<ConcreteTypeHandle>) =
         { this with
             _ConcretisedLocals = this._ConcretisedLocals |> Map.add key locals
+        }
+
+    member this.WithSatisfiedClassConstraints (instantiation : ConcreteTypeHandle) =
+        { this with
+            _SatisfiedClassConstraints = this._SatisfiedClassConstraints |> Set.add instantiation
         }
 
     /// Register an assembly under its own definition identity. Idempotent: if an assembly with

@@ -2461,22 +2461,22 @@ module Concretization =
                         |> List.filter (fun field -> not (field.Attributes.HasFlag FieldAttributes.Static))
                         |> primeFields assemblies concreteTypes
 
-    /// Concretize a method's declaring type, signature and generics. Its locals are left as its
-    /// local signature spells them, for `concretizeLocals`: CoreCLR loads them when it compiles the
-    /// method, not when it binds a call to it.
+    /// Concretize a method's declaring type at `typeArgs`, and check the method's instantiation
+    /// `methodArgs` as CoreCLR does before it creates the instantiated method: the first half of
+    /// `concretizeMethod`, returning the declaring type's handle.
     ///
     /// `typeArgs` instantiates the declaring type and must have exactly one handle per generic
     /// parameter it declares (counting those a nested type inherits from its declaring types);
     /// any other length fails. A non-generic declaring type reads nothing from `typeArgs`.
     /// `methodArgs` is the method's instantiation, and each of its handles must be interned in `ctx`.
     ///
-    /// A type the method names that does not bind is the result's failure, with what was loaded
-    /// and registered before it. So is an instantiation CoreCLR refuses to create: one with a
+    /// A type the declaring type names that does not bind is the result's failure, with what was
+    /// loaded and registered before it. So is an instantiation CoreCLR refuses to create: one with a
     /// handle other than one per generic parameter of the method, or with a byref,
     /// `TypedReference`, `void`, pointer or function-pointer argument. A generic method named with
     /// no instantiation at all is not such an instantiation, and a caller must not pass it here as
     /// an empty `methodArgs`.
-    let concretizeMethod
+    let concretizeMethodDeclaringType
         (ctx : AllConcreteTypes)
         (loadAssembly : IAssemblyLoad)
         (assemblies : LoadedAssemblies)
@@ -2484,12 +2484,7 @@ module Concretization =
         (method : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
         (typeArgs : ImmutableArray<ConcreteTypeHandle>)
         (methodArgs : ImmutableArray<ConcreteTypeHandle>)
-        : Result<
-              WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>,
-              TypeBindingFailure
-           > *
-          AllConcreteTypes *
-          LoadedAssemblies
+        : Result<ConcreteTypeHandle, TypeBindingFailure> * AllConcreteTypes * LoadedAssemblies
         =
 
         // Concretization walks the declaring type's metadata throughout -- its base-type closure, its
@@ -2569,10 +2564,6 @@ module Concretization =
         | Error failure, concCtx -> stopped failure concCtx
         | Ok declaringHandle, concCtx ->
 
-        // Look up the concretized declaring type
-        let concretizedDeclaringType =
-            AllConcreteTypes.lookup declaringHandle concCtx.ConcreteTypes |> Option.get
-
         // CoreCLR checks the method's instantiation once its arguments and declaring type are loaded,
         // and before it reads the method's signature
         // (`MethodDesc::FindOrCreateAssociatedMethodDesc`, genmeth.cpp). Both faults raise the
@@ -2591,7 +2582,50 @@ module Concretization =
                     TypeLoadRefusal.InvalidMethodInstantiation (declaringType.Identity, method.Name, fault)
                 ))
                 concCtx
-        | None ->
+        | None -> Ok declaringHandle, concCtx.ConcreteTypes, concCtx.LoadedAssemblies
+
+    /// Concretize the signature and generics of `method`, whose declaring type
+    /// `concretizeMethodDeclaringType` concretised at `typeArgs` as `declaringHandle` and whose
+    /// instantiation `methodArgs` it checked: the second half of `concretizeMethod`. Its locals are
+    /// left as its local signature spells them, for `concretizeLocals`.
+    ///
+    /// A type the signature names that does not bind is the result's failure, with what was loaded
+    /// and registered before it.
+    let concretizeMethodSignatureOn
+        (ctx : AllConcreteTypes)
+        (loadAssembly : IAssemblyLoad)
+        (assemblies : LoadedAssemblies)
+        (baseTypes : BaseClassTypes<DumpedAssembly>)
+        (method : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (typeArgs : ImmutableArray<ConcreteTypeHandle>)
+        (methodArgs : ImmutableArray<ConcreteTypeHandle>)
+        (declaringHandle : ConcreteTypeHandle)
+        : Result<
+              WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>,
+              TypeBindingFailure
+           > *
+          AllConcreteTypes *
+          LoadedAssemblies
+        =
+        let declaringType =
+            MethodOwner.requireDeclaringType "concretizing a method's signature" method.Owner
+
+        let concCtx =
+            {
+                TypeConcretization.ConcretizationContext.ConcreteTypes = ctx
+                TypeConcretization.ConcretizationContext.LoadedAssemblies = assemblies
+                TypeConcretization.ConcretizationContext.BaseTypes = baseTypes
+            }
+
+        let concretizedDeclaringType =
+            match AllConcreteTypes.lookup declaringHandle ctx with
+            | Some concrete -> concrete
+            | None ->
+                failwith
+                    $"BUG: concretizeMethodSignatureOn was given declaring type handle %O{declaringHandle} for %s{method.Name}, which is not registered"
+
+        let stopped (failure : TypeBindingFailure) (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>) =
+            Error failure, ctx.ConcreteTypes, ctx.LoadedAssemblies
 
         // Concretize signature
         match
@@ -2674,6 +2708,41 @@ module Concretization =
         @ List.ofSeq concretizedDeclaringType.Generics
         |> prime concCtx.LoadedAssemblies concCtx.ConcreteTypes
 
+
+    /// Concretize a method's declaring type, signature and generics. Its locals are left as its
+    /// local signature spells them, for `concretizeLocals`: CoreCLR loads them when it compiles the
+    /// method, not when it binds a call to it.
+    ///
+    /// `typeArgs` instantiates the declaring type and must have exactly one handle per generic
+    /// parameter it declares (counting those a nested type inherits from its declaring types);
+    /// any other length fails. A non-generic declaring type reads nothing from `typeArgs`.
+    /// `methodArgs` is the method's instantiation, and each of its handles must be interned in `ctx`.
+    ///
+    /// A type the method names that does not bind is the result's failure, with what was loaded
+    /// and registered before it. So is an instantiation CoreCLR refuses to create: one with a
+    /// handle other than one per generic parameter of the method, or with a byref,
+    /// `TypedReference`, `void`, pointer or function-pointer argument. A generic method named with
+    /// no instantiation at all is not such an instantiation, and a caller must not pass it here as
+    /// an empty `methodArgs`.
+    let concretizeMethod
+        (ctx : AllConcreteTypes)
+        (loadAssembly : IAssemblyLoad)
+        (assemblies : LoadedAssemblies)
+        (baseTypes : BaseClassTypes<DumpedAssembly>)
+        (method : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (typeArgs : ImmutableArray<ConcreteTypeHandle>)
+        (methodArgs : ImmutableArray<ConcreteTypeHandle>)
+        : Result<
+              WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>,
+              TypeBindingFailure
+           > *
+          AllConcreteTypes *
+          LoadedAssemblies
+        =
+        match concretizeMethodDeclaringType ctx loadAssembly assemblies baseTypes method typeArgs methodArgs with
+        | Error failure, ctx, assemblies -> Error failure, ctx, assemblies
+        | Ok declaringHandle, ctx, assemblies ->
+            concretizeMethodSignatureOn ctx loadAssembly assemblies baseTypes method typeArgs methodArgs declaringHandle
 
     /// Concretize the locals of `method`, a method `concretizeMethod` instantiated, against that
     /// instantiation, in slot order; and load every assembly the base chain of each names, as

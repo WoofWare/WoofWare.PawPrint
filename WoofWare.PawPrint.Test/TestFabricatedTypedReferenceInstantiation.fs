@@ -150,15 +150,9 @@ public static class Program
         ParkedOn.check [ EmulatedRuntime.Net10 ] stopsAtRefusal
         FabricatedGuest.run "TypedRefArg" (fabricate true) "TypedRefArgDriver" (driver Shape.Type) 9
 
-    /// The interpreter checks no generic constraints, so it runs an instantiation whose byref-like
-    /// argument a parameter without `allows ref struct` refuses.
-    let private constraintsUnchecked : string =
-        "PawPrint checks no generic constraint as it instantiates a type or method, so it runs a byref-like argument for a parameter without `allows ref struct`; checking them would un-park this"
-
     [<Test>]
     let ``a method instantiated at TypedReference without allows ref struct is refused`` () : unit =
         ParkedOn.check [ EmulatedRuntime.Net10 ] stopsAtRefusal
-        ParkedOn.check [ EmulatedRuntime.Net11 ] constraintsUnchecked
 
         FabricatedGuest.run
             "TypedRefArg"
@@ -172,7 +166,6 @@ public static class Program
     [<Test>]
     let ``a type instantiated at TypedReference without allows ref struct is refused`` () : unit =
         ParkedOn.check [ EmulatedRuntime.Net10 ] stopsAtRefusal
-        ParkedOn.check [ EmulatedRuntime.Net11 ] constraintsUnchecked
 
         FabricatedGuest.run
             "TypedRefArg"

@@ -51,6 +51,8 @@ type internal MethodTokenBinding =
     /// (`MemberReferenceResolution.RefusedParent`), so the instruction raises
     /// `InvalidProgramException`.
     | RefusedParent of TypeOperandRefusal
+    /// An instantiation the token names violates its constraints, so the instruction raises.
+    | ViolatesConstraints of ConstraintRefusal
     /// PawPrint cannot bind the token.
     | Unbound of UnboundToken
 
@@ -72,6 +74,18 @@ type internal GenericTypeMethodRow =
 /// assemblies and registered concrete types on the way.
 [<RequireQualifiedAccess>]
 module internal MethodTokenBinding =
+
+    /// The binding of a method token naming `fromMetadata`, which binding for the instruction
+    /// found as `binding`.
+    let private ofInstructionBinding
+        (fromMetadata : WoofWare.PawPrint.MethodInfo<TypeDefn, GenericParamFromMetadata, TypeDefn>)
+        (binding : InstructionMethodBinding)
+        : MethodTokenBinding
+        =
+        match binding with
+        | InstructionMethodBinding.Bound (concretized, _declaringType) ->
+            MethodTokenBinding.Method (concretized, fromMetadata)
+        | InstructionMethodBinding.ViolatesConstraints refusal -> MethodTokenBinding.ViolatesConstraints refusal
 
     /// `ty`, read in `assemblyFullName`, concretised against the executing frame's generic context.
     let concretizeInFrame
@@ -158,7 +172,7 @@ module internal MethodTokenBinding =
         let state, concretized =
             match methodGenerics with
             | Some methodGenerics ->
-                ExecutionConcretization.concretizeMethodForExecutionWithConcreteMethodGenerics
+                ExecutionConcretization.bindMethodForInstructionWithConcreteMethodGenerics
                     loggerFactory
                     baseClassTypes
                     thread
@@ -167,7 +181,7 @@ module internal MethodTokenBinding =
                     (Some extractedTypeArgs)
                     state
             | None ->
-                ExecutionConcretization.concretizeMethodForExecution
+                ExecutionConcretization.bindMethodForInstruction
                     loggerFactory
                     baseClassTypes
                     thread
@@ -177,7 +191,7 @@ module internal MethodTokenBinding =
                     state
 
         match concretized with
-        | Ok (concretized, _declaringType) -> state, MethodTokenBinding.Method (concretized, method)
+        | Ok binding -> state, ofInstructionBinding method binding
         | Error failure -> state, MethodTokenBinding.Unbound (UnboundToken.Type failure)
 
     /// The method MemberRef row `reference` of `assembly` names, used by an instruction as `use'`
@@ -271,7 +285,7 @@ module internal MethodTokenBinding =
             else
 
             let state, concretized =
-                ExecutionConcretization.concretizeMethodForExecution
+                ExecutionConcretization.bindMethodForInstruction
                     loggerFactory
                     baseClassTypes
                     thread
@@ -281,7 +295,7 @@ module internal MethodTokenBinding =
                     state
 
             match concretized with
-            | Ok (concretized, _declaringType) -> state, MethodTokenBinding.Method (concretized, method)
+            | Ok binding -> state, ofInstructionBinding method binding
             | Error failure -> state, MethodTokenBinding.Unbound (UnboundToken.Type failure)
         | MetadataToken.MemberReference reference ->
             // The spec's arguments, concretized against the executing frame, so that resolving the
@@ -363,7 +377,7 @@ module internal MethodTokenBinding =
             | GenericTypeMethodRow.AtExecutingFrame ->
 
             let state, concretized =
-                ExecutionConcretization.concretizeMethodForExecution
+                ExecutionConcretization.bindMethodForInstruction
                     loggerFactory
                     baseClassTypes
                     thread
@@ -373,7 +387,7 @@ module internal MethodTokenBinding =
                     state
 
             match concretized with
-            | Ok (concretized, _declaringType) -> state, MethodTokenBinding.Method (concretized, method)
+            | Ok binding -> state, ofInstructionBinding method binding
             | Error failure -> state, MethodTokenBinding.Unbound (UnboundToken.Type failure)
         | MetadataToken.MemberReference reference ->
             bindMemberReference loggerFactory baseClassTypes thread use' opName assembly reference None state

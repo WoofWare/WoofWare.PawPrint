@@ -22,6 +22,17 @@ type internal ResolvedMemberToken =
     /// A reference whose member CoreCLR finds, but through a parent it refuses the instruction over
     /// (`MemberReferenceResolution.RefusedParent`). Never for `ldtoken`.
     | RefusedParent of TypeOperandRefusal
+    /// A method reference naming an instantiation whose constraints reject its arguments: binding it
+    /// throws into the guest.
+    | ViolatesConstraints of ConstraintRefusal
+
+/// Why binding an `ldtoken` operand throws into the guest.
+[<RequireQualifiedAccess>]
+type internal LdtokenRaise =
+    /// A field MemberRef that binds nothing.
+    | FieldBinding of FieldReferenceFailure
+    /// A method token naming an instantiation whose constraints reject its arguments.
+    | ViolatesConstraints of ConstraintRefusal
 
 /// What an `ldtoken` operand names: the three things a `Runtime*Handle` can stand for.
 ///
@@ -129,6 +140,8 @@ module internal UnaryMetadataTokenOps =
             | state, MethodTokenBinding.Method (concretized, method) ->
                 state, ResolvedMemberToken.Method (concretized, method)
             | state, MethodTokenBinding.RefusedParent refusal -> state, ResolvedMemberToken.RefusedParent refusal
+            | state, MethodTokenBinding.ViolatesConstraints refusal ->
+                state, ResolvedMemberToken.ViolatesConstraints refusal
             | _, MethodTokenBinding.Unbound unbound -> failwith (UnboundToken.describe unbound)
         | Choice2Of2 (FieldReferenceBinding.Fails failure) -> state, ResolvedMemberToken.BindingFails failure
         | Choice2Of2 (FieldReferenceBinding.Bound field) ->
@@ -240,6 +253,8 @@ module internal UnaryMetadataTokenOps =
         with
         | _, MethodTokenBinding.Unbound unbound -> failwith (UnboundToken.describe unbound)
         | state, MethodTokenBinding.RefusedParent refusal -> UnaryMetadataIlOpContext.raiseTypeRefusal ctx refusal state
+        | state, MethodTokenBinding.ViolatesConstraints refusal ->
+            UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state
         | state, MethodTokenBinding.Method (callSiteMethod, method) ->
 
         // CoreCLR's importer falls through to its `ldftn` handling when the named method is
@@ -490,8 +505,8 @@ module internal UnaryMetadataTokenOps =
 
         // Classify first, push second. Every refusal below is stated once, and the pushes that
         // follow cannot ask a question this has not answered.
-        // `Error` is a field MemberRef that binds nothing, and why.
-        let state, (target : Result<LdtokenTarget, FieldReferenceFailure>) =
+        // `Error` is a token whose binding throws into the guest, and why.
+        let state, (target : Result<LdtokenTarget, LdtokenRaise>) =
             match operand with
             | ResolvedLdtokenOperand.FromScope target ->
                 // Nothing to resolve and nothing to narrow. The entry *is* a `RuntimeTypeHandle`
@@ -581,7 +596,9 @@ module internal UnaryMetadataTokenOps =
                 | state, ResolvedMemberToken.Method (concretized, _) -> state, Ok (LdtokenTarget.Method concretized)
                 | state, ResolvedMemberToken.Field (declaringType, fieldHandle) ->
                     state, Ok (LdtokenTarget.Field (RuntimeTypeHandleTarget.Closed declaringType, fieldHandle))
-                | state, ResolvedMemberToken.BindingFails failure -> state, Error failure
+                | state, ResolvedMemberToken.BindingFails failure -> state, Error (LdtokenRaise.FieldBinding failure)
+                | state, ResolvedMemberToken.ViolatesConstraints refusal ->
+                    state, Error (LdtokenRaise.ViolatesConstraints refusal)
                 | _, ResolvedMemberToken.RefusedParent refusal ->
                     failwith
                         $"BUG: ldtoken's MemberReference was refused for naming %O{refusal}, but resolveMember refuses no reference for ldtoken"
@@ -598,6 +615,8 @@ module internal UnaryMetadataTokenOps =
                         state
                 with
                 | state, MethodTokenBinding.Method (concretized, _) -> state, Ok (LdtokenTarget.Method concretized)
+                | state, MethodTokenBinding.ViolatesConstraints refusal ->
+                    state, Error (LdtokenRaise.ViolatesConstraints refusal)
                 | _, MethodTokenBinding.Unbound unbound -> failwith (UnboundToken.describe unbound)
                 | _, MethodTokenBinding.RefusedParent refusal ->
                     failwith
@@ -630,7 +649,9 @@ module internal UnaryMetadataTokenOps =
                 failwith $"Unexpected metadata token %O{metadataToken} in LdToken"
 
         match target with
-        | Error failure -> UnaryMetadataFieldOps.throwBindingFailure ctx failure state
+        | Error (LdtokenRaise.FieldBinding failure) -> UnaryMetadataFieldOps.throwBindingFailure ctx failure state
+        | Error (LdtokenRaise.ViolatesConstraints refusal) ->
+            UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state
         | Ok target ->
 
         // `typeof(X).IsValueType` is folded to its answer here, at the `ldtoken`, as the JIT folds

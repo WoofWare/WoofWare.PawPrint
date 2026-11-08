@@ -239,6 +239,36 @@ module internal UnaryMetadataIlOpContext =
             ctx.Thread
             state
 
+    /// Raises into the guest CoreCLR's refusal of an instantiation this instruction's method token
+    /// names, whose constraints reject its arguments: `TypeLoadException` for the declaring type's,
+    /// `VerificationException` for the method's own.
+    let raiseConstraintRefusal
+        (ctx : UnaryMetadataIlOpContext)
+        (refusal : ConstraintRefusal)
+        (state : IlMachineState)
+        : IlMachineState * WhatWeDid
+        =
+        ctx.Logger.LogWarning ("{Op} names an instantiation whose constraints reject it: {Refusal}", ctx.Op, refusal)
+
+        let exceptionType =
+            match refusal with
+            | ConstraintRefusal.DeclaringType _ -> ctx.BaseClassTypes.TypeLoadException
+            | ConstraintRefusal.Method _ -> ctx.BaseClassTypes.VerificationException
+
+        // CoreCLR's messages name the instantiation in its own type-name format, and its
+        // `TypeLoadException` carries the type's name and assembly too. PawPrint formats none of
+        // that, and the synthesised exception can set no `TypeLoadException` field, so it raises
+        // each with its default message, as `newarr` of a byref-like element type does.
+        //
+        // Don't advance the PC: exception dispatch needs the faulting instruction's offset.
+        IlMachineStateExecution.raiseRuntimeException
+            ctx.LoggerFactory
+            ctx.BaseClassTypes
+            (IlMachineStateExecution.RaiseOrigin.InstructionResolution (ResolutionFault.TokenBinding, exceptionType))
+            []
+            ctx.Thread
+            state
+
     /// <summary>
     /// Raises into the guest CoreCLR's refusal of <paramref name="handle"/> as this instruction's
     /// type operand, or <c>None</c> where the instruction may consume it (see

@@ -2470,6 +2470,233 @@ public static class Cases
         if not failures.IsEmpty then
             failures |> String.concat "\n" |> failwith
 
+    /// A virtual generic method instantiated with an argument its constraint rejects, called on a
+    /// receiver of exactly its declaring type, so that the receiver's type decides what runs. CoreCLR
+    /// refuses the instantiation as the JIT compiles the body naming it, raising
+    /// `VerificationException` (`InstantiatedMethodDesc::NewInstantiatedMethodDesc`, genmeth.cpp),
+    /// which the body's own `catch` does not stop. The analysis must answer rather than throw. It
+    /// does not yet name that refusal, so the violating case is recorded as unreported
+    /// (`unreportedProblem`), as other method constraint violations are. An admitted argument is
+    /// the control: it runs, and the analysis must not name the refusal there. So is an abstract
+    /// argument for a constraint that is an interface declaring a static abstract method, which the
+    /// argument implements: CoreCLR admits it once that method resolves on the argument
+    /// (typedesc.cpp), which the analysis does not decide, and must still answer.
+    [<Test>]
+    let ``a virtual method instantiation its constraint rejects is answered, dispatched on an exact receiver``
+        ()
+        : unit
+        =
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        // Each case: its name, the instantiation it calls of `V` (constrained to `class`) or of `W`
+        // (constrained to `I`), given those two and the abstract class `A : I`, and what the host
+        // does running it.
+        let cases
+            : (string *
+              (Reflection.Emit.MethodBuilder * Reflection.Emit.MethodBuilder * Type -> Reflection.MethodInfo) *
+              Outcome) list =
+            [
+                "Violates", (fun (v, _, _) -> v.MakeGenericMethod [| typeof<int> |]), Outcome.Escapes verification
+                "Admitted", (fun (v, _, _) -> v.MakeGenericMethod [| typeof<string> |]), Outcome.Runs
+                "AbstractForStaticAbstract", (fun (_, w, a) -> w.MakeGenericMethod [| a |]), Outcome.Runs
+            ]
+
+        let libraryImage =
+            let builder =
+                Reflection.Emit.PersistedAssemblyBuilder (Reflection.AssemblyName "Lib", typeof<obj>.Assembly)
+
+            let modul = builder.DefineDynamicModule "Lib"
+
+            // `interface I { static abstract void S(); }`.
+            let iface =
+                modul.DefineType (
+                    "I",
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Interface
+                    ||| Reflection.TypeAttributes.Abstract
+                )
+
+            let staticAbstract =
+                iface.DefineMethod (
+                    "S",
+                    Reflection.MethodAttributes.Public
+                    ||| Reflection.MethodAttributes.Static
+                    ||| Reflection.MethodAttributes.Abstract
+                    ||| Reflection.MethodAttributes.Virtual
+                    ||| Reflection.MethodAttributes.NewSlot
+                    ||| Reflection.MethodAttributes.HideBySig,
+                    typeof<Void>,
+                    Type.EmptyTypes
+                )
+
+            iface.CreateType () |> ignore<Type>
+
+            // `abstract class A : I { public static void S() { } }`.
+            let abstractType =
+                modul.DefineType (
+                    "A",
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Class
+                    ||| Reflection.TypeAttributes.Abstract,
+                    typeof<obj>,
+                    [| iface :> Type |]
+                )
+
+            let implementation =
+                abstractType.DefineMethod (
+                    "S",
+                    Reflection.MethodAttributes.Public
+                    ||| Reflection.MethodAttributes.Static
+                    ||| Reflection.MethodAttributes.HideBySig,
+                    typeof<Void>,
+                    Type.EmptyTypes
+                )
+
+            implementation.GetILGenerator().Emit Reflection.Emit.OpCodes.Ret
+            abstractType.DefineMethodOverride (implementation, staticAbstract)
+            abstractType.CreateType () |> ignore<Type>
+
+            let baseType =
+                modul.DefineType ("Base", Reflection.TypeAttributes.Public ||| Reflection.TypeAttributes.Class)
+
+            let constructor =
+                baseType.DefineDefaultConstructor Reflection.MethodAttributes.Public
+
+            let virtualGeneric (name : string) =
+                baseType.DefineMethod (
+                    name,
+                    Reflection.MethodAttributes.Public
+                    ||| Reflection.MethodAttributes.Virtual
+                    ||| Reflection.MethodAttributes.NewSlot
+                    ||| Reflection.MethodAttributes.HideBySig,
+                    typeof<Void>,
+                    Type.EmptyTypes
+                )
+
+            // `public virtual void V<T>() where T : class`.
+            let virtualMethod = virtualGeneric "V"
+
+            (virtualMethod.DefineGenericParameters [| "T" |]).[0].SetGenericParameterAttributes
+                Reflection.GenericParameterAttributes.ReferenceTypeConstraint
+
+            virtualMethod.GetILGenerator().Emit Reflection.Emit.OpCodes.Ret
+
+            // `public virtual void W<T>() where T : I`.
+            let interfaceConstrained = virtualGeneric "W"
+
+            (interfaceConstrained.DefineGenericParameters [| "T" |]).[0].SetInterfaceConstraints [| iface :> Type |]
+
+            interfaceConstrained.GetILGenerator().Emit Reflection.Emit.OpCodes.Ret
+            baseType.CreateType () |> ignore<Type>
+
+            let plain =
+                modul.DefineType (
+                    "Plain",
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Abstract
+                    ||| Reflection.TypeAttributes.Sealed
+                )
+
+            // Each `static int Name()` makes its call on a new `Base` inside `try`, returning 0 if
+            // it returns, and 1 if its `catch` stops what it raises.
+            for name, instantiate, _ in cases do
+                let method =
+                    plain.DefineMethod (
+                        name,
+                        Reflection.MethodAttributes.Public ||| Reflection.MethodAttributes.Static,
+                        typeof<int>,
+                        Type.EmptyTypes
+                    )
+
+                let il = method.GetILGenerator ()
+                let result = il.DeclareLocal typeof<int>
+                il.BeginExceptionBlock () |> ignore<Reflection.Emit.Label>
+                il.Emit (Reflection.Emit.OpCodes.Newobj, constructor)
+
+                il.Emit (
+                    Reflection.Emit.OpCodes.Callvirt,
+                    instantiate (virtualMethod, interfaceConstrained, abstractType :> Type)
+                )
+
+                il.Emit Reflection.Emit.OpCodes.Ldc_I4_0
+                il.Emit (Reflection.Emit.OpCodes.Stloc, result)
+                il.BeginCatchBlock typeof<obj>
+                il.Emit Reflection.Emit.OpCodes.Pop
+                il.Emit Reflection.Emit.OpCodes.Ldc_I4_1
+                il.Emit (Reflection.Emit.OpCodes.Stloc, result)
+                il.EndExceptionBlock ()
+                il.Emit (Reflection.Emit.OpCodes.Ldloc, result)
+                il.Emit Reflection.Emit.OpCodes.Ret
+
+            plain.CreateType () |> ignore<Type>
+
+            use stream = new MemoryStream ()
+            builder.Save stream
+            stream.ToArray ()
+
+        let names = cases |> List.map (fun (name, _, _) -> name)
+
+        let clientImage =
+            names
+            |> List.map (fun name -> $"    public static int %s{name}() => Plain.%s{name}();")
+            |> String.concat "\n"
+            |> sprintf "namespace Client;\npublic static class Cases\n{\n%s\n}\n"
+            |> compileClient [ libraryImage ]
+
+        let hostOutcomes = hostOutcomes [ "Lib", libraryImage ] clientImage names
+
+        let read (name : string) (image : byte[]) : DumpedAssembly =
+            Assembly.read loggerFactory (Some $"%s{name}.dll") (new MemoryStream (image))
+
+        let clientAssembly = read "Client" clientImage
+        let libraryAssembly = read "Lib" libraryImage
+
+        let mutable analysis =
+            analysisOver
+                [ clientAssembly ; libraryAssembly ]
+                (fun loaded ->
+                    let reference =
+                        clientAssembly.AssemblyReferences.Values
+                        |> Seq.find (fun r -> r.Name.Name = "Lib")
+
+                    fst (loaded.WithBoundReference reference libraryAssembly)
+                )
+
+        let failures =
+            [
+                for name, _, expected in cases do
+                    if hostOutcomes.[name] <> expected then
+                        yield $"%s{name}: the host's outcome is %A{hostOutcomes.[name]}, not %A{expected}"
+
+                    for key in
+                        [
+                            methodNamed clientAssembly "Client.Cases" name
+                            methodNamed libraryAssembly "Plain" name
+                        ] do
+                        let answer =
+                            try
+                                let next, escapes = EscapeAnalysis.escapes analysis key
+                                analysis <- next
+                                Ok (escapes, render next escapes)
+                            with e ->
+                                Error e.Message
+
+                        match expected, answer with
+                        | Outcome.Escapes raised, _ ->
+                            match unreportedProblem Gap.Unnamed (Set.singleton raised) answer with
+                            | Some problem ->
+                                yield $"%O{key} (%s{name}), recorded as unreported (%A{Gap.Unnamed}): %s{problem}"
+                            | None -> ()
+                        | _, Error message -> yield $"%O{key} (%s{name}): the analysis throws %s{message}"
+                        | _, Ok (_, shown) when shown.Contains $"=%s{verification}" ->
+                            yield
+                                $"%O{key} (%s{name}): the analysis names %s{verification}, which the host does not raise"
+                        | _, Ok _ -> ()
+            ]
+
+        if not failures.IsEmpty then
+            failures |> String.concat "\n" |> failwith
+
     /// A type whose interface's argument grows without end through a function pointer's signature,
     /// named by a type token. CoreCLR's check for an expanding cycle of instantiations
     /// (`RecursionGraph::AddDependency`, generics.cpp) does not look into a function pointer, so

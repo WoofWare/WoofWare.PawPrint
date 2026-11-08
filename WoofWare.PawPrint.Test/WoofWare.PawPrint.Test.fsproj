@@ -405,6 +405,7 @@
     <Compile Include="TestFabricatedDefaultBodyOrder.fs" />
     <Compile Include="TestFabricatedAbstractMethodCall.fs" />
     <Compile Include="TestFabricatedByRefLikeBox.fs" />
+    <Compile Include="TestFabricatedInstantiationConstraints.fs" />
     <Compile Include="TestFabricatedTypeOperandRefusal.fs" />
     <Compile Include="TestBoxPattern.fs" />
     <Compile Include="TestMethodAtSlotShapes.fs" />

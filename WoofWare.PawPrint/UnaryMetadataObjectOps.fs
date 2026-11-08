@@ -445,8 +445,8 @@ module internal UnaryMetadataObjectOps =
         | Error refusal -> UnaryMetadataIlOpContext.raiseTypeRefusal ctx refusal state
         | Ok (ctor, typeArgsFromMetadata) ->
 
-        let state, concretizedCtorResult =
-            ExecutionConcretization.concretizeMethodForExecution
+        let state, binding =
+            ExecutionConcretization.bindMethodForInstruction
                 loggerFactory
                 baseClassTypes
                 thread
@@ -455,7 +455,10 @@ module internal UnaryMetadataObjectOps =
                 typeArgsFromMetadata
                 state
 
-        let concretizedCtor, declaringTypeHandle = BindingStop.bound concretizedCtorResult
+        match BindingStop.bound binding with
+        | InstructionMethodBinding.ViolatesConstraints refusal ->
+            UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state
+        | InstructionMethodBinding.Bound (concretizedCtor, declaringTypeHandle) ->
 
         // No class-initialisation check here: the object is allocated first and the constructor's
         // own prologue runs it, which is the order the CLR uses. Measured on .NET 10, a `.cctor`

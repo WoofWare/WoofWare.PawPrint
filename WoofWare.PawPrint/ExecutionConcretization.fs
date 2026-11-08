@@ -6,6 +6,30 @@ open System.Reflection.Metadata
 open System.Reflection.Metadata.Ecma335
 open Microsoft.Extensions.Logging
 
+/// An instantiation whose type parameters' constraints reject its arguments, which an instruction
+/// binding a method token names, and which CoreCLR checks as its JIT binds the token.
+[<RequireQualifiedAccess>]
+type internal ConstraintRefusal =
+    /// The method's declaring type `instantiation`, which CoreCLR loads in full to bind the token,
+    /// checking its constraints as the load completes (`SatisfiesClassConstraints`, from
+    /// `MethodTable::DoFullyLoad`): `TypeLoadException`.
+    | DeclaringType of instantiation : ConcreteTypeHandle * violation : ConstraintViolation
+    /// The method's own instantiation (`TypeLoadRefusal.MethodConstraintsViolated`):
+    /// `VerificationException`.
+    | Method of declaringType : ResolvedTypeIdentity * method : string * parameter : int
+
+/// What an instruction's method token binds to, once both instantiations it names have been
+/// checked against their constraints.
+[<RequireQualifiedAccess>]
+[<NoEquality ; NoComparison>]
+type internal InstructionMethodBinding =
+    /// The method, instantiated for execution, and its declaring type.
+    | Bound of
+        method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> *
+        declaringType : ConcreteTypeHandle
+    /// An instantiation the token names violates its constraints, so binding the token raises.
+    | ViolatesConstraints of ConstraintRefusal
+
 [<RequireQualifiedAccess>]
 module ExecutionConcretization =
 
@@ -285,6 +309,149 @@ module ExecutionConcretization =
         | state, Error failure -> state, Error failure
         | state, Ok typeGenerics ->
             concretizeMethodWithAllGenerics loggerFactory baseClassTypes typeGenerics methodToCall methodGenerics state
+
+    /// <summary>
+    /// <paramref name="bound" />, the result of instantiating <paramref name="methodToCall" /> on
+    /// its declaring type at <paramref name="typeGenerics" /> for an instruction's token, with the
+    /// constraints of both instantiations the token names checked as CoreCLR's JIT checks them when
+    /// it binds the token: the declaring type's first, as CoreCLR loads it in full before it
+    /// creates the method's instantiation, and then the method's, which concretisation checked.
+    /// </summary>
+    /// <remarks>
+    /// CoreCLR loads the declaring type in full before anything it reads of the method, so where the
+    /// declaring type was registered but binding the method failed later, the declaring type's
+    /// violation is still what binding raises.
+    /// </remarks>
+    let private checkInstructionConstraints
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (methodToCall : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (typeGenerics : ImmutableArray<ConcreteTypeHandle>)
+        (state : IlMachineState)
+        (bound :
+            Result<
+                WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> *
+                ConcreteTypeHandle,
+                TypeBindingFailure
+             >)
+        : IlMachineState * Result<InstructionMethodBinding, TypeBindingFailure>
+        =
+        let declaringTypeVerdict
+            (state : IlMachineState)
+            (declaringType : ConcreteTypeHandle)
+            : IlMachineState * Result<ConstraintRefusal option, TypeBindingFailure>
+            =
+            let typeSystem, verdict =
+                ConstraintSatisfaction.classConstraints
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    baseClassTypes
+                    state.TypeSystem
+                    declaringType
+
+            let state = state.WithTypeSystem typeSystem
+
+            match verdict with
+            | Error failure -> state, Error failure
+            | Ok ConstraintVerdict.Satisfied -> state, Ok None
+            | Ok (ConstraintVerdict.Violated violation) ->
+                state, Ok (Some (ConstraintRefusal.DeclaringType (declaringType, violation)))
+            | Ok (ConstraintVerdict.Undecided (parameter, required)) ->
+                state,
+                Error (
+                    TypeBindingFailure.Unmodelled
+                        {
+                            Diagnostic =
+                                $"TODO: the argument %d{parameter} of %O{declaringType}, the declaring type of %s{methodToCall.Name}, is abstract and can be cast to %O{required}, an interface declaring static abstract methods; CoreCLR then requires each of them to resolve on the argument, which PawPrint does not decide"
+                        }
+                )
+
+        match bound with
+        | Ok (method, declaringType) ->
+            match declaringTypeVerdict state declaringType with
+            | state, Error failure -> state, Error failure
+            | state, Ok (Some refusal) -> state, Ok (InstructionMethodBinding.ViolatesConstraints refusal)
+            | state, Ok None -> state, Ok (InstructionMethodBinding.Bound (method, declaringType))
+        | Error failure ->
+
+        let owner =
+            MethodOwner.requireDeclaringType "checking an instruction's instantiations" methodToCall.Owner
+
+        let ownerGenerics =
+            if owner.Generics.IsEmpty then
+                ImmutableArray.Empty
+            else
+                typeGenerics
+
+        match AllConcreteTypes.findExistingConcreteType state.TypeSystem.ConcreteTypes owner.Identity ownerGenerics with
+        | None -> state, Error failure
+        | Some declaringType ->
+
+        match declaringTypeVerdict state declaringType with
+        | state, Error declaringFailure -> state, Error declaringFailure
+        | state, Ok (Some refusal) -> state, Ok (InstructionMethodBinding.ViolatesConstraints refusal)
+        | state, Ok None ->
+
+        match failure with
+        | TypeBindingFailure.Refused (TypeLoadRefusal.MethodConstraintsViolated (identity, name, parameter)) ->
+            state,
+            Ok (InstructionMethodBinding.ViolatesConstraints (ConstraintRefusal.Method (identity, name, parameter)))
+        | failure -> state, Error failure
+
+    /// As `concretizeMethodForExecution`, for an instruction binding a method token: with the
+    /// declaring type's and the method's instantiations checked against their constraints
+    /// (`checkInstructionConstraints`).
+    let internal bindMethodForInstruction
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (methodToCall : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (methodGenerics : TypeDefn ImmutableArray option)
+        (typeArgsFromMetadata : TypeDefn ImmutableArray option)
+        (state : IlMachineState)
+        : IlMachineState * Result<InstructionMethodBinding, TypeBindingFailure>
+        =
+        match resolveTargetTypeGenerics loggerFactory baseClassTypes thread typeArgsFromMetadata state with
+        | state, Error failure -> state, Error failure
+        | state, Ok typeGenerics ->
+
+        let callingAssemblyFullName = (state.ActiveAssembly thread).DefinitionFullName
+        let currentMethod = state.ThreadState.[thread].MethodState.ExecutingMethod
+
+        let state, bound =
+            concretizeMethodWithTypeGenerics
+                loggerFactory
+                baseClassTypes
+                typeGenerics
+                methodToCall
+                methodGenerics
+                callingAssemblyFullName
+                currentMethod.Generics
+                state
+
+        checkInstructionConstraints loggerFactory baseClassTypes methodToCall typeGenerics state bound
+
+    /// As `concretizeMethodForExecutionWithConcreteMethodGenerics`, for an instruction binding a
+    /// method token: with the declaring type's and the method's instantiations checked against
+    /// their constraints (`checkInstructionConstraints`).
+    let internal bindMethodForInstructionWithConcreteMethodGenerics
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (methodToCall : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
+        (typeArgsFromMetadata : TypeDefn ImmutableArray option)
+        (state : IlMachineState)
+        : IlMachineState * Result<InstructionMethodBinding, TypeBindingFailure>
+        =
+        match resolveTargetTypeGenerics loggerFactory baseClassTypes thread typeArgsFromMetadata state with
+        | state, Error failure -> state, Error failure
+        | state, Ok typeGenerics ->
+
+        let state, bound =
+            concretizeMethodWithAllGenerics loggerFactory baseClassTypes typeGenerics methodToCall methodGenerics state
+
+        checkInstructionConstraints loggerFactory baseClassTypes methodToCall typeGenerics state bound
 
     /// Concretize the declaring type of a resolved field token, substituting any generic
     /// parameters it still mentions against the supplied context.

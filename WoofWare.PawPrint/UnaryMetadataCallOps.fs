@@ -693,6 +693,8 @@ module internal UnaryMetadataCallOps =
         match failure with
         | CompilationFailure.NamesAbstractMethod -> raiseNamedAbstractMethod ctx state
         | CompilationFailure.RefusesTypeOperand refusal -> UnaryMetadataIlOpContext.raiseTypeRefusal ctx refusal state
+        | CompilationFailure.ViolatesConstraints refusal ->
+            UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state
 
     /// The type the active frame's pending `constrained.` prefix names, if it has one, and the state
     /// with the prefix cleared: the instruction it precedes consumes it.
@@ -1240,10 +1242,10 @@ module internal UnaryMetadataCallOps =
         | Error refusal -> UnaryMetadataIlOpContext.raiseTypeRefusal ctx refusal state
         | Ok (methodToCall, methodGenerics, typeArgsFromMetadata, preConcretizedMethodGenerics) ->
 
-        let state, concretizedMethodResult =
+        let state, binding =
             match preConcretizedMethodGenerics with
             | Some concrete ->
-                ExecutionConcretization.concretizeMethodForExecutionWithConcreteMethodGenerics
+                ExecutionConcretization.bindMethodForInstructionWithConcreteMethodGenerics
                     loggerFactory
                     baseClassTypes
                     thread
@@ -1252,7 +1254,7 @@ module internal UnaryMetadataCallOps =
                     typeArgsFromMetadata
                     state
             | None ->
-                ExecutionConcretization.concretizeMethodForExecution
+                ExecutionConcretization.bindMethodForInstruction
                     loggerFactory
                     baseClassTypes
                     thread
@@ -1261,8 +1263,10 @@ module internal UnaryMetadataCallOps =
                     typeArgsFromMetadata
                     state
 
-        let concretizedMethod, declaringTypeHandle =
-            BindingStop.bound concretizedMethodResult
+        match BindingStop.bound binding with
+        | InstructionMethodBinding.ViolatesConstraints refusal ->
+            UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state
+        | InstructionMethodBinding.Bound (concretizedMethod, declaringTypeHandle) ->
 
         // Capture the pending `constrained.` prefix up front and clear it from the current
         // frame. This ensures that if the callee's class initializer throws an exception
