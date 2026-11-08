@@ -90,18 +90,6 @@ module TestSignalTerminatedCases =
 
     [<TestCaseSource(nameof cases)>]
     let ``A guest killed by a signal dies of it on both runtimes`` (case : SignalTerminatedCase) : unit =
-        match
-            Map.tryFind
-                case.FileName
-                (Map.ofList
-                    [
-                        "KillSelf.cs",
-                        "On .NET 11, `Process.Kill` signals `PosixSignal.SIGKILL` (-11), a value .NET 10's enum lacks, and `Process.SignalCore` raises `PlatformNotSupportedException` when `SystemNative_GetPlatformSignalNumber` answers 0 for it, as PawPrint's does. Un-park when PawPrint maps .NET 11's `PosixSignal` values."
-                    ])
-        with
-        | Some reason -> Net11Frontier.park reason
-        | None -> ()
-
         let source = Assembly.getEmbeddedResourceAsString case.FileName assy
         let image = Roslyn.compile [ source ]
 
