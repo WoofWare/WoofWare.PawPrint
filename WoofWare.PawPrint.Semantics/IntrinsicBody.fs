@@ -68,8 +68,9 @@ type IntrinsicBody =
     /// A CoreLib method the JIT replaces at every call to it, whatever it is optimising for: one of
     /// the named intrinsics `impIntrinsic` (importercalls.cpp) expands before it tests whether to
     /// optimise. What replaces the call is not the method's IL, which throws
-    /// `UnreachableException`. Only code the runtime generates calls these (IL stubs, the async
-    /// resumption stub, runtime-async methods).
+    /// `UnreachableException`. Code the runtime generates calls these (IL stubs, the async
+    /// resumption stub), as do runtime-async methods and the reflection invoke stubs CoreLib emits
+    /// (`InvokerEmitUtil`), which call `StubHelpers.NextCallReturnAddress`.
     | CallSiteExpansion
     /// A method of CoreLib's `System.StubHelpers.StructureMarshaler<T>`, whose body CoreCLR's VM
     /// replaces with a stub that performs the operation on T field by field when T is a value type

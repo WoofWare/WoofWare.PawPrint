@@ -113,10 +113,9 @@ module StackCrawlMark =
         //
         // Guests reach the dynamic-method arm with both answers, through dynamic methods of their
         // own scoped to CoreLib's module whose bodies call a crawling method such as
-        // `Assembly.GetExecutingAssembly` (`StackCrawlThroughDynamicMethod.cs`). CoreLib's own
-        // stubs, which `MethodBase.Invoke` emits from its second invocation of a method onwards,
-        // do not get this far: each begins with a call to the JIT intrinsic
-        // `StubHelpers.NextCallReturnAddress`, which PawPrint refuses.
+        // `Assembly.GetExecutingAssembly` (`StackCrawlThroughDynamicMethod.cs`), and through
+        // CoreLib's own stubs, which `MethodBase.Invoke` emits from its second invocation of a
+        // method onwards (`ReflectionInvokeThroughEmittedStub.cs`).
         AssemblyDefinitionName.isNamed "System.Private.CoreLib" frame.ExecutingMethod.DeclaringAssemblyFullName
         && match frame.ExecutingMethod.TryDeclaringType with
            | None ->
