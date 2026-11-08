@@ -91,62 +91,6 @@ module NativeRuntimeAssembly =
         hash.[hash.Length - 8 ..] |> Array.rev
 
     /// <summary>
-    /// <c>StrongNameIsValidPublicKey</c> (md/runtime/strongnameinternal.cpp): does this blob
-    /// look like a public key, in the sense the strong-name code checks before hashing one?
-    /// </summary>
-    /// <remarks>
-    /// The blob is a <c>PublicKeyBlob</c>: a signature algorithm, a hash algorithm and a key
-    /// length as little-endian 32-bit words, then the CryptoAPI key bytes. It must be at least
-    /// the unpacked struct's sixteen bytes, its key length must account for everything after the
-    /// twelve-byte header, an algorithm that is given must be of the right class (and the hash
-    /// no weaker than SHA-1), and the key must announce itself as a <c>PUBLICKEYBLOB</c>. The
-    /// sixteen-byte ECMA key passes without those checks, since it is not a real key.
-    /// </remarks>
-    let isValidPublicKey (blob : byte[]) : bool =
-        let ecmaKey =
-            [|
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-                4uy
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-                0uy
-            |]
-
-        if blob = ecmaKey then
-            true
-        elif blob.Length < 16 then
-            false
-        else
-
-        let word (offset : int) : uint32 =
-            System.BitConverter.ToUInt32 (blob, offset)
-
-        let sigAlgId = word 0
-        let hashAlgId = word 4
-        let keyLength = word 8
-
-        // GET_ALG_CLASS keeps bits 13-15; GET_ALG_SID keeps the low nine. ALG_CLASS_HASH is
-        // 4 << 13, ALG_CLASS_SIGNATURE is 1 << 13, ALG_SID_SHA1 is 4 and PUBLICKEYBLOB is 6.
-        let algClass (id : uint32) = id &&& (7u <<< 13)
-        let algSid (id : uint32) = id &&& 511u
-
-        keyLength = uint32 (blob.Length - 12)
-        && (hashAlgId = 0u || (algClass hashAlgId = (4u <<< 13) && algSid hashAlgId >= 4u))
-        && (sigAlgId = 0u || algClass sigAlgId = (1u <<< 13))
-        && blob.[12] = 6uy
-
-    /// <summary>
     /// Escapes one segment of a display name, as
     /// <c>TextualIdentityParser::EscapeString</c> does.
     /// </summary>
@@ -2774,7 +2718,8 @@ module NativeRuntimeAssembly =
                 match blob with
                 | None -> None
                 | Some blob when not hasFullKey -> Some blob
-                | Some key when isValidPublicKey key -> Some (publicKeyToken key)
+                | Some key when StrongName.isValidPublicKey (ImmutableArray.Create<byte> key) ->
+                    Some (publicKeyToken key)
                 | Some key ->
                     failwith
                         $"TODO: %s{operation} of '%s{simpleName}' names a %d{key.Length}-byte public key that StrongNameIsValidPublicKey rejects, which CoreCLR reports as SecurityException (Invalid assembly public key.); this handler raises only FileNotFoundException"

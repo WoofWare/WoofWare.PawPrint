@@ -1,6 +1,7 @@
 namespace WoofWare.PawPrint.Test
 
 open System
+open System.Collections.Immutable
 open FsUnitTyped
 open NUnit.Framework
 open WoofWare.PawPrint
@@ -86,24 +87,33 @@ module TestInternalLoadNames =
 
     [<Test>]
     let ``StrongNameIsValidPublicKey`` () =
-        NativeRuntimeAssembly.isValidPublicKey microsoftKey |> shouldEqual true
-        NativeRuntimeAssembly.isValidPublicKey ecmaKey |> shouldEqual true
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> microsoftKey)
+        |> shouldEqual true
+
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> ecmaKey)
+        |> shouldEqual true
         // Measured: `PublicKey=0011` is "Invalid assembly public key."
-        NativeRuntimeAssembly.isValidPublicKey [| 0x00uy ; 0x11uy |]
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> [| 0x00uy ; 0x11uy |])
         |> shouldEqual false
         // A header whose key length disagrees with the blob.
-        NativeRuntimeAssembly.isValidPublicKey (Array.append microsoftKey [| 0uy |])
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> (Array.append microsoftKey [| 0uy |]))
         |> shouldEqual false
         // A key that does not announce itself as a PUBLICKEYBLOB.
         let notAKeyBlob = Array.copy microsoftKey
         notAKeyBlob.[12] <- 7uy
-        NativeRuntimeAssembly.isValidPublicKey notAKeyBlob |> shouldEqual false
+
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> notAKeyBlob)
+        |> shouldEqual false
         // A hash algorithm of the wrong class.
         let wrongHashClass = Array.copy microsoftKey
         wrongHashClass.[5] <- 0x20uy
-        NativeRuntimeAssembly.isValidPublicKey wrongHashClass |> shouldEqual false
+
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> wrongHashClass)
+        |> shouldEqual false
         // An unspecified hash algorithm is allowed.
         let noHash = Array.copy microsoftKey
         noHash.[4] <- 0uy
         noHash.[5] <- 0uy
-        NativeRuntimeAssembly.isValidPublicKey noHash |> shouldEqual true
+
+        StrongName.isValidPublicKey (ImmutableArray.Create<byte> noHash)
+        |> shouldEqual true
