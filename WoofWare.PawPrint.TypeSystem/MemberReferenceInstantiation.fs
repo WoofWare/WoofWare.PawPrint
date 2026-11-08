@@ -316,7 +316,8 @@ module MemberReferenceInstantiation =
                         | None
                         | Some "" -> name, searchedIn
                         | Some ns -> $"%s{ns}.%s{name}", searchedIn
-                    | TypeResolutionMiss.NestedTypeAbsent (searchedIn, _declaringType, name) -> name, searchedIn
+                    | TypeResolutionMiss.NestedTypeAbsent (searchedIn, _declaringType, ns, name) ->
+                        (if ns = "" then name else $"%s{ns}.%s{name}"), searchedIn
 
                 let failure = FieldReferenceFailure.ParentTypeMissing (typeName, searchedIn)
                 bound state assy.Name (Choice2Of2 (FieldReferenceBinding.Fails failure)) ImmutableArray.Empty

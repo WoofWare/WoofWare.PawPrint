@@ -365,7 +365,8 @@ type DumpedAssembly =
         /// "what is nested in this type", where <c>TypeInfo.DeclaringType</c> answers the
         /// converse. It exists because <c>MetadataImport_Enum</c> for <c>mdtTypeDef</c> is that
         /// question, and it is deliberately not <c>_NestedTypeDefsLookup</c>, which is keyed by
-        /// name and silently drops duplicates: legal in IL, and fatal to an enumeration.
+        /// namespace and name and silently drops duplicates: legal in IL, and fatal to an
+        /// enumeration.
         /// </remarks>
         NestedTypeDefsByEnclosing :
             ImmutableDictionary<ComparableTypeDefinitionHandle, ImmutableArray<TypeDefinitionHandle>>
@@ -382,11 +383,13 @@ type DumpedAssembly =
             ImmutableDictionary<string * string, WoofWare.PawPrint.TypeInfo<GenericParamFromMetadata, TypeDefn>>
 
         /// <summary>
-        /// Internal lookup for nested type definitions by declaring type and simple name.
+        /// Internal lookup for nested type definitions by declaring type, namespace and name. The
+        /// namespace is the row's own Namespace column, which is empty for every nested type a
+        /// compiler emits but need not be (ECMA-335 II.22.37).
         /// </summary>
         _NestedTypeDefsLookup :
             ImmutableDictionary<
-                ComparableTypeDefinitionHandle * string,
+                ComparableTypeDefinitionHandle * string * string,
                 WoofWare.PawPrint.TypeInfo<GenericParamFromMetadata, TypeDefn>
              >
 
@@ -396,9 +399,11 @@ type DumpedAssembly =
         _TopLevelExportedTypesLookup : ImmutableDictionary<string option * string, WoofWare.PawPrint.ExportedType>
 
         /// <summary>
-        /// Internal lookup for nested exported types by parent export and simple name.
+        /// Internal lookup for nested exported types by parent export, namespace and name. The
+        /// namespace is the row's own Namespace column, empty when that column is null.
         /// </summary>
-        _NestedExportedTypesLookup : ImmutableDictionary<ExportedTypeHandle * string, WoofWare.PawPrint.ExportedType>
+        _NestedExportedTypesLookup :
+            ImmutableDictionary<ExportedTypeHandle * string * string, WoofWare.PawPrint.ExportedType>
 
         /// <summary>
         /// Friend-assembly declarations parsed from assembly-level
@@ -449,15 +454,17 @@ type DumpedAssembly =
 
         for ty in typeDefs do
             if ty.IsNested then
-                let key = (ComparableTypeDefinitionHandle.Make ty.DeclaringType, ty.Name)
+                let key =
+                    (ComparableTypeDefinitionHandle.Make ty.DeclaringType, ty.Namespace, ty.Name)
 
                 if keys.Add key then
                     result.Add (key, ty)
                 else
                     logger.LogDebug (
-                        "Duplicate nested type defs from assembly {ThisAssemblyName}: parent {DeclaringTypeHandle}, type {DuplicatedTypeName}. Ignoring the duplicate.",
+                        "Duplicate nested type defs from assembly {ThisAssemblyName}: parent {DeclaringTypeHandle}, namespace {DuplicatedTypeNamespace}, type {DuplicatedTypeName}. Ignoring the duplicate.",
                         name,
                         ty.DeclaringType,
+                        ty.Namespace,
                         ty.Name
                     )
 
@@ -492,7 +499,7 @@ type DumpedAssembly =
         (logger : ILogger)
         (name : AssemblyName)
         (types : WoofWare.PawPrint.ExportedType seq)
-        : ImmutableDictionary<ExportedTypeHandle * string, WoofWare.PawPrint.ExportedType>
+        : ImmutableDictionary<ExportedTypeHandle * string * string, WoofWare.PawPrint.ExportedType>
         =
         let result = ImmutableDictionary.CreateBuilder ()
         let keys = HashSet ()
@@ -500,12 +507,18 @@ type DumpedAssembly =
         for ty in types do
             match ty.Data with
             | ExportedTypeData.ParentExportedType parent ->
-                let key = (parent, ty.Name)
+                let ns = ty.Namespace |> Option.defaultValue ""
+                let key = (parent, ns, ty.Name)
 
                 if keys.Add key then
                     result.Add (key, ty)
                 else
-                    failwithf "Duplicate nested exported types from assembly %O: parent %O, type %s" name parent ty.Name
+                    failwithf
+                        "Duplicate nested exported types from assembly %O: parent %O, namespace %s, type %s"
+                        name
+                        parent
+                        ns
+                        ty.Name
             | _ -> ()
 
         result.ToImmutable ()
@@ -910,20 +923,37 @@ type DumpedAssembly =
 
         DumpedAssembly.DecideCaseInsensitive (AsciiCaseFold.foldAscii $"%s{``namespace``}.%s{name}") matches unfoldable
 
+    /// <summary>
+    /// The type nested directly in <paramref name="declaringType"/> whose Namespace and Name columns
+    /// are exactly <paramref name="namespace"/> and <paramref name="name"/>.
+    /// </summary>
+    /// <param name="declaringType">The type the sought type is nested directly inside.</param>
+    /// <param name="namespace">
+    /// The nested row's own namespace, empty for a null column. Every nested type a compiler emits
+    /// has an empty one; it is not the declaring type's namespace. CoreCLR compares it as part of the
+    /// name, so a nested type is not found under a namespace it does not carry.
+    /// </param>
+    /// <param name="name">The nested row's name.</param>
     member this.TryGetNestedTypeDef
         (declaringType : TypeDefinitionHandle)
+        (``namespace`` : string)
         (name : string)
         : WoofWare.PawPrint.TypeInfo<GenericParamFromMetadata, TypeDefn> option
         =
-        match this._NestedTypeDefsLookup.TryGetValue ((ComparableTypeDefinitionHandle.Make declaringType, name)) with
+        match
+            this._NestedTypeDefsLookup.TryGetValue (
+                (ComparableTypeDefinitionHandle.Make declaringType, ``namespace``, name)
+            )
+        with
         | false, _ -> None
         | true, v -> Some v
 
     /// <summary>
-    /// As <see cref="TryGetNestedTypeDef"/>, comparing names case-insensitively.
+    /// As <see cref="TryGetNestedTypeDef"/>, comparing namespace and name case-insensitively.
     /// </summary>
     member this.TryGetNestedTypeDefIgnoreCase
         (declaringType : TypeDefinitionHandle)
+        (``namespace`` : string)
         (name : string)
         : Result<WoofWare.PawPrint.TypeInfo<GenericParamFromMetadata, TypeDefn> option, CaseInsensitiveLookupRefusal>
         =
@@ -931,14 +961,19 @@ type DumpedAssembly =
         let unfoldable = ResizeArray ()
         let matches = ResizeArray ()
 
-        for KeyValue ((candidateParent, candidateName), candidate) in this._NestedTypeDefsLookup do
-            if candidateParent = declaring then
-                match AsciiCaseFold.compare name candidateName with
-                | FoldComparison.CannotMatch -> ()
-                | FoldComparison.Matches -> matches.Add (candidateName, candidate)
-                | FoldComparison.MightMatch c -> unfoldable.Add (candidateName, c)
+        // A nested name is spelled with its namespace only where it has one, as a nested segment of
+        // a type name is.
+        let spell (ns : string) (name : string) : string =
+            if ns = "" then name else $"%s{ns}.%s{name}"
 
-        DumpedAssembly.DecideCaseInsensitive (AsciiCaseFold.foldAscii name) matches unfoldable
+        for KeyValue ((candidateParent, candidateNs, candidateName), candidate) in this._NestedTypeDefsLookup do
+            if candidateParent = declaring then
+                match AsciiCaseFold.comparePair (``namespace``, name) (candidateNs, candidateName) with
+                | FoldComparison.CannotMatch -> ()
+                | FoldComparison.Matches -> matches.Add (spell candidateNs candidateName, candidate)
+                | FoldComparison.MightMatch c -> unfoldable.Add (spell candidateNs candidateName, c)
+
+        DumpedAssembly.DecideCaseInsensitive (AsciiCaseFold.foldAscii (spell ``namespace`` name)) matches unfoldable
 
     member this.TryGetTopLevelExportedType
         (``namespace`` : string option)
@@ -984,12 +1019,20 @@ type DumpedAssembly =
 
         DumpedAssembly.DecideCaseInsensitive (AsciiCaseFold.foldAscii $"%s{nsString}.%s{name}") matches unfoldable
 
+    /// <summary>
+    /// The exported type nested in <paramref name="parent"/> whose Namespace and Name columns are
+    /// exactly <paramref name="namespace"/> and <paramref name="name"/>.
+    /// </summary>
+    /// <param name="parent">The exported type the sought one is nested directly inside.</param>
+    /// <param name="namespace">The nested row's own namespace, empty for a null column.</param>
+    /// <param name="name">The nested row's name.</param>
     member this.TryGetNestedExportedType
         (parent : ExportedTypeHandle)
+        (``namespace`` : string)
         (name : string)
         : WoofWare.PawPrint.ExportedType option
         =
-        match this._NestedExportedTypesLookup.TryGetValue ((parent, name)) with
+        match this._NestedExportedTypesLookup.TryGetValue ((parent, ``namespace``, name)) with
         | false, _ -> None
         | true, v -> Some v
 

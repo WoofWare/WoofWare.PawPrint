@@ -122,7 +122,7 @@ module TestUnaryMetadataIlOp =
             | None -> failwith "System.Threading.Volatile not found in corelib"
             | Some volatileType -> volatileType
 
-        match corelib.TryGetNestedTypeDef volatileType.TypeDefHandle "VolatileObject" with
+        match corelib.TryGetNestedTypeDef volatileType.TypeDefHandle "" "VolatileObject" with
         | None -> failwith "System.Threading.Volatile/VolatileObject not found in corelib"
         | Some volatileObject -> volatileObject
 

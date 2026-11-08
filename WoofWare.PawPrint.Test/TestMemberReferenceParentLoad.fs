@@ -789,7 +789,8 @@ module TestMemberReferenceParentLoad =
         | TypeResolutionMiss.TopLevelTypeAbsent (_, None, name)
         | TypeResolutionMiss.TopLevelTypeAbsent (_, Some "", name) -> name
         | TypeResolutionMiss.TopLevelTypeAbsent (_, Some ns, name) -> $"%s{ns}.%s{name}"
-        | TypeResolutionMiss.NestedTypeAbsent (_, _, name) -> name
+        | TypeResolutionMiss.NestedTypeAbsent (_, _, "", name) -> name
+        | TypeResolutionMiss.NestedTypeAbsent (_, _, ns, name) -> $"%s{ns}.%s{name}"
 
     [<Test>]
     let ``a MemberRef parent that cannot be loaded is Unresolved exactly when the real runtime cannot load it``

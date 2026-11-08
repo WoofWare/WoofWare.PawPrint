@@ -175,7 +175,7 @@ public static class Methods
         (name : string)
         : TypeInfo<GenericParamFromMetadata, TypeDefn>
         =
-        asm.TryGetNestedTypeDef parent.TypeDefHandle name
+        asm.TryGetNestedTypeDef parent.TypeDefHandle "" name
         |> Option.defaultWith (fun () -> failwith $"Missing nested type %s{name} in %s{parent.Name}")
 
     [<Test>]

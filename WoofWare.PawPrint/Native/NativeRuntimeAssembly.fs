@@ -43,6 +43,10 @@ module NativeRuntimeAssembly =
     /// The type nested directly in <paramref name="declaring"/> that one nested-name segment of
     /// <c>AssemblyNative_GetTypeCore</c> names, or <c>None</c> if there is none.
     /// </summary>
+    /// <remarks>
+    /// A segment's text up to its last '.' is a namespace, which a nested type matches only if its
+    /// own Namespace column holds it: <c>"X.Sys"</c> does not name a nested <c>Sys</c> with none.
+    /// </remarks>
     let internal tryNestedTypeDefOfSegment
         (ignoreCase : bool)
         (assembly : DumpedAssembly)
@@ -50,12 +54,15 @@ module NativeRuntimeAssembly =
         (segment : string)
         : Result<TypeInfo<GenericParamFromMetadata, TypeDefn> option, CaseInsensitiveLookupRefusal>
         =
-        let _, simple = splitAtLastDot segment
+        // CoreCLR runs the same loop body for a nested segment as for the top-level name
+        // (vm/assemblynative.cpp), so the segment is split as a top-level name is, and both halves
+        // are looked up: the class loader keys a nested row on its own namespace and name.
+        let ns, name = splitAtLastDot segment
 
         if ignoreCase then
-            assembly.TryGetNestedTypeDefIgnoreCase declaring simple
+            assembly.TryGetNestedTypeDefIgnoreCase declaring ns name
         else
-            assembly.TryGetNestedTypeDef declaring simple |> Ok
+            assembly.TryGetNestedTypeDef declaring ns name |> Ok
 
     /// <summary>
     /// The eight-byte strong name token of a public key: ECMA-335 II.6.3's low eight bytes of
@@ -990,8 +997,9 @@ module NativeRuntimeAssembly =
                             | Some missNs -> $"%s{missNs}.%s{missName}"
 
                         $"Could not load type '%s{qualified}' from assembly '%s{searchedIn}'."
-                    | TypeResolutionMiss.NestedTypeAbsent (searchedIn, declaringType, missName) ->
-                        $"Could not load type '%s{declaringType}+%s{missName}' from assembly '%s{searchedIn}'."
+                    | TypeResolutionMiss.NestedTypeAbsent (searchedIn, declaringType, missNs, missName) ->
+                        let spelled = if missNs = "" then missName else $"%s{missNs}.%s{missName}"
+                        $"Could not load type '%s{declaringType}+%s{spelled}' from assembly '%s{searchedIn}'."
 
                 NativeHandlerResult.raiseExceptionWithMessage ctx.BaseClassTypes.TypeLoadException (Some message) state
                 |> Some
