@@ -103,10 +103,9 @@ public static class Program
             mod.ResolveMethod (genericStatic.MetadataToken, null, new Type[] { typeof (Holder<>) });
         if (!ReferenceEquals (resolvedOpenContext, genericStatic)) return 15;
 
-        // The same shape with a *generic declaring type* is not checked here: `Module.ResolveMethod`
-        // then re-resolves the declaring TypeDef through `ModuleHandle.ResolveType`, which does
-        // consume its instantiation arrays and refuses an open argument. That is a gap in that
-        // QCall rather than in this one, and reaching it needs no MethodDef token at all.
+        // The same shape with a *generic declaring type* goes on to re-resolve the declaring TypeDef
+        // through `ModuleHandle.ResolveType`, with the same arrays; `ModuleResolveTypeUnreadContext.cs`
+        // checks that.
 
         // Control: an ordinary method on a non-generic type still round-trips to itself.
         MethodInfo plain = typeof(Statics).GetMethod("Plain");
