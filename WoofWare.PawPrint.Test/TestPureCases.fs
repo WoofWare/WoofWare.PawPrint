@@ -125,8 +125,6 @@ module TestPureCases =
             """On .NET 11, `lock` on a multi-dimensional array reaches `RuntimeHelpers.GetRawData` on it, whose `RawData::Data` projection PawPrint refuses for a multi-dimensional array: "TODO: RawData::Data projection for multi-dimensional array (rank 2)". Its single-dimensional array locks before that. Un-park when that projection is modelled and the header word is placed before a multi-dimensional array's bounds."""
             "StringContentRoundTrip.cs",
             """On .NET 11, `HttpContent.LoadIntoBufferAsyncCore` in System.Net.Http is a runtime-async method: it awaits through `AsyncHelpers.Await` and returns its `Task` from an empty stack, which PawPrint does not run, and its stack-shape check refuses the body: "is executing offset 49, which is invalid IL: StackUnderflow (49, Nullary Ret, 0)". Un-park when runtime-async methods run. Verified to exit 0 on real .NET 11."""
-            "AssemblyGetCallingAssemblyFromEntryPoint.cs",
-            """On .NET 11, `Assembly.GetCallingAssembly()` in `Main` is not the program's own assembly, so real .NET 11 exits 2 where .NET 10 exits 0 (measured on RC1). PawPrint answers the program's own assembly on every runtime, so it exits 0. Un-park when PawPrint answers as RC1 does."""
             "ProcessStartRootedSeeded.cs",
             """On .NET 11, `Process.Start` creates its redirections' pipes in managed code and then calls `SystemNative_ForkAndExecProcess`, whose .NET 11 argument list PawPrint does not recognise, so it stops there (measured): "Unimplemented native method (PInvokeImpl libSystem.Native!SystemNative_ForkAndExecProcess)". That shim makes no `access` check before it forks: a rooted path naming nothing executable forks a child, whose failed `execve` sends its errno back over a pipe. Un-park when PawPrint models that child. Verified to exit 0 on real .NET 11 RC1, which skips the guest's direct calls of .NET 10's shim."""
         ]
@@ -149,7 +147,6 @@ module TestPureCases =
             "AssemblyLoadWindowsRuntime.cs", GuestEnding.ExitCode 11
             "AssemblyLoadFailureCache.cs", GuestEnding.ExitCode 13
             "ThreadStateOfEntryThreadAfterMain.cs", GuestEnding.ExitCode 12
-            "AssemblyGetCallingAssemblyFromEntryPoint.cs", GuestEnding.ExitCode 2
             "DelegateBindStaticAbstractInterfaceMethod.cs", GuestEnding.UnhandledException
             "DelegateBindToMetadataMethod.cs", GuestEnding.ExitCode 18
             "DelegateMethodInfo.cs", GuestEnding.ExitCode 120
