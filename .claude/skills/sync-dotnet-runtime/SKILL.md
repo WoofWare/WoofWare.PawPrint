@@ -7,7 +7,7 @@ description: How to bump the pinned dotnet/runtime source in flake.nix, and how 
 
 `flake.nix` holds one entry of `runtimes` per runtime PawPrint emulates (`net10`; `net11`, which the devshell carries as a framework for guests only). Each pins nixpkgs's runtime package, the version we emulate (`expectedRuntimeVersion`), the dotnet/runtime source at that version (`sourceRev`, `sourceHash`; a sparse `fetchgit` made by `runtimeSource`), and its linux-x64 runtime pack (`linuxFrameworkTfm`, `linuxFrameworkHash`). The source is exposed in the devshell as `$DOTNET_RUNTIME_SRC_NET10` and `$DOTNET_RUNTIME_SRC_NET11`. We use it as a read-only reference for upstream behaviour (BCL source, QCall stubs, native runtime helpers). Each source pin must match the runtime the devshell runs for it, so the source you read matches the assemblies the interpreter actually executes. The steps below bump one runtime; the other's pins are untouched.
 
-Bumping is an edit to `flake.nix` and `WoofWare.PawPrint/EmulatedRuntime.fs` — there is no sibling checkout to manage any more. Two guards keep the pin honest, and both run in CI:
+Bumping is an edit to `flake.nix` and `WoofWare.PawPrint.Domain/EmulatedRuntime.fs` — there is no sibling checkout to manage any more. Two guards keep the pin honest, and both run in CI:
 
 - the `runtime-version-pin-<runtime>` flake checks fail when a runtime's `expectedRuntimeVersion` in `flake.nix` drifts from the version nixpkgs provides;
 - the `TestEmulatedRuntime` drift tests fail when the CoreLib the test suite loads (the runtime under test's, and its pinned linux-x64 pack's inside the devshell) is not the build `EmulatedRuntime.pin` records for its major. The pinned build is the CoreLib's `AssemblyInformationalVersion` up to its `+`, e.g. `10.0.7-servicing.26217.108`, compared as an exact string.
@@ -33,13 +33,13 @@ Bumping is an edit to `flake.nix` and `WoofWare.PawPrint/EmulatedRuntime.fs` —
    - Set its `sourceRev` to the public tag commit from step 2, set `sourceHash = pkgs.lib.fakeHash;`, then run `nix develop -c true` and copy the real `got: sha256-…` value back into `sourceHash`. Do the same for `linuxFrameworkHash` and `osxFrameworkHash`, since the packs are fetched at `expectedRuntimeVersion`.
    - If you need a runtime tree outside the current sparse set, add it to `sparseCheckout`, which every runtime's source shares, then re-run the fakeHash → real-hash dance for every runtime's `sourceHash`, since each hash covers its checked-out tree.
 
-4. Update `EmulatedRuntime.pin` in `WoofWare.PawPrint/EmulatedRuntime.fs` for the runtime's major:
+4. Update `EmulatedRuntime.pin` in `WoofWare.PawPrint.Domain/EmulatedRuntime.fs` for the runtime's major:
    - `Build` must become the new CoreLib's informational-version build identity. It carries a label and build number that `dotnet --info` does not show (a servicing build's is like `10.0.8-servicing.<build>`), so do not guess it: run `nix develop -c dotnet test WoofWare.PawPrint.Test/WoofWare.PawPrint.Test.fsproj --filter "FullyQualifiedName~TestEmulatedRuntime"`, and the failing drift test prints the exact string to paste.
    - `SourceRef` and `SourceCommit` must name the public tag and its commit, per step 2.
 
    That runtime's `runtime-version-pin-<runtime>` check and `TestEmulatedRuntime` both stay red until `flake.nix` and `EmulatedRuntime.fs` agree with the devshell runtime. (A runtime without an `EmulatedRuntime` case yet has no `EmulatedRuntime.pin` to update.)
 
-   Then run `TestHardwareInstruction`. Its first test regenerates `WoofWare.PawPrint.Semantics/HardwareIntrinsicTable.tsv` from the JIT's `hwintrinsiclist*.h` at the new pin, and if the JIT's tables changed it fails and prints the `cp` command that installs the regenerated table. Read the diff before copying: a row that changes category or flags changes what the escape analysis says an instruction can raise.
+   Then run `TestHardwareInstruction`. Its test `each checked-in table is the JIT's, as that runtime's pinned source states it` has one case per runtime, which regenerates that runtime's `WoofWare.PawPrint.Semantics/HardwareIntrinsicTable.<runtime>.tsv` (e.g. `HardwareIntrinsicTable.Net10.tsv`) from the JIT's `hwintrinsiclist*.h` at its pin. If the JIT's tables changed, it fails and prints the `cp` command that installs the regenerated table. Read the diff before copying: a row that changes category or flags changes what the escape analysis says an instruction can raise.
 
 5. Verify the source you care about looks right: e.g. for QCall work against RuntimeHandles, glance at `$DOTNET_RUNTIME_SRC_NET10/src/coreclr/System.Private.CoreLib/src/System/RuntimeHandles.cs` and `$DOTNET_RUNTIME_SRC_NET10/src/coreclr/vm/runtimehandles.cpp` to confirm they look like the .NET 10 shape you expect.
 

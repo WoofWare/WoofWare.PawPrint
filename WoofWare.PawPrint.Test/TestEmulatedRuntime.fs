@@ -15,7 +15,7 @@ open WoofWare.PawPrint
 /// major is not supported. Separately, `EmulatedRuntime.pin` records which exact build our
 /// validation was measured against; the drift tests here fail loudly when the CoreLib the suite
 /// actually resolves is a different build, as happens when nixpkgs bumps the SDK. See
-/// `EmulatedRuntime.fs` and the `sync-dotnet-runtime` skill.
+/// `WoofWare.PawPrint.Domain/EmulatedRuntime.fs` and the `sync-dotnet-runtime` skill.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestEmulatedRuntime =
@@ -98,7 +98,7 @@ public static class Program
 
         if found.Text <> pinned.Text then
             failwith
-                $"The loaded CoreLib (%s{corelib.DefinitionFullName}, from %A{corelib.OriginalPath}) is build %s{found.Text}, but EmulatedRuntime.pin %O{runtime} says %s{pinned.Text}. Set that runtime's Build in WoofWare.PawPrint.Semantics/EmulatedRuntime.fs to \"%s{found.Text}\" (and re-sync that runtime's pins in flake.nix; see the sync-dotnet-runtime skill)."
+                $"The loaded CoreLib (%s{corelib.DefinitionFullName}, from %A{corelib.OriginalPath}) is build %s{found.Text}, but EmulatedRuntime.pin %O{runtime} says %s{pinned.Text}. Set that runtime's Build in WoofWare.PawPrint.Domain/EmulatedRuntime.fs to \"%s{found.Text}\" (and re-sync that runtime's pins in flake.nix; see the sync-dotnet-runtime skill)."
 
     [<Test>]
     let ``The CoreLib the suite resolves is the build EmulatedRuntime pins for the runtime under test`` () =
