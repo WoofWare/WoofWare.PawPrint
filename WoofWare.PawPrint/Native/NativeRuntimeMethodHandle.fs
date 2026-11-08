@@ -1322,6 +1322,63 @@ module NativeRuntimeMethodHandle =
                     targets
 
             NativeHandlerResult.completed state |> Some
+        | "RuntimeMethodHandle_ConstructInstantiation",
+          "System.Private.CoreLib",
+          "System",
+          "RuntimeMethodHandle",
+          "ConstructInstantiation",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System", "RuntimeMethodHandleInternal", handleGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System", "TypeNameFormatFlags", flagsGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "StringHandleOnStack",
+                                                        stringHandleGenerics) ],
+          MethodReturnType.Void when handleGenerics.IsEmpty && flagsGenerics.IsEmpty && stringHandleGenerics.IsEmpty ->
+            // CoreCLR runtimehandles.cpp:492:
+            //   TypeString::AppendInst(ss, pMethod->LoadMethodInstantiation(), format);
+            //   retString.Set(ss);
+            // The instantiation is the one `GetMethodInstantiation` reports, so a generic method
+            // definition spells its own type parameters.
+            let operation = "RuntimeMethodHandle.ConstructInstantiation"
+
+            if instruction.Arguments.Length <> 3 then
+                failwith $"%s{operation}: expected three native arguments, got %d{instruction.Arguments.Length}"
+
+            let identity =
+                resolveMetadataIdentityFromArg operation state instruction.Arguments.[0]
+
+            let methodInfo =
+                MethodHandleResolution.methodInfoOfMetadataIdentity operation state identity
+
+            let flags =
+                match CliType.unwrapPrimitiveLikeDeep instruction.Arguments.[1] with
+                | CliType.Numeric (CliNumericType.Int32 flags) -> flags
+                | other -> failwith $"%s{operation}: expected TypeNameFormatFlags as Int32, got %O{other}"
+
+            let retString =
+                NativeCall.stringHandleOnStackTarget operation state "retString" instruction.Arguments.[2]
+
+            let targets =
+                methodInstantiationTargets
+                    operation
+                    methodInfo.RequiredDeclaringType.Identity
+                    (identity.GetMethodDefinitionHandle ())
+                    methodInfo.Generics.Length
+                    (identity.GetMethodGenerics ())
+
+            let name =
+                NativeRuntimeTypeHelpers.methodInstantiationName operation ctx.BaseClassTypes state flags targets
+
+            let nameAddr, state =
+                IlMachineState.allocateManagedString ctx.LoggerFactory ctx.BaseClassTypes name state
+
+            let state =
+                IlMachineState.writeManagedByrefWithBase
+                    ctx.BaseClassTypes
+                    state
+                    (ManagedPointerSource.requireAddressed retString)
+                    (CliType.ObjectRef (Some nameAddr))
+
+            NativeHandlerResult.completed state |> Some
         | "RuntimeMethodHandle_GetTypicalMethodDefinition",
           "System.Private.CoreLib",
           "System",

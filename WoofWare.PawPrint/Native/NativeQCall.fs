@@ -16,6 +16,8 @@ module NativeQCall =
             NativeRuntimeMethodHandle.tryExecuteQCall "RuntimeMethodHandle_GetIsCollectible"
             "RuntimeMethodHandle_GetFunctionPointer",
             NativeRuntimeMethodHandle.tryExecuteQCall "RuntimeMethodHandle_GetFunctionPointer"
+            "RuntimeMethodHandle_ConstructInstantiation",
+            NativeRuntimeMethodHandle.tryExecuteQCall "RuntimeMethodHandle_ConstructInstantiation"
             "RuntimeMethodHandle_GetMethodInstantiation",
             NativeRuntimeMethodHandle.tryExecuteQCall "RuntimeMethodHandle_GetMethodInstantiation"
             "RuntimeMethodHandle_GetStubIfNeededSlow",
