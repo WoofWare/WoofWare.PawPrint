@@ -1804,6 +1804,12 @@ module NativeRuntimeTypeHelpers =
 
             addr, state
 
+    /// What `typeString` renders: one type, or an instantiation on its own.
+    [<RequireQualifiedAccess>]
+    type private TypeStringRequest =
+        | AppendType of RuntimeTypeHandleTarget
+        | AppendInst of RuntimeTypeHandleTarget list
+
     let formatNamespaceFlag : int32 = 0x00000001
     let formatFullInstFlag : int32 = 0x00000002
     let formatAssemblyFlag : int32 = 0x00000004
@@ -1821,17 +1827,15 @@ module NativeRuntimeTypeHelpers =
         else
             typeInfo.Name
 
-    /// CoreCLR's `TypeString::AppendType` (`vm/typestring.cpp`), the renderer behind
-    /// `RuntimeTypeHandle.ConstructName` and so behind `Type.Name`, `ToString()`, `FullName` and
-    /// `AssemblyQualifiedName`. `flags` is a `TypeNameFormatFlags` value made of
-    /// `formatNamespaceFlag`, `formatFullInstFlag` and `formatAssemblyFlag`; any other bit is
-    /// refused rather than ignored.
-    let runtimeTypeHandleName
+    // CoreCLR's `TypeString` (`vm/typestring.cpp`): `AppendType` for one type, or `AppendInst` for an
+    // instantiation on its own. Both entry points share every rendering rule below, because
+    // `AppendType` renders a generic type's instantiation through `AppendInst`.
+    let private typeString
         (operation : string)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
         (flags : int32)
-        (typeHandleTarget : RuntimeTypeHandleTarget)
+        (request : TypeStringRequest)
         : string
         =
         // The other `TypeNameFormatFlags` bits (angle brackets, `!`-prefixed generic parameters,
@@ -2132,7 +2136,43 @@ module NativeRuntimeTypeHelpers =
 
                 name + assemblySuffix format embedded (fun () -> assemblyOf target)
 
-        targetName flags false typeHandleTarget
+        match request with
+        | TypeStringRequest.AppendType typeHandleTarget -> targetName flags false typeHandleTarget
+        | TypeStringRequest.AppendInst [] ->
+            // `AppendInst`'s precondition (typestring.cpp:608): CoreLib asks only for a generic
+            // method's instantiation, and a generic method has at least one parameter.
+            failwith $"%s{operation}: asked to render an empty instantiation"
+        | TypeStringRequest.AppendInst arguments -> instantiation flags arguments
+
+    /// CoreCLR's `TypeString::AppendType` (`vm/typestring.cpp`), the renderer behind
+    /// `RuntimeTypeHandle.ConstructName` and so behind `Type.Name`, `ToString()`, `FullName` and
+    /// `AssemblyQualifiedName`. `flags` is a `TypeNameFormatFlags` value made of
+    /// `formatNamespaceFlag`, `formatFullInstFlag` and `formatAssemblyFlag`; any other bit is
+    /// refused rather than ignored.
+    let runtimeTypeHandleName
+        (operation : string)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (flags : int32)
+        (typeHandleTarget : RuntimeTypeHandleTarget)
+        : string
+        =
+        typeString operation baseClassTypes state flags (TypeStringRequest.AppendType typeHandleTarget)
+
+    /// CoreCLR's `TypeString::AppendInst` (`vm/typestring.cpp:581`), the renderer behind
+    /// `RuntimeMethodHandle.ConstructInstantiation` and so behind the bracketed part of a generic
+    /// method's `ToString()`: `[A,B]`, each argument spelled as an argument of a generic type is
+    /// spelled under `flags`. `flags` is as for `runtimeTypeHandleName`. `arguments` must not be
+    /// empty.
+    let methodInstantiationName
+        (operation : string)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (flags : int32)
+        (arguments : RuntimeTypeHandleTarget list)
+        : string
+        =
+        typeString operation baseClassTypes state flags (TypeStringRequest.AppendInst arguments)
 
 
     /// CoreCLR's `TypeHandle::GetName` (`vm/typehandle.cpp:659`) — a *different* renderer from
