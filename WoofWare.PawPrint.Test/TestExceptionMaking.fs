@@ -852,8 +852,9 @@ static class Program
     /// Touches a type whose initializer throws an exception whose construction looks nothing up,
     /// under a current UI culture whose name cannot be read at all when its argument is "nameless",
     /// can be read except the first time when it is "once", and can always be read when it is
-    /// "named". Exits 1 if a `TypeInitializationException` escaped the touch, 4 if the initializer's
-    /// own exception did, 2 if the culture's did, 3 if another did, and 0 if none did.
+    /// "named". Exits 1 if a `TypeInitializationException` escaped the touch wrapping the
+    /// initializer's own exception, 5 if one escaped wrapping the culture's, 4 if the initializer's
+    /// own exception escaped, 2 if the culture's did, 3 if another did, and 0 if none did.
     let private initializerGuest : string =
         """
 using System;
@@ -903,9 +904,9 @@ static class Program
         {
             return 2;
         }
-        catch (TypeInitializationException)
+        catch (TypeInitializationException e)
         {
-            return 1;
+            return e.InnerException is TimeZoneNotFoundException ? 5 : 1;
         }
         catch (Boom)
         {
@@ -924,9 +925,6 @@ static class Program
 
     [<Test>]
     let ``a type initializer's failure raises what ExceptionMaking says`` () : unit =
-        Net11Frontier.park
-            "Measured on real .NET 11: when looking up the message of the `TypeInitializationException` the runtime makes for a failed initializer raises, that wrapper is still raised (the guest exits 1), where on .NET 10 the initializer's own exception escapes in its place (4), as `ExceptionMaking.InitializerFailure` describes. Un-park when `ExceptionMaking` describes each runtime's making."
-
         let makings = makingsIn initializerImage.Value "Main" OpcodeFault.TypeInitialization
 
         makings |> shouldNotEqual []
@@ -939,9 +937,19 @@ static class Program
 
         // The runtime wraps what the initializer raised.
         touch "named" |> shouldEqual (RealRuntimeResult.NormalExit 1)
-        // Making the wrapper looks up its message, and fails; the initializer's own exception
-        // escapes in its place.
-        touch "once" |> shouldEqual (RealRuntimeResult.NormalExit 4)
-        // So it does again, but preserving the stack trace of that exception before raising it
-        // looks up resources too, and what that raises escapes instead.
-        touch "nameless" |> shouldEqual (RealRuntimeResult.NormalExit 2)
+
+        match ExceptionMaking.vmMakingRaise (FrameworkUnderTest.runtime ()) with
+        | VmMakingRaise.EscapesInPlace ->
+            // Making the wrapper looks up its message, and fails; the initializer's own exception
+            // escapes in its place.
+            touch "once" |> shouldEqual (RealRuntimeResult.NormalExit 4)
+            // So it does again, but preserving the stack trace of that exception before raising it
+            // looks up resources too, and what that raises escapes instead.
+            touch "nameless" |> shouldEqual (RealRuntimeResult.NormalExit 2)
+        | VmMakingRaise.ThrownAgainPreservingTrace ->
+            // Throwing the initializer's exception again preserves its stack trace, which looks up
+            // resources, and fails; the wrapper wraps what that raised instead.
+            touch "once" |> shouldEqual (RealRuntimeResult.NormalExit 5)
+            // Preserving the stack trace of what that raised fails too, without end, until the
+            // stack overflows and the runtime aborts.
+            touch "nameless" |> shouldEqual (RealRuntimeResult.NormalExit 134)
