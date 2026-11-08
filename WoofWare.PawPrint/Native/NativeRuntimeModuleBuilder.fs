@@ -173,18 +173,22 @@ module NativeRuntimeModuleBuilder =
             let tr = NativeCall.int32Argument operation instruction.Arguments.[1]
 
             // `RegMeta::DefineMemberRef` takes any MemberRefParent. `GetMemberRefToken` passes a
-            // TypeSpec for a member of a generic instantiation, and for a vararg call site a TypeRef
-            // (a method of another module) or a MethodDef (one of this module); a user-derived
-            // MemberInfo passes its type's token.
+            // TypeSpec for a member of a generic instantiation, a TypeRef for a generic method of
+            // another module, and for a vararg call site a TypeRef (a method of another module) or a
+            // MethodDef (one of this module). A user-derived MemberInfo passes its type's token.
             let parent =
                 match tr >>> 24 with
                 | table when table = typeSpecTable ->
                     match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
                     | Some rid -> MemberRefParent.TypeSpec rid
                     | None -> failwith $"%s{operation}: the parent 0x%08x{tr} names no TypeSpec row of %s{moduleName}"
+                | table when table = typeRefTable ->
+                    match EmitScope.tryTypeRefRid (tr &&& 0x00FFFFFF) held with
+                    | Some rid -> MemberRefParent.TypeRef rid
+                    | None -> failwith $"%s{operation}: the parent 0x%08x{tr} names no TypeRef row of %s{moduleName}"
                 | _ ->
                     failwith
-                        $"TODO: %s{operation}: the parent 0x%08x{tr} is not a TypeSpec; a vararg call site or a user-derived MemberInfo passes another kind, and PawPrint adds only a member of a generic instantiation"
+                        $"TODO: %s{operation}: the parent 0x%08x{tr} is neither a TypeRef nor a TypeSpec; a vararg call site or a user-derived MemberInfo passes another kind, and PawPrint adds only a member of another module or of a generic instantiation"
 
             let name =
                 match
@@ -204,6 +208,12 @@ module NativeRuntimeModuleBuilder =
                     (NativeCall.managedPointerOfPointerArgument operation "pSignature" instruction.Arguments.[3])
                     (NativeCall.int32Argument operation instruction.Arguments.[4])
                 |> System.Collections.Immutable.ImmutableArray.CreateRange
+
+            // A vararg call site's signature carries a sentinel and the call's extra arguments, and its
+            // duplicate rules want measuring on their own.
+            if signature.Length > 0 && signature.[0] &&& 0x0Fuy = 0x05uy then
+                failwith
+                    $"TODO: %s{operation}: %s{name}'s signature is vararg (0x%02x{signature.[0]}); PawPrint does not add a vararg call site's MemberRef"
 
             let memberRef, extended =
                 EmitScopeReferences.defineMemberRef parent name signature held

@@ -328,6 +328,18 @@ module TestEmitScopeImage =
             let actual = reader.GetTypeSpecification (MetadataTokens.TypeSpecificationHandle i)
             checkBlob scope reader typeSpecs.[i - 1].Signature actual.Signature
 
+        let methodSpecs = EmitScope.methodSpecs scope
+        reader.GetTableRowCount TableIndex.MethodSpec |> shouldEqual methodSpecs.Count
+
+        for i in 1 .. methodSpecs.Count do
+            let expected = methodSpecs.[i - 1]
+
+            let actual =
+                reader.GetMethodSpecification (MetadataTokens.MethodSpecificationHandle i)
+
+            token actual.Method |> shouldEqual (methodDefOrRefToken expected.Method)
+            checkBlob scope reader expected.Instantiation actual.Signature
+
         // Nothing the scope cannot hold.
         for table in
             [
@@ -336,7 +348,6 @@ module TestEmitScopeImage =
                 TableIndex.ModuleRef
                 TableIndex.NestedClass
                 TableIndex.GenericParam
-                TableIndex.MethodSpec
                 TableIndex.Property
                 TableIndex.Event
             ] do

@@ -224,6 +224,7 @@ module EmitScopeExtension =
             | None -> ()
 
             yield! rewritten TableIndex.AssemblyRef (EmitScope.assemblyRefs before) (EmitScope.assemblyRefs after)
+            yield! rewritten TableIndex.MethodSpec (EmitScope.methodSpecs before) (EmitScope.methodSpecs after)
 
             yield! heapRewritten HeapIndex.String (=) (EmitScope.strings before) (EmitScope.strings after)
 

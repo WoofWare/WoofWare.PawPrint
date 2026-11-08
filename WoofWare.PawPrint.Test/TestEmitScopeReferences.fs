@@ -591,3 +591,150 @@ module TestEmitScopeReferences =
 
         found.Value |> shouldBeGreaterThan 100
         added.Value |> shouldBeGreaterThan 100
+
+    /// Instantiations a request may give besides those already in the scope, some of them alike but for
+    /// their length or one byte.
+    let private instantiations : ImmutableArray<byte> list =
+        [
+            ImmutableArray.Create<byte> [| 0x0Auy ; 0x01uy ; 0x08uy |]
+            ImmutableArray.Create<byte> [| 0x0Auy ; 0x01uy ; 0x0Euy |]
+            ImmutableArray.Create<byte> [| 0x0Auy ; 0x02uy ; 0x08uy ; 0x08uy |]
+            ImmutableArray.Create<byte> [| 0x0Auy ; 0x02uy ; 0x08uy ; 0x0Euy |]
+        ]
+
+    /// A `MethodSpec` request: either one taken from a row the scope already has, or one made of
+    /// choices.
+    type private MethodSpecRequest =
+        | Existing of row : int
+        | Made of method : int * instantiation : int
+
+    /// `RegMeta::DefineMethodSpec`, which `TypeBuilder_DefineMethodSpec` calls: in a dynamic module,
+    /// whose emitter checks for duplicate MethodSpecs (`MDDupMethodSpec`), the first row with the same
+    /// method and the same instantiation bytes, or a new one.
+    [<Test>]
+    let ``a method instantiation is the first row with its method and instantiation, or else a new row`` () : unit =
+        let mutable found = 0
+        let mutable foundOfTwo = 0
+        let mutable added = 0
+
+        let held (scope : EmitScope) (row : MethodSpecRow) : MethodDefOrRef * byte list =
+            row.Method, List.ofSeq (EmitScope.blobAt row.Instantiation scope)
+
+        let property (generated : EmitScope) (duplicate : int option) (requests : MethodSpecRequest list) : unit =
+            // The emitter never adds a row it would find, but a scope may hold two alike all the same:
+            // the first of them is the one found.
+            let start =
+                match duplicate with
+                | Some row when (EmitScope.methodSpecs generated).Count > 0 ->
+                    let rows = EmitScope.methodSpecs generated
+                    EmitScope.addMethodSpec rows.[row % rows.Count] generated |> snd
+                | _ -> generated
+
+            let candidates =
+                [
+                    for i in 1 .. (EmitScope.methodDefs start).Count do
+                        yield MethodDefOrRef.MethodDef (MethodDefRid i)
+                    for i in 1 .. (EmitScope.memberRefs start).Count do
+                        yield MethodDefOrRef.MemberRef (MemberRefRid i)
+                ]
+
+            let mutable model =
+                EmitScope.methodSpecs start |> Seq.map (held start) |> List.ofSeq
+
+            let mutable scope = start
+
+            if not candidates.IsEmpty then
+                for request in requests do
+                    let method, instantiation =
+                        match request with
+                        | MethodSpecRequest.Existing row when not model.IsEmpty ->
+                            let method, instantiation = List.item (row % model.Length) model
+                            method, ImmutableArray.CreateRange instantiation
+                        | MethodSpecRequest.Existing row ->
+                            List.item (row % candidates.Length) candidates, instantiations.Head
+                        | MethodSpecRequest.Made (m, i) ->
+                            List.item (m % candidates.Length) candidates, instantiations.[i % instantiations.Length]
+
+                    let key = method, List.ofSeq instantiation
+                    let rid, next = EmitScopeReferences.defineMethodSpec method instantiation scope
+
+                    match List.tryFindIndex ((=) key) model with
+                    | Some index ->
+                        found <- found + 1
+
+                        if List.filter ((=) key) model |> List.length > 1 then
+                            foundOfTwo <- foundOfTwo + 1
+
+                        rid |> shouldEqual (MethodSpecRid (index + 1))
+                        Object.ReferenceEquals (next, scope) |> shouldEqual true
+                    | None ->
+                        added <- added + 1
+                        rid |> shouldEqual (MethodSpecRid (model.Length + 1))
+                        model <- model @ [ key ]
+
+                        EmitScope.methodSpecs next
+                        |> Seq.map (held next)
+                        |> List.ofSeq
+                        |> shouldEqual model
+
+                        // Only the new row and its blob are added.
+                        EmitScope.memberRefs next |> shouldEqual (EmitScope.memberRefs scope)
+                        EmitScope.methodDefs next |> shouldEqual (EmitScope.methodDefs scope)
+                        EmitScope.strings next |> shouldEqual (EmitScope.strings scope)
+
+                    scope <- next
+
+        let genRequest : Gen<MethodSpecRequest> =
+            Gen.frequency
+                [
+                    1, Gen.map MethodSpecRequest.Existing EmitScopeGen.choice
+                    3,
+                    Gen.map2
+                        (fun m i -> MethodSpecRequest.Made (m, i))
+                        EmitScopeGen.choice
+                        (Gen.choose (0, instantiations.Length - 1))
+                ]
+
+        let arb =
+            Gen.zip3 EmitScopeGen.genScope (Gen.optionOf EmitScopeGen.choice) (Gen.listOf genRequest)
+            |> Arb.fromGen
+
+        Check.One (
+            Config.QuickThrowOnFailure.WithMaxTest 300,
+            Prop.forAll arb (fun (start, duplicate, requests) -> property start duplicate requests)
+        )
+
+        found |> shouldBeGreaterThan 100
+        foundOfTwo |> shouldBeGreaterThan 20
+        added |> shouldBeGreaterThan 100
+
+    [<Test>]
+    let ``an empty instantiation, and a method the scope does not have, are refused`` () : unit =
+        let scope = EmitScope.create "Refusals" Guid.Empty
+        let instantiation = ImmutableArray.Create<byte> [| 0x0Auy ; 0x01uy ; 0x08uy |]
+
+        Assert.Throws<ArgumentException> (fun () ->
+            EmitScopeReferences.defineMethodSpec (MethodDefOrRef.MemberRef (MemberRefRid 1)) instantiation scope
+            |> ignore
+        )
+        |> ignore
+
+        let withRef =
+            let typeRef, scope =
+                EmitScopeReferences.defineTypeRefByName ResolutionScope.Module "N.T" scope
+
+            EmitScopeReferences.defineMemberRef
+                (MemberRefParent.TypeRef typeRef)
+                "M"
+                (ImmutableArray.Create<byte> [| 0x10uy ; 0x01uy ; 0x00uy ; 0x01uy |])
+                scope
+            |> snd
+
+        Assert.Throws<ArgumentException> (fun () ->
+            EmitScopeReferences.defineMethodSpec
+                (MethodDefOrRef.MemberRef (MemberRefRid 1))
+                ImmutableArray.Empty
+                withRef
+            |> ignore
+        )
+        |> ignore

@@ -170,6 +170,7 @@ module NativeQCall =
             "TypeBuilder_DefineMethod", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethod"
             "TypeBuilder_SetMethodImpl", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetMethodImpl"
             "TypeBuilder_DefineMethodImpl", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethodImpl"
+            "TypeBuilder_DefineMethodSpec", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethodSpec"
             "TypeBuilder_TermCreateClass", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_TermCreateClass"
             "TypeBuilder_SetParentType", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetParentType"
             "TypeBuilder_SetMethodIL", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetMethodIL"

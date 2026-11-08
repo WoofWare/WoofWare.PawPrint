@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -949,3 +949,61 @@ is the instantiation's TypeSpec. Read from `RuntimeModuleBuilder.GetMethodTokenN
 * A vararg call site's MemberRef, whose parent is a TypeRef or a MethodDef.
 * A generic method's instantiation, which also wants a MethodSpec row.
 
+### 5f: a generic method's instantiation
+
+A call to an instantiation of a generic method, such as `Array.Empty<int>`, names a MethodSpec. Read from
+`RuntimeModuleBuilder.GetMethodTokenInternal` and `GetMemberRefToken`, `TypeBuilder_DefineMethodSpec`
+(vm/comdynamic.cpp) and `RegMeta::DefineMethodSpec` (md/compiler/emit.cpp):
+
+* `GetMethodTokenInternal` takes the generic method definition. If it is of another module, or of a
+  generic type, it asks `GetMemberRefToken` for a MemberRef to it; otherwise it asks for its MethodDef,
+  which is a generic `MethodBuilder` of this module. It then builds the instantiation's signature
+  (`0x0A`, the count, each type argument) and calls `TypeBuilder_DefineMethodSpec` with that token as the
+  parent. `ldtoken`, `ldftn` and `ldvirtftn` of a generic method definition stop at the parent.
+* `GetMemberRefToken`'s signature is the definition's: the generic flag and a count of generic
+  parameters, and `ELEMENT_TYPE_MVAR` for each of the method's own type parameters, which is why
+  `SignatureHelper` asks every generic parameter for its `DeclaringMethod` (#2183). Its parent is the
+  declaring instantiation's TypeSpec for a generic type, as in 5e, and otherwise, for a method of
+  another module, the declaring type's TypeRef. That TypeRef parent is new: 5e saw only TypeSpecs.
+  `RegMeta::DefineMemberRef` treats the two alike, finding a row with the same parent, name and
+  signature before adding one.
+* `RegMeta::DefineMethodSpec` takes a MethodDef or a MemberRef parent and refuses any other. Under
+  `MDDupMethodSpec`, which is part of the `MDDupDefault` a dynamic module sets, it finds a row with the
+  same parent and the same instantiation bytes (`FindMethodSpecByMethodAndInstantiation`) before adding
+  one. ECMA-335 does not sort the MethodSpec table.
+
+### 5f: the decisions
+
+* **The scope gains a MethodSpec table**, rows of a `MethodDefOrRef` (the coded index MethodImpl already
+  uses) and an instantiation blob, with `EmitScopeReferences.defineMethodSpec` searching as
+  `DefineMethodSpec` does, and the image and the extension carrying the table as they carry TypeSpec.
+* **`GetMemberRefFromSignature` accepts a TypeRef or a TypeSpec parent for a signature that is not
+  vararg**, and refuses a vararg signature whatever its parent, and a TypeDef or MethodDef parent. A
+  MethodDef parent is valid only for a vararg call site (ECMA-335 II.22.25), and no CoreLib path passes
+  a TypeDef; both would be untested.
+* **`TypeBuilder_DefineMethodSpec` accepts a MethodDef parent as well as a MemberRef**, as
+  `DefineMethodSpec` does, under the same rule. No guest reaches the MethodDef case yet: a generic
+  `MethodBuilder` needs `TypeBuilder_DefineGenericParam` and a GenericParam table, which PawPrint does not
+  have. The unit tests cover it.
+
+### 5f: the oracle
+
+* `ModuleBuilderDefineMethodSpec.cs`, which exits 0 on .NET 10, emits calls to `Array.IndexOf<int>`,
+  `Array.Empty<int>` twice and `Array.Empty<string>` (members of a TypeRef), and to
+  `List<int>.ConvertAll<long>` (a member of a TypeSpec), and invokes the first method. Its
+  terminal-state check reads the MemberRef and MethodSpec rows as .NET 10 reports them; the source
+  predicts one MemberRef to `Empty`, asked for three times, and one MethodSpec for both of
+  `Empty<int>`'s calls.
+* `TestEmitScopeReferences` checks `defineMethodSpec` against a model, the first row with the same
+  parent and bytes or else a new one, over generated sequences that repeat parents and instantiations.
+* The generator draws MethodSpecs, so the image's round trip and the extension properties cover the
+  table.
+* Each mutant is caught: the search removed, keyed on the parent alone, or keyed on the bytes alone;
+  the coded index's MemberRef tag wrong; the table's row count or its extension check dropped; the
+  token's table byte wrong; the extended scope never stored; and a TypeRef parent's row number wrong.
+
+### 5f: left to later stages
+
+* A generic `MethodBuilder` (`TypeBuilder_DefineGenericParam`, the GenericParam table), and calls to
+  its instantiations through a MethodDef parent.
+* A vararg call site's MemberRef.

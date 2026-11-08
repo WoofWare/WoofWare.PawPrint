@@ -1712,6 +1712,97 @@ module TestImpureCases =
                 listOfInt, "get_Count", [ 0x20uy ; 0x00uy ; 0x08uy ]
             ]
 
+    /// `ModuleBuilderDefineMethodSpec.cs` has called `Array.IndexOf<int>`, `Array.Empty<int>` twice,
+    /// `Array.Empty<string>` and `List<int>.ConvertAll<long>`. This checks the module's MemberRef and
+    /// MethodSpec rows as .NET 10 reports them: a MemberRef to each generic method definition, once,
+    /// whose parent is `Array`'s TypeRef (3) or `List<int>`'s TypeSpec and whose signature is the
+    /// definition's; then a MethodSpec for each distinct instantiation, `Empty<int>` once. .NET 10's
+    /// reflection gives no MethodSpec's blob, only its parent and, through `ResolveMethod`, its type
+    /// arguments; the bytes here are those `SignatureHelper.GetMethodSpecSigHelper` writes for them.
+    let private assertMethodSpecRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                "System", "Object"
+                "System", "Int32"
+                "System", "Array"
+                "System.Collections.Generic", "List`1"
+                "System", "Converter`2"
+            ]
+
+        EmitScope.typeSpecs scope
+        |> Seq.map (fun row -> EmitScope.blobAt row.Signature scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual [ [ 0x15uy ; 0x12uy ; 0x11uy ; 0x01uy ; 0x08uy ] ]
+
+        let array = MemberRefParent.TypeRef (EmitScope.tryTypeRefRid 3 scope).Value
+        let listOfInt = MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid 1 scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, EmitScope.blobAt row.Signature scope |> List.ofSeq
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                array,
+                "IndexOf",
+                [
+                    0x10uy
+                    0x01uy
+                    0x02uy
+                    0x08uy
+                    0x1Duy
+                    0x1Euy
+                    0x00uy
+                    0x1Euy
+                    0x00uy
+                ]
+                array, "Empty", [ 0x10uy ; 0x01uy ; 0x00uy ; 0x1Duy ; 0x1Euy ; 0x00uy ]
+                listOfInt,
+                "ConvertAll",
+                [
+                    0x30uy
+                    0x01uy
+                    0x01uy
+                    0x15uy
+                    0x12uy
+                    0x11uy
+                    0x01uy
+                    0x1Euy
+                    0x00uy
+                    0x15uy
+                    0x12uy
+                    0x15uy
+                    0x02uy
+                    0x13uy
+                    0x00uy
+                    0x1Euy
+                    0x00uy
+                ]
+            ]
+
+        let memberRef (rid : int) =
+            MethodDefOrRef.MemberRef (EmitScope.tryMemberRefRid rid scope).Value
+
+        EmitScope.methodSpecs scope
+        |> Seq.map (fun row -> row.Method, EmitScope.blobAt row.Instantiation scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                memberRef 1, [ 0x0Auy ; 0x01uy ; 0x08uy ]
+                memberRef 2, [ 0x0Auy ; 0x01uy ; 0x08uy ]
+                memberRef 2, [ 0x0Auy ; 0x01uy ; 0x0Euy ]
+                memberRef 3, [ 0x0Auy ; 0x01uy ; 0x0Auy ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5265,6 +5356,26 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertMemberRefsOfTypeSpec
+            }
+            {
+                // `TypeBuilder_DefineMethodSpec`, through calls to instantiations of generic methods: a
+                // MemberRef to each definition, whose parent is a TypeRef or a TypeSpec, then a MethodSpec
+                // for each instantiation, found before it is added; `assertMethodSpecRows` reads the
+                // rows. Dynamic-code switch overridden to true like its siblings; verified by hand to exit
+                // 0 on real .NET 10.
+                FileName = "ModuleBuilderDefineMethodSpec.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMethodSpecRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has

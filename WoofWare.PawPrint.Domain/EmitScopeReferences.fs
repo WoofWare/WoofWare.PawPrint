@@ -409,6 +409,43 @@ module EmitScopeReferences =
                 }
                 scope
 
+    /// <summary>
+    /// The <c>MethodSpec</c> row instantiating <paramref name="method"/> as
+    /// <paramref name="instantiation"/> says: the first with the same method and the same bytes, as
+    /// <c>ImportHelper::FindMethodSpecByMethodAndInstantiation</c> finds it in a dynamic module, whose
+    /// emitter checks for duplicate MethodSpecs (<c>MDDupMethodSpec</c>), or a new one, as
+    /// <c>RegMeta::DefineMethodSpec</c> adds it.
+    /// </summary>
+    /// <exception cref="ArgumentException">The instantiation is empty, or the scope has no such method.</exception>
+    let defineMethodSpec
+        (method : MethodDefOrRef)
+        (instantiation : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : MethodSpecRid * EmitScope
+        =
+        if instantiation.IsDefaultOrEmpty then
+            invalidArg (nameof instantiation) "a MethodSpec's instantiation is never empty"
+
+        // Equal blobs are one heap entry, so a row matches exactly when it holds this offset.
+        let existing =
+            EmitScope.tryBlobOffset instantiation scope
+            |> Option.bind (fun offset ->
+                EmitScope.methodSpecs scope
+                |> Seq.tryFindIndex (fun row -> row.Method = method && row.Instantiation = offset)
+            )
+
+        match existing with
+        | Some index -> MethodSpecRid (index + 1), scope
+        | None ->
+            let offset, scope = EmitScope.internBlob instantiation scope
+
+            EmitScope.addMethodSpec
+                {
+                    Method = method
+                    Instantiation = offset
+                }
+                scope
+
     /// The bytes of a compressed unsigned integer (ECMA-335 II.23.2) in its shortest form.
     let private compressed (value : int) : byte list =
         if value < 0x80 then

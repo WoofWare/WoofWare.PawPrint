@@ -136,6 +136,16 @@ type StandAloneSigRid =
         match this with
         | StandAloneSigRid rid -> rid
 
+/// The RID of an emit scope's `MethodSpec` row.
+[<Struct>]
+type MethodSpecRid =
+    internal
+    | MethodSpecRid of int
+
+    member this.Rid : int =
+        match this with
+        | MethodSpecRid rid -> rid
+
 /// ECMA-335 II.24.2.6's `ResolutionScope` coded index, for the targets an emit scope can hold.
 [<RequireQualifiedAccess>]
 type ResolutionScope =
@@ -293,6 +303,13 @@ type MethodImplRow =
         Declaration : MethodDefOrRef
     }
 
+/// A `MethodSpec` row (ECMA-335 II.22.29): an instantiation of a generic method.
+type MethodSpecRow =
+    {
+        Method : MethodDefOrRef
+        Instantiation : BlobOffset
+    }
+
 type private ByteContentComparer () =
     interface IEqualityComparer<ImmutableArray<byte>> with
         member _.Equals (x : ImmutableArray<byte>, y : ImmutableArray<byte>) : bool =
@@ -339,6 +356,7 @@ type EmitScope =
             StandAloneSigs : ImmutableList<StandAloneSigRow>
             TypeSpecs : ImmutableList<TypeSpecRow>
             MethodImpls : ImmutableList<MethodImplRow>
+            MethodSpecs : ImmutableList<MethodSpecRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -582,6 +600,7 @@ module EmitScope =
                 StandAloneSigs = ImmutableList.Empty
                 TypeSpecs = ImmutableList.Empty
                 MethodImpls = ImmutableList.Empty
+                MethodSpecs = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -828,6 +847,16 @@ module EmitScope =
             MethodImpls = scope.MethodImpls.Add row
         }
 
+    let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
+        let operation = "EmitScope.addMethodSpec"
+        requireMethodDefOrRef operation scope row.Method
+        requireBlob operation scope row.Instantiation
+
+        MethodSpecRid (scope.MethodSpecs.Count + 1),
+        { scope with
+            MethodSpecs = scope.MethodSpecs.Add row
+        }
+
     /// The `#Strings` entries other than the empty string, in the order they were interned: each
     /// starts where the previous one's terminator ends.
     let strings (scope : EmitScope) : ImmutableList<string> = scope.Strings
@@ -855,6 +884,7 @@ module EmitScope =
     let memberRefs (scope : EmitScope) : ImmutableList<MemberRefRow> = scope.MemberRefs
     let standAloneSigs (scope : EmitScope) : ImmutableList<StandAloneSigRow> = scope.StandAloneSigs
     let typeSpecs (scope : EmitScope) : ImmutableList<TypeSpecRow> = scope.TypeSpecs
+    let methodSpecs (scope : EmitScope) : ImmutableList<MethodSpecRow> = scope.MethodSpecs
 
     /// In the order they were added, which is not the image's: the image sorts them by class.
     let interfaceImpls (scope : EmitScope) : ImmutableList<InterfaceImplRow> = scope.InterfaceImpls
