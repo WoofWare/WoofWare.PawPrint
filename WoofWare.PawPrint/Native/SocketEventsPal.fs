@@ -115,7 +115,14 @@ module SocketEventsPal =
     /// when the new mask has the bit and `EV_DELETE|EV_RECEIPT` when it does
     /// not, naming the socket's descriptor and carrying `data`. Empty when
     /// neither bit changed: the shim then calls `kevent` with no changes at all.
-    let keventChanges (socketFd : int) (currentEvents : int) (newEvents : int) (data : uint64) : Kevent list =
+    let keventChanges
+        (runtime : EmulatedRuntime)
+        (socketFd : int)
+        (currentEvents : int)
+        (newEvents : int)
+        (data : uint64)
+        : Kevent list
+        =
         let saRead = 0x01
         let saWrite = 0x02
         let changes = currentEvents ^^^ newEvents

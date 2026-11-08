@@ -6,8 +6,8 @@ using System.Runtime.InteropServices;
 // Registrations on a Darwin process's socket event port, which is a kqueue, driven
 // through the System.Native shim the way SocketAsyncEngine drives it:
 // TryChangeSocketEventRegistration registers a socket for SA_READ and SA_WRITE, which
-// is EV_ADD|EV_CLEAR|EV_RECEIPT on EVFILT_READ and EVFILT_WRITE, and
-// WaitForSocketEvents takes what the kqueue reports, converting each event to the
+// is EV_ADD|EV_CLEAR on EVFILT_READ and EVFILT_WRITE, with EV_RECEIPT as well on
+// .NET 10 (.NET 11's shim dropped it), and WaitForSocketEvents takes what the kqueue reports, converting each event to the
 // shim's SocketEvents. Configured as macOS, and compared with real .NET on a macOS
 // host. The sockets themselves are made through System.Net.Sockets, blocking.
 //
@@ -152,12 +152,13 @@ class Program
         check = 12;
         if (data[1] != 9 || events[1] != (SA_WRITE | SA_READ)) return check;
         // The two SocketEvents cover the first struct kevent, and the second, the
-        // WRITE's, survives whole: its filter, its flags (EV_ADD|EV_CLEAR|
-        // EV_RECEIPT with EV_EOF), no pending error (the blocking connect took it),
-        // its data, the 2048 a refused socket's send buffer is capped at, and its
-        // udata.
+        // WRITE's, survives whole: its filter, its flags (the registration's, with
+        // EV_EOF: EV_ADD|EV_CLEAR|EV_RECEIPT on .NET 10, EV_ADD|EV_CLEAR on .NET 11),
+        // no pending error (the blocking connect took it), its data, the 2048 a
+        // refused socket's send buffer is capped at, and its udata.
+        ushort writeFlags = Environment.Version.Major == 10 ? (ushort)0x8061 : (ushort)0x8021;
         check = 26;
-        if (*(short*)(buffer + 40) != -2 || *(ushort*)(buffer + 42) != 0x8061) return check;
+        if (*(short*)(buffer + 40) != -2 || *(ushort*)(buffer + 42) != writeFlags) return check;
         check = 27;
         if (*(uint*)(buffer + 44) != 0 || *(long*)(buffer + 56) != 9) return check;
         check = 29;

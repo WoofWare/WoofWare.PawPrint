@@ -7725,7 +7725,12 @@ module NativeSystemNative =
                 // With no room in the eventlist, a receipt is dropped and a
                 // failing change ends the call, the changes before it applied.
                 let changes =
-                    SocketEventsPal.keventChanges targetFd currentEvents newEvents placeholder
+                    SocketEventsPal.keventChanges
+                        (EmulatedRuntime.ofCoreLib ctx.BaseClassTypes.Corelib)
+                        targetFd
+                        currentEvents
+                        newEvents
+                        placeholder
 
                 let kevent (changes : Kevent list) =
                     UnixKqueue.kevent
