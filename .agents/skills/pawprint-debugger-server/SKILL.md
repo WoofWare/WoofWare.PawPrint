@@ -22,7 +22,7 @@ Start the debugger. It always binds `127.0.0.1` on an ephemeral port and prints 
 ```bash
 nix develop -c dotnet run --project WoofWare.PawPrint.App/WoofWare.PawPrint.App.fsproj -- \
   --debug-server \
-  CSharpExample/bin/Release/net9.0/osx-arm64/publish/CSharpExample.dll
+  CSharpExample/bin/Release/net10.0/osx-arm64/publish/CSharpExample.dll
 ```
 
 For a test source, compile or publish the relevant DLL using the existing test/playground flow rather than modifying the debugger. Use the printed URL and token for all requests.
