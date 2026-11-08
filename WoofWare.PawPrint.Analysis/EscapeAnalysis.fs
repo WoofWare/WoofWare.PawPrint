@@ -6644,6 +6644,35 @@ module EscapeAnalysis =
             else
                 state, false
 
+        // CoreCLR checks the named instantiation's constraints as the JIT compiles the body naming
+        // it, before anything is dispatched, and refuses it if they reject it. The analysis does not
+        // yet name that refusal, nor decide every constraint, so where they do not admit it, which
+        // method runs, and what the call raises, is left undecided, as for a signature that does not
+        // load.
+        let state, binds =
+            if binds then
+                match
+                    MethodConcretisation.methodConstraintVerdict
+                        state.LoggerFactory
+                        state.RuntimeDirs
+                        state.BaseTypes
+                        definition
+                        (ImmutableArray.CreateRange namedTypeArguments)
+                        (ImmutableArray.CreateRange namedMethodArguments)
+                        state.TypeSystem
+                with
+                | _, Error failure -> failwith (TypeBindingFailure.describe failure)
+                | typeSystem, Ok verdict ->
+                    { state with
+                        TypeSystem = typeSystem
+                    },
+                    (match verdict with
+                     | ConstraintVerdict.Satisfied -> true
+                     | ConstraintVerdict.Violated _
+                     | ConstraintVerdict.Undecided _ -> false)
+            else
+                state, false
+
         if not binds then
             state, DispatchOutcome.Undecided
         else
@@ -6658,11 +6687,9 @@ module EscapeAnalysis =
                 (ImmutableArray.CreateRange namedMethodArguments)
                 state.TypeSystem
         with
-        // CoreCLR refuses the instantiation as the JIT compiles the body naming it, before anything
-        // is dispatched. The analysis does not yet name that refusal, so which method runs, and what
-        // the call raises, is left undecided here, as for a signature that does not load.
-        | _, Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodConstraintsViolated _)) ->
-            state, DispatchOutcome.Undecided
+        | _, Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodConstraintsViolated _) as failure) ->
+            failwith
+                $"BUG: a call names an instantiation whose constraints its verdict admitted (`methodConstraintVerdict`), and instantiating it refused them: %s{TypeBindingFailure.describe failure}"
         | _, Error (TypeBindingFailure.Refused (TypeLoadRefusal.InvalidMethodInstantiation _) as failure) ->
             failwith
                 $"BUG: a call names an instantiation CoreCLR refuses, which binding its token reports and leaves without arguments (`bindToken`): %s{TypeBindingFailure.describe failure}"

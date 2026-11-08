@@ -11,6 +11,41 @@ open Microsoft.Extensions.Logging
 [<RequireQualifiedAccess>]
 module MethodConcretisation =
 
+    /// The verdict of `method`'s own type parameters' constraints on the instantiation
+    /// `methodGenerics`, where its declaring type is instantiated at `typeGenerics`: what
+    /// `concretizeMethodWithAllGenerics` checks once the declaring type has loaded, and refuses
+    /// unless `ConstraintVerdict.Satisfied`. `Satisfied` for a method with no type parameters of
+    /// its own.
+    let methodConstraintVerdict
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (method : WoofWare.PawPrint.MethodInfo<'ty, GenericParamFromMetadata, TypeDefn>)
+        (typeGenerics : ImmutableArray<ConcreteTypeHandle>)
+        (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
+        (state : TypeSystemState)
+        : TypeSystemState * Result<ConstraintVerdict, TypeBindingFailure>
+        =
+        if method.Generics.IsEmpty then
+            state, Ok ConstraintVerdict.Satisfied
+        else
+
+        // CoreCLR exempts an instantiation with an argument in its canonical form, which only code
+        // shared between instantiations names. PawPrint runs every instantiation exactly, and none
+        // of its arguments is canonical; CoreCLR checks each exact instantiation too, as it creates
+        // it, which in shared code is when the instruction naming it first runs.
+        ConstraintSatisfaction.satisfiesClosed
+            loggerFactory
+            dotnetRuntimeDirs
+            baseClassTypes
+            state
+            (MethodOwner.requireDeclaringType "checking a method instantiation's constraints" method.Owner)
+                .AssemblyFullName
+            typeGenerics
+            methodGenerics
+            method.Generics
+            (List.ofSeq methodGenerics)
+
     /// Whether CoreCLR creates the instantiation `methodGenerics` of `method`, declared on
     /// `declaringType`, as far as its type parameters' constraints decide it
     /// (`InstantiatedMethodDesc::NewInstantiatedMethodDesc`, genmeth.cpp, which checks them once the
@@ -27,14 +62,6 @@ module MethodConcretisation =
         (state : TypeSystemState)
         : TypeSystemState * Result<unit, TypeBindingFailure>
         =
-        if method.Generics.IsEmpty then
-            state, Ok ()
-        else
-
-        // CoreCLR exempts an instantiation with an argument in its canonical form, which only code
-        // shared between instantiations names. PawPrint runs every instantiation exactly, and none
-        // of its arguments is canonical; CoreCLR checks each exact instantiation too, as it creates
-        // it, which in shared code is when the instruction naming it first runs.
         let declaring =
             match AllConcreteTypes.lookup declaringType state.ConcreteTypes with
             | Some declaring -> declaring
@@ -43,17 +70,14 @@ module MethodConcretisation =
                     $"BUG: the declaring type %O{declaringType} of %s{method.Name}, which concretisation returned, is not registered"
 
         match
-            ConstraintSatisfaction.satisfiesClosed
+            methodConstraintVerdict
                 loggerFactory
                 dotnetRuntimeDirs
                 baseClassTypes
-                state
-                (MethodOwner.requireDeclaringType "checking a method instantiation's constraints" method.Owner)
-                    .AssemblyFullName
+                method
                 declaring.Generics
                 methodGenerics
-                method.Generics
-                (List.ofSeq methodGenerics)
+                state
         with
         | state, Error failure -> state, Error failure
         | state, Ok ConstraintVerdict.Satisfied -> state, Ok ()
