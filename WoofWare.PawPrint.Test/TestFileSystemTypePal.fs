@@ -11,8 +11,10 @@ open WoofWare.PosixKernel
 
 /// `FileSystemTypePal` transcribes part of `MapFileSystemNameToEnum`, so
 /// nothing in the type system keeps its numbers right. Its oracles are the
-/// pinned `pal_io.c`, which the name rows are re-derived from, and this host's
-/// own shim, which the composition with the library is compared against.
+/// pinned .NET 10 `pal_io.c`, which the name rows are re-derived from, and this
+/// host's own shim, which the composition with the library is compared against.
+/// .NET 11's shim has neither `SystemNative_GetFileSystemType` nor the table:
+/// it decides whether a file can be locked itself (`TestFileLockingPal`).
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestFileSystemTypePal =
@@ -39,7 +41,7 @@ module TestFileSystemTypePal =
     extern int private close(int fd)
 
     let private pinnedSource () : string =
-        let dir = FrameworkUnderTest.requireRuntimeSource ()
+        let dir = FrameworkUnderTest.requireRuntimeSourceOf EmulatedRuntime.Net10
         let path = Path.Combine (dir, "src", "native", "libs", "System.Native", "pal_io.c")
 
         if not (File.Exists path) then
@@ -72,9 +74,6 @@ module TestFileSystemTypePal =
 
     [<Test>]
     let ``each Darwin name row is upstream's`` () : unit =
-        Net11Frontier.park
-            "The test reads `MapFileSystemNameToEnum` out of the pinned `pal_io.c` with a pattern that finds no rows in .NET 11's (\"read 0 rows ... Its shape has changed\"), so .NET 11's Darwin file-system name table is unchecked. Un-park when the test reads .NET 11's shape and `FileSystemTypePal` is checked against it."
-
         let pinned = pinnedNameTable ()
 
         for name, value in FileSystemTypePal.darwinNameRows do

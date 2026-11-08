@@ -3,7 +3,8 @@ namespace WoofWare.PawPrint
 open WoofWare.PosixKernel
 
 /// The BCL's `UnixFileSystemTypes` encoding of a filesystem's type, and the
-/// conversion `SystemNative_GetFileSystemType` performs into it.
+/// conversion .NET 10's `SystemNative_GetFileSystemType` performs into it.
+/// .NET 11's shim has no such export (`FileLockingPal` is its counterpart).
 ///
 /// This is PawPrint's half of the `fstatfs` boundary. The library states the
 /// fields a kernel's `fstatfs(2)` fills in, among them the ones naming the
@@ -22,7 +23,7 @@ open WoofWare.PosixKernel
 ///
 /// The name table is a transcription, so the compiler cannot keep it correct.
 /// Its oracle is upstream: `TestFileSystemTypePal` re-derives each row from the
-/// pinned `pal_io.c`.
+/// pinned .NET 10 `pal_io.c`.
 [<RequireQualifiedAccess>]
 module FileSystemTypePal =
 
