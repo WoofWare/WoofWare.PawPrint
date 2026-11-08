@@ -112,18 +112,19 @@ module AppContextProperties =
     ///
     /// There is exactly one, and it is
     /// `System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported=false`.
-    /// PawPrint has no JIT, and its `System.Reflection.Emit` support is partial: enough to
-    /// mint and run a `DynamicMethod` a guest builds itself, not enough for the stubs the BCL
-    /// emits on its own behalf, which name reflected members in their bodies, and not at all
-    /// for `AssemblyBuilder`/`TypeBuilder`. That switch is precisely
-    /// what the BCL consults before reaching for either: with it off, `Expression.Compile`
-    /// takes its interpreter, `MethodInvokerCommon` keeps using the interpreted
-    /// `RuntimeMethodHandle.InvokeMethod` path instead of building an invoke stub, and every
-    /// Reflection.Emit entry point raises `PlatformNotSupportedException` from
+    /// PawPrint has no JIT, and its `System.Reflection.Emit` support is partial: it mints and
+    /// runs a `DynamicMethod` a guest builds itself, and some of the invoke stubs CoreLib emits
+    /// for `MethodBase.Invoke`, but not the stubs for a constructor or a by-ref parameter, not
+    /// `Expression.Compile`'s code, and only part of `AssemblyBuilder`/`TypeBuilder`.
+    /// docs/divergences.md lists, as measured, what a guest with the switch on stops on.
+    /// That switch is precisely what the BCL consults before reaching for any of them: with it
+    /// off, `Expression.Compile` takes its interpreter, `MethodInvokerCommon` keeps using the
+    /// interpreted `RuntimeMethodHandle.InvokeMethod` path instead of building an invoke stub,
+    /// and every Reflection.Emit entry point raises `PlatformNotSupportedException` from
     /// `AssemblyBuilder.EnsureDynamicCodeSupported`. This is the profile NativeAOT reports,
-    /// so those fallbacks are well travelled rather than exotic, and it converts a class of
-    /// "unimplemented native primitive" crashes into behaviour a guest can catch and a real
-    /// host also produces when configured the same way.
+    /// so those fallbacks are well travelled rather than exotic, and it converts refusals deep
+    /// inside the emit machinery into behaviour a guest can catch and a real host also produces
+    /// when configured the same way.
     ///
     /// It is a *divergence from a stock host*, which defaults the switch to true, and it is
     /// recorded as one in docs/divergences.md. It is not a divergence from the real runtime
