@@ -12,6 +12,7 @@
     <Compile Include="BindingResult.fs" />
     <Compile Include="Launched.fs" />
     <Compile Include="ExpectRun.fs" />
+    <Compile Include="PreparedGuest.fs" />
     <Compile Include="SynthesisedLayoutKind.fs" />
     <Compile Include="TestGcHeapHardLimit.fs" />
     <Compile Include="TestJitSwitchLowering.fs" />

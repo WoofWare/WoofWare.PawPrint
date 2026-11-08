@@ -101,7 +101,7 @@ public static class Entry
         use peImage = new MemoryStream (image)
 
         match Program.prepare loggerFactory (Some "NativeEnumTest.cs") peImage (HostConfig.Default dotnetRuntimes) with
-        | Program.ProgramStartResult.Ready prepared -> prepared
+        | Program.ProgramStartResult.Ready prepared -> PreparedGuest.enterMain loggerFactory prepared
         | Program.ProgramStartResult.CompletedBeforeMain outcome ->
             failwith $"expected enum test program to be ready before Main, got %O{outcome}"
 

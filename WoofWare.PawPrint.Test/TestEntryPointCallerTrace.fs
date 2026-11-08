@@ -14,6 +14,7 @@ open WoofWare.PawPrint
 /// does not raise `AppDomain.UnhandledException`, so this reads it from the run's outcome, and
 /// compares it with the trace real .NET prints.
 [<TestFixture>]
+[<Parallelizable(ParallelScope.All)>]
 module TestEntryPointCallerTrace =
 
     let private source : string =
