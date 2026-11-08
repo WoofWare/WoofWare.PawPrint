@@ -8,6 +8,10 @@
       <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
       <EnableDefaultItems>false</EnableDefaultItems>
       <IsPackable>false</IsPackable>
+      <!-- A publish with a RuntimeIdentifier otherwise stamps the image with that RID's machine
+           (Amd64, Arm64), and PawPrint refuses a machine-specific image because it does not
+           model the process architecture. -->
+      <PlatformTarget>AnyCPU</PlatformTarget>
     </PropertyGroup>
 
   <ItemGroup>
