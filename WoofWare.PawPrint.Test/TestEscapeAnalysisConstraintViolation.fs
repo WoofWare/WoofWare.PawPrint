@@ -2477,7 +2477,10 @@ public static class Cases
     /// which the body's own `catch` does not stop. The analysis must answer rather than throw. It
     /// does not yet name that refusal, so the violating case is recorded as unreported
     /// (`unreportedProblem`), as other method constraint violations are. An admitted argument is
-    /// the control: it runs, and the analysis must not name the refusal there.
+    /// the control: it runs, and the analysis must not name the refusal there. So is an abstract
+    /// argument for a constraint that is an interface declaring a static abstract method, which the
+    /// argument implements: CoreCLR admits it once that method resolves on the argument
+    /// (typedesc.cpp), which the analysis does not decide, and must still answer.
     [<Test>]
     let ``a virtual method instantiation its constraint rejects is answered, dispatched on an exact receiver``
         ()
@@ -2485,11 +2488,17 @@ public static class Cases
         =
         let _, loggerFactory = LoggerFactory.makeTest ()
 
-        // Each case: its name, the method argument of its call, and what the host does running it.
-        let cases : (string * Type * Outcome) list =
+        // Each case: its name, the instantiation it calls of `V` (constrained to `class`) or of `W`
+        // (constrained to `I`), given those two and the abstract class `A : I`, and what the host
+        // does running it.
+        let cases
+            : (string *
+              (Reflection.Emit.MethodBuilder * Reflection.Emit.MethodBuilder * Type -> Reflection.MethodInfo) *
+              Outcome) list =
             [
-                "Violates", typeof<int>, Outcome.Escapes verification
-                "Admitted", typeof<string>, Outcome.Runs
+                "Violates", (fun (v, _, _) -> v.MakeGenericMethod [| typeof<int> |]), Outcome.Escapes verification
+                "Admitted", (fun (v, _, _) -> v.MakeGenericMethod [| typeof<string> |]), Outcome.Runs
+                "AbstractForStaticAbstract", (fun (_, w, a) -> w.MakeGenericMethod [| a |]), Outcome.Runs
             ]
 
         let libraryImage =
@@ -2498,16 +2507,64 @@ public static class Cases
 
             let modul = builder.DefineDynamicModule "Lib"
 
+            // `interface I { static abstract void S(); }`.
+            let iface =
+                modul.DefineType (
+                    "I",
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Interface
+                    ||| Reflection.TypeAttributes.Abstract
+                )
+
+            let staticAbstract =
+                iface.DefineMethod (
+                    "S",
+                    Reflection.MethodAttributes.Public
+                    ||| Reflection.MethodAttributes.Static
+                    ||| Reflection.MethodAttributes.Abstract
+                    ||| Reflection.MethodAttributes.Virtual
+                    ||| Reflection.MethodAttributes.NewSlot
+                    ||| Reflection.MethodAttributes.HideBySig,
+                    typeof<Void>,
+                    Type.EmptyTypes
+                )
+
+            iface.CreateType () |> ignore<Type>
+
+            // `abstract class A : I { public static void S() { } }`.
+            let abstractType =
+                modul.DefineType (
+                    "A",
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Class
+                    ||| Reflection.TypeAttributes.Abstract,
+                    typeof<obj>,
+                    [| iface :> Type |]
+                )
+
+            let implementation =
+                abstractType.DefineMethod (
+                    "S",
+                    Reflection.MethodAttributes.Public
+                    ||| Reflection.MethodAttributes.Static
+                    ||| Reflection.MethodAttributes.HideBySig,
+                    typeof<Void>,
+                    Type.EmptyTypes
+                )
+
+            implementation.GetILGenerator().Emit Reflection.Emit.OpCodes.Ret
+            abstractType.DefineMethodOverride (implementation, staticAbstract)
+            abstractType.CreateType () |> ignore<Type>
+
             let baseType =
                 modul.DefineType ("Base", Reflection.TypeAttributes.Public ||| Reflection.TypeAttributes.Class)
 
             let constructor =
                 baseType.DefineDefaultConstructor Reflection.MethodAttributes.Public
 
-            // `public virtual void V<T>() where T : class`.
-            let virtualMethod =
+            let virtualGeneric (name : string) =
                 baseType.DefineMethod (
-                    "V",
+                    name,
                     Reflection.MethodAttributes.Public
                     ||| Reflection.MethodAttributes.Virtual
                     ||| Reflection.MethodAttributes.NewSlot
@@ -2516,10 +2573,20 @@ public static class Cases
                     Type.EmptyTypes
                 )
 
+            // `public virtual void V<T>() where T : class`.
+            let virtualMethod = virtualGeneric "V"
+
             (virtualMethod.DefineGenericParameters [| "T" |]).[0].SetGenericParameterAttributes
                 Reflection.GenericParameterAttributes.ReferenceTypeConstraint
 
             virtualMethod.GetILGenerator().Emit Reflection.Emit.OpCodes.Ret
+
+            // `public virtual void W<T>() where T : I`.
+            let interfaceConstrained = virtualGeneric "W"
+
+            (interfaceConstrained.DefineGenericParameters [| "T" |]).[0].SetInterfaceConstraints [| iface :> Type |]
+
+            interfaceConstrained.GetILGenerator().Emit Reflection.Emit.OpCodes.Ret
             baseType.CreateType () |> ignore<Type>
 
             let plain =
@@ -2532,7 +2599,7 @@ public static class Cases
 
             // Each `static int Name()` makes its call on a new `Base` inside `try`, returning 0 if
             // it returns, and 1 if its `catch` stops what it raises.
-            for name, argument, _ in cases do
+            for name, instantiate, _ in cases do
                 let method =
                     plain.DefineMethod (
                         name,
@@ -2545,7 +2612,12 @@ public static class Cases
                 let result = il.DeclareLocal typeof<int>
                 il.BeginExceptionBlock () |> ignore<Reflection.Emit.Label>
                 il.Emit (Reflection.Emit.OpCodes.Newobj, constructor)
-                il.Emit (Reflection.Emit.OpCodes.Callvirt, virtualMethod.MakeGenericMethod [| argument |])
+
+                il.Emit (
+                    Reflection.Emit.OpCodes.Callvirt,
+                    instantiate (virtualMethod, interfaceConstrained, abstractType :> Type)
+                )
+
                 il.Emit Reflection.Emit.OpCodes.Ldc_I4_0
                 il.Emit (Reflection.Emit.OpCodes.Stloc, result)
                 il.BeginCatchBlock typeof<obj>
