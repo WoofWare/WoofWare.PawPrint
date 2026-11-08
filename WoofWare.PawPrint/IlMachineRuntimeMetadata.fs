@@ -2196,10 +2196,14 @@ module IlMachineRuntimeMetadata =
     ///   accepts. A variant argument compares by `IsBoxedAndCanCastTo`, under which a type
     ///   variable counts as a reference only when `ConstrainedAsObjRef`;
     /// - an array source casts to an open generic interface only through the implicit `T[]`
-    ///   interfaces (`ArraySupportsBizarreInterface`).
-    ///
-    /// A composite (array, byref, pointer or function pointer) over a type variable, on either
-    /// side, is refused loudly.
+    ///   interfaces (`ArraySupportsBizarreInterface`);
+    /// - an array source casts to another array of the same rank whose element its own element
+    ///   casts to by `CanCastParam` (`ArrayIsInstanceOf`), and to any other class or non-generic
+    ///   interface exactly as System.Array does;
+    /// - a byref or pointer casts only to another of the same kind, by `CanCastParam` on the
+    ///   element, and a function pointer only to itself (`TypeDesc::CanCastTo`);
+    /// - a nominal source that is not an array casts to no array, byref, pointer or function
+    ///   pointer (`MethodTable::CanCastTo`, `TypeHandle::CanCastTo`).
     let isRuntimeTypeHandleTargetAssignableTo
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -2258,6 +2262,27 @@ module IlMachineRuntimeMetadata =
                 ||> List.fold (fun state next -> walk state (current :: path) next)
 
             walk state [] variable
+
+        // The shape and element of an array, byref or pointer, closed or over a variable; `None`
+        // for anything else.
+        let parameterized (target : RuntimeTypeHandleTarget) : (CompositeShape * RuntimeTypeHandleTarget) option =
+            match target with
+            | RuntimeTypeHandleTarget.Composite (shape, element) -> Some (shape, element)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref element) ->
+                Some (CompositeShape.Byref, RuntimeTypeHandleTarget.Closed element)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer element) ->
+                Some (CompositeShape.Pointer, RuntimeTypeHandleTarget.Closed element)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero element) ->
+                Some (CompositeShape.OneDimArrayZero, RuntimeTypeHandleTarget.Closed element)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array (element, rank)) ->
+                Some (CompositeShape.Array rank, RuntimeTypeHandleTarget.Closed element)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ | ConcreteTypeHandle.FunctionPointer _)
+            | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
+            | RuntimeTypeHandleTarget.OpenConstructed _
+            | RuntimeTypeHandleTarget.DynamicMethodsClass _
+            | RuntimeTypeHandleTarget.GenericParameter _
+            | RuntimeTypeHandleTarget.MethodGenericParameter _
+            | RuntimeTypeHandleTarget.FunctionPointer _ -> None
 
         // `visited` is CoreCLR's `TypeHandlePairList`: the (source, target) pairs already being
         // compared further up this path. Revisiting one through variance answers false, exactly
@@ -2322,9 +2347,28 @@ module IlMachineRuntimeMetadata =
             // a type variable, which `TypeDesc::CanCastTo` refuses too.
             | _, (RuntimeTypeHandleTarget.GenericParameter _ | RuntimeTypeHandleTarget.MethodGenericParameter _) ->
                 state, false
-            | (RuntimeTypeHandleTarget.Composite _ | RuntimeTypeHandleTarget.FunctionPointer _ as composite), _
-            | _, (RuntimeTypeHandleTarget.Composite _ | RuntimeTypeHandleTarget.FunctionPointer _ as composite) ->
-                RuntimeTypeHandleTarget.refuseComposite "isRuntimeTypeHandleTargetAssignableTo" composite
+            // A function pointer is a TypeDesc whose `TypeDesc::CanCastTo` relates it to nothing
+            // but itself, and nothing else casts to one: a MethodTable never casts to a TypeDesc,
+            // and a byref or pointer is a TypeDesc of a different kind.
+            | RuntimeTypeHandleTarget.FunctionPointer _, _
+            | _, RuntimeTypeHandleTarget.FunctionPointer _ -> state, false
+            | RuntimeTypeHandleTarget.Composite _, _
+            | _, RuntimeTypeHandleTarget.Composite _ ->
+                match parameterized source with
+                | Some ((CompositeShape.Byref | CompositeShape.Pointer) as shape, element) ->
+                    // `TypeDesc::CanCastTo`: the element kinds must match, and then the elements
+                    // are compared by `CanCastParam`.
+                    match parameterized target with
+                    | Some (targetShape, targetElement) when targetShape = shape ->
+                        canCastParam visited state element targetElement
+                    | _ -> state, false
+                | Some ((CompositeShape.OneDimArrayZero | CompositeShape.Array _) as shape, element) ->
+                    arrayCanCast visited state shape element target
+                | None ->
+                    // The target is the composite. `MethodTable::CanCastTo` casts a non-array
+                    // MethodTable to no array, and `TypeHandle::CanCastTo` a MethodTable to no
+                    // byref or pointer.
+                    state, false
             // A TypeDesc never casts to a MethodTable (`TypeDesc::CanCastTo`'s last arm).
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _ | ConcreteTypeHandle.Pointer _ | ConcreteTypeHandle.FunctionPointer _),
               _ -> state, false
@@ -2352,6 +2396,91 @@ module IlMachineRuntimeMetadata =
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _), _
             | (RuntimeTypeHandleTarget.OpenGenericTypeDefinition _ | RuntimeTypeHandleTarget.OpenConstructed _), _ ->
                 methodTableCanCast visited state source target
+
+        // `TypeDesc::CanCastParam` (typedesc.cpp:386), how an array's, byref's or pointer's element
+        // is compared. It is reached only from a pair at least one side of which is open, so at
+        // least one element is open; its primitive-width rule relates two primitives, which are
+        // closed, and so what is left of it is identity and `IsBoxedAndCanCastTo`.
+        and canCastParam
+            (visited : Set<RuntimeTypeHandleTarget * RuntimeTypeHandleTarget>)
+            (state : IlMachineState)
+            (from : RuntimeTypeHandleTarget)
+            (``to`` : RuntimeTypeHandleTarget)
+            : IlMachineState * bool
+            =
+            match from, ``to`` with
+            | RuntimeTypeHandleTarget.Closed _, RuntimeTypeHandleTarget.Closed _ ->
+                failwith
+                    $"logic error: canCastParam reached with two closed elements, %O{from} and %O{``to``}, whose primitive-width rule belongs to isConcreteTypeAssignableTo"
+            | _ ->
+
+            if from = ``to`` then
+                state, true
+            else
+                isBoxedAndCanCastTo visited state from ``to``
+
+        // `MethodTable::CanCastTo` (methodtable.cpp:1385) for an array source of the given shape and
+        // element, against a target that is not the same type.
+        and arrayCanCast
+            (visited : Set<RuntimeTypeHandleTarget * RuntimeTypeHandleTarget>)
+            (state : IlMachineState)
+            (shape : CompositeShape)
+            (element : RuntimeTypeHandleTarget)
+            (target : RuntimeTypeHandleTarget)
+            : IlMachineState * bool
+            =
+            match parameterized target with
+            | Some ((CompositeShape.OneDimArrayZero | CompositeShape.Array _) as targetShape, targetElement) ->
+                // `MethodTable::ArrayIsInstanceOf` (methodtable.cpp:1458): no multi-dimensional
+                // array is an szarray, and otherwise the ranks must agree, an szarray's rank
+                // being 1.
+                let ranksAgree =
+                    match shape, targetShape with
+                    | CompositeShape.OneDimArrayZero, CompositeShape.OneDimArrayZero -> true
+                    | CompositeShape.Array _, CompositeShape.OneDimArrayZero -> false
+                    | CompositeShape.OneDimArrayZero, CompositeShape.Array targetRank -> targetRank = 1
+                    | CompositeShape.Array rank, CompositeShape.Array targetRank -> rank = targetRank
+                    | _ ->
+                        failwith
+                            $"logic error: arrayCanCast compared the non-array shapes %O{shape} and %O{targetShape}"
+
+                if not ranksAgree then state, false
+                elif element = targetElement then state, true
+                else canCastParam visited state element targetElement
+            // An array is a MethodTable, and a MethodTable casts to no TypeDesc.
+            | Some ((CompositeShape.Byref | CompositeShape.Pointer), _) -> state, false
+            | None ->
+
+            match target with
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _)
+            | RuntimeTypeHandleTarget.FunctionPointer _
+            | RuntimeTypeHandleTarget.GenericParameter _
+            | RuntimeTypeHandleTarget.MethodGenericParameter _ -> state, false
+            | _ ->
+
+            match nominalInstantiation state target with
+            | Some (identity, (_ :: _ as arguments)) when isInterfaceTarget state target ->
+                // `ArraySupportsBizarreInterface` (methodtable.cpp:1433): a generic interface only
+                // through an szarray's implicit ones, over an element `CanCastParam` accepts.
+                match shape, arguments with
+                | CompositeShape.OneDimArrayZero, [ targetElement ] when
+                    baseClassTypes.IsImplicitInterfaceOfSzArray identity
+                    ->
+                    canCastParam visited state element targetElement
+                | _ -> state, false
+            | _ ->
+                // `CanCastToClass` or `CanCastToInterface` over the array's MethodTable, whose
+                // parent is System.Array and whose non-generic interfaces are System.Array's.
+                let state, parent =
+                    resolveBaseRuntimeTypeHandleTarget
+                        loggerFactory
+                        baseClassTypes
+                        state
+                        (RuntimeTypeHandleTarget.composite shape element)
+
+                match parent with
+                | Some parent -> canCast visited state parent target
+                | None -> failwith $"logic error: the array over %O{element} has no parent"
 
         // `TypeHandle::IsBoxedAndCanCastTo` (typehandle.cpp:546), the comparison a variant
         // argument is held to: `from` must be an object reference, which for a type variable means
@@ -2419,6 +2548,9 @@ module IlMachineRuntimeMetadata =
             =
             match target with
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _ | ConcreteTypeHandle.Array _) ->
+                state, false
+            // A MethodTable casts to no TypeDesc (`TypeHandle::CanCastTo`).
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _ | ConcreteTypeHandle.Pointer _ | ConcreteTypeHandle.FunctionPointer _) ->
                 state, false
             | _ when isObject state target ->
                 // Every reference type (including an interface) and every boxed value type casts to
