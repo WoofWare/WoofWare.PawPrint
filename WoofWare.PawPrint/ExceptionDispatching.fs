@@ -653,6 +653,9 @@ module ExceptionDispatching =
     /// consumes nothing either: real .NET has no `StackTraceElement` for that stub and hence no
     /// `AppendElement` call to read the flag, which stays pending for the next genuine frame the
     /// raise reaches.
+    ///
+    /// .NET 11's `Environment.CallEntryPoint`, beneath `Main`, appends nothing either
+    /// (`StackFrameCapture.isEntryPointCaller`).
     let private appendCallerFrame
         (currentThread : ThreadId)
         (caller : MethodState)
@@ -662,6 +665,12 @@ module ExceptionDispatching =
         : IlMachineState * CliException<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
         =
         if StackFrameCapture.isDelegateInvokeStub caller then
+            state, cliException
+        elif StackFrameCapture.isEntryPointCaller caller then
+            // CoreCLR's `AppendElement` clears a pending foreign-raise flag before it declines to
+            // append this frame. Leaving the flag alone instead differs from that only if one is
+            // pending here, and none can be: the raise has already appended `Main`'s frame, its
+            // only callee, which consumed it.
             state, cliException
         else
 

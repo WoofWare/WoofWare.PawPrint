@@ -68,7 +68,9 @@ public class Program
                                 loggerFactory
                                 (Some "EntryPointCallerTrace")
                                 peImage
-                                (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                                (HostConfig.Default (
+                                    FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+                                ))
                         with _ ->
                             for message in messages () do
                                 Console.Error.WriteLine $"{message}"
