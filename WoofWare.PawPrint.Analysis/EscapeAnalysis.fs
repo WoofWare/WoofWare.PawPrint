@@ -6648,22 +6648,26 @@ module EscapeAnalysis =
             state, DispatchOutcome.Undecided
         else
 
-        let typeSystem, concretized, declaringType =
-            match
-                MethodConcretisation.concretizeMethodWithAllGenerics
-                    state.LoggerFactory
-                    state.RuntimeDirs
-                    state.BaseTypes
-                    (ImmutableArray.CreateRange namedTypeArguments)
-                    definition
-                    (ImmutableArray.CreateRange namedMethodArguments)
-                    state.TypeSystem
-            with
-            | typeSystem, Ok (concretized, declaringType) -> typeSystem, concretized, declaringType
-            | _, Error (TypeBindingFailure.Refused (TypeLoadRefusal.InvalidMethodInstantiation _) as failure) ->
-                failwith
-                    $"BUG: a call names an instantiation CoreCLR refuses, which binding its token reports and leaves without arguments (`bindToken`): %s{TypeBindingFailure.describe failure}"
-            | _, Error failure -> failwith (TypeBindingFailure.describe failure)
+        match
+            MethodConcretisation.concretizeMethodWithAllGenerics
+                state.LoggerFactory
+                state.RuntimeDirs
+                state.BaseTypes
+                (ImmutableArray.CreateRange namedTypeArguments)
+                definition
+                (ImmutableArray.CreateRange namedMethodArguments)
+                state.TypeSystem
+        with
+        // CoreCLR refuses the instantiation as the JIT compiles the body naming it, before anything
+        // is dispatched. The analysis does not yet name that refusal, so which method runs, and what
+        // the call raises, is left undecided here, as for a signature that does not load.
+        | _, Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodConstraintsViolated _)) ->
+            state, DispatchOutcome.Undecided
+        | _, Error (TypeBindingFailure.Refused (TypeLoadRefusal.InvalidMethodInstantiation _) as failure) ->
+            failwith
+                $"BUG: a call names an instantiation CoreCLR refuses, which binding its token reports and leaves without arguments (`bindToken`): %s{TypeBindingFailure.describe failure}"
+        | _, Error failure -> failwith (TypeBindingFailure.describe failure)
+        | typeSystem, Ok (concretized, declaringType) ->
 
         let implementationOn
             (walkBaseTypes : bool)
