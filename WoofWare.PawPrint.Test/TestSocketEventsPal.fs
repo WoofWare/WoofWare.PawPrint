@@ -20,15 +20,18 @@ open WoofWare.PosixKernel
 [<Parallelizable(ParallelScope.All)>]
 module TestSocketEventsPal =
 
-    let private palPath (leaf : string) : string =
+    let private palPathIn (runtimeSource : string) (leaf : string) : string =
         let path =
-            Path.Combine (FrameworkUnderTest.requireRuntimeSource (), "src", "native", "libs", "System.Native", leaf)
+            Path.Combine (runtimeSource, "src", "native", "libs", "System.Native", leaf)
 
         if not (File.Exists path) then
             failwith
                 $"TestSocketEventsPal: expected the pinned PAL networking source at %s{path}. If the sparse checkout in flake.nix no longer includes src/native/libs/System.Native, this transcription has lost its oracle."
 
         path
+
+    let private palPath (leaf : string) : string =
+        palPathIn (FrameworkUnderTest.requireRuntimeSource ()) leaf
 
     /// `SocketEvents_SA_READ = 0x01,` and friends.
     let private palEntry : Regex =
@@ -371,8 +374,9 @@ module TestSocketEventsPal =
     // changelist.
     // ---------------------------------------------------------------------
 
-    let private keventChangeInnerBody () : string =
-        let source = File.ReadAllText (palPath "pal_networking.c")
+    let private keventChangeInnerBody (runtime : EmulatedRuntime) : string =
+        let source =
+            File.ReadAllText (palPathIn (FrameworkUnderTest.requireRuntimeSourceOf runtime) "pal_networking.c")
 
         // The kqueue backend's definitions follow its own `GetSocketEvents`,
         // whose signature the epoll backend's does not share.
@@ -390,25 +394,42 @@ module TestSocketEventsPal =
 
         functionBody kqueueSection "static int32_t TryChangeSocketEventRegistrationInner("
 
+    let everyRuntime : TestCaseData list = FrameworkUnderTest.everyRuntime
+
     /// Upstream builds at most two changes, `EVFILT_READ` first when `SA_READ`
     /// changed and then `EVFILT_WRITE` when `SA_WRITE` did, each an add or a
-    /// delete by whether the new mask has the bit, with `EV_RECEIPT` on both
-    /// wherever the header defines it, as Darwin's does. Read out of the body,
-    /// then checked against `keventChanges` for every pair of masks.
-    [<Test>]
-    let ``the kqueue changelist is upstream's`` () : unit =
-        Net11Frontier.park
-            ".NET 11's `TryChangeSocketEventRegistrationInner` registers kqueue events with `EV_ADD | EV_CLEAR` and `EV_DELETE`, without the `EV_RECEIPT` .NET 10's adds, so the changelist `SocketEventsPal` reproduces is .NET 10's. Un-park when it follows each runtime's."
-
-        let body = keventChangeInnerBody ()
+    /// delete by whether the new mask has the bit. .NET 10 adds `EV_RECEIPT` to
+    /// both wherever the header defines it, as Darwin's does; .NET 11 never
+    /// does. Read out of each runtime's body, then checked against
+    /// `keventChanges` for every pair of masks.
+    [<TestCaseSource(nameof everyRuntime)>]
+    let ``the kqueue changelist is upstream's`` (runtime : EmulatedRuntime) : unit =
+        let body = keventChangeInnerBody runtime
 
         let expect (pattern : string) =
             if not (Regex.IsMatch (body, pattern)) then
                 failwith
-                    $"TestSocketEventsPal: the kqueue TryChangeSocketEventRegistrationInner no longer matches /%s{pattern}/. Read the body and teach this test.\n%s{body}"
+                    $"TestSocketEventsPal: %O{runtime}'s kqueue TryChangeSocketEventRegistrationInner no longer matches /%s{pattern}/. Read the body and teach this test.\n%s{body}"
 
-        expect
-            @"#ifdef EV_RECEIPT\s*const uint16_t AddFlags = EV_ADD \| EV_CLEAR \| EV_RECEIPT;\s*const uint16_t RemoveFlags = EV_DELETE \| EV_RECEIPT;"
+        let withReceipt =
+            @"#ifdef EV_RECEIPT\s*const uint16_t AddFlags = EV_ADD \| EV_CLEAR \| EV_RECEIPT;\s*const uint16_t RemoveFlags = EV_DELETE \| EV_RECEIPT;\s*#else\s*const uint16_t AddFlags = EV_ADD \| EV_CLEAR;\s*const uint16_t RemoveFlags = EV_DELETE;\s*#endif"
+
+        let withoutReceipt =
+            @"uintptr_t data\)\s*\{\s*const uint16_t AddFlags = EV_ADD \| EV_CLEAR;\s*const uint16_t RemoveFlags = EV_DELETE;"
+
+        // Darwin defines EV_RECEIPT, so a body whose flags depend on it takes the
+        // first branch there.
+        let receipt =
+            match Regex.IsMatch (body, withReceipt), Regex.IsMatch (body, withoutReceipt) with
+            | true, false -> true
+            | false, true -> false
+            | inReceipt, inPlain ->
+                failwith
+                    $"TestSocketEventsPal: %O{runtime}'s kqueue TryChangeSocketEventRegistrationInner declares its flags in neither known form (with EV_RECEIPT under #ifdef: %b{inReceipt}; without it, unconditionally: %b{inPlain}). Read the body and teach this test.\n%s{body}"
+
+        if (Regex.Matches (body, @"\bEV_RECEIPT\b")).Count <> (if receipt then 3 else 0) then
+            failwith
+                $"TestSocketEventsPal: %O{runtime}'s kqueue TryChangeSocketEventRegistrationInner mentions EV_RECEIPT somewhere this test does not read. Read the body and teach this test.\n%s{body}"
 
         expect @"int8_t readChanged = \(changes & SocketEvents_SA_READ\) != 0;"
         expect @"int8_t writeChanged = \(changes & SocketEvents_SA_WRITE\) != 0;"
@@ -424,8 +445,9 @@ module TestSocketEventsPal =
 
         // Darwin 27.0.0's <sys/event.h>, measured: EVFILT_READ -1, EVFILT_WRITE -2,
         // EV_ADD 0x1, EV_DELETE 0x2, EV_CLEAR 0x20, EV_RECEIPT 0x40.
-        let add = 0x0001us ||| 0x0020us ||| 0x0040us
-        let remove = 0x0002us ||| 0x0040us
+        let receiptFlag = if receipt then 0x0040us else 0us
+        let add = 0x0001us ||| 0x0020us ||| receiptFlag
+        let remove = 0x0002us ||| receiptFlag
 
         for current in 0 .. SocketEventsPal.supported do
             for next in 0 .. SocketEventsPal.supported do
@@ -447,7 +469,8 @@ module TestSocketEventsPal =
                             change -2s 0x02
                     ]
 
-                SocketEventsPal.keventChanges -7 current next 0xC0FFEEUL |> shouldEqual expected
+                SocketEventsPal.keventChanges runtime -7 current next 0xC0FFEEUL
+                |> shouldEqual expected
 
     /// The kqueue build's `GetSocketEvents(int16_t filter, uint16_t flags)`, read out
     /// of the pinned source: `EVFILT_READ` is `SA_READ` with `SA_READCLOSE` for

@@ -109,16 +109,30 @@ module SocketEventsPal =
             system
 
     /// `TryChangeSocketEventRegistrationInner`, the kqueue build's, past the
-    /// wrapper's two screens: the changelist the shim passes `kevent`. It
-    /// changes `EVFILT_READ` when `SA_READ` differs between the two masks, and
-    /// then `EVFILT_WRITE` when `SA_WRITE` does, each `EV_ADD|EV_CLEAR|EV_RECEIPT`
-    /// when the new mask has the bit and `EV_DELETE|EV_RECEIPT` when it does
-    /// not, naming the socket's descriptor and carrying `data`. Empty when
-    /// neither bit changed: the shim then calls `kevent` with no changes at all.
-    let keventChanges (socketFd : int) (currentEvents : int) (newEvents : int) (data : uint64) : Kevent list =
+    /// wrapper's two screens: the changelist `runtime`'s shim passes `kevent`.
+    /// It changes `EVFILT_READ` when `SA_READ` differs between the two masks,
+    /// and then `EVFILT_WRITE` when `SA_WRITE` does, each `EV_ADD|EV_CLEAR`
+    /// when the new mask has the bit and `EV_DELETE` when it does not, naming
+    /// the socket's descriptor and carrying `data`. .NET 10's shim adds
+    /// `EV_RECEIPT` to both, and .NET 11's does not; a registration's flags are
+    /// what kevent echoes back in each event it reports. Empty when neither bit
+    /// changed: the shim then calls `kevent` with no changes at all.
+    let keventChanges
+        (runtime : EmulatedRuntime)
+        (socketFd : int)
+        (currentEvents : int)
+        (newEvents : int)
+        (data : uint64)
+        : Kevent list
+        =
         let saRead = 0x01
         let saWrite = 0x02
         let changes = currentEvents ^^^ newEvents
+
+        let receipt =
+            match runtime with
+            | EmulatedRuntime.Net10 -> KeventFlags.Receipt
+            | EmulatedRuntime.Net11 -> 0us
 
         let change (filter : int16) (bit : int) : Kevent =
             {
@@ -127,9 +141,9 @@ module SocketEventsPal =
                 Filter = filter
                 Flags =
                     if newEvents &&& bit = 0 then
-                        KeventFlags.Delete ||| KeventFlags.Receipt
+                        KeventFlags.Delete ||| receipt
                     else
-                        KeventFlags.Add ||| KeventFlags.Clear ||| KeventFlags.Receipt
+                        KeventFlags.Add ||| KeventFlags.Clear ||| receipt
                 FilterFlags = 0u
                 Data = 0L
                 UserData = data

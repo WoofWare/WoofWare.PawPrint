@@ -6220,12 +6220,7 @@ module TestImpureCases =
 
     /// The cases of `registeredEverywhere` parked on .NET 11, by file name, each with why it is parked
     /// there and what would un-park it.
-    let parkedOnNet11 : Map<string, string> =
-        [
-            "KqueueRegistrationDarwin.cs",
-            """On .NET 11, the System.Native shim registers a socket on its kqueue with `EV_ADD | EV_CLEAR`, where .NET 10's adds `EV_RECEIPT` (pal_networking.c, `SystemNative_TryChangeSocketEventRegistration`). The case asserts the flags kevent writes back under .NET 10's registration: real RC1 exits 26 (measured), at the check that a refused socket's WRITE event carries `0x8061`, which is `EV_ADD | EV_CLEAR | EV_RECEIPT` with `EV_EOF`. PawPrint registers with .NET 10's flags on every runtime. Un-park when PawPrint registers with each runtime's flags and this case states .NET 11's."""
-        ]
-        |> Map.ofList
+    let parkedOnNet11 : Map<string, string> = Map.empty
 
     /// The cases of `registeredEverywhere` parked on .NET 11 only in their registration for a Linux
     /// kernel, by file name: each Darwin registration ends before it reaches the blocker.

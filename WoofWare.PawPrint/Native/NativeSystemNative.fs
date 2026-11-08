@@ -7722,10 +7722,15 @@ module NativeSystemNative =
                 // `kevent(port, changes, n, NULL, 0, NULL)`, with the changelist
                 // `SocketEventsPal.keventChanges` transcribes; the shim's EINTR
                 // loop never turns, a call with no events to take never sleeping.
-                // With no room in the eventlist, a receipt is dropped and a
+                // With no room in the eventlist, any receipt is dropped and a
                 // failing change ends the call, the changes before it applied.
                 let changes =
-                    SocketEventsPal.keventChanges targetFd currentEvents newEvents placeholder
+                    SocketEventsPal.keventChanges
+                        (EmulatedRuntime.ofCoreLib ctx.BaseClassTypes.Corelib)
+                        targetFd
+                        currentEvents
+                        newEvents
+                        placeholder
 
                 let kevent (changes : Kevent list) =
                     UnixKqueue.kevent
