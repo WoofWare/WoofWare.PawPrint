@@ -1461,7 +1461,7 @@ module NativeRuntimeTypeHelpers =
     ///    (ECMA-335 §II.22.21), i.e. base-class and interface requirements.
     ///
     /// Each general constraint is read in the *caller's* substitution context —
-    /// `declaringAssemblyFullName` / `typeVariables` / `methodGenerics` — before the assignability check,
+    /// `declaringAssemblyFullName` / `typeVariables` / `methodVariables` — before the assignability check,
     /// exactly as CoreCLR loads it under `pTypeContextOfConstraintDeclarer` rather than deferring
     /// to `CanCastTo` on a typical instantiation. The comment at typedesc.cpp:1565-1580 gives the
     /// motivating example: verifying `S : A&lt;R&gt;` against `U : A&lt;T&gt;` requires substituting
@@ -1475,6 +1475,8 @@ module NativeRuntimeTypeHelpers =
     /// whether a closed argument casts to it. `where U : T` then admits no closed argument, while
     /// `where U : IComparer&lt;T&gt;` admits `IComparer&lt;object&gt;` when `T : class`, by
     /// contravariance.
+    /// `methodVariables` is `Open` in the same way when the method is a generic method definition
+    /// read as itself, which is the context `RuntimeTypeHandle.SatisfiesConstraints` asks in.
     ///
     /// CoreCLR additionally walks the *constraining chain* of the argument when the argument is
     /// itself a type variable (`GatherConstraintsRecursive`), because `class A&lt;S, T&gt; where S : T`
@@ -1498,7 +1500,7 @@ module NativeRuntimeTypeHelpers =
         (ownerDisplayName : string)
         (declaringAssemblyFullName : string)
         (typeVariables : ReflectedTypeTarget.ReflectionVariableBinding)
-        (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
+        (methodVariables : ReflectedTypeTarget.ReflectionVariableBinding)
         (generics : GenericParamFromMetadata ImmutableArray)
         (genericArguments : ConcreteTypeHandle list)
         : IlMachineState * GenericConstraintViolation option
@@ -1522,8 +1524,7 @@ module NativeRuntimeTypeHelpers =
         let environment =
             {
                 ReflectedTypeTarget.ReflectionTypeEnvironment.TypeVariables = typeVariables
-                ReflectedTypeTarget.ReflectionTypeEnvironment.MethodVariables =
-                    ReflectedTypeTarget.ReflectionVariableBinding.Bound methodGenerics
+                ReflectedTypeTarget.ReflectionTypeEnvironment.MethodVariables = methodVariables
             }
 
         /// Whether the flag-style constraints or the byref-like rejection refuse `arg`. None of
@@ -1643,7 +1644,7 @@ module NativeRuntimeTypeHelpers =
             $"%s{typeInfo.Namespace}.%s{typeInfo.Name}"
             typeInfo.AssemblyFullName
             (ReflectedTypeTarget.ReflectionVariableBinding.Bound (ImmutableArray.CreateRange genericArguments))
-            ImmutableArray.Empty
+            (ReflectedTypeTarget.ReflectionVariableBinding.Bound ImmutableArray.Empty)
             typeInfo.Generics
             genericArguments
 
@@ -1659,6 +1660,20 @@ module NativeRuntimeTypeHelpers =
         : string
         =
         $"Method %s{declaringType}.%s{methodName}: type argument '%s{typeArgument}' violates the constraint of type parameter '%s{typeParameter}'."
+
+    /// `IDS_EE_CLASS_CONSTRAINTS_VIOLATION`, the message of the `TypeLoadException` CoreCLR raises
+    /// while loading a generic type at an argument one of its type parameters refuses
+    /// (`SatisfiesClassConstraints`, typehandle.cpp:1283-1305). Each part is spelled as
+    /// `TypeString::AppendType` spells it there: the refusing parameter's zero-based position, the
+    /// refused type argument, the generic type definition, and the name of the parameter.
+    let classConstraintsViolationMessage
+        (position : int)
+        (typeArgument : string)
+        (genericTypeDefinition : string)
+        (typeParameter : string)
+        : string
+        =
+        $"GenericArguments[%d{position}], '%s{typeArgument}', on '%s{genericTypeDefinition}' violates the constraint of type parameter '%s{typeParameter}'."
 
     let getOrAllocateRuntimeAssembly
         (loggerFactory : ILoggerFactory)

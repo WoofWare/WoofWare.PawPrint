@@ -1741,21 +1741,18 @@ module NativeRuntimeMethodHandle =
                         $"%s{operation}: rebinding %s{methodInfo.Name} onto %O{other}, which cannot declare a generic method"
 
             // CoreCLR validates the method's generic constraints while binding
-            // (`FindOrCreateAssociatedMethodDesc` -> `SatisfiesMethodConstraints`) and surfaces a
-            // violation to the caller of `MakeGenericMethod` as `ArgumentException`: the binder
-            // raises `VerificationException`, which `RuntimeMethodInfo.MakeGenericMethod` catches
-            // and rewrites via `ValidateGenericArguments`
+            // (`FindOrCreateAssociatedMethodDesc` -> `SatisfiesMethodConstraints`) and raises
+            // `VerificationException` for a violation, which `RuntimeMethodInfo.MakeGenericMethod`
+            // catches and wraps in an `ArgumentException` of its own via `ValidateGenericArguments`
             // (RuntimeMethodInfo.CoreCLR.cs:446-450). The managed `SanityCheckGenericArguments`
             // that runs *before* the QCall only screens nulls, non-RuntimeType arguments and arity,
             // so without this check PawPrint would hand back a usable handle where real .NET
-            // throws. We raise `ArgumentException` directly, which the managed `catch
-            // (VerificationException)` does not intercept, so it propagates as the same exception
-            // type the caller would have seen.
+            // throws.
             //
             // A method's generic parameters live in the same substitution scope as its declaring
             // type's, so a constraint on one of them may mention either (`!0` or `!!0`). Both
             // contexts therefore have to go in: the declaring type's variables as `typeVariables`,
-            // the instantiation being bound as `methodGenerics`.
+            // the instantiation being bound as the method's.
             let state, constraintViolation =
                 NativeRuntimeTypeHelpers.validateConstraintsOn
                     ctx.LoggerFactory
@@ -1764,13 +1761,42 @@ module NativeRuntimeMethodHandle =
                     $"%s{MethodOwner.describe methodInfo.Owner}.%s{methodInfo.Name}"
                     methodInfo.DeclaringAssemblyFullName
                     typeVariables
-                    (ImmutableArray.CreateRange methodInstantiation)
+                    (ReflectedTypeTarget.ReflectionVariableBinding.Bound (
+                        ImmutableArray.CreateRange methodInstantiation
+                    ))
                     methodInfo.Generics
                     methodInstantiation
 
             match constraintViolation with
-            | Some _ ->
-                NativeHandlerResult.raiseException ctx.BaseClassTypes.ArgumentException state
+            | Some violation ->
+                // `SatisfiesMethodConstraintsForInstantiation` (genmeth.cpp:359-372) names the
+                // declaring type as `instType` gives it, so a definition spells its own formals.
+                let render (target : RuntimeTypeHandleTarget) : string =
+                    NativeRuntimeTypeHelpers.runtimeTypeHandleName
+                        operation
+                        ctx.BaseClassTypes
+                        state
+                        NativeRuntimeTypeHelpers.formatNamespaceFlag
+                        target
+
+                let formalParameter =
+                    RuntimeTypeHandleTarget.MethodGenericParameter (
+                        methodInfo.RequiredDeclaringType.Identity,
+                        identity.GetMethodDefinitionHandle (),
+                        violation.Parameter.SequenceNumber
+                    )
+
+                let message =
+                    NativeRuntimeTypeHelpers.methodConstraintsViolationMessage
+                        (render declaringTarget)
+                        methodInfo.Name
+                        (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                        (render formalParameter)
+
+                NativeHandlerResult.raiseExceptionWithMessage
+                    ctx.BaseClassTypes.VerificationException
+                    (Some message)
+                    state
                 |> Some
             | None ->
 

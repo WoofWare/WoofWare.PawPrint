@@ -491,11 +491,31 @@ module NativeRuntimeTypeQCall =
                 match openGenericTypeInfoForValidation state typeHandleTarget with
                 | None -> state, None
                 | Some typeInfo ->
-                    validateConstraints ctx.LoggerFactory ctx.BaseClassTypes state typeInfo genericArguments
+                    let state, violation =
+                        validateConstraints ctx.LoggerFactory ctx.BaseClassTypes state typeInfo genericArguments
+
+                    state, violation |> Option.map (fun violation -> typeInfo, violation)
 
             match constraintViolation with
-            | Some _ ->
-                NativeHandlerResult.raiseException ctx.BaseClassTypes.ArgumentException state
+            | Some (typeInfo, violation) ->
+                // CoreCLR's full load raises `TypeLoadException` through `COMPlusThrow`, which sets
+                // the message and nothing else, so its `TypeName` is empty
+                // (`SatisfiesClassConstraints`, typehandle.cpp:1283-1305). `MakeGenericType` catches
+                // it and asks `RuntimeTypeHandle.SatisfiesConstraints` which argument to name in its
+                // own `ArgumentException`, which wraps this one.
+                let render (target : RuntimeTypeHandleTarget) : string =
+                    runtimeTypeHandleName operation ctx.BaseClassTypes state formatNamespaceFlag target
+
+                let position = violation.Parameter.SequenceNumber
+
+                let message =
+                    classConstraintsViolationMessage
+                        position
+                        (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                        (render (RuntimeTypeHandleTarget.OpenGenericTypeDefinition typeInfo.Identity))
+                        (render (RuntimeTypeHandleTarget.GenericParameter (typeInfo.Identity, position)))
+
+                NativeHandlerResult.raiseExceptionWithMessage ctx.BaseClassTypes.TypeLoadException (Some message) state
                 |> Some
             | None ->
 
@@ -523,6 +543,170 @@ module NativeRuntimeTypeQCall =
                     (CliType.ObjectRef (Some runtimeTypeAddr))
 
             NativeHandlerResult.completed state |> Some
+        | "RuntimeTypeHandle_SatisfiesConstraints",
+          "System.Private.CoreLib",
+          "System",
+          "RuntimeTypeHandle",
+          "SatisfiesConstraints",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        paramGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        contextGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System", "RuntimeMethodHandleInternal", methodGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        toTypeGenerics) ],
+          MethodReturnType.Returns (CorelibType state.TypeSystem.ConcreteTypes ("", "BOOL", boolGenerics)) when
+            paramGenerics.IsEmpty
+            && contextGenerics.IsEmpty
+            && methodGenerics.IsEmpty
+            && toTypeGenerics.IsEmpty
+            && boolGenerics.IsEmpty
+            ->
+            // CoreCLR runtimehandles.cpp:986: whether one generic parameter's constraints admit
+            // `toType`, reading each constraint under the instantiation of `typeContext`'s
+            // MethodTable and of `methodContext`. CoreLib's `ValidateGenericArguments` asks with
+            // the generic definition itself as the context (or, for a method, its declaring type as
+            // reflected and the generic method definition), so a constraint naming another
+            // parameter is read against that parameter, not against the argument bound to it.
+            let operation = "RuntimeTypeHandle.SatisfiesConstraints"
+
+            if instruction.Arguments.Length <> 4 then
+                failwith $"%s{operation}: expected four native arguments, got %d{instruction.Arguments.Length}"
+
+            let parameter =
+                NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let typeContext =
+                NativeCall.qCallTypeHandleToRuntimeTypeHandleTargetOption
+                    operation
+                    state
+                    (instruction.Arguments.[1] |> EvalStackValue.ofCliType)
+
+            let methodContext =
+                MethodHandleResolution.methodHandleIdOfRuntimeMethodHandleInternal operation instruction.Arguments.[2]
+                |> Option.map (fun _ ->
+                    NativeRuntimeMethodHandle.resolveMetadataIdentityFromArg operation state instruction.Arguments.[2]
+                )
+
+            let argument =
+                match
+                    NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget
+                        operation
+                        state
+                        (instruction.Arguments.[3] |> EvalStackValue.ofCliType)
+                with
+                | RuntimeTypeHandleTarget.Closed handle -> handle
+                | other ->
+                    // Every argument `MakeGenericType` and `MakeGenericMethod` reach this QCall with
+                    // was first bound by the instantiating QCall, which PawPrint answers only for
+                    // closed arguments.
+                    failwith
+                        $"TODO: %s{operation}: the argument %O{other} is not a closed type; deciding constraints for an open argument needs the argument's own constraints (`GatherConstraintsRecursive`), which PawPrint does not model"
+
+            let loadedAssembly (assemblyFullName : string) : DumpedAssembly =
+                state.LoadedAssembly assemblyFullName
+                |> Option.defaultWith (fun () -> failwith $"%s{operation}: assembly %s{assemblyFullName} is not loaded")
+
+            // `typeContext`'s MethodTable instantiation: its arguments if it is an instantiation,
+            // its own formals if it is a definition, and nothing if it is absent.
+            let typeVariables : ReflectedTypeTarget.ReflectionVariableBinding =
+                match typeContext with
+                | None -> ReflectedTypeTarget.ReflectionVariableBinding.Bound ImmutableArray.Empty
+                | Some (RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle)) ->
+                    AllConcreteTypes.lookup handle state.TypeSystem.ConcreteTypes
+                    |> Option.defaultWith (fun () ->
+                        failwith $"%s{operation}: type context %O{handle} is not registered in ConcreteTypes"
+                    )
+                    |> fun concreteType -> ReflectedTypeTarget.ReflectionVariableBinding.Bound concreteType.Generics
+                | Some (RuntimeTypeHandleTarget.OpenGenericTypeDefinition definition) ->
+                    let typeInfo =
+                        (loadedAssembly definition.AssemblyFullName).TypeDefs.[definition.TypeDefinition.Get]
+
+                    Seq.init
+                        typeInfo.Generics.Length
+                        (fun index -> RuntimeTypeHandleTarget.GenericParameter (definition, index))
+                    |> ImmutableArray.CreateRange
+                    |> ReflectedTypeTarget.ReflectionVariableBinding.Open
+                | Some (RuntimeTypeHandleTarget.OpenConstructed (_, arguments)) ->
+                    ReflectedTypeTarget.ReflectionVariableBinding.Open (ImmutableArray.CreateRange arguments)
+                | Some other ->
+                    // CoreLib passes a declaring type, and nothing but a MethodTable-backed type
+                    // declares a generic type or method.
+                    failwith $"%s{operation}: type context %O{other} cannot declare a generic parameter"
+
+            // `methodContext`'s instantiation, as `MethodDesc::GetMethodInstantiation` reports it: a
+            // generic method definition's own formals, or the arguments an instantiation binds.
+            let methodVariables : ReflectedTypeTarget.ReflectionVariableBinding =
+                match methodContext with
+                | None -> ReflectedTypeTarget.ReflectionVariableBinding.Bound ImmutableArray.Empty
+                | Some identity ->
+                    match identity.GetMethodGenerics () with
+                    | [] ->
+                        let methodInfo =
+                            MethodHandleResolution.methodInfoOfMetadataIdentity operation state identity
+
+                        NativeRuntimeMethodHandle.methodInstantiationTargets
+                            operation
+                            methodInfo.RequiredDeclaringType.Identity
+                            (identity.GetMethodDefinitionHandle ())
+                            methodInfo.Generics.Length
+                            []
+                        |> ImmutableArray.CreateRange
+                        |> ReflectedTypeTarget.ReflectionVariableBinding.Open
+                    | bound -> ReflectedTypeTarget.ReflectionVariableBinding.Bound (ImmutableArray.CreateRange bound)
+
+            // `TypeHandle::AsGenericVariable`: CoreLib passes one of the definition's own parameters.
+            let declaringAssemblyFullName, ownerDisplayName, parameterEntry =
+                match parameter with
+                | RuntimeTypeHandleTarget.GenericParameter (declaringType, position) ->
+                    let typeInfo =
+                        (loadedAssembly declaringType.AssemblyFullName).TypeDefs.[declaringType.TypeDefinition.Get]
+
+                    if position < 0 || position >= typeInfo.Generics.Length then
+                        failwith
+                            $"%s{operation}: generic parameter position %d{position} is out of range for %s{typeInfo.Name}, which declares %d{typeInfo.Generics.Length}"
+
+                    declaringType.AssemblyFullName,
+                    $"%s{typeInfo.Namespace}.%s{typeInfo.Name}",
+                    typeInfo.Generics.[position]
+                | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, position) ->
+                    let methodInfo =
+                        (loadedAssembly declaringType.AssemblyFullName).Methods.[declaringMethod.Get]
+
+                    if position < 0 || position >= methodInfo.Generics.Length then
+                        failwith
+                            $"%s{operation}: method generic parameter position %d{position} is out of range for %s{methodInfo.Name}, which declares %d{methodInfo.Generics.Length}"
+
+                    declaringType.AssemblyFullName,
+                    $"%s{MethodOwner.describe methodInfo.Owner}.%s{methodInfo.Name}",
+                    methodInfo.Generics.[position]
+                | other -> failwith $"%s{operation}: paramType %O{other} is not a generic parameter"
+
+            let state, violation =
+                validateConstraintsOn
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    state
+                    ownerDisplayName
+                    declaringAssemblyFullName
+                    typeVariables
+                    methodVariables
+                    (ImmutableArray.Create parameterEntry)
+                    [ argument ]
+
+            // Interop.BOOL: TRUE is 1, FALSE is 0.
+            let result = if violation.IsNone then 1 else 0
+
+            state
+            |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 result)) ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
         | "RuntimeTypeHandle_GetInstantiation",
           "System.Private.CoreLib",
           "System",
@@ -1859,7 +2043,7 @@ module NativeRuntimeTypeQCall =
                         $"%s{MethodOwner.describe method.Owner}.%s{method.Name}"
                         method.DeclaringAssemblyFullName
                         (ReflectedTypeTarget.ReflectionVariableBinding.Bound declaringTypeGenerics)
-                        methodGenerics
+                        (ReflectedTypeTarget.ReflectionVariableBinding.Bound methodGenerics)
                         method.Generics
                         (List.ofSeq methodGenerics)
 
