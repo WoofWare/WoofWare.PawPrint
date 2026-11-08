@@ -41,6 +41,7 @@
         <Compile Include="TypeDefn.fs" />
                     <Compile Include="PropertySignatureDecoding.fs" />
         <Compile Include="SignatureParameterOffset.fs" />
+        <Compile Include="SignatureCustomModifiers.fs" />
         <Compile Include="CustomAttribute.fs" />
         <Compile Include="GenericParameter.fs" />
         <Compile Include="ConcreteType.fs" />

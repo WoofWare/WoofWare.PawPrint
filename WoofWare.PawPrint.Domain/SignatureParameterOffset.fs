@@ -35,7 +35,7 @@ module SignatureParameterOffset =
 
     /// `CorSigUncompressData` (cor.h): one compressed integer, of whichever width its first byte
     /// announces, however small the value.
-    let private data (signature : ImmutableArray<byte>) (position : int) : struct (uint32 * int) voption =
+    let internal data (signature : ImmutableArray<byte>) (position : int) : struct (uint32 * int) voption =
         let remaining = signature.Length - position
 
         if remaining < 1 then
@@ -68,13 +68,13 @@ module SignatureParameterOffset =
 
     /// `GetData(NULL)`, and also `GetToken(NULL)`: a compressed token is a compressed integer whose
     /// two low bits name its table, and every table tag decodes.
-    let private skipData (signature : ImmutableArray<byte>) (position : int) : int voption =
+    let internal skipData (signature : ImmutableArray<byte>) (position : int) : int voption =
         match data signature position with
         | ValueSome (struct (_, next)) -> ValueSome next
         | ValueNone -> ValueNone
 
     /// `GetPointer(NULL)`.
-    let private skipPointer (pointerSize : int) (signature : ImmutableArray<byte>) (position : int) : int voption =
+    let internal skipPointer (pointerSize : int) (signature : ImmutableArray<byte>) (position : int) : int voption =
         if signature.Length - position < pointerSize then
             ValueNone
         else
