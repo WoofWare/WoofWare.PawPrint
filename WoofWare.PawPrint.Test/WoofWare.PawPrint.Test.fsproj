@@ -12,6 +12,7 @@
     <Compile Include="BindingResult.fs" />
     <Compile Include="Launched.fs" />
     <Compile Include="ExpectRun.fs" />
+    <Compile Include="PreparedGuest.fs" />
     <Compile Include="SynthesisedLayoutKind.fs" />
     <Compile Include="TestGcHeapHardLimit.fs" />
     <Compile Include="TestJitSwitchLowering.fs" />
@@ -482,6 +483,7 @@
     <Compile Include="TestAssumption.fs" />
     <Compile Include="TestObjectGetType.fs" />
     <Compile Include="TestExceptionMaking.fs" />
+    <Compile Include="TestEntryPointCallerTrace.fs" />
     <Compile Include="TestStringConstructor.fs" />
     <Compile Include="TestHardwareIntrinsicsProfile.fs" />
     <Compile Include="TestEmulatedRuntime.fs" />

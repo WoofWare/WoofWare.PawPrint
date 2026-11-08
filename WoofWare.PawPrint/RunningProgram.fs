@@ -14,6 +14,21 @@ type internal MainReturn =
     /// earlier `Environment.ExitCode` write and overwritten by any later one.
     | Int32
 
+/// How the VM called `Main`, which decides where `Main`'s return value is once the entry
+/// thread's bottom frame has returned.
+[<RequireQualifiedAccess>]
+type internal MainCall =
+    /// The VM called `Main` itself, as .NET 10's `RunMainInternal` does: `Main` is the entry
+    /// thread's bottom frame, and an `int Main` leaves its return value on that frame's eval
+    /// stack.
+    | Direct of returns : MainReturn
+    /// The VM called CoreLib's `Environment.CallEntryPoint`, as .NET 11's `RunMainInternal`
+    /// does, which called `Main` and stored an `int Main`'s return value in `returnValue`; a
+    /// `void Main` is given no cell. `exceptionSlot` is the `Exception*` out-slot, which
+    /// `CallEntryPoint` writes only when asked to capture what `Main` raises, which a run never
+    /// asks.
+    | ThroughCallEntryPoint of returnValue : NativeInt32Cell option * exceptionSlot : NativeReferenceCell
+
 /// Where a program's startup has got to: which call it is pumping on the entry thread, and
 /// what it does when that call returns.
 ///
@@ -44,9 +59,9 @@ type internal StartupPhase =
     /// `Main` must receive; `onReturn` puts the next phase's call on the entry thread.
     | InitialisingCommandLine of onReturn : (IlMachineState -> IlMachineState * StartupPhase)
     /// Pumping class initialisers, the entry type's included, with `Main`'s arguments
-    /// already in hand: `installMain` puts `Main` on the entry thread once they have run, and
-    /// `returns` is what `Main` returns.
-    | InitialisingClasses of installMain : (IlMachineState -> IlMachineState) * returns : MainReturn
+    /// already in hand: `installMain` puts the call of `Main` on the entry thread once they
+    /// have run, and says how it called `Main`.
+    | InitialisingClasses of installMain : (IlMachineState -> IlMachineState * MainCall)
 
 /// What the entry thread is running, which decides what its bottom frame returning means.
 [<RequireQualifiedAccess>]
@@ -55,10 +70,11 @@ type internal EntryFrameKind =
     /// initialiser, a class initialiser. Its return ends the phase, and `phase` says what the
     /// entry thread runs next.
     | StartupCall of phase : StartupPhase
-    /// `Main`. Its return latches the exit code if `Main` returns one, and does not end the
-    /// run: the entry thread goes to `ThreadStatus.WaitingForForegroundThreads` (and
-    /// background), and the run ends with `NormalExit` once `shutdownSignalled` — CoreCLR's
-    /// `ThreadStore::WaitForOtherThreads`, which `RunMainPost` blocks in after `Main`.
+    /// The call of `Main`, made as `call` says. Its return latches the exit code if `Main`
+    /// returns one, and does not end the run: the entry thread goes to
+    /// `ThreadStatus.WaitingForForegroundThreads` (and background), and the run ends with
+    /// `NormalExit` once `shutdownSignalled` — CoreCLR's `ThreadStore::WaitForOtherThreads`,
+    /// which `RunMainPost` blocks in after `Main`.
     ///
     /// `shutdownSignalled` is CoreCLR's `m_TerminationEvent`, a manual-reset event that
     /// `CheckForEEShutdown` sets at the first moment, once `Main` is running, at which no
@@ -73,7 +89,7 @@ type internal EntryFrameKind =
     /// the entry type's class initialiser runs; PawPrint arms it only once `Main` itself is
     /// installed, so a `.cctor` that sends the entry thread background and starts a
     /// foreground worker is waited for here where real .NET would abandon it.
-    | Main of returns : MainReturn * shutdownSignalled : bool
+    | Main of call : MainCall * shutdownSignalled : bool
 
 /// One PawPrint process the driver (`MultiProgram`) runs: its interpreter state, and what
 /// its scheduler carries from one tick to the next.
@@ -510,20 +526,36 @@ module internal RunningProgram =
     let private abortTermination (thread : ThreadId) (state : IlMachineState) : ProcessEnd =
         EmulatedKernel.abort thread state.Kernel
 
-    /// `RunMain`'s `SetLatchedExitCode(*piRetVal)`: the moment an `int Main` returns, its return
-    /// value — which its `ret` left as the only value on the entry thread's eval stack — becomes
-    /// the latched exit code. A `void Main` latches nothing.
+    /// `RunMainInternal`'s `SetLatchedExitCode(*piRetVal)`: the moment the call of an `int Main`
+    /// returns, its return value becomes the latched exit code. A `void Main` latches nothing.
     ///
-    /// The eval stack is exactly what the signature says by the time this runs:
-    /// `returnStackFrame` has already refused, as invalid CIL, a `Main` that returned with any
+    /// The eval stack is exactly what the bottom frame's signature says by the time this runs:
+    /// `returnStackFrame` has already refused, as invalid CIL, a frame that returned with any
     /// other number of values on it.
-    let private latchMainReturnValue
-        (returns : MainReturn)
-        (entry : ThreadId)
-        (state : IlMachineState)
-        : IlMachineState
-        =
-        match returns, state.ThreadState.[entry].MethodState.EvaluationStack.Values with
+    let private latchMainReturnValue (call : MainCall) (entry : ThreadId) (state : IlMachineState) : IlMachineState =
+        let stack = state.ThreadState.[entry].MethodState.EvaluationStack.Values
+
+        match call with
+        | MainCall.ThroughCallEntryPoint (returnValue, exceptionSlot) ->
+            if not stack.IsEmpty then
+                failwith
+                    $"logic error: Environment.CallEntryPoint, which returns void, returned with %d{List.length stack} values on its eval stack, which returnStackFrame should have refused as invalid CIL"
+
+            match NativeReferenceCell.read exceptionSlot (IlMachineState.getNativeMemoryPool state) with
+            | Some stored ->
+                failwith
+                    $"Environment.CallEntryPoint stored the exception %O{stored} in its out-slot, which it does only when asked to capture what Main raises, and PawPrint asks it not to. This is an interpreter bug."
+            | None -> ()
+
+            match returnValue with
+            | None -> state
+            | Some cell ->
+                { state with
+                    LatchedExitCode = NativeInt32Cell.read cell (IlMachineState.getNativeMemoryPool state)
+                }
+        | MainCall.Direct returns ->
+
+        match returns, stack with
         | MainReturn.Void, [] -> state
         | MainReturn.Int32, [ EvalStackValue.Int32 (Int32Source.Verbatim code) ] ->
             { state with
@@ -560,7 +592,7 @@ module internal RunningProgram =
         =
         match program.EntryFrame with
         | EntryFrameKind.StartupCall _ -> continuing program
-        | EntryFrameKind.Main (returns, shutdownSignalled) ->
+        | EntryFrameKind.Main (call, shutdownSignalled) ->
 
         let entry = program.State.ThreadState.[program.EntryThread]
 
@@ -587,7 +619,7 @@ module internal RunningProgram =
             else
                 continuing
                     { program with
-                        EntryFrame = EntryFrameKind.Main (returns, nowSignalled)
+                        EntryFrame = EntryFrameKind.Main (call, nowSignalled)
                     }
 
     /// The program's half of a scheduler tick: ask the policy which thread runs next, run it,
@@ -664,17 +696,19 @@ module internal RunningProgram =
                                     State = state
                                     EntryFrame = EntryFrameKind.StartupCall next
                                 }
-                        | StartupPhase.InitialisingClasses (installMain, returns) ->
+                        | StartupPhase.InitialisingClasses installMain ->
+                            let state, call = installMain state
+
                             ProgramTick.StartupCallReturned
                                 { program with
-                                    State = installMain state
+                                    State = state
                                     // Nothing can have signalled shutdown yet: the entry thread is
                                     // about to run `Main` as a foreground thread, and only `Main`
                                     // arms the latch.
-                                    EntryFrame = EntryFrameKind.Main (returns, false)
+                                    EntryFrame = EntryFrameKind.Main (call, false)
                                     LastRan = program.EntryThread
                                 }
-                    | EntryFrameKind.Main (returns, _) ->
+                    | EntryFrameKind.Main (call, _) ->
                         // `Main` has returned. Its return value, if it has one, is latched as the
                         // exit code now, and the entry thread keeps its final frame and waits for
                         // the other foreground threads; the run ends below if there are none.
@@ -685,7 +719,7 @@ module internal RunningProgram =
 
                         let state =
                             state
-                            |> latchMainReturnValue returns program.EntryThread
+                            |> latchMainReturnValue call program.EntryThread
                             |> Scheduler.onMainReturned program.EntryThread
 
                         // The `ret` retired a step, reported here as `WhatWeDid.Executed`, so it

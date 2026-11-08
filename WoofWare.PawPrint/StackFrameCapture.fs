@@ -47,6 +47,29 @@ module StackFrameCapture =
         | _ -> false
 
     /// <summary>
+    /// Whether <paramref name="frame" /> is CoreLib's <c>System.Environment.CallEntryPoint</c>,
+    /// through which .NET 11's VM calls <c>Main</c>, and which no trace CoreCLR builds reports:
+    /// neither a captured trace (debugdebugger.cpp's <c>GetStackFramesCallback</c>) nor an
+    /// exception's (excep.cpp's <c>StackTraceInfo::AppendElement</c>).
+    /// </summary>
+    /// <remarks>
+    /// Only traces skip it. A stack-crawl mark's walk does not, so on .NET 11
+    /// <c>Assembly.GetCallingAssembly</c> called in <c>Main</c> answers CoreLib.
+    /// </remarks>
+    let isEntryPointCaller (frame : MethodState) : bool =
+        // CoreCLR compares the frame's MethodDesc with the one `RunMainInternal` calls. CoreLib
+        // declares one `CallEntryPoint` on `Environment` (`EntryPointCall.locate` refuses
+        // otherwise), so its name and declaring type identify it.
+        frame.ExecutingMethod.Name = "CallEntryPoint"
+        && AssemblyDefinitionName.isNamed "System.Private.CoreLib" frame.ExecutingMethod.DeclaringAssemblyFullName
+        && match frame.ExecutingMethod.TryDeclaringType with
+           | None -> false
+           | Some declaringType ->
+               declaringType.Generics.IsEmpty
+               && declaringType.Namespace = "System"
+               && declaringType.Name = "Environment"
+
+    /// <summary>
     /// The frames of <paramref name="thread" />'s live stack, innermost first — the order
     /// <c>StackTrace</c> reports and <c>ExceptionDispatching</c> accumulates.
     /// </summary>
@@ -136,7 +159,7 @@ module StackFrameCapture =
             )
 
             let acc =
-                if isDelegateInvokeStub frame then
+                if isDelegateInvokeStub frame || isEntryPointCaller frame then
                     acc
                 else
                     describe frame ilOffset :: acc
