@@ -419,81 +419,114 @@ module internal ProgramStartup =
                 failwith
                     "logic error: initial loadClass for entry point cannot block on another thread (no other threads exist yet)"
 
-        /// Put `Main`, whose locals are `localTypes`, on the entry thread, to be given
-        /// `mainArgs`, once class initialisation has returned.
+        /// Put the call of `Main`, whose locals are `localTypes`, on the entry thread, to give it
+        /// `mainArgs` once class initialisation has returned, and say how it calls `Main`.
         let installMain
             (localTypes : ImmutableArray<ConcreteTypeHandle>)
             (mainArgs : ImmutableArray<CliType>)
             (state : IlMachineState)
-            : IlMachineState
+            : IlMachineState * MainCall
             =
             logger.LogInformation "Main method class now initialised"
 
-            // Now that BCL initialisation has taken place and the user-code classes are constructed,
-            // overwrite the main thread completely using the already-concretized method. The entry
-            // thread Terminated during the cctor pump (its onlyRet body hit `ret`); we're resurrecting
-            // it to run Main, so restore Status to Runnable before the scheduler is asked to pick again.
-            let methodState =
-                match
-                    MethodState.Empty
-                        state.TypeSystem.ConcreteTypes
-                        baseClassTypes
-                        state.TypeSystem._LoadedAssemblies
-                        dumped
-                        concretizedMainMethod
-                        ImmutableArray.Empty
-                        localTypes
-                        mainArgs
-                        None
-                with
-                | Ok s -> s
-                | Error _ -> failwith "TODO: I'd be surprised if this could ever happen in a valid program"
+            // The bottom frame, the call it makes, and the types whose initialisers a call of it
+            // would arm, in the order a call would arm them: the bottom frame is entered without
+            // a call, so arming them is left to us.
+            let state, bottomFrame, call, armed =
+                match MainCaller.ofRuntime (EmulatedRuntime.ofCoreLib baseClassTypes.Corelib) with
+                | MainCaller.Vm ->
+                    let methodState =
+                        match
+                            MethodState.Empty
+                                state.TypeSystem.ConcreteTypes
+                                baseClassTypes
+                                state.TypeSystem._LoadedAssemblies
+                                dumped
+                                concretizedMainMethod
+                                ImmutableArray.Empty
+                                localTypes
+                                mainArgs
+                                None
+                        with
+                        | Ok s -> s
+                        | Error _ -> failwith "TODO: I'd be surprised if this could ever happen in a valid program"
 
+                    state, methodState, MainCall.Direct entry.Returns, [ mainTypeHandle ]
+                | MainCaller.CallEntryPoint ->
+                    let state, frame, environmentType, call =
+                        EntryPointCall.buildFrame
+                            loggerFactory
+                            baseClassTypes
+                            concretizedMainMethod
+                            mainArgs
+                            entry.Returns
+                            state
+
+                    // `CallEntryPoint`'s `calli` arms the entry type itself; that type's
+                    // initialiser has run by now, so arming it here as well changes nothing, and
+                    // keeps the check below of the two runtimes alike.
+                    state, frame, call, [ environmentType ; mainTypeHandle ]
+
+            // Now that BCL initialisation has taken place and the user-code classes are constructed,
+            // overwrite the main thread completely. The entry thread Terminated during the cctor
+            // pump (its onlyRet body hit `ret`); we're resurrecting it to call Main, so restore
+            // Status to Runnable before the scheduler is asked to pick again.
             let threadState =
                 state.ThreadState.[mainThread]
-                |> ThreadState.replaceFrames methodState
+                |> ThreadState.replaceFrames bottomFrame
                 |> fun threadState ->
                     { threadState with
                         Status = ThreadStatus.Runnable
                     }
 
-            let state, init =
+            let state =
                 { state with
                     ThreadState = state.ThreadState |> Map.add mainThread threadState
                 }
-                |> IlMachineStateExecution.ensureTypeInitialised loggerFactory baseClassTypes mainThread mainTypeHandle
 
-            match init with
-            | WhatWeDid.Aborted fatal ->
-                // Triggered when initialising the entry point's declaring type tears the process
-                // down. Startup has no `RunOutcome` to hand back at this point -- it is still
-                // assembling the machine -- so the abort cannot be reported as one; surface it
-                // rather than installing Main on a state whose process has already died.
-                let message = fatal.Message |> Option.defaultValue "<no message>"
+            let arm (state : IlMachineState) (typeHandle : ConcreteTypeHandle) : IlMachineState =
+                let state, init =
+                    IlMachineStateExecution.ensureTypeInitialised
+                        loggerFactory
+                        baseClassTypes
+                        mainThread
+                        typeHandle
+                        state
 
-                failwith
-                    $"TODO: initialising the entry point's declaring type aborted the process (%O{fatal.Code}): %s{message}"
-            | WhatWeDid.SuspendedForClassInit -> failwith "TODO: suspended for class init"
-            | WhatWeDid.SuspendedForManagedCall ->
-                failwith "logic error: ensureTypeInitialised cannot suspend for an arbitrary managed call"
-            | WhatWeDid.BlockedOnClassInit _ ->
-                failwith "logic error: surely this thread can't be blocked on class init"
-            | WhatWeDid.ThrowingTypeInitializationException
-            | WhatWeDid.UnhandledException _ ->
-                // A failing entry-type cctor ends the run during the class-initialisation phase,
-                // as `RunOutcome.GuestUnhandledException`, before Main is ever installed.
-                failwith "logic error: entry point type's class initialiser had already failed when Main was installed"
-            | WhatWeDid.VoluntaryYield _ ->
-                // ensureTypeInitialised drives cctor execution, which has no path to a
-                // yield primitive: voluntary yields are produced by native handlers like
-                // `ThreadNative_YieldThread`, never by a synthetic cctor step. If this
-                // arm ever fires, the cctor pipeline has acquired a producer we didn't
-                // anticipate, and the entry-point sequencer needs to decide explicitly
-                // whether to honour the yield before running Main.
-                failwith "logic error: ensureTypeInitialised cannot produce a VoluntaryYield"
-            | WhatWeDid.Executed -> ()
+                match init with
+                | WhatWeDid.Aborted fatal ->
+                    // Triggered when initialising the type tears the process down. Startup has no
+                    // `RunOutcome` to hand back at this point -- it is still assembling the
+                    // machine -- so the abort cannot be reported as one; surface it rather than
+                    // installing Main on a state whose process has already died.
+                    let message = fatal.Message |> Option.defaultValue "<no message>"
 
-            state
+                    failwith
+                        $"TODO: initialising %O{typeHandle} as Main was installed aborted the process (%O{fatal.Code}): %s{message}"
+                | WhatWeDid.SuspendedForClassInit ->
+                    failwith
+                        $"TODO: %O{typeHandle} had yet to be initialised when Main was installed, and running its initialiser then is not implemented"
+                | WhatWeDid.SuspendedForManagedCall ->
+                    failwith "logic error: ensureTypeInitialised cannot suspend for an arbitrary managed call"
+                | WhatWeDid.BlockedOnClassInit _ ->
+                    failwith "logic error: surely this thread can't be blocked on class init"
+                | WhatWeDid.ThrowingTypeInitializationException
+                | WhatWeDid.UnhandledException _ ->
+                    // A failing initialiser ends the run during the class-initialisation phase,
+                    // as `RunOutcome.GuestUnhandledException`, before Main is ever installed.
+                    failwith
+                        $"logic error: the class initialiser of %O{typeHandle} had already failed when Main was installed"
+                | WhatWeDid.VoluntaryYield _ ->
+                    // ensureTypeInitialised drives cctor execution, which has no path to a
+                    // yield primitive: voluntary yields are produced by native handlers like
+                    // `ThreadNative_YieldThread`, never by a synthetic cctor step. If this
+                    // arm ever fires, the cctor pipeline has acquired a producer we didn't
+                    // anticipate, and the entry-point sequencer needs to decide explicitly
+                    // whether to honour the yield before running Main.
+                    failwith "logic error: ensureTypeInitialised cannot produce a VoluntaryYield"
+                | WhatWeDid.Executed -> state
+
+            List.fold arm state armed, call
 
         /// Load the entry class, so that the class-initialisation phase has its `.cctor` to
         /// pump. Runs no guest instructions of its own — `loadClass` only pushes cctor frames.
@@ -507,7 +540,7 @@ module internal ProgramStartup =
             let state, localTypes =
                 ExecutionConcretization.concretizeLocals loggerFactory baseClassTypes concretizedMainMethod state
 
-            loadInitialState state, StartupPhase.InitialisingClasses (installMain localTypes mainArgs, entry.Returns)
+            loadInitialState state, StartupPhase.InitialisingClasses (installMain localTypes mainArgs)
 
         let atPhase (state : IlMachineState) (phase : StartupPhase) : RunningProgram =
             {

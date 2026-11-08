@@ -208,7 +208,7 @@ module StackCrawlMark =
                 | Some found -> found
                 | None ->
                     failwith
-                        $"%s{operation}: reached the outermost frame of the thread without passing a single frame that is not reflection infrastructure. PawPrint's outermost frame is always guest code, so this is an interpreter bug."
+                        $"%s{operation}: reached the outermost frame of the thread without passing a single frame that is not reflection infrastructure. PawPrint's outermost frame is a startup call, `Main`, or a CoreLib method the VM calls (`Environment.CallEntryPoint`, `Thread.StartCallback`), none of which is reflection infrastructure, so this is an interpreter bug."
             | Some returnState ->
 
             match ThreadState.tryGetFrame returnState.JumpTo thread with
@@ -283,8 +283,7 @@ module StackCrawlMark =
             match frame.ReturnState with
             | None ->
                 // The marked frame is `GetCurrentMethod` itself, and a delegate stub calls its
-                // target, so each has a caller; PawPrint's outermost frame is the entry point or
-                // its startup placeholder.
+                // target, so each has a caller; PawPrint's outermost frame is never either.
                 failwith
                     $"%s{operation}: the frame %s{frame.ExecutingMethod.Name}, at or above the one holding the stack-crawl mark, has no caller. This is an interpreter bug."
             | Some returnState ->

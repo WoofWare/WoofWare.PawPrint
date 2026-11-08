@@ -60,8 +60,12 @@ public class Program
                 return 1 + 10 * i;
             }
 
-            // So too `GetCallingAssembly`, measured on real .NET 10.
-            if (!ReferenceEquals(getCallingAssembly.Invoke(null, null), self))
+            // `GetCallingAssembly`'s crawl skips the same frames, so it answers whatever called
+            // `Main`: on .NET 10 the VM, from native code, so the crawl falls back to this
+            // assembly; on .NET 11 CoreLib's `Environment.CallEntryPoint`. Measured on 10.0.12
+            // and on 11.0.0-rc.1.
+            Assembly callerOfMain = Environment.Version.Major == 10 ? self : typeof(object).Assembly;
+            if (!ReferenceEquals(getCallingAssembly.Invoke(null, null), callerOfMain))
             {
                 return 2 + 10 * i;
             }

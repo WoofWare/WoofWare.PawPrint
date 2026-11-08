@@ -292,6 +292,32 @@ class Program
             return JsonDocument.Parse body
         }
 
+    /// Step thread 0 until it is running `Main`: at once on .NET 10, and through CoreLib's
+    /// `Environment.CallEntryPoint` up to its call of `Main` on .NET 11, as
+    /// `PreparedGuest.enterMain` does.
+    let private enterMain (client : HttpClient) : Task<unit> =
+        task {
+            let mutable inCaller = true
+            let mutable steps = 0
+
+            while inCaller do
+                let! il = client.GetAsync "thread/0/active-method/il"
+                il.StatusCode |> shouldEqual HttpStatusCode.OK
+                use! ilJson = jsonDocument il
+
+                inCaller <-
+                    ilJson.RootElement.GetProperty("method").GetString () = "System.Private.CoreLib.Environment.CallEntryPoint"
+
+                if inCaller then
+                    if steps = 64 then
+                        failwith
+                            "enterMain: thread 0 was still in Environment.CallEntryPoint after 64 steps, without having called Main"
+
+                    let! step = client.PostAsync ("step?count=1", emptyContent ())
+                    step.StatusCode |> shouldEqual HttpStatusCode.OK
+                    steps <- steps + 1
+        }
+
     let private activeFrame (thread : JsonElement) : JsonElement =
         thread.GetProperty("frames").EnumerateArray ()
         |> Seq.find (fun frame -> frame.GetProperty("active").GetBoolean ())
@@ -455,6 +481,7 @@ class Program
         task {
             use server = startServer objectOnStackSource
             use client = client server (Some token)
+            do! enterMain client
 
             let mutable objectAddress = None
 
@@ -544,6 +571,7 @@ class Program
         task {
             use server = startServer simpleSource
             use client = client server (Some token)
+            do! enterMain client
 
             let! il = client.GetAsync "thread/0/active-method/il"
             il.StatusCode |> shouldEqual HttpStatusCode.OK
@@ -581,6 +609,7 @@ class Program
         task {
             use server = startServer objectOnStackSource
             use client = client server (Some token)
+            do! enterMain client
 
             let! context = client.GetAsync "thread/0/active-method/il?context=1"
             context.StatusCode |> shouldEqual HttpStatusCode.OK
@@ -696,9 +725,17 @@ class Program
             let frames =
                 threadJson.RootElement.GetProperty("frames").EnumerateArray () |> Seq.toList
 
+            // The guest's own callers: on .NET 11 `Main` has a caller too, CoreLib's
+            // `Environment.CallEntryPoint`, which has no symbols here.
             let callers =
                 frames
-                |> List.filter (fun frame -> not (frame.GetProperty("active").GetBoolean ()))
+                |> List.filter (fun frame ->
+                    not (frame.GetProperty("active").GetBoolean ())
+                    && frame
+                        .GetProperty("method")
+                        .GetString()
+                        .StartsWith ("PawPrintTestAssembly.", StringComparison.Ordinal)
+                )
 
             // `Recurse(4)` plus `Main`, so there is something to be a caller.
             callers |> List.isEmpty |> shouldEqual false
@@ -989,6 +1026,7 @@ class Program
         task {
             use server = startServer objectAndArrayLocalsSource
             use client = client server (Some token)
+            do! enterMain client
 
             let mutable addresses = None
             let mutable lastLocals = ""

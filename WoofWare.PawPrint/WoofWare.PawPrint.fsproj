@@ -69,6 +69,7 @@
     <Compile Include="MemoryPools.fsi" />
     <Compile Include="MemoryPools.fs" />
     <Compile Include="NativeReferenceCell.fs" />
+    <Compile Include="NativeInt32Cell.fs" />
     <Compile Include="CorelibEntryPoint.fs" />
     <Compile Include="CatchClauseRefusal.fs" />
     <Compile Include="MethodState.fs" />
@@ -268,6 +269,7 @@
     <Compile Include="AppContextSeed.fs" />
     <Compile Include="CommandLineArgsInit.fs" />
     <Compile Include="RunningProgram.fs" />
+    <Compile Include="EntryPointCall.fs" />
     <Compile Include="ProgramStartup.fs" />
     <Compile Include="MultiProgram.fs" />
     <Compile Include="Program.fs" />

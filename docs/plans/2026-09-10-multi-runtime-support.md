@@ -936,7 +936,12 @@ mutation-testing skill applies to each table/classifier they introduce.
      Every case parked on it passes, the F# printf cases among them;
    * the guest cases whose real .NET 11 ending differs from .NET 10's, recorded in
      `TestPureCases.endingsOnNet11` (delegate equality, `Delegate.Method`'s declaring type,
-     `GetCallingAssembly` from `Main`, and the private reflection several cases lean on);
+     and the private reflection several cases lean on);
+   * **(landed)** RC1's `RunMainInternal` calls `Main` through CoreLib's
+     `[UnmanagedCallersOnly] Environment.CallEntryPoint`, so on .NET 11 PawPrint's entry thread
+     runs that method beneath `Main` (`EntryPointCall`). `Assembly.GetCallingAssembly` in `Main`
+     sees it, and answers CoreLib; every stack trace CoreCLR builds leaves it out, and so does
+     PawPrint's (`StackFrameCapture.isEntryPointCaller`);
    * **(landed)** the new intrinsics `IntrinsicBody` did not classify:
      `Interlocked.CompareExchange(int*, int, int)`, the thin lock's compare-exchange on an
      object's header, is the `ref int` overload's primitive with its location given by a pointer
