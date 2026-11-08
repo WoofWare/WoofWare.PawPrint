@@ -403,6 +403,7 @@ module EmitScopeImage =
                 | MemberRefParent.TypeDef rid -> (rid.Rid <<< 3) ||| 0
                 | MemberRefParent.TypeRef rid -> (rid.Rid <<< 3) ||| 1
                 | MemberRefParent.MethodDef rid -> (rid.Rid <<< 3) ||| 3
+                | MemberRefParent.TypeSpec rid -> (rid.Rid <<< 3) ||| 4
 
             writeIndex tables memberRefParentSize "MemberRef.Class" coded
             str "MemberRef.Name" row.Name

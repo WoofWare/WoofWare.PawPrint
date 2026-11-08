@@ -905,6 +905,47 @@ yet: no QCall adds a member of a TypeSpec. A breaking change to `WoofWare.PawPri
   asks for the return parameter's and each parameter's custom modifiers, which reaches
   `Signature.GetParameterOffsetInternal` for a method signature, which PawPrint refuses (it handles only
   a field signature). A field of a generic instantiation goes through `ModuleBuilder_GetMemberRefOfFieldInfo`
-  instead. So `GetMemberRefFromSignature` waits on that refusal, a separate feature; a parked branch,
-  `module-builder-member-ref-from-signature`, holds a handler no guest can yet reach.
+  instead. So `GetMemberRefFromSignature` waited on that refusal, and then on a second one: the
+  modifiers are asked of the generic definition's method, and `Signature_GetCustomModifiersAtOffset`
+  refused every member of an open generic definition. #2169 and #2175 lifted them, and 5e adds the
+  member.
+
+### 5e: a member of a generic instantiation
+
+A call to a method of a generic instantiation, such as `List<int>.Add`, names a MemberRef whose parent
+is the instantiation's TypeSpec. Read from `RuntimeModuleBuilder.GetMethodTokenNoLock` and
+`GetMemberRefToken`, and from `ModuleBuilder_GetMemberRefFromSignature` (vm/commodule.cpp):
+
+* A method's reference goes through `GetMemberRefToken`. It builds the signature from the generic
+  definition's method (`List<T>.Add` takes `!0`), after asking each parameter for its custom
+  modifiers, takes the TypeSpec of the declaring instantiation as the parent, and calls
+  `ModuleBuilder_GetMemberRefFromSignature`, which is `RegMeta::DefineMemberRef`: under
+  `MDDupMemberRef` it finds a row with the same parent, name and signature before adding one.
+* A constructor's reference goes through `ModuleBuilder_GetMemberRefOfMethodInfo` with the TypeSpec as
+  the parent, and the signature of the constructor's MethodDef.
+* `GetMemberRefToken` also passes a TypeRef or a MethodDef as the parent, for a vararg call site, and a
+  user-derived `MemberInfo` passes its type's token; neither is a member of a TypeSpec.
+
+### 5e: the decisions
+
+* **`MemberRefParent` gains a `TypeSpec` case**, as ECMA-335's coded index has it (tag 4). A breaking
+  change to `WoofWare.PawPrint.Domain`'s `MemberRefParent`.
+* **`GetMemberRefFromSignature` refuses any parent but a TypeSpec.** A vararg MemberRef carries a
+  sentinel and its own duplicate rules, which want measuring on their own.
+
+### 5e: the oracle
+
+* `ModuleBuilderMemberRefFromSignature.cs`, which exits 0 on .NET 10, emits a method that constructs a
+  `List<int>`, adds to it twice and reads its count, checks that naming `Add` twice gives one token, and
+  invokes the method. Its terminal-state check reads the TypeSpec and the three MemberRef rows, each a
+  member of that TypeSpec, as .NET 10 reports them.
+* The generator draws TypeSpec parents, so the image's round trip and the extension properties cover
+  the new case.
+* Each mutant is caught: the coded index's TypeSpec tag wrong, the token's table byte wrong, the parent's
+  row number wrong, and the constructor's parent read as a TypeRef.
+
+### 5e: left to later stages
+
+* A vararg call site's MemberRef, whose parent is a TypeRef or a MethodDef.
+* A generic method's instantiation, which also wants a MethodSpec row.
 

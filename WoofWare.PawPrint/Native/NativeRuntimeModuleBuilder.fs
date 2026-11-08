@@ -120,8 +120,8 @@ module NativeRuntimeModuleBuilder =
                     failwith
                         $"%s{operation}: %s{moduleName} is not a dynamic assembly, and only a RuntimeModuleBuilder's module reaches this QCall"
 
-            // A signature naming a type the managed caller could not spell as a token
-            // (`ELEMENT_TYPE_INTERNAL`) is refused by name: `readCountedBytes` reads numbers only.
+            // A signature naming a type the managed caller could not spell as a token carries
+            // `ELEMENT_TYPE_INTERNAL` and a pointer, which `readCountedBytes` refuses.
             let signature =
                 NativeCall.readCountedBytes
                     operation
@@ -137,6 +137,87 @@ module NativeRuntimeModuleBuilder =
             state
             |> IlMachineState.pushToEvalStack
                 (CliType.Numeric (CliNumericType.Int32 (0x1B000000 ||| typeSpec.Rid)))
+                ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
+        | "ModuleBuilder_GetMemberRefFromSignature",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeModuleBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.UInt16)
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Byte)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty
+            ->
+            let operation = "ModuleBuilder_GetMemberRefFromSignature"
+
+            if instruction.Arguments.Length <> 5 then
+                failwith $"%s{operation}: expected five native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held =
+                match state.TypeSystem._LoadedAssemblies.TryDynamicScope moduleName with
+                | Some scope -> scope
+                | None ->
+                    failwith
+                        $"%s{operation}: %s{moduleName} is not a dynamic assembly, and only a RuntimeModuleBuilder's module reaches this QCall"
+
+            let tr = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+            // `RegMeta::DefineMemberRef` takes any MemberRefParent. `GetMemberRefToken` passes a
+            // TypeSpec for a member of a generic instantiation, and for a vararg call site a TypeRef
+            // (a method of another module) or a MethodDef (one of this module); a user-derived
+            // MemberInfo passes its type's token.
+            let parent =
+                match tr >>> 24 with
+                | table when table = typeSpecTable ->
+                    match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
+                    | Some rid -> MemberRefParent.TypeSpec rid
+                    | None -> failwith $"%s{operation}: the parent 0x%08x{tr} names no TypeSpec row of %s{moduleName}"
+                | _ ->
+                    failwith
+                        $"TODO: %s{operation}: the parent 0x%08x{tr} is not a TypeSpec; a vararg call site or a user-derived MemberInfo passes another kind, and PawPrint adds only a member of a generic instantiation"
+
+            let name =
+                match
+                    NativeCall.managedPointerOfPointerArgument operation "wszMemberName" instruction.Arguments.[2]
+                with
+                | ManagedPointerSource.Null ->
+                    failwith $"%s{operation}: a null member name; the managed callers pass the member's Name"
+                | namePtr -> NativeCall.readNullTerminatedUtf16 operation ctx.BaseClassTypes state namePtr
+
+            // A signature naming a type the managed caller could not spell as a token carries
+            // `ELEMENT_TYPE_INTERNAL` and a pointer, which `readCountedBytes` refuses.
+            let signature =
+                NativeCall.readCountedBytes
+                    operation
+                    ctx.BaseClassTypes
+                    state
+                    (NativeCall.managedPointerOfPointerArgument operation "pSignature" instruction.Arguments.[3])
+                    (NativeCall.int32Argument operation instruction.Arguments.[4])
+                |> System.Collections.Immutable.ImmutableArray.CreateRange
+
+            let memberRef, extended =
+                EmitScopeReferences.defineMemberRef parent name signature held
+
+            let state =
+                // Found rather than added, so there is nothing to re-read.
+                if Object.ReferenceEquals (extended, held) then
+                    state
+                else
+                    state.WithEmitScope ctx.LoggerFactory moduleName extended |> fst
+
+            state
+            |> IlMachineState.pushToEvalStack
+                (CliType.Numeric (CliNumericType.Int32 ((memberRefTable <<< 24) ||| memberRef.Rid)))
                 ctx.Thread
             |> NativeHandlerResult.completed
             |> Some
@@ -312,8 +393,11 @@ module NativeRuntimeModuleBuilder =
                         failwith
                             $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeRef row of %s{moduleName}"
                 | table when table = typeSpecTable ->
-                    failwith
-                        $"TODO: %s{operation}: parent token 0x%08x{tr} for %s{described} is a TypeSpec, which the managed caller makes for a generic type with ModuleBuilder_GetTokenFromTypeSpec; an emit scope has no TypeSpec table yet"
+                    match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
+                    | Some rid -> MemberRefParent.TypeSpec rid
+                    | None ->
+                        failwith
+                            $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeSpec row of %s{moduleName}"
                 | _ ->
                     failwith
                         $"%s{operation}: parent token 0x%08x{tr} for %s{described} is neither a TypeRef nor a TypeSpec; the managed caller passes its declaring type's token, which is a TypeDef only for a type of this module"
