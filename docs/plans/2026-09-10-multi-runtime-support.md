@@ -825,8 +825,9 @@ mutation-testing skill applies to each table/classifier they introduce.
      (`StorageLocation.resolveOrder`), as `clt.un` and `cgt.un` already did, which is what RC1's
      `UnicodeEncoding.GetBytes` needs: it loops on `blt.un.s` over two byte views of one
      stackalloc block. Twenty-one of the twenty-two cases parked on it pass;
-     `KqueueRegistrationDarwin.cs` is parked on its own, since RC1's shim registers a socket on
-     its kqueue without `EV_RECEIPT`;
+     `KqueueRegistrationDarwin.cs` was parked on its own, since RC1's shim registers a socket on
+     its kqueue without `EV_RECEIPT`, until `SocketEventsPal.keventChanges` followed each
+     runtime's flags;
    * `Delegate_GetMethodDesc`
      (`SystemNative_AlignedAlloc`, which net10 reaches too, lands on net10 ahead of the leg);
    * **(landed)** the managed `WaitSubsystem` that RC1 sleeps, joins and waits through on Unix.
@@ -946,7 +947,8 @@ mutation-testing skill applies to each table/classifier they introduce.
    * any placeholders among the `Half` and `SZArrayHelper` type-level `[Intrinsic]`s and the
      other newly-`[Intrinsic]` bodies;
    * the two PAL facts, with their out-of-process net11 probes, and the four PAL deltas the
-     net11 leg found: kqueue registration without `EV_RECEIPT`, `PAL_O_NONBLOCK_READ`/`_WRITE`,
+     net11 leg found: kqueue registration without `EV_RECEIPT` (**landed**:
+     `SocketEventsPal.keventChanges` takes the runtime), `PAL_O_NONBLOCK_READ`/`_WRITE`,
      the `NotifyEvents` set, and `MapFileSystemNameToEnum`'s shape.
 
    Each PR un-parks its cases

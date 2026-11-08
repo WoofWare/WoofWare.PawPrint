@@ -5,8 +5,8 @@ using System.Threading.Tasks;
 
 // A managed asynchronous accept over loopback, on a Darwin process, whose socket
 // event port is a kqueue. Socket.AcceptAsync finds nothing queued, so it registers
-// the listener with SocketAsyncEngine's kqueue (EV_ADD|EV_CLEAR|EV_RECEIPT on
-// EVFILT_READ and EVFILT_WRITE) and waits for the listener's READ to report the
+// the listener with SocketAsyncEngine's kqueue (EV_ADD|EV_CLEAR on EVFILT_READ and
+// EVFILT_WRITE, with EV_RECEIPT as well on .NET 10) and waits for the listener's READ to report the
 // connection a blocking connect then queues. Configured as macOS, and compared with
 // real .NET on a macOS host.
 //
