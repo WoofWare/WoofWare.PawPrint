@@ -7,9 +7,10 @@ using System.Runtime.InteropServices;
 // through the System.Native shim the way SocketAsyncEngine drives it:
 // TryChangeSocketEventRegistration registers a socket for SA_READ and SA_WRITE, which
 // is EV_ADD|EV_CLEAR on EVFILT_READ and EVFILT_WRITE, with EV_RECEIPT as well on
-// .NET 10 (.NET 11's shim dropped it), and WaitForSocketEvents takes what the kqueue reports, converting each event to the
-// shim's SocketEvents. Configured as macOS, and compared with real .NET on a macOS
-// host. The sockets themselves are made through System.Net.Sockets, blocking.
+// .NET 10, whose shim adds it. WaitForSocketEvents takes what the kqueue reports,
+// converting each event to the shim's SocketEvents. Configured as macOS, and
+// compared with real .NET on a macOS host. The sockets themselves are made through
+// System.Net.Sockets, blocking.
 //
 // What it pins, each measured on Darwin 27.0.0 by kevent-register.c:
 //
