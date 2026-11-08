@@ -334,6 +334,51 @@ module TypeDefn =
         | TypeDefn.Modified m -> stripCustomModifiers m.Unmodified
         | t -> t
 
+    /// Whether `leaf` holds of any type occurring in `t`, `t` included.
+    let rec private occurs (leaf : TypeDefn -> bool) (t : TypeDefn) : bool =
+        leaf t
+        || match t with
+           | TypeDefn.PrimitiveType _
+           | TypeDefn.FromReference _
+           | TypeDefn.FromDefinition _
+           | TypeDefn.GenericTypeParameter _
+           | TypeDefn.GenericMethodParameter _
+           | TypeDefn.Void -> false
+           | TypeDefn.Array (elt, _) -> occurs leaf elt
+           | TypeDefn.Pinned inner
+           | TypeDefn.Pointer inner
+           | TypeDefn.Byref inner
+           | TypeDefn.OneDimensionalArrayLowerBoundZero inner -> occurs leaf inner
+           | TypeDefn.Modified m -> occurs leaf m.Unmodified || occurs leaf m.Modifier
+           | TypeDefn.GenericInstantiation (generic, args) -> occurs leaf generic || Seq.exists (occurs leaf) args
+           | TypeDefn.FunctionPointer signature ->
+               (match signature.ReturnType with
+                | MethodReturnType.Returns returns -> occurs leaf returns
+                | MethodReturnType.Void -> false)
+               || List.exists (occurs leaf) signature.ParameterTypes
+
+    /// Whether a generic type parameter (`!i`) occurs anywhere in this type, inside custom
+    /// modifiers and function-pointer signatures included: whether reading it needs the type
+    /// arguments of its context.
+    let mentionsGenericTypeParameter (t : TypeDefn) : bool =
+        t
+        |> occurs (
+            function
+            | TypeDefn.GenericTypeParameter _ -> true
+            | _ -> false
+        )
+
+    /// Whether a generic method parameter (`!!i`) occurs anywhere in this type, inside custom
+    /// modifiers and function-pointer signatures included: whether reading it needs the method
+    /// arguments of its context.
+    let mentionsGenericMethodParameter (t : TypeDefn) : bool =
+        t
+        |> occurs (
+            function
+            | TypeDefn.GenericMethodParameter _ -> true
+            | _ -> false
+        )
+
     /// The width a field of this type occupies, when that follows from the signature's head alone.
     ///
     /// This is CoreCLR's `FieldDesc::LoadSize` (field.cpp:655): it reads the field's normalised

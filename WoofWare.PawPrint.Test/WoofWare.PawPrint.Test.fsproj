@@ -237,6 +237,7 @@
     <Compile Include="TestNativeSignature.fs" />
     <Compile Include="TestSignatureParameterOffset.fs" />
     <Compile Include="TestSignatureCustomModifiers.fs" />
+    <Compile Include="TestTypeDefnMentions.fs" />
     <Compile Include="TestNativeCustomAttribute.fs" />
     <Compile Include="NativeRuntimeFieldHandleFixture.fs" />
     <Compile Include="TestNativeRuntimeFieldHandleGetValue.fs" />

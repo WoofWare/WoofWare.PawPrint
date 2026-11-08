@@ -490,6 +490,14 @@ module NativeSignature =
         /// The handle is the generic method definition: the typical instantiation.
         | Definition
 
+    /// What a custom modifier's `!i`, or its `!!i`, is read as: the runtime types the signature's
+    /// context supplies, or, where the context supplies its own variables, why a modifier naming
+    /// one is refused. A modifier naming no variable of that kind needs neither.
+    [<RequireQualifiedAccess>]
+    type private ModifierArguments =
+        | Supplied of ImmutableArray<ConcreteTypeHandle>
+        | Open of refusal : string
+
     /// The context a method-backed `Signature` resolves its blob against, plus the defining
     /// assembly, since token resolution against the blob needs it.
     ///
@@ -1249,47 +1257,43 @@ module NativeSignature =
             let pMethod =
                 AllocatedNonArrayObject.DereferenceFieldById pMethodFieldId signatureObj
 
-            let typeGenerics, methodGenerics =
+            // A modifier is resolved and concretised below, which wants runtime types for each
+            // variable it names. A definition or an open construction supplies variables instead,
+            // which ConcreteTypeHandle cannot name; but only a modifier spelled as a TypeSpec can
+            // name one, so the rest resolve without them.
+            let typeArguments, methodArguments =
                 match MethodHandleResolution.methodHandleIdOfRuntimeMethodHandleInternal operation pMethod with
                 | Some _ ->
                     let _, methodInfo, _, declaringTypeContext, methodGenericContext =
                         methodSignatureTypeContext operation state pMethod
 
-                    let methodGenerics =
+                    let methodArguments =
                         match methodGenericContext with
-                        | MethodGenericContext.Instantiation methodGenerics -> methodGenerics
+                        | MethodGenericContext.Instantiation methodGenerics -> ModifierArguments.Supplied methodGenerics
+                        | MethodGenericContext.Definition when methodInfo.Generics.IsEmpty ->
+                            // The method declares no variables, so the empty substitution is the
+                            // whole truth.
+                            ModifierArguments.Supplied ImmutableArray.Empty
                         | MethodGenericContext.Definition ->
-                            if methodInfo.Generics.IsEmpty then
-                                // The method declares no variables, so its modifiers cannot spell
-                                // `!!i` and the empty substitution is the whole truth.
-                                ImmutableArray.Empty
-                            else
-                                // Same limit as the declaring-type arm below, on the other axis: a
-                                // modifier is concretised, and the typical instantiation's `!!i`
-                                // are variables rather than runtime types. Refused rather than
-                                // given an empty vector, which would report `!!0` as out of range
-                                // instead of as unsupported.
-                                failwith
-                                    $"TODO: %s{operation} on the generic method definition %s{methodInfo.Name}: a custom modifier is resolved and concretised against the method's generic arguments, and the typical instantiation supplies the method's own variables instead, which ConcreteTypeHandle cannot name"
+                            ModifierArguments.Open
+                                $"the method is the generic method definition %s{methodInfo.Name}, whose typical instantiation supplies the method's own variables"
 
-                    match declaringTypeContext with
-                    | DeclaringTypeContext.Instantiation typeGenerics -> typeGenerics, methodGenerics
-                    | DeclaringTypeContext.Definition definition ->
-                        // A modifier token is resolved and concretised below, and both want runtime
-                        // types for the declaring type's `!i` -- which a definition does not supply.
-                        // The near-free half is a modifier that mentions no variable at all, which
-                        // is every modifier the corpus actually carries; the general case wants the
-                        // whole walk `Signature_Init` now takes for its parameter types.
-                        failwith
-                            $"TODO: %s{operation} on method %s{methodInfo.Name}, whose declaring type is the open generic definition %O{definition}: a custom modifier is resolved and concretised against the declaring type's generic arguments, and a definition supplies its own type variables instead, which ConcreteTypeHandle cannot name"
-                    | DeclaringTypeContext.OpenConstruction (definition, arguments) ->
-                        // The same limit as a definition's: at least one argument is open, and
-                        // ConcreteTypeHandle cannot name it.
-                        let described = arguments |> Seq.map string |> String.concat ", "
+                    let typeArguments =
+                        match declaringTypeContext with
+                        | DeclaringTypeContext.Instantiation typeGenerics -> ModifierArguments.Supplied typeGenerics
+                        | DeclaringTypeContext.Definition definition ->
+                            ModifierArguments.Open
+                                $"method %s{methodInfo.Name}'s declaring type is the open generic definition %O{definition}, which supplies its own variables"
+                        | DeclaringTypeContext.OpenConstruction (definition, arguments) ->
+                            let described = arguments |> Seq.map string |> String.concat ", "
 
-                        failwith
-                            $"TODO: %s{operation} on method %s{methodInfo.Name}, whose declaring type is an open construction of %O{definition} over [%s{described}]: a custom modifier is resolved and concretised against the declaring type's generic arguments, and an open argument is not a runtime type, which ConcreteTypeHandle cannot name"
-                | None -> declaringTypeGenericsOfSignature operation state signatureObj, ImmutableArray.Empty
+                            ModifierArguments.Open
+                                $"method %s{methodInfo.Name}'s declaring type is an open construction of %O{definition} over [%s{described}], and an open argument is not a runtime type"
+
+                    typeArguments, methodArguments
+                | None ->
+                    ModifierArguments.Supplied (declaringTypeGenericsOfSignature operation state signatureObj),
+                    ModifierArguments.Supplied ImmutableArray.Empty
 
             let assembly, blobHandle = resolveSignatureBlobHandle operation state sigCliValue
             let blob = assembly.PeReader.GetMetadataReader().GetBlobContent blobHandle
@@ -1355,14 +1359,27 @@ module NativeSignature =
                     let typeDefn, resolvedAssy =
                         TokenBindingStop.typeToken assembly token typeDefnResult
 
+                    let argumentsFor
+                        (arguments : ModifierArguments)
+                        (mentioned : bool)
+                        (kind : string)
+                        : ImmutableArray<ConcreteTypeHandle>
+                        =
+                        match arguments with
+                        | ModifierArguments.Supplied generics -> generics
+                        | ModifierArguments.Open _ when not mentioned -> ImmutableArray.Empty
+                        | ModifierArguments.Open refusal ->
+                            failwith
+                                $"TODO: %s{operation}: the custom modifier %O{typeDefn} names a generic %s{kind} parameter, and %s{refusal}, which ConcreteTypeHandle cannot name"
+
                     let state, concreteHandle =
                         IlMachineState.concretizeType
                             ctx.LoggerFactory
                             ctx.BaseClassTypes
                             state
                             resolvedAssy.DefinitionFullName
-                            typeGenerics
-                            methodGenerics
+                            (argumentsFor typeArguments (TypeDefn.mentionsGenericTypeParameter typeDefn) "type")
+                            (argumentsFor methodArguments (TypeDefn.mentionsGenericMethodParameter typeDefn) "method")
                             typeDefn
 
                     let runtimeTypeAddr, state =
