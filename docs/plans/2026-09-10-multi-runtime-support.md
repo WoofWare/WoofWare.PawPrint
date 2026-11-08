@@ -892,9 +892,11 @@ mutation-testing skill applies to each table/classifier they introduce.
      recurs on every attempt recurs until
      the stack overflows. `ExceptionMaking` tells an exception IL throws (`ThrownByIl`, whose
      constructor's raises escape on every runtime) from one the VM makes, and `vmMakingRaise` says
-     per runtime what a raise during the VM's making does. Still open: the interpreter, which delivers the
-     constructor's exception on .NET 11 too; and a failed message lookup no longer replacing a
-     `TypeInitializationException`;
+     per runtime what a raise during the VM's making does. RC1 runs a type initializer through
+     such a wrapper too, so what it raises is thrown again, preserving its stack trace, before the
+     runtime wraps it in a `TypeInitializationException`: where preserving fails, the wrapper wraps
+     what that raised, and `ExceptionMaking.InitializerFailure` says so through `vmMakingRaise`.
+     Still open: the interpreter, which delivers the constructor's exception on .NET 11 too;
    * **(landed)** the JIT's hardware-intrinsic tables, kept per runtime:
      `HardwareIntrinsicTable.Net10.tsv` and `.Net11.tsv`, each regenerated from its runtime's
      source by a reader that follows the headers' `#include`s and conditionals (RC1 drops the

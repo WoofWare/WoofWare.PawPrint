@@ -27,14 +27,17 @@ type internal ExceptionMaking =
     /// (`EETypeLoadException::CreateThrowable`). That constructor formats its message from the
     /// runtime's native resources. What it raises does as `vmMakingRaise` says.
     | TypeLoadConstructor
-    /// It runs `TypeInitializationException`'s `(string, Exception)` constructor around what a type
-    /// initializer raised, and should that constructor fail, raises what the initializer raised
-    /// instead, throwing it again: that runs `Exception.InternalPreserveStackTrace` on it, whose
-    /// own raises escape in its place. What the constructor raises never escapes.
+    /// The VM runs the type initializer from native code, so what the initializer raises does first
+    /// as `vmMakingRaise` says, and what then escapes is the exception the runtime wraps. It runs
+    /// `TypeInitializationException`'s `(string, Exception)` constructor around that, and should
+    /// the constructor fail, raises the exception it was wrapping instead, throwing it again: that
+    /// runs `Exception.InternalPreserveStackTrace` on it, whose own raises escape in its place.
+    /// What the constructor raises never escapes.
     | InitializerFailure
 
 /// What follows where a method the VM runs from native code to make an exception raises
-/// (`ExceptionMaking.VmConstructor`, `ResourceMessage` and `TypeLoadConstructor`).
+/// (`ExceptionMaking.VmConstructor`, `ResourceMessage` and `TypeLoadConstructor`), or where a type
+/// initializer raises (`ExceptionMaking.InitializerFailure`).
 [<RequireQualifiedAccess>]
 type internal VmMakingRaise =
     /// What the method raised escapes in place of the exception being made.
@@ -49,8 +52,8 @@ type internal VmMakingRaise =
 module internal ExceptionMaking =
 
     /// What follows on `runtime` where a method the VM runs from native code to make an exception
-    /// raises. Where the CPU reported the fault the exception is for, the process ends on every
-    /// runtime instead, which each answer over-approximates.
+    /// raises, or a type initializer raises. Where the CPU reported the fault the exception is for,
+    /// the process ends on every runtime instead, which each answer over-approximates.
     let vmMakingRaise (runtime : EmulatedRuntime) : VmMakingRaise =
         match runtime with
         | EmulatedRuntime.Net10 -> VmMakingRaise.EscapesInPlace
