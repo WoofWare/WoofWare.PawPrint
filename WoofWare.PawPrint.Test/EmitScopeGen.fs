@@ -53,6 +53,9 @@ module EmitScopeGen =
         | SetMethodBody of method : int * body : BodyShape
         /// A TypeSpec: a single-dimensional array of the element type this chooses.
         | TypeSpec of element : int
+        /// An instantiation of a method or method reference already in the scope, if it has any; never
+        /// of no type arguments.
+        | MethodSpec of method : int * arguments : int list
 
     type private Applied =
         {
@@ -219,6 +222,10 @@ module EmitScopeGen =
                 2, Gen.map2 (fun t e -> Op.SetTypeDefExtends (t, e)) choice choice
                 2, Gen.map2 (fun m b -> Op.SetMethodBody (m, b)) choice genBody
                 2, Gen.map Op.TypeSpec choice
+                2,
+                Gen.listOfLength 2 choice
+                |> Gen.bind Gen.subListOf
+                |> Gen.map3 (fun m first rest -> Op.MethodSpec (m, first :: List.ofSeq rest)) choice choice
             ]
 
     let pick (choice : int) (items : 'a list) : 'a option =
@@ -542,6 +549,35 @@ module EmitScopeGen =
                 }
 
             withScope (EmitScope.addTypeSpec row applied.Scope |> snd) applied
+        | Op.MethodSpec (methodChoice, arguments) ->
+            let methods =
+                [
+                    for i in 1..methodCount do
+                        yield MethodDefOrRef.MethodDef (MethodDefRid i)
+                    for r in applied.MethodRefs do
+                        yield MethodDefOrRef.MemberRef r
+                ]
+
+            match pick methodChoice methods with
+            | None -> applied
+            | Some method ->
+                let instantiation, applied =
+                    [
+                        yield 0x0Auy
+                        yield! compressedUnsigned arguments.Length
+                        for a in arguments do
+                            yield! elementType scope a
+                    ]
+                    |> ImmutableArray.CreateRange
+                    |> fun blob -> internBlob blob applied
+
+                let row : MethodSpecRow =
+                    {
+                        Method = method
+                        Instantiation = instantiation
+                    }
+
+                withScope (EmitScope.addMethodSpec row applied.Scope |> snd) applied
         | Op.MethodImpl (cls, bodyChoice, declaration) ->
             let methods =
                 [
@@ -694,6 +730,9 @@ module EmitScopeGen =
             for i in 1 .. reader.GetTableRowCount TableIndex.TypeSpec do
                 let r = reader.GetTypeSpecification (MetadataTokens.TypeSpecificationHandle i)
                 yield (TableIndex.TypeSpec, i), box (blob r.Signature)
+            for i in 1 .. reader.GetTableRowCount TableIndex.MethodSpec do
+                let r = reader.GetMethodSpecification (MetadataTokens.MethodSpecificationHandle i)
+                yield (TableIndex.MethodSpec, i), box (token r.Method, blob r.Signature)
         ]
         |> Map.ofList
 

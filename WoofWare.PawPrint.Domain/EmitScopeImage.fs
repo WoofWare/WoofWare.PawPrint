@@ -254,6 +254,7 @@ module EmitScopeImage =
         rowCounts.[int TableIndex.TypeSpec] <- (EmitScope.typeSpecs scope).Count
         rowCounts.[int TableIndex.Assembly] <- (if (EmitScope.assembly scope).IsSome then 1 else 0)
         rowCounts.[int TableIndex.AssemblyRef] <- (EmitScope.assemblyRefs scope).Count
+        rowCounts.[int TableIndex.MethodSpec] <- (EmitScope.methodSpecs scope).Count
 
         let stringSize = if largeStrings then 4 else 2
         let guidSize = if largeGuids then 4 else 2
@@ -442,6 +443,11 @@ module EmitScopeImage =
             str "AssemblyRef.Name" row.Name
             str "AssemblyRef.Culture" row.Culture
             blob "AssemblyRef.HashValue" row.HashValue
+
+        // MethodSpec (II.22.29)
+        for row in EmitScope.methodSpecs scope do
+            methodDefOrRef "MethodSpec.Method" row.Method
+            blob "MethodSpec.Instantiation" row.Instantiation
 
         // The header (II.24.2.6), then the rows above, which are in table-number order.
         let stream = BlobBuilder ()
