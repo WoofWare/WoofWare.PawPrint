@@ -24,6 +24,7 @@ namespace MakeGenericConstraintViolationMessages
         public static void M<W>() where W : struct { }
         public static void WT<W>() where W : T { }
         public static void TwoM<A, B>() where A : class where B : struct { }
+        public static void AT<A, B>() where A : T where B : struct { }
     }
 
     public static class Statics
@@ -144,6 +145,9 @@ namespace MakeGenericConstraintViolationMessages
             Check(24, () => M(typeof(G<int>), "TwoM", typeof(int), typeof(int)), MethodCase("0", "System.Int32", "Void TwoM[A,B]()", "A", ns + "G`1[System.Int32]", "TwoM", "System.Int32", "A"));
             Check(25, () => M(typeof(Statics), "M", typeof(Span<int>)), MethodCase("0", "System.Span`1[System.Int32]", "Void M[W]()", "W", ns + "Statics", "M", "System.Span`1[System.Int32]", "W"));
             Check(26, () => M(typeof(G<object>), "WT", typeof(string)), "returned Void WT[String]()");
+            // In `G<object>`'s context `A : T` admits `string`, so CoreLib names `B`, as the binder
+            // does; against the formal `T` it would have named `A`.
+            Check(27, () => M(typeof(G<object>), "AT", typeof(string), typeof(string)), MethodCase("1", "System.String", "Void AT[A,B]()", "B", ns + "G`1[System.Object]", "AT", "System.String", "B"));
 
             return failures;
         }
