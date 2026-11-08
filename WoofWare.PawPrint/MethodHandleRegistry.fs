@@ -875,6 +875,34 @@ module MethodHandleRegistry =
 
         alloc, reg, allocState
 
+    /// A *fresh* `RuntimeMethodInfoStub` naming `method` as declared by `declaringType`, with no
+    /// method-generic arguments bound: CoreCLR's `AllocateStubMethodInfo` on an open `MethodDesc*`,
+    /// the identity `getOrAllocateInternalId` mints, so a generic method comes back as its
+    /// definition.
+    let allocateFreshStubOfOpenMethod
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (allConcreteTypes : AllConcreteTypes)
+        (allocState : 'allocState)
+        (allocate : CliValueType -> 'allocState -> ManagedHeapAddress * 'allocState)
+        (assemblyFullName : string)
+        (declaringType : RuntimeTypeHandleTarget)
+        (method : MethodInfo<'tyGen, GenericParamFromMetadata, TypeDefn>)
+        (reg : MethodHandleRegistry)
+        : ManagedHeapAddress * MethodHandleRegistry * 'allocState
+        =
+        let registryId, reg =
+            makeOpenMethodHandle
+                "MethodHandleRegistry.allocateFreshStubOfOpenMethod"
+                assemblyFullName
+                declaringType
+                method
+            |> fun handle -> idOfHandle handle reg
+
+        let alloc, allocState =
+            allocateFreshStubForId baseClassTypes allConcreteTypes allocState allocate registryId
+
+        alloc, reg, allocState
+
     /// `allocateFreshStubOfIdentity` for a concretised method.
     let allocateFreshStub
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
