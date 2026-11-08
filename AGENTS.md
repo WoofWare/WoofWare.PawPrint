@@ -151,6 +151,8 @@ If you find you really do need to implement a dependency, please consider whethe
 
 ## Instructions for OpenAI Codex agents specifically
 
+If you're in a sandbox (e.g. you're performing a code review task), `dotnet test` needs the flags `--disable-build-servers -m:1` to run.
+
 When you've completed a change to the point where you think it can be PR'ed, please commit it.
 Then invoke Claude for a review: `claude --effort max --print "Please review this branch against main. The branch intends to..."` (for example).
 This will take many minutes, and can easily take at least ten minutes if Claude decides to run tests; do not assume it has hung just because it is silent for a long time.
