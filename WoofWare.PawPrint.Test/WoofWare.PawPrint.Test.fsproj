@@ -449,6 +449,7 @@
     <Compile Include="TestEmitScopeMemberRefs.fs" />
     <Compile Include="TestFabricatedMemberRefOfOverlongSignature.fs" />
     <Compile Include="TestDynamicAssemblyRefusals.fs" />
+    <Compile Include="TestNextCallReturnAddressRefusal.fs" />
     <Compile Include="TestFabricatedCallArgumentCoercion.fs" />
     <Compile Include="TestFabricatedTypedReferenceInstantiation.fs" />
     <Compile Include="TestTypedReferenceArgumentPerRuntime.fs" />

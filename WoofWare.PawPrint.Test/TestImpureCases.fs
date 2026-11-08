@@ -4638,6 +4638,25 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `MethodInfo.Invoke` from its second call onwards, which runs through the
+                // `InvokeStub_` dynamic method CoreLib emits. Registered with the dynamic-code
+                // switch overridden, like its siblings; real .NET 10, whose default is true, returns
+                // 0 from it.
+                FileName = "ReflectionInvokeThroughEmittedStub.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // Executing the body of a `Reflection.Emit` method: the first slice that runs the
                 // IL rather than only minting, describing or binding it. Registered with the
                 // dynamic-code switch overridden, like its siblings.

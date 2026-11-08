@@ -925,9 +925,44 @@ module IlMachineStateExecution =
                                 state,
                                 MethodInfo.setMethodVars body methodToCall.Signature methodToCall
                             )
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.StubHelpers.StubHelpers"
+                        && key.MethodName = "NextCallReturnAddress"
+                        ->
+                        // The JIT replaces the call with the address its method's next call returns
+                        // to, and stops inlining into that method and tail-calling out of it
+                        // (`compHasNextCallRetAddr`); PawPrint does neither in any method. CoreLib's
+                        // reflection invoke stubs (`InvokerEmitUtil`) pop the address at once, and
+                        // CoreCLR's own interpreter runs that pair as nothing. A native int 0 stands
+                        // in for the address, which the `pop` this thread runs next discards unread;
+                        // the `pop` stays a step of its own, since entering it may be a join that
+                        // widens the slots beneath (`StackShapeOfMethod`).
+                        let callSite =
+                            match activeMethodState.ExecutingMethod.Body with
+                            | MethodBody.Il instructions when advanceProgramCounterOfCaller ->
+                                Some (
+                                    instructions.Locations.[activeMethodState.IlOpIndex],
+                                    MethodState.peekNextInstruction activeMethodState
+                                )
+                            | _ -> None
+
+                        match callSite with
+                        | Some (IlOp.UnaryMetadataToken (UnaryMetadataTokenIlOp.Call, _),
+                                Some (IlOp.Nullary NullaryIlOp.Pop)) ->
+                            let state =
+                                state
+                                |> IlMachineState.pushToEvalStack
+                                    (CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.Verbatim 0L)))
+                                    thread
+                                |> IlMachineState.advanceProgramCounter thread
+
+                            IntrinsicOutcome.Handled (state, CallCommitment.Committed)
+                        | _ ->
+                            failwith
+                                $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces a call to this method with the address the calling method's next call returns to. PawPrint has no representation of a code address, so it runs only a `call` whose next instruction pops the address unread, as CoreLib's reflection invoke stubs do (`InvokerEmitUtil`); this call is not one (%s{MethodOwner.describe activeMethodState.ExecutingMethod.Owner}::%s{activeMethodState.ExecutingMethod.Name} at IL_%04X{activeMethodState.IlOpIndex}: %A{callSite})"
                     | IntrinsicBody.CallSiteExpansion ->
                         failwith
-                            $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces every call to this method with code of its own, and its IL is not what runs. Only code the runtime generates calls it (IL stubs, the async resumption stub, runtime-async methods), and PawPrint runs none of those"
+                            $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces every call to this method with code of its own, and its IL is not what runs. Only code the runtime generates (IL stubs, the async resumption stub) and runtime-async methods call it, and PawPrint models none of those replacements"
                     | IntrinsicBody.VmSubstitution ->
                         match VmSubstitution.unsafeStub declaringAssy handle with
                         | Some stub ->
