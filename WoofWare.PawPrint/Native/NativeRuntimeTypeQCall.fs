@@ -1293,29 +1293,20 @@ module NativeRuntimeTypeQCall =
                     failwith $"%s{operation}: module's assembly %s{assemblyFullName} is not loaded"
                 )
 
-            // CoreCLR allows the caller to pass declaring-type / declaring-method generic
-            // argument arrays as substitution context for tokens that reference generic
-            // parameters (typically TypeSpecs); these arrays may also be supplied for tokens
-            // that don't need them, in which case they are simply unused. Decode them up
-            // front so we never reject a call whose token doesn't actually consume them.
-            let typeInstantiation =
+            // The caller's arrays are CoreCLR's `SigTypeContext`, which only a TypeSpec's signature
+            // reads: a TypeDef or a TypeRef names its type outright. Decoded in the TypeSpec arm alone,
+            // because decoding narrows each element to a closed type, and the other arms must answer
+            // whatever the arrays hold. `Module.ResolveMethod` passes a method's own type variables
+            // for a method of a generic type, and CoreCLR answers with the declaring type's definition.
+            let decodeInstantiation
+                (pointer : ManagedPointerSource)
+                (count : int)
+                : ImmutableArray<ConcreteTypeHandle>
+                =
                 ImmutableArray.CreateRange (
                     seq {
-                        for index in 0 .. typeInstCount - 1 ->
-                            readTypeHandleInstantiationElement ctx.BaseClassTypes operation state typeInstArgsPtr index
-                    }
-                )
-
-            let methodInstantiation =
-                ImmutableArray.CreateRange (
-                    seq {
-                        for index in 0 .. methodInstCount - 1 ->
-                            readTypeHandleInstantiationElement
-                                ctx.BaseClassTypes
-                                operation
-                                state
-                                methodInstArgsPtr
-                                index
+                        for index in 0 .. count - 1 ->
+                            readTypeHandleInstantiationElement ctx.BaseClassTypes operation state pointer index
                     }
                 )
 
@@ -1354,15 +1345,11 @@ module NativeRuntimeTypeQCall =
                         ctx.BaseClassTypes
                         assembly
                         true
-                        typeInstantiation
-                        methodInstantiation
+                        ImmutableArray.Empty
+                        ImmutableArray.Empty
                         typeDefn
                         state
                 | MetadataToken.TypeReference h ->
-                    // Resolve the TypeRef itself with no caller-supplied generic context: the
-                    // referenced type's own definition must not be substituted via the caller's
-                    // type/method instantiation. Caller context is reserved for TypeSpec generic
-                    // substitution, applied below by runtimeTypeHandleTargetForTypeToken.
                     let state, typeDefnResult =
                         IlMachineState.lookupTypeRef ctx.LoggerFactory ctx.BaseClassTypes state assembly h
 
@@ -1374,8 +1361,8 @@ module NativeRuntimeTypeQCall =
                         ctx.BaseClassTypes
                         declaringAssembly
                         true
-                        typeInstantiation
-                        methodInstantiation
+                        ImmutableArray.Empty
+                        ImmutableArray.Empty
                         typeDefn
                         state
                 | MetadataToken.TypeSpecification h ->
@@ -1389,8 +1376,8 @@ module NativeRuntimeTypeQCall =
                         ctx.BaseClassTypes
                         assembly
                         false
-                        typeInstantiation
-                        methodInstantiation
+                        (decodeInstantiation typeInstArgsPtr typeInstCount)
+                        (decodeInstantiation methodInstArgsPtr methodInstCount)
                         typeDefn
                         state
                 | other ->
