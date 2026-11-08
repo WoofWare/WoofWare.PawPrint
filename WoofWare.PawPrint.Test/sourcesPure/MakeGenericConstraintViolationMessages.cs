@@ -13,6 +13,7 @@ namespace MakeGenericConstraintViolationMessages
     public class Iface<T> where T : IMark { }
     public class Bas<T> where T : Base { }
     public class Cmp<T> where T : IComparable<T> { }
+    public class CmpArr<T> where T : IComparable<T[]> { }
     public class Ref<T> { }
     public class TU<T, U> where T : U where U : IMark { }
     public class UT<T, U> where U : T { }
@@ -25,12 +26,14 @@ namespace MakeGenericConstraintViolationMessages
         public static void WT<W>() where W : T { }
         public static void TwoM<A, B>() where A : class where B : struct { }
         public static void AT<A, B>() where A : T where B : struct { }
+        public static void EA<W>() where W : IEnumerable<T[]> { }
     }
 
     public static class Statics
     {
         public static void M<W>() where W : struct { }
         public static void XY<X, Y>() where X : Y where Y : IMark { }
+        public static void CA<W>() where W : IComparable<W[]> { }
     }
 
     // A constraint violation in `MakeGenericType` or `MakeGenericMethod` reaches the guest as an
@@ -148,6 +151,13 @@ namespace MakeGenericConstraintViolationMessages
             // In `G<object>`'s context `A : T` admits `string`, so CoreLib names `B`, as the binder
             // does; against the formal `T` it would have named `A`.
             Check(27, () => M(typeof(G<object>), "AT", typeof(string), typeof(string)), MethodCase("1", "System.String", "Void AT[A,B]()", "B", ns + "G`1[System.Object]", "AT", "System.String", "B"));
+
+            // Constraints over an array of a parameter: CoreLib reads each against the formal, so
+            // the cast relation sees `T[]` with `T` unbound.
+            Check(28, () => T1(typeof(CmpArr<>), typeof(string)), SameTypeCase("0", "System.String", ns + "CmpArr`1[T]", "T"));
+            Check(29, () => M(typeof(Statics), "CA", typeof(string)), MethodCase("0", "System.String", "Void CA[W]()", "W", ns + "Statics", "CA", "System.String", "W"));
+            Check(30, () => M(typeof(G<>), "EA", typeof(List<object[]>)), MethodCase("0", "System.Collections.Generic.List`1[System.Object[]]", "Void EA[W]()", "W", ns + "G`1[T]", "EA", "System.Collections.Generic.List`1[System.Object[]]", "W"));
+            Check(31, () => M(typeof(G<object>), "EA", typeof(List<string[]>)), "returned Void EA[List`1]()");
 
             return failures;
         }
