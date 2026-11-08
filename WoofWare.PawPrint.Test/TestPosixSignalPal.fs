@@ -124,7 +124,11 @@ module TestPosixSignalPal =
                 )
 
             let pinned =
-                Regex.Matches (File.ReadAllText path, @"^\s+PosixSignal(?<name>SIG[A-Z]+)\s*=\s*(?<value>-\d+)", RegexOptions.Multiline)
+                Regex.Matches (
+                    File.ReadAllText path,
+                    @"^\s+PosixSignal(?<name>SIG[A-Z]+)\s*=\s*(?<value>-\d+)",
+                    RegexOptions.Multiline
+                )
                 |> Seq.map (fun m -> m.Groups.["name"].Value, int m.Groups.["value"].Value)
                 |> Set.ofSeq
 
@@ -142,15 +146,15 @@ module TestPosixSignalPal =
     /// that a table transposed in both this fixture and the library is seen.
     [<Test>]
     let ``only .NET 11's enum names SIGKILL, as -11`` () : unit =
-        PosixSignalPal.platformSignalNumber EmulatedRuntime.Net10 SignalNumbering.Linux -11
+        PosixSignalPal.platformSignalNumber EmulatedRuntime.Net10 SignalNumbering.Linux (-11)
         |> shouldEqual 0
 
         for numbering in everyNumbering do
-            PosixSignalPal.platformSignalNumber EmulatedRuntime.Net11 numbering -11
+            PosixSignalPal.platformSignalNumber EmulatedRuntime.Net11 numbering (-11)
             |> shouldEqual 9
 
         PosixSignalPal.toEnum EmulatedRuntime.Net10 Signal.SIGKILL |> shouldEqual 0
-        PosixSignalPal.toEnum EmulatedRuntime.Net11 Signal.SIGKILL |> shouldEqual -11
+        PosixSignalPal.toEnum EmulatedRuntime.Net11 Signal.SIGKILL |> shouldEqual (-11)
 
     // ---------------------------------------------------------------------
     // `signalMax`.

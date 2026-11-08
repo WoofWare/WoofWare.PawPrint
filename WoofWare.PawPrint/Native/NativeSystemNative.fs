@@ -9019,7 +9019,10 @@ module NativeSystemNative =
 
             let numbering = SimulatedUnixPlatform.signalNumbering state.Kernel.UnixPlatform
 
-            pushInt32 (PosixSignalPal.platformSignalNumber numbering raw) ctx |> Some
+            let runtime = EmulatedRuntime.ofCoreLib ctx.BaseClassTypes.Corelib
+
+            pushInt32 (PosixSignalPal.platformSignalNumber runtime numbering raw) ctx
+            |> Some
         | Some "SystemNative_EnablePosixSignalHandling",
           [ ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
           MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->

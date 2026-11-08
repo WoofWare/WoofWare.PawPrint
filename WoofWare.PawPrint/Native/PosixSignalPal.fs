@@ -7,36 +7,41 @@ open WoofWare.PosixKernel
 ///
 /// This is PawPrint's half of the signal boundary, and the last of the four
 /// (`UnixErrorPal`, `SocketEventsPal`, `SocketArgumentsPal` are the others).
-/// The enum carries no kernel content whatever: it is a managed alphabet of ten
+/// The enum carries no kernel content whatever: it is a managed alphabet of
 /// negative integers naming the signals .NET considers portable, and a kernel
 /// knows only signos. So `WoofWare.PosixKernel` states the signo, under a
 /// `SignalNumbering` that says whose `<signal.h>` it is read from, and these
 /// functions are where a guest's `PosixSignal` becomes one and back.
 ///
-/// A transcription, so the compiler cannot keep it correct. Its oracle is the
-/// enum itself, which `TestPosixSignalPal` reads from the running BCL — a
-/// stronger position than the other three, whose upstream vocabulary is
-/// internal and had to be parsed out of pinned source — and, for the
-/// numbering, the host's own `SystemNative_GetPlatformSignalNumber`.
+/// A transcription, so the compiler cannot keep it correct. Its oracles are the
+/// enum itself, which `TestPosixSignalPal` reads from the running BCL, and each
+/// runtime's pinned `pal_signal.h`; and, for the numbering, the host's own
+/// `SystemNative_GetPlatformSignalNumber`.
 [<RequireQualifiedAccess>]
 module PosixSignalPal =
 
-    /// `PosixSignal.SIGHUP` … `PosixSignal.SIGTSTP`, the ten members the enum
-    /// defines. Every other signal a guest can name reaches these functions as
-    /// a raw signo instead.
-    let private enumIdentities : (int * Signal) list =
-        [
-            -1, Signal.SIGHUP
-            -2, Signal.SIGINT
-            -3, Signal.SIGQUIT
-            -4, Signal.SIGTERM
-            -5, Signal.SIGCHLD
-            -6, Signal.SIGCONT
-            -7, Signal.SIGWINCH
-            -8, Signal.SIGTTIN
-            -9, Signal.SIGTTOU
-            -10, Signal.SIGTSTP
-        ]
+    /// The members the enum defines on `runtime`: `PosixSignal.SIGHUP` …
+    /// `PosixSignal.SIGTSTP`, and on .NET 11 `PosixSignal.SIGKILL` too. Every
+    /// other signal a guest can name reaches these functions as a raw signo
+    /// instead.
+    let private enumIdentities (runtime : EmulatedRuntime) : (int * Signal) list =
+        let shared =
+            [
+                -1, Signal.SIGHUP
+                -2, Signal.SIGINT
+                -3, Signal.SIGQUIT
+                -4, Signal.SIGTERM
+                -5, Signal.SIGCHLD
+                -6, Signal.SIGCONT
+                -7, Signal.SIGWINCH
+                -8, Signal.SIGTTIN
+                -9, Signal.SIGTTOU
+                -10, Signal.SIGTSTP
+            ]
+
+        match runtime with
+        | EmulatedRuntime.Net10 -> shared
+        | EmulatedRuntime.Net11 -> shared @ [ -11, Signal.SIGKILL ]
 
     /// `pal_signal.c`'s `GetSignalMax()`: the largest positive number
     /// `SystemNative_GetPlatformSignalNumber` echoes back as a signo, and the
@@ -55,17 +60,17 @@ module PosixSignalPal =
         | SignalNumbering.Darwin -> Signal.highestSignoUnder SignalNumbering.Darwin + 1
 
     /// `SystemNative_GetPlatformSignalNumber`: the signo the BCL registers a
-    /// managed `PosixSignal` value under.
+    /// managed `PosixSignal` value under, or signals, on `runtime`.
     ///
-    /// The enum's own members are negative and map to their signo under the
-    /// given numbering. A caller may equally pass a positive native signo
+    /// The enum's own members on `runtime` are negative and map to their signo
+    /// under the given numbering. A caller may equally pass a positive native signo
     /// directly, which `PosixSignalRegistration.Register` allows; the shim
     /// echoes any such number in `(0, signalMax]` back without interpreting
     /// it, and this does the same. Anything else — including 0, which is
     /// `PosixSignalInvalid` — answers 0, which `Register` reports as
     /// `PlatformNotSupportedException`.
-    let platformSignalNumber (numbering : SignalNumbering) (raw : int) : int =
-        match List.tryFind (fun (value, _) -> value = raw) enumIdentities with
+    let platformSignalNumber (runtime : EmulatedRuntime) (numbering : SignalNumbering) (raw : int) : int =
+        match List.tryFind (fun (value, _) -> value = raw) (enumIdentities runtime) with
         | Some (_, signal) -> Signal.toRawSignoUnder numbering signal
         | None -> if raw > 0 && raw <= signalMax numbering then raw else 0
 
@@ -122,16 +127,16 @@ module PosixSignalPal =
         | Signal.RealTime _ -> false
 
     /// The `PosixSignal` value the dispatcher hands a registered handler as its
-    /// second argument.
+    /// second argument, on `runtime`.
     ///
-    /// Signals with no member of the enum — SIGPIPE, SIGABRT, SIGUSR1, SIGUSR2,
-    /// and any raw signo — produce `PosixSignalInvalid` (0), which is what real
+    /// Signals with no member of the enum on `runtime` — SIGPIPE, SIGABRT,
+    /// SIGUSR1, SIGUSR2, and any raw signo — produce `PosixSignalInvalid` (0), which is what real
     /// CoreCLR passes: `pal_signal.c` calls `TryConvertSignalCodeToPosixSignal`
     /// and, on its `false` return, overwrites the out-parameter with
     /// `PosixSignalInvalid` before invoking the handler. The raw signo that
     /// conversion helper writes for unmapped codes is dropped by that
     /// overwrite; only the *first* argument carries the signal number.
-    let toEnum (signal : Signal) : int =
-        match List.tryFind (fun (_, candidate) -> candidate = signal) enumIdentities with
+    let toEnum (runtime : EmulatedRuntime) (signal : Signal) : int =
+        match List.tryFind (fun (_, candidate) -> candidate = signal) (enumIdentities runtime) with
         | Some (value, _) -> value
         | None -> 0
