@@ -51,12 +51,10 @@ public static class Program
     //    sourcesPure/ReflectionOpenGenericDefinitionElementTypes.cs parks that for the type-formal
     //    side, and the method-formal side has the same gap for the same reason.
     //  - `Type.DeclaringMethod`, the most direct way to tell a method variable from a type
-    //    variable. It reaches `RuntimeTypeHandle.GetDeclaringMethodForGenericParameter`, which
-    //    needs an `IRuntimeMethodInfo` for the declaring method and is unimplemented. Reference
-    //    equality against `GetGenericArguments()` distinguishes the two axes without it, and is
-    //    the stronger statement anyway: checks 33/36/37 pin that the method variable is the
-    //    method's own and is *not* the declaring type's, which is what a walk that confused the
-    //    axes would get wrong.
+    //    variable; sourcesPure/TypeDeclaringMethod.cs covers it. Reference equality against
+    //    `GetGenericArguments()` is the stronger statement here: checks 33/36/37 pin that the
+    //    method variable is the method's own and is *not* the declaring type's, which is what a
+    //    walk that confused the axes would get wrong.
     //
     // Exit code is the index of the first failing check, so a failure names itself.
     public static int Main()
@@ -151,8 +149,8 @@ public static class Program
         if (!openSecond.IsGenericParameter) return 35;
         if (!ReferenceEquals(openSecond, openMix.GetGenericArguments()[0])) return 36;
         // Both axes are formal here, and they must not be confused: the method variable is not the
-        // type variable, even though both are position 0 of their respective owners. This is what
-        // separates the two axes in the absence of `Type.DeclaringMethod` -- see the note above.
+        // type variable, even though both are position 0 of their respective owners -- see the note
+        // above.
         if (ReferenceEquals(openSecond, openBoxFormal)) return 37;
         if (openSecond.GenericParameterPosition != 0) return 38;
 

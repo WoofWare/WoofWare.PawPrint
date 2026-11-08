@@ -1159,15 +1159,14 @@ module NativeRuntimeTypeQCall =
             let typeHandleTarget =
                 NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state qCallHandle
 
-            // Validate the ObjectHandleOnStack argument shape eagerly so a malformed
-            // BCL call fails here rather than later. We don't write through the byref
-            // on the type-level branch: the managed wrapper initialises its local
-            // `IRuntimeMethodInfo? method = null` before the QCall, and CoreCLR's
-            // implementation in runtimehandles.cpp:885 leaves `result` untouched when
-            // the generic variable's def-token is not an mdtMethodDef. Returning
-            // without writing therefore yields the same null the managed wrapper
+            // Read eagerly so a malformed BCL call fails here rather than later. We don't
+            // write through the byref on the type-level branch: the managed wrapper
+            // initialises its local `IRuntimeMethodInfo? method = null` before the QCall,
+            // and CoreCLR's implementation in runtimehandles.cpp:885 leaves `result`
+            // untouched when the generic variable's def-token is not an mdtMethodDef.
+            // Returning without writing therefore yields the same null the managed wrapper
             // reads back.
-            let _ =
+            let result =
                 NativeCall.objectHandleOnStackTarget operation state "result" instruction.Arguments.[1]
 
             match typeHandleTarget with
@@ -1180,9 +1179,59 @@ module NativeRuntimeTypeQCall =
                 // Type-level generic parameter: CoreCLR's `defToken` is mdtTypeDef,
                 // so the early-exit branch leaves `result` null. Mirror that.
                 NativeHandlerResult.completed state |> Some
-            | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, position) ->
-                failwith
-                    $"TODO: %s{operation} for method generic parameter #%i{position} of method %O{declaringMethod.Get} on %O{declaringType.TypeDefinition.Get}; need to allocate and return an IRuntimeMethodInfo for the declaring method (same gap as the RuntimeTypeHandle.GetDeclaringMethod InternalCall)"
+            | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, _) ->
+                // `pGenericVariable->LoadOwnerMethod()->AllocateStubMethodInfo()`: a fresh stub
+                // for the method that declares the variable, which is the generic method
+                // definition on its typical declaring type, as `ModuleHandle_ResolveMethod`
+                // resolves a MethodDef token.
+                let assembly =
+                    state.LoadedAssembly declaringType.AssemblyFullName
+                    |> Option.defaultWith (fun () ->
+                        failwith
+                            $"%s{operation}: the assembly %s{declaringType.AssemblyFullName} declaring a method's type variable is not loaded"
+                    )
+
+                let method = assembly.Methods.[declaringMethod.Get]
+
+                let state, declaringTarget =
+                    NativeRuntimeTypeHelpers.typicalDeclaringTypeTarget
+                        ctx.LoggerFactory
+                        ctx.BaseClassTypes
+                        assembly
+                        method
+                        state
+
+                let runtimeMethodInfoStubType =
+                    AllConcreteTypes.getRequiredNonGenericHandle
+                        state.TypeSystem.ConcreteTypes
+                        ctx.BaseClassTypes.RuntimeMethodInfoStub
+
+                let stubAddress, registry, state =
+                    MethodHandleRegistry.allocateFreshStubOfOpenMethod
+                        ctx.BaseClassTypes
+                        state.TypeSystem.ConcreteTypes
+                        state
+                        (fun fields state ->
+                            IlMachineState.allocateManagedObject runtimeMethodInfoStubType fields state
+                        )
+                        method.DeclaringAssemblyFullName
+                        declaringTarget
+                        method
+                        state.MethodHandles
+
+                let state =
+                    { state with
+                        MethodHandles = registry
+                    }
+
+                let state =
+                    IlMachineState.writeManagedByrefWithBase
+                        ctx.BaseClassTypes
+                        state
+                        (ManagedPointerSource.requireAddressed result)
+                        (CliType.ObjectRef (Some stubAddress))
+
+                NativeHandlerResult.completed state |> Some
             | RuntimeTypeHandleTarget.Closed _
             | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
             | RuntimeTypeHandleTarget.Composite _
