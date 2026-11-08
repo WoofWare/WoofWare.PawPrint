@@ -18,10 +18,10 @@ open WoofWare.PosixKernel
 [<Parallelizable(ParallelScope.All)>]
 module TestNotifyEventsPal =
 
-    /// The pinned runtime source only exists inside the Nix devshell, so a plain
-    /// `dotnet test` in a non-Nix checkout skips rather than fails.
-    let private palSource (leaf : string) : string =
-        let root = FrameworkUnderTest.requireRuntimeSource ()
+    /// The pinned runtime source of `runtime` only exists inside the Nix devshell,
+    /// so a plain `dotnet test` in a non-Nix checkout skips rather than fails.
+    let private palSourceOf (runtime : EmulatedRuntime) (leaf : string) : string =
+        let root = FrameworkUnderTest.requireRuntimeSourceOf runtime
 
         let path = Path.Combine (root, "src", "native", "libs", "System.Native", leaf)
 
@@ -31,10 +31,14 @@ module TestNotifyEventsPal =
 
         File.ReadAllText path
 
-    /// The `NotifyEvents` enum of the pinned `pal_io.h`: `PAL_IN_ACCESS =
+    /// The pinned source of the runtime under test.
+    let private palSource (leaf : string) : string =
+        palSourceOf (FrameworkUnderTest.runtime ()) leaf
+
+    /// The `NotifyEvents` enum of `runtime`'s pinned `pal_io.h`: `PAL_IN_ACCESS =
     /// 0x00000001,` and the rest, by the name after `PAL_IN_`.
-    let private pinnedNotifyEvents () : Map<string, uint32> =
-        let header = palSource "pal_io.h"
+    let private pinnedNotifyEventsOf (runtime : EmulatedRuntime) : Map<string, uint32> =
+        let header = palSourceOf runtime "pal_io.h"
 
         let body =
             Regex.Match (header, @"typedef enum\s*\{(?<body>[^}]*)\}\s*NotifyEvents;", RegexOptions.Singleline)
@@ -52,12 +56,17 @@ module TestNotifyEventsPal =
         let bytes = InotifyRecord.toBytes record
         BinaryPrimitives.ReadUInt32LittleEndian (bytes.AsSpan().Slice (4, 4))
 
-    /// The Linux value of each name `NotifyEvents` holds. The events and the bits
-    /// a record carries are the library's own; the three flags a watch asks
-    /// with the library parses but does not publish, so they are Linux's
-    /// `<sys/inotify.h>`, as `inotify-probe.c` prints them.
-    let private linux : (string * uint32) list =
+    /// The Linux value of each name `NotifyEvents` holds on `runtime`. The events
+    /// and the bits a record carries are the library's own; the three flags a
+    /// watch asks with the library parses but does not publish, so they are
+    /// Linux's `<sys/inotify.h>`, as `inotify-probe.c` prints them.
+    let private linuxOn (runtime : EmulatedRuntime) : (string * uint32) list =
         let watch = WatchDescriptor 1
+
+        let added =
+            match runtime with
+            | EmulatedRuntime.Net10 -> []
+            | EmulatedRuntime.Net11 -> [ "MOVE_SELF", InotifyEvent.bit InotifyEvent.MoveSelf ]
 
         [
             "ACCESS", InotifyEvent.bit InotifyEvent.Access
@@ -76,33 +85,32 @@ module TestNotifyEventsPal =
             recordMask (InotifyRecord.Event (watch, Set.singleton InotifyEvent.Attrib, true, 0u, None))
             ^^^ InotifyEvent.bit InotifyEvent.Attrib
         ]
+        @ added
 
     [<Test>]
     let ``every NotifyEvents value is the Linux bit of its name, and reaches the kernel as it is`` () : unit =
-        Net11Frontier.park
-            ".NET 11's `NotifyEvents` declares a different set of names from .NET 10's, which `NotifyEventsPal` transcribes. Un-park when the PAL conversion follows each runtime's enum."
+        for runtime in EmulatedRuntime.supported do
+            let pinned = pinnedNotifyEventsOf runtime
+            let linux = linuxOn runtime
 
-        let pinned = pinnedNotifyEvents ()
+            // A name added upstream, or one dropped, means this table and the
+            // enum no longer describe one thing.
+            (runtime, pinned |> Map.keys |> Set.ofSeq)
+            |> shouldEqual (runtime, linux |> List.map fst |> Set.ofList)
 
-        // A name added upstream, or one dropped, means this table and the enum
-        // no longer describe one thing.
-        pinned
-        |> Map.keys
-        |> Set.ofSeq
-        |> shouldEqual (linux |> List.map fst |> Set.ofList)
-
-        for name, value in linux do
-            pinned.[name] |> shouldEqual value
-            NotifyEventsPal.toInotifyMask pinned.[name] |> shouldEqual value
+            for name, value in linux do
+                pinned.[name] |> shouldEqual value
+                NotifyEventsPal.toInotifyMask pinned.[name] |> shouldEqual value
 
     [<Test>]
     let ``upstream asserts each NotifyEvents value equal to the platform's`` () : unit =
-        let source = palSource "pal_io.c"
+        for runtime in EmulatedRuntime.supported do
+            let source = palSourceOf runtime "pal_io.c"
 
-        for name in pinnedNotifyEvents () |> Map.keys do
-            if not (Regex.IsMatch (source, $@"c_static_assert\(PAL_IN_%s{name} == IN_%s{name}\);")) then
-                failwith
-                    $"TestNotifyEventsPal: pal_io.c no longer asserts PAL_IN_%s{name} == IN_%s{name}, which NotifyEventsPal passing the mask on untouched relies on."
+            for name in pinnedNotifyEventsOf runtime |> Map.keys do
+                if not (Regex.IsMatch (source, $@"c_static_assert\(PAL_IN_%s{name} == IN_%s{name}\);")) then
+                    failwith
+                        $"TestNotifyEventsPal: %O{runtime}'s pal_io.c no longer asserts PAL_IN_%s{name} == IN_%s{name}, which NotifyEventsPal passing the mask on untouched relies on."
 
     /// The body of `name` in the pinned `pal_io.c`.
     let private shimBody (name : string) : string =
