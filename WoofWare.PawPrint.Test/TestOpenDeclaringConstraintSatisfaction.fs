@@ -418,7 +418,7 @@ public class D_Self<T> where T : class { public void M_Self<U>() where U : D_Sel
                 $"%s{definition}.%s{methodName}"
                 typeInfo.AssemblyFullName
                 (ReflectedTypeTarget.ReflectionVariableBinding.Open formals)
-                (ImmutableArray.Create argHandle)
+                (ReflectedTypeTarget.ReflectionVariableBinding.Bound (ImmutableArray.Create argHandle))
                 method.Generics
                 [ argHandle ]
 
