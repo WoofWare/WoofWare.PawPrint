@@ -5267,6 +5267,21 @@ module TestImpureCases =
                 AssertTerminalState = Some assertMemberRefsOfTypeSpec
             }
             {
+                FileName = "ModuleBuilderDefineMethodSpec.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
                 // given the earlier methods their bodies: the retry refuses to bake a released body
                 // again, and gives an abstract method its empty one again, which sets none. Dynamic-code
