@@ -33,7 +33,7 @@ Bumping is an edit to `flake.nix` and `WoofWare.PawPrint/EmulatedRuntime.fs` —
    - Set its `sourceRev` to the public tag commit from step 2, set `sourceHash = pkgs.lib.fakeHash;`, then run `nix develop -c true` and copy the real `got: sha256-…` value back into `sourceHash`. Do the same for `linuxFrameworkHash` and `osxFrameworkHash`, since the packs are fetched at `expectedRuntimeVersion`.
    - If you need a runtime tree outside the current sparse set, add it to `sparseCheckout`, which every runtime's source shares, then re-run the fakeHash → real-hash dance for every runtime's `sourceHash`, since each hash covers its checked-out tree.
 
-4. Update `EmulatedRuntime.pin` in `WoofWare.PawPrint/EmulatedRuntime.fs` for the runtime's major:
+4. Update `EmulatedRuntime.pin` in `WoofWare.PawPrint.Domain/EmulatedRuntime.fs` for the runtime's major:
    - `Build` must become the new CoreLib's informational-version build identity. It carries a label and build number that `dotnet --info` does not show (a servicing build's is like `10.0.8-servicing.<build>`), so do not guess it: run `nix develop -c dotnet test WoofWare.PawPrint.Test/WoofWare.PawPrint.Test.fsproj --filter "FullyQualifiedName~TestEmulatedRuntime"`, and the failing drift test prints the exact string to paste.
    - `SourceRef` and `SourceCommit` must name the public tag and its commit, per step 2.
 
