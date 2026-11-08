@@ -10,8 +10,8 @@ namespace WoofWare.PawPrint
 ///
 /// * a target of 32 bits or more: NaN converts to 0; otherwise the source is truncated
 ///   toward zero and clamped into the target's range;
-/// * a narrower target: the low bits of the int32 conversion above, so `conv.u1` of 300.0
-///   is 44 and `conv.u2` of 1e20 is 0xFFFF.
+/// * a narrower target: as the caller's `NarrowFloatConversion` says, which depends on the
+///   runtime.
 ///
 /// A float32 source gives the same answer as its widening to double, which is exact, so
 /// only double sources are taken.
@@ -60,17 +60,39 @@ module FloatToInteger =
         elif x >= twoTo32 then System.UInt32.MaxValue
         else uint32 x
 
-    // The narrow targets are integer narrowings of an int32, which F# performs unchecked and
-    // which ECMA-335 defines as truncation to the low bits.
+    // `LowBitsOfSaturatedInt32` is an integer narrowing of the int32 conversion, which F#
+    // performs unchecked and which ECMA-335 defines as truncation to the low bits.
+    // `Saturates` clamps the source into the target's range first, as the JIT does; the clamped
+    // value is in int32's range, so the int32 conversion truncates it toward zero into the
+    // target's range, and the narrowing changes nothing. NaN passes through the clamp and
+    // converts to 0.
 
-    /// `conv.i2`.
-    let toInt16 (x : float) : int16 = int16 (toInt32 x)
+    /// `x` clamped into [`lower`, `upper`], or NaN if `x` is NaN.
+    let private clamp (lower : float) (upper : float) (x : float) : float =
+        if x < lower then lower
+        elif x > upper then upper
+        else x
 
-    /// `conv.u2`.
-    let toUInt16 (x : float) : uint16 = uint16 (toInt32 x)
+    /// `conv.i2`, by `rule`.
+    let toInt16 (rule : NarrowFloatConversion) (x : float) : int16 =
+        match rule with
+        | NarrowFloatConversion.LowBitsOfSaturatedInt32 -> int16 (toInt32 x)
+        | NarrowFloatConversion.Saturates -> int16 (toInt32 (clamp -32768.0 32767.0 x))
 
-    /// `conv.i1`.
-    let toInt8 (x : float) : int8 = int8 (toInt32 x)
+    /// `conv.u2`, by `rule`.
+    let toUInt16 (rule : NarrowFloatConversion) (x : float) : uint16 =
+        match rule with
+        | NarrowFloatConversion.LowBitsOfSaturatedInt32 -> uint16 (toInt32 x)
+        | NarrowFloatConversion.Saturates -> uint16 (toInt32 (clamp 0.0 65535.0 x))
 
-    /// `conv.u1`.
-    let toUInt8 (x : float) : uint8 = uint8 (toInt32 x)
+    /// `conv.i1`, by `rule`.
+    let toInt8 (rule : NarrowFloatConversion) (x : float) : int8 =
+        match rule with
+        | NarrowFloatConversion.LowBitsOfSaturatedInt32 -> int8 (toInt32 x)
+        | NarrowFloatConversion.Saturates -> int8 (toInt32 (clamp -128.0 127.0 x))
+
+    /// `conv.u1`, by `rule`.
+    let toUInt8 (rule : NarrowFloatConversion) (x : float) : uint8 =
+        match rule with
+        | NarrowFloatConversion.LowBitsOfSaturatedInt32 -> uint8 (toInt32 x)
+        | NarrowFloatConversion.Saturates -> uint8 (toInt32 (clamp 0.0 255.0 x))

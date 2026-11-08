@@ -950,12 +950,16 @@ module TestEvalStack =
                     | other, _ -> failwith $"%s{name}: expected a verbatim int32, got %O{other}"
         }
 
+    /// The runtime under test's rule for a float source, which no pointer-shaped source reaches.
+    let private underTestNarrowFloat : NarrowFloatConversion =
+        NarrowFloatConversion.ofRuntime (FrameworkUnderTest.runtime ())
+
     let private narrowingConversions : NarrowingConv list =
         [
-            ofInt32Returning "conv.i1" 8 EvalStackValue.convToInt8
-            ofInt32Returning "conv.u1" 8 EvalStackValue.convToUInt8
-            ofInt32Returning "conv.i2" 16 EvalStackValue.convToInt16
-            ofInt32Returning "conv.u2" 16 EvalStackValue.convToUInt16
+            ofInt32Returning "conv.i1" 8 (EvalStackValue.convToInt8 underTestNarrowFloat)
+            ofInt32Returning "conv.u1" 8 (EvalStackValue.convToUInt8 underTestNarrowFloat)
+            ofInt32Returning "conv.i2" 16 (EvalStackValue.convToInt16 underTestNarrowFloat)
+            ofInt32Returning "conv.u2" 16 (EvalStackValue.convToUInt16 underTestNarrowFloat)
             ofEvalStackReturning "conv.i4" EvalStackValue.convToInt32
             ofEvalStackReturning "conv.u4" EvalStackValue.convToUInt32
         ]

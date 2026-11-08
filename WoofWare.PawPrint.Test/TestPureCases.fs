@@ -123,8 +123,6 @@ module TestPureCases =
         [
             "LockOnArray.cs",
             """On .NET 11, `lock` on a multi-dimensional array reaches `RuntimeHelpers.GetRawData` on it, whose `RawData::Data` projection PawPrint refuses for a multi-dimensional array: "TODO: RawData::Data projection for multi-dimensional array (rank 2)". Its single-dimensional array locks before that. Un-park when that projection is modelled and the header word is placed before a multi-dimensional array's bounds."""
-            "ConvFloatSaturating.cs",
-            """On .NET 11, an unchecked conversion from floating point to an integer narrower than 32 bits saturates to that integer's own range, where .NET 10 takes the low bits of the saturated `int32` conversion. Measured on RC1 against .NET 10: `(byte)300.0` is 255 (44), `(sbyte)-1e20` is -128 (0), `(short)70000.7` is 32767 (4464), `(char)70000.7` is 65535 (4464), and `(byte)-1.5` is 0 (255). The guest asserts .NET 10's rule, so real RC1 exits 40 at its first narrow check, and PawPrint converts by .NET 10's rule on every runtime. Un-park when the conversion opcodes take the runtime's rule and this case states .NET 11's results."""
             "StringContentRoundTrip.cs",
             """On .NET 11, `HttpContent.LoadIntoBufferAsyncCore` in System.Net.Http is a runtime-async method: it awaits through `AsyncHelpers.Await` and returns its `Task` from an empty stack, which PawPrint does not run, and its stack-shape check refuses the body: "is executing offset 49, which is invalid IL: StackUnderflow (49, Nullary Ret, 0)". Un-park when runtime-async methods run. Verified to exit 0 on real .NET 11."""
             "AssemblyGetCallingAssemblyFromEntryPoint.cs",
@@ -150,7 +148,6 @@ module TestPureCases =
         [
             "AssemblyLoadWindowsRuntime.cs", GuestEnding.ExitCode 11
             "AssemblyLoadFailureCache.cs", GuestEnding.ExitCode 13
-            "ConvFloatSaturating.cs", GuestEnding.ExitCode 40
             "ThreadStateOfEntryThreadAfterMain.cs", GuestEnding.ExitCode 12
             "AssemblyGetCallingAssemblyFromEntryPoint.cs", GuestEnding.ExitCode 2
             "DelegateBindStaticAbstractInterfaceMethod.cs", GuestEnding.UnhandledException
