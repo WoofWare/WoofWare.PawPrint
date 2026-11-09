@@ -1663,7 +1663,7 @@ module IlMachineStateExecution =
     /// runs the constructor itself and raises that again from the `throw`, continuing its trace
     /// (`ExceptionEscape.RaisedAgainFromCaller`). On .NET 11 it runs the constructor inside the
     /// CoreLib helper `Exception.CreateRuntimeWrappedException`, and first preserves the trace of
-    /// what that caught (`resumeNonExceptionWrap`), so the `throw`'s raise begins a fresh one.
+    /// what that caught (`resumeVmRaise`), so the `throw`'s raise begins a fresh one.
     and wrapNonException
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -1715,27 +1715,26 @@ module IlMachineStateExecution =
             let raised, pool = NativeReferenceCell.allocate None pool
             let state = IlMachineState.setNativeMemoryPool pool state
 
-            callNonExceptionWrapHelper
+            callVmExceptionHelper
                 loggerFactory
                 baseClassTypes
                 "CreateRuntimeWrappedException"
                 "WrapNonCompliantException"
                 [ thrownCell ; result ; raised ]
-                (NonExceptionWrapStep.AfterCreate (thrownCell, result, raised))
+                (VmRaiseStep.AfterCreate (thrownCell, result, raised))
                 currentThread
                 state
 
-    /// Call the static `[UnmanagedCallersOnly]` helper `methodName` of `System.Exception`, as the
-    /// runtime's `runtimeCaller` does from inside the active frame's `throw` of an object that is not
-    /// an exception, passing a pointer to each of `arguments`; `step` is what the runtime does once
-    /// it returns.
-    and private callNonExceptionWrapHelper
+    /// Call the static `[UnmanagedCallersOnly]` helper `methodName` of `System.Exception`, as .NET
+    /// 11's `runtimeCaller` does on the way to raising an exception from the active frame, passing a
+    /// pointer to each of `arguments`; `step` is what the runtime does once it returns.
+    and private callVmExceptionHelper
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (methodName : string)
         (runtimeCaller : string)
         (arguments : NativeReferenceCell list)
-        (step : NonExceptionWrapStep)
+        (step : VmRaiseStep)
         (currentThread : ThreadId)
         (state : IlMachineState)
         : ExecutionResult
@@ -1747,7 +1746,7 @@ module IlMachineStateExecution =
                 "Exception"
                 methodName
                 (List.length arguments)
-                $"wrap a thrown object that is not an exception, as .NET 11's %s{runtimeCaller} does"
+                $"raise an exception as .NET 11's %s{runtimeCaller} does"
 
         let state, concretizedResult =
             ExecutionConcretization.concretizeMethodWithTypeGenerics
@@ -1773,8 +1772,8 @@ module IlMachineStateExecution =
 
         // The VM calls an `[UnmanagedCallersOnly]` method from native code
         // (`UnmanagedCallersOnlyCaller`), which is the transition such a method admits. The
-        // `throw` is not finished, so its program counter stays where it is: the exception the
-        // runtime settles on is dispatched from it.
+        // raising frame's instruction is not finished, so its program counter stays where it is:
+        // the exception the runtime settles on is dispatched from it.
         let state, commitment =
             callMethodWithCommitment
                 loggerFactory
@@ -1790,7 +1789,7 @@ module IlMachineStateExecution =
                 currentThread
                 state.ThreadState.[currentThread]
                 None
-                (ReturnValueDisposition.ResumeNonExceptionWrap step)
+                (ReturnValueDisposition.ResumeVmRaise step)
                 (ExceptionEscape.UnhandledAtNativeCaller runtimeCaller)
                 state
 
@@ -1798,29 +1797,27 @@ module IlMachineStateExecution =
         | CallCommitment.Committed -> ExecutionResult.stepped (state, WhatWeDid.Executed)
         | CallCommitment.Raised ->
             failwith
-                $"TODO: calling System.Exception.%s{methodName}, which .NET 11's %s{runtimeCaller} calls to wrap a thrown object that is not an exception, raised before it ran; CoreCLR would raise that from the throw, which is not modelled"
+                $"TODO: calling System.Exception.%s{methodName}, which .NET 11's %s{runtimeCaller} calls on the way to raising an exception, raised before it ran; what CoreCLR raises then is not modelled"
         | CallCommitment.Aborted fatal -> ExecutionResult.Aborted (state, currentThread, fatal)
 
-    /// Do what .NET 11's `WrapNonCompliantException` does next once the helper whose frame carried
-    /// `step` has returned to the throwing frame, which is active: dispatch from the `throw` the
-    /// exception the runtime has settled on, or call `Exception.InternalPreserveStackTrace` on the
-    /// one it is about to raise.
+    /// Do what .NET 11's runtime does next once the helper whose frame carried `step` has returned
+    /// to the frame the runtime is raising from, which is active: dispatch the exception the runtime
+    /// has settled on, or call `Exception.InternalPreserveStackTrace` on the one it is about to
+    /// raise.
     ///
     /// Each exception a helper caught is raised through `COMPlusThrow`, which first preserves its
     /// trace (`ExceptionPreserveStackTrace`), and raises instead whatever preserving it raised,
     /// preserving that in turn. That recursion is on the native stack, which real .NET 11
     /// overflows if every preserve raises; PawPrint follows a bounded number of re-raises and then
     /// refuses.
-    and resumeNonExceptionWrap
+    and resumeVmRaise
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (step : NonExceptionWrapStep)
+        (step : VmRaiseStep)
         (currentThread : ThreadId)
         (state : IlMachineState)
         : ExecutionResult
         =
-        let reraiseBound = 16
-
         let read (cell : NativeReferenceCell) : ManagedHeapAddress option =
             NativeReferenceCell.read cell (IlMachineState.getNativeMemoryPool state)
 
@@ -1829,68 +1826,141 @@ module IlMachineStateExecution =
             ||> List.fold (fun pool cell -> NativeReferenceCell.free cell pool)
             |> fun pool -> IlMachineState.setNativeMemoryPool pool state
 
-        // `IL_Throw` dispatches what `WrapNonCompliantException` left in `*ppThrowable` from the
-        // `throw`, so the method that threw is the first frame of the trace that raise begins.
-        let raiseFromThrow (exceptionAddr : ManagedHeapAddress) (state : IlMachineState) : ExecutionResult =
-            let exceptionType =
-                ManagedHeap.getObjectConcreteType exceptionAddr state.ManagedHeap
-
-            match
-                ExceptionDispatching.throwExceptionObject
-                    loggerFactory
-                    baseClassTypes
-                    state
-                    currentThread
-                    TraceHeadOrigin.IlThrow
-                    exceptionAddr
-                    exceptionType
-            with
-            | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
-            | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
-                ExecutionResult.UnhandledException (state, currentThread, exn)
-
-        // `preserved` holds `candidate`; CoreCLR passes the address of its own copy, which no
-        // guest can tell apart.
-        let preserve
-            (candidate : ManagedHeapAddress)
-            (preserved : NativeReferenceCell)
-            (reraises : int)
-            (state : IlMachineState)
-            : ExecutionResult
-            =
-            let raised, pool =
-                NativeReferenceCell.allocate None (IlMachineState.getNativeMemoryPool state)
-
-            callNonExceptionWrapHelper
-                loggerFactory
-                baseClassTypes
-                "InternalPreserveStackTrace"
-                "ExceptionPreserveStackTrace"
-                [ preserved ; raised ]
-                (NonExceptionWrapStep.AfterPreserve (candidate, preserved, raised, reraises))
-                currentThread
-                (IlMachineState.setNativeMemoryPool pool state)
-
         match step with
-        | NonExceptionWrapStep.AfterCreate (thrown, result, raised) ->
+        | VmRaiseStep.AfterCreate (thrown, result, raised) ->
             match read raised, read result with
-            | None, Some wrapper -> state |> free [ thrown ; result ; raised ] |> raiseFromThrow wrapper
+            | None, Some wrapper ->
+                state
+                |> free [ thrown ; result ; raised ]
+                |> raiseFromVmSite loggerFactory baseClassTypes VmRaiseSite.NonExceptionThrow wrapper currentThread
             | None, None ->
                 failwith
                     "logic error: Exception.CreateRuntimeWrappedException returned having stored neither a wrapper nor an exception, though its body stores one or the other"
-            | Some caught, None -> state |> free [ thrown ; result ] |> preserve caught raised 0
+            | Some caught, None ->
+                state
+                |> free [ thrown ; result ; raised ]
+                |> preserveForVmRaise loggerFactory baseClassTypes VmRaiseSite.NonExceptionThrow caught 0 currentThread
             | Some caught, Some wrapper ->
                 failwith
                     $"logic error: Exception.CreateRuntimeWrappedException stored both a wrapper (%O{wrapper}) and an exception (%O{caught}), though it stores the wrapper only once the constructor has returned"
-        | NonExceptionWrapStep.AfterPreserve (candidate, preserved, raised, reraises) ->
+        | VmRaiseStep.AfterPreserve (site, candidate, preserved, raised, reraises) ->
             match read raised with
-            | None -> state |> free [ preserved ; raised ] |> raiseFromThrow candidate
+            | None ->
+                state
+                |> free [ preserved ; raised ]
+                |> raiseFromVmSite loggerFactory baseClassTypes site candidate currentThread
             | Some caught ->
-                if reraises + 1 > reraiseBound then
-                    failwith
-                        $"TODO: Exception.InternalPreserveStackTrace raised more than %d{reraiseBound} times running, each time on the exception the call before it raised, while .NET 11 wrapped a thrown object that is not an exception. Real .NET 11 raises each of them through COMPlusThrow, which preserves it in turn on the native stack, until a preserve raises nothing or the stack overflows and the process aborts; PawPrint follows %d{reraiseBound} and then refuses rather than model the overflow."
+                state
+                |> free [ preserved ; raised ]
+                |> preserveForVmRaise loggerFactory baseClassTypes site caught (reraises + 1) currentThread
 
-                state |> free [ preserved ] |> preserve caught raised (reraises + 1)
+    /// Dispatch `exceptionAddr` from the active frame, as .NET 11's runtime raises the exception it
+    /// settled on from `site`.
+    and private raiseFromVmSite
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (site : VmRaiseSite)
+        (exceptionAddr : ManagedHeapAddress)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        let origin =
+            match site with
+            // `IL_Throw` dispatches what `WrapNonCompliantException` left in `*ppThrowable` from the
+            // `throw`, so the method that threw is the first frame of the trace that raise begins.
+            | VmRaiseSite.NonExceptionThrow -> TraceHeadOrigin.IlThrow
+            | VmRaiseSite.NativeFrame -> TraceHeadOrigin.RuntimeRaise RuntimeRaiseSite.ThrownAgainByVm
+
+        let exceptionType =
+            ManagedHeap.getObjectConcreteType exceptionAddr state.ManagedHeap
+
+        match
+            ExceptionDispatching.throwExceptionObject
+                loggerFactory
+                baseClassTypes
+                state
+                currentThread
+                origin
+                exceptionAddr
+                exceptionType
+        with
+        | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
+        | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
+            ExecutionResult.UnhandledException (state, currentThread, exn)
+
+    /// Call `Exception.InternalPreserveStackTrace` on `candidate`, which .NET 11's runtime is about
+    /// to raise from `site`; `reraises` is how many preserves before it raised.
+    and private preserveForVmRaise
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (site : VmRaiseSite)
+        (candidate : ManagedHeapAddress)
+        (reraises : int)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        let reraiseBound = 16
+
+        if reraises > reraiseBound then
+            failwith
+                $"TODO: Exception.InternalPreserveStackTrace raised more than %d{reraiseBound} times running, each time on the exception the call before it raised, while .NET 11's runtime was raising an exception (%A{site}). Real .NET 11 raises each of them through COMPlusThrow, which preserves it in turn on the native stack, until a preserve raises nothing or the stack overflows and the process aborts; PawPrint follows %d{reraiseBound} and then refuses rather than model the overflow."
+
+        // `preserved` holds `candidate`; CoreCLR passes the address of its own copy, which no
+        // guest can tell apart.
+        let preserved, pool =
+            NativeReferenceCell.allocate (Some candidate) (IlMachineState.getNativeMemoryPool state)
+
+        let raised, pool = NativeReferenceCell.allocate None pool
+
+        callVmExceptionHelper
+            loggerFactory
+            baseClassTypes
+            "InternalPreserveStackTrace"
+            "ExceptionPreserveStackTrace"
+            [ preserved ; raised ]
+            (VmRaiseStep.AfterPreserve (site, candidate, preserved, raised, reraises))
+            currentThread
+            (IlMachineState.setNativeMemoryPool pool state)
+
+    /// What the active native frame's runtime code does throwing `exceptionAddr`, an exception
+    /// object it already holds, as `COMPlusThrow(OBJECTREF)` does (`NativeHandlerResult.ThrowExisting`).
+    /// On .NET 11 `RealCOMPlusThrow` first preserves its trace, unless it is not an exception
+    /// (`ExceptionPreserveStackTrace`), and raises instead whatever preserving it raised.
+    and throwExistingFromNativeFrame
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (exceptionAddr : ManagedHeapAddress)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        match EmulatedRuntime.ofCoreLib baseClassTypes.Corelib with
+        | EmulatedRuntime.Net10 ->
+            // .NET 10's `RealCOMPlusThrow` preserves through a plain managed call, whose raise
+            // escapes in place; no .NET 10 native handler throws an object it holds.
+            failwith
+                $"TODO: a .NET 10 native method threw the exception object %O{exceptionAddr} it held; .NET 10's COMPlusThrow preserves its trace through a plain call of Exception.InternalPreserveStackTrace, which is not modelled because no .NET 10 handler needs it"
+        | EmulatedRuntime.Net11 ->
+            let exceptionType =
+                ManagedHeap.getObjectConcreteType exceptionAddr state.ManagedHeap
+
+            let exceptionHandle =
+                AllConcreteTypes.getRequiredNonGenericHandle state.TypeSystem.ConcreteTypes baseClassTypes.Exception
+
+            let state, isException =
+                isAssignableFrom loggerFactory baseClassTypes exceptionType exceptionHandle state
+
+            if not isException then
+                // `ExceptionPreserveStackTrace` skips an object that is not an exception, and so
+                // does nothing a guest could see; but none of the runtime's callers hands one here.
+                failwith
+                    $"logic error: a native method threw %O{exceptionAddr}, of type %O{exceptionType}, which is not an exception; the runtime throws only exceptions an [UnmanagedCallersOnly] helper caught"
+
+            // `ExceptionPreserveStackTrace` also skips the runtime's preallocated exceptions, which
+            // PawPrint does not make.
+            preserveForVmRaise loggerFactory baseClassTypes VmRaiseSite.NativeFrame exceptionAddr 0 currentThread state
 
     /// Synthesise an exception from inside the runtime itself (the host emulating the CLR),
     /// as opposed to a `throw` opcode executed by guest IL. Allocates the exception without

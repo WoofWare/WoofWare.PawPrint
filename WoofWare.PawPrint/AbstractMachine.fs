@@ -173,6 +173,24 @@ module AbstractMachine =
                         state
 
                 ExecutionResult.Stepped (state, WhatWeDid.SuspendedForManagedCall, effect)
+            | NativeHandlerResult.ThrowExisting (state, exceptionAddr, effect) ->
+                // The handler's runtime code throws an exception object it holds. The native frame
+                // stays on the stack: a preserve of its trace runs above it, and the exception is
+                // dispatched from it.
+                match
+                    IlMachineStateExecution.throwExistingFromNativeFrame
+                        loggerFactory
+                        baseClassTypes
+                        exceptionAddr
+                        thread
+                        state
+                with
+                | ExecutionResult.Stepped (state, whatWeDid, StepEffect.NoEffect) ->
+                    ExecutionResult.Stepped (state, whatWeDid, effect)
+                | ExecutionResult.Stepped (_, _, raised) ->
+                    failwith
+                        $"logic error: throwing an existing exception from a native frame produced the step effect %O{raised}, though it runs no handler that has one"
+                | other -> other
             | NativeHandlerResult.SuspendedForClassInit (state, effect) ->
                 // A cctor was pushed; the native frame must stay on the stack so the dispatch
                 // loop runs the cctor first, then re-enters this native method on the next step.
@@ -301,7 +319,7 @@ module AbstractMachine =
             match state |> IlMachineState.returnFromSyntheticStackFrame thread with
             | ReturnFrameResult.NoFrameToReturn -> failwith "unexpectedly nowhere to return from delegate"
             | ReturnFrameResult.DispatchException _ -> failwith "unexpected exception dispatch from delegate frame pop"
-            | ReturnFrameResult.ResumeNonExceptionWrap _ ->
+            | ReturnFrameResult.ResumeVmRaise _ ->
                 failwith "unexpected step of a thrown non-exception's wrapping from delegate frame pop"
             | ReturnFrameResult.NormalReturn state ->
 
