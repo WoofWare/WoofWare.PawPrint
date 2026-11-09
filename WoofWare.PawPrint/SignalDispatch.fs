@@ -88,9 +88,14 @@ module SignalDispatch =
     /// (matching real CoreCLR `pal_signal.c`, which overwrites the
     /// out-parameter with `PosixSignalInvalid` when
     /// `TryConvertSignalCodeToPosixSignal` returns `false`).
-    let private buildArgs (numbering : SignalNumbering) (signal : Signal) : ImmutableArray<CliType> =
+    let private buildArgs
+        (runtime : EmulatedRuntime)
+        (numbering : SignalNumbering)
+        (signal : Signal)
+        : ImmutableArray<CliType>
+        =
         let signo = Signal.toRawSignoUnder numbering signal
-        let posixEnum = PosixSignalPal.toEnum signal
+        let posixEnum = PosixSignalPal.toEnum runtime signal
 
         ImmutableArray.CreateRange (
             [
@@ -515,7 +520,9 @@ module SignalDispatch =
             )
 
         let numbering = SimulatedUnixPlatform.signalNumbering state.Kernel.UnixPlatform
-        let args = buildArgs numbering signal
+
+        let args =
+            buildArgs (EmulatedRuntime.ofCoreLib baseClassTypes.Corelib) numbering signal
 
         // `MethodState.Empty` enforces an arity check against
         // `MethodInfo.arity mi` (plus 1 if non-static). The handler is
