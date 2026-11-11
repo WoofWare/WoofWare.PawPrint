@@ -236,13 +236,7 @@ module ExceptionDispatching =
     ///
     /// The frame stays on the stack and in the trace either way; it is only its clauses that are
     /// out of scope, for both passes. A frame that never began has no `finally` to run either.
-    ///
-    /// A user-written runtime-async body that has yet to capture the thread's contexts has not
-    /// begun either: CoreCLR's JIT calls `AsyncHelpers.CaptureContexts` before every region of the
-    /// body (`SaveAsyncContexts`, jit/async.cpp).
-    let private hasNotStarted (frame : MethodState) : bool =
-        frame.PendingTypeInit.IsSome
-        || frame.AsyncFrame = Some (AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture)
+    let private hasNotStarted (frame : MethodState) : bool = frame.PendingTypeInit.IsSome
 
     /// What `exceptionObject`, of type `exceptionType`, wraps if it is a
     /// `RuntimeWrappedException` (its `_wrappedException`, which may be null), and `None` if it is
