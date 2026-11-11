@@ -24,7 +24,8 @@ module TestDebuggerServerTrace =
     let private token = "test-debugger-trace-token"
 
     /// Two threads contending one lock, so the scheduler interleaves them and a thread is seen
-    /// blocked on the other's lock; plus a write, so a step carries output.
+    /// blocked on the other's lock; plus a write, so a step carries output. Each holds the lock
+    /// across a sleep, so the contention outlasts .NET 11's spin before a `lock` blocks.
     let private contendedLockSource =
         """
 using System;
@@ -47,6 +48,7 @@ class Program
             lock (Gate)
             {
                 counter += Twice(1);
+                Thread.Sleep(1);
             }
         }
     }
@@ -777,16 +779,22 @@ class Program
             Session = recording.Session
         }
 
-    let private isLockWait (status : string) : bool =
-        status.Contains ("blockedOnSyncBlockAcquire", StringComparison.Ordinal)
-        || status.Contains ("blockedOnMonitorAcquire", StringComparison.Ordinal)
+    /// Whether `thread` is blocked waiting for another thread's lock. On .NET 10 a `lock` blocks in
+    /// a status of its own; on .NET 11 it blocks in `System.Threading.Lock`'s slow path, which
+    /// waits as any managed wait does, so it is told by its frames.
+    let private waitsForLock (thread : Thread) : bool =
+        match FrameworkUnderTest.runtime () with
+        | EmulatedRuntime.Net10 ->
+            thread.Status.Contains ("blockedOnSyncBlockAcquire", StringComparison.Ordinal)
+            || thread.Status.Contains ("blockedOnMonitorAcquire", StringComparison.Ordinal)
+        | EmulatedRuntime.Net11 ->
+            // A blocked status is an object; the others are strings.
+            thread.Status.StartsWith ("{", StringComparison.Ordinal)
+            && thread.Frames
+               |> List.exists (fun frame -> frame.Method = "System.Private.CoreLib.Lock.TryEnterSlow")
 
     [<Test>]
     let ``replaying a trace reconstructs what single-stepping observes at every step`` () : Task =
-        Net11Frontier.park (
-            "On .NET 11 the guest's contention for its lock is settled inside the thin lock's spin, so no step shows a thread blocked on the lock, which this test's check of what the run exercised requires (measured on 11.0.0-rc.1, with the fat lock running). Un-park with a guest whose contention outlasts the spin."
-        )
-
         task {
             use tracedServer = startServerWith Roslyn.compileWithSymbols contendedLockSource
             use tracedClient = client tracedServer
@@ -811,7 +819,7 @@ class Program
             eventThreads.Length >= 2 |> shouldEqual true
 
             traced.Steps
-            |> List.exists (fun step -> step.After.Threads |> Map.exists (fun _ t -> isLockWait t.Status))
+            |> List.exists (fun step -> step.After.Threads |> Map.exists (fun _ t -> waitsForLock t))
             |> shouldEqual true
 
             traced.Steps
@@ -837,10 +845,6 @@ class Program
 
     [<Test>]
     let ``a trace records what discovering a deadlock changed`` () : Task =
-        Net11Frontier.park (
-            "This test looks for .NET 10's monitor statuses, `BlockedOnSyncBlockWait` before the deadlock and `BlockedOnSyncBlockAcquire` once discovering it wakes `Main`; on .NET 11 `Monitor.Wait`'s timeout and the reacquire are a managed `Lock`'s waits on a `LowLevelMonitor`, so neither status arises (measured on 11.0.0-rc.1). Un-park with the statuses .NET 11 shows."
-        )
-
         task {
             use tracedServer = startServerWith Roslyn.compile timedWaitDeadlockSource
             use tracedClient = client tracedServer
@@ -852,7 +856,6 @@ class Program
 
             assertSameRun stepped traced
 
-            // Not vacuous: the discovery moved a thread from waiting on the lock to acquiring it.
             let deadlock =
                 match traced.Deadlock with
                 | Some deadlock -> deadlock
@@ -866,13 +869,30 @@ class Program
                 | Some step -> step.After
                 | None -> traced.Initial
 
-            statuses before
-            |> List.exists (fun s -> s.Contains ("blockedOnSyncBlockWait", StringComparison.Ordinal))
-            |> shouldEqual true
+            match FrameworkUnderTest.runtime () with
+            | EmulatedRuntime.Net10 ->
+                // Not vacuous: `Main`'s timed wait is still pending when no thread can run, and the
+                // discovery fires it, moving `Main` from waiting on the lock to acquiring it.
+                statuses before
+                |> List.exists (fun s -> s.Contains ("blockedOnSyncBlockWait", StringComparison.Ordinal))
+                |> shouldEqual true
 
-            statuses deadlock.After
-            |> List.exists (fun s -> s.Contains ("blockedOnSyncBlockAcquire", StringComparison.Ordinal))
-            |> shouldEqual true
+                statuses deadlock.After
+                |> List.exists (fun s -> s.Contains ("blockedOnSyncBlockAcquire", StringComparison.Ordinal))
+                |> shouldEqual true
+            | EmulatedRuntime.Net11 ->
+                // `Monitor.Wait` times out inside the thread's own wait, which leaves `Main` able to
+                // run, and it goes on to wait for the lock without end; so the timeout fires in the
+                // run's steps, and the discovery finds nothing left to fire and changes no thread.
+                traced.Steps
+                |> List.exists (fun step ->
+                    step.After.Threads
+                    |> Map.exists (fun _ t -> t.Status.Contains ("deadlineTicks", StringComparison.Ordinal))
+                )
+                |> shouldEqual true
+
+                before.Threads |> Map.exists (fun _ t -> waitsForLock t) |> shouldEqual true
+                deadlock.After |> shouldEqual before
         }
 
     [<Test>]
