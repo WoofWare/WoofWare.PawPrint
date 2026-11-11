@@ -638,7 +638,7 @@ class Program
 
             for summary in session.GetProperty("threads").EnumerateArray () do
                 let id = summary.GetProperty("id").GetInt32 ()
-                let! response = client.GetAsync $"thread/%d{id}"
+                let! response = client.GetAsync $"thread/%d{id}?values=active"
                 response.StatusCode |> shouldEqual HttpStatusCode.OK
                 use! json = jsonDocument response
                 let thread = json.RootElement

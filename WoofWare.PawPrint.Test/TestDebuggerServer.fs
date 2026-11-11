@@ -515,6 +515,66 @@ class Program
         }
 
     [<Test>]
+    let ``Debugger HTTP thread renders only the active frame's values when asked`` () : Task =
+        task {
+            use server = startServer recursiveSource
+            use client = client server (Some token)
+
+            let! run = client.PostAsync ("run?maxSteps=200", emptyContent ())
+            run.StatusCode |> shouldEqual HttpStatusCode.OK
+
+            let framesOf (query : string) : Task<JsonElement list> =
+                task {
+                    let! response = client.GetAsync $"thread/0%s{query}"
+                    response.StatusCode |> shouldEqual HttpStatusCode.OK
+                    use! json = jsonDocument response
+                    // Cloned so the frames outlive the document.
+                    return
+                        json.RootElement.GetProperty("frames").EnumerateArray ()
+                        |> Seq.map _.Clone()
+                        |> Seq.toList
+                }
+
+            let raw (frames : JsonElement list) : string list =
+                frames |> List.map (fun frame -> frame.GetRawText ())
+
+            let! everyFrame = framesOf ""
+            let! explicitAll = framesOf "?values=all"
+            let! activeOnly = framesOf "?values=active"
+
+            raw explicitAll |> shouldEqual (raw everyFrame)
+            activeOnly.Length |> shouldEqual everyFrame.Length
+
+            let valueKeys = [ "evalStack" ; "arguments" ; "locals" ]
+
+            let withoutValues (frame : JsonElement) : (string * string) list =
+                frame.EnumerateObject ()
+                |> Seq.filter (fun p -> not (List.contains p.Name valueKeys))
+                |> Seq.map (fun p -> p.Name, p.Value.GetRawText ())
+                |> Seq.toList
+
+            for full, active in List.zip everyFrame activeOnly do
+                if full.GetProperty("active").GetBoolean () then
+                    active.GetRawText () |> shouldEqual (full.GetRawText ())
+                else
+                    withoutValues active |> shouldEqual (withoutValues full)
+
+                    for key in valueKeys do
+                        active.GetProperty(key).ValueKind |> shouldEqual JsonValueKind.Null
+
+            // Not vacuous: `Recurse`'s callers each hold an argument the default rendering states.
+            everyFrame
+            |> List.exists (fun frame ->
+                not (frame.GetProperty("active").GetBoolean ())
+                && frame.GetProperty("arguments").GetArrayLength () > 0
+            )
+            |> shouldEqual true
+
+            let! unknownMode = client.GetAsync "thread/0?values=some"
+            unknownMode.StatusCode |> shouldEqual HttpStatusCode.BadRequest
+        }
+
+    [<Test>]
     let ``Debugger HTTP exposes compact stack summary`` () : Task =
         task {
             use server = startServer recursiveSource
