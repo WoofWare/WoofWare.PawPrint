@@ -4,6 +4,7 @@ open System
 open System.Collections.Immutable
 open System.Reflection
 open System.Reflection.Metadata
+open System.Reflection.Metadata.Ecma335
 open System.Security.Cryptography
 open System.Text
 
@@ -72,15 +73,33 @@ module AssemblyRefRequest =
                     definition.Flags &&& ~~~AssemblyFlags.PublicKey
         }
 
+/// A token in another module's method signature that <c>EmitScopeReferences.importMethodSignature</c>
+/// does not translate into the dynamic module, the first the walk meets.
+[<RequireQualifiedAccess>]
+type SignatureTokenRefusal =
+    /// A TypeRef of the source module, which CoreCLR's <c>ImportTypeRef</c> translates by copying its
+    /// outermost resolution scope.
+    | TypeRef of TypeReferenceHandle
+    /// A TypeSpec of the source module, which CoreCLR translates in turn and finds or adds.
+    | TypeSpec of TypeSpecificationHandle
+    /// A token whose tag names no table (<c>mdtBaseType</c>), given as the encoded token.
+    | NoTable of coded : int
+    /// A TypeDef of an unsigned source assembly, named here, to which the scope has no AssemblyRef.
+    /// CoreCLR would add one holding eight uninitialised bytes as its token. The managed caller always
+    /// asks for the declaring type's TypeRef first, which makes the AssemblyRef, so it never reaches this.
+    | UnreferencedUnsignedAssembly of assembly : string
+
 /// What CoreCLR's emitter writes into a dynamic module for a method signature read from another module
 /// (<c>TranslateSigWithScope</c>).
 [<RequireQualifiedAccess>]
+[<NoEquality>]
+[<NoComparison>]
 type MethodSignatureImport =
-    /// The signature names no type by token, and these are the bytes the emitter writes for it.
-    | Copied of ImmutableArray<byte>
-    /// The signature names a type by token, which the emitter rewrites to name a <c>TypeRef</c> of the
-    /// dynamic module, adding <c>TypeRef</c> and <c>AssemblyRef</c> rows of its own.
-    | NamesTypeByToken
+    /// The bytes the emitter writes, and the scope with the AssemblyRef and TypeRefs the translation
+    /// added, which is the scope it was given if it added none.
+    | Imported of signature : ImmutableArray<byte> * scope : EmitScope
+    /// The signature names a type by a token the translation does not handle yet, and nothing is added.
+    | Refused of SignatureTokenRefusal
 
 /// <summary>
 /// The references CoreCLR's emitter adds to a dynamic module's scope, each found among the rows the
@@ -461,23 +480,134 @@ module EmitScopeReferences =
             ]
 
     /// <summary>
+    /// The <c>AssemblyRef</c> row that CoreCLR's <c>ImportHelper::CreateAssemblyRefFromAssembly</c>
+    /// gives for the assembly <paramref name="request"/> was read from: the one
+    /// <c>tryFindAssemblyRef</c> finds, or a new one holding the request's version and flags as they are
+    /// (unlike <c>defineAssemblyRef</c>'s), its token, and an empty hash. <c>None</c> for an unsigned
+    /// assembly that the scope has no row for, for which CoreCLR writes an uninitialised token.
+    /// </summary>
+    let private assemblyRefFromAssembly
+        (request : AssemblyRefRequest)
+        (scope : EmitScope)
+        : (AssemblyRefRid * EmitScope) option
+        =
+        match tryFindAssemblyRef request scope with
+        | Some row -> Some (row, scope)
+        | None when request.PublicKeyToken.IsDefaultOrEmpty -> None
+        | None ->
+            // `CreateAssemblyRefFromAssembly` puts the token, the name, the culture and the hash, in that
+            // order.
+            let token, scope = EmitScope.internBlob request.PublicKeyToken scope
+            let name, scope = EmitScope.internString request.Name scope
+            let culture, scope = EmitScope.internString request.Culture scope
+            let hash, scope = EmitScope.internBlob ImmutableArray.Empty scope
+
+            EmitScope.addAssemblyRef
+                {
+                    Version = request.Version
+                    Flags = request.Flags
+                    PublicKeyOrToken = token
+                    Name = name
+                    Culture = culture
+                    HashValue = hash
+                }
+                scope
+            |> Some
+
+    /// <summary>
+    /// The <c>TypeRef</c> row CoreCLR's <c>ImportHelper::ImportTypeDef</c> gives for a TypeDef of
+    /// another assembly: the last of a chain, outermost first, each scoped by the one before and the
+    /// first by <paramref name="assemblyRef"/>, holding the source TypeDefs' own namespaces and names.
+    /// <c>CreateNesterHierarchy</c> finds the chain from the outermost, and from the first it does not
+    /// find adds the rest without looking.
+    /// </summary>
+    let private importTypeDef
+        (source : MetadataReader)
+        (assemblyRef : AssemblyRefRid)
+        (handle : TypeDefinitionHandle)
+        (scope : EmitScope)
+        : TypeRefRid * EmitScope
+        =
+        let rec chain (handle : TypeDefinitionHandle) (inner : TypeDefinition list) : TypeDefinition list =
+            let definition = source.GetTypeDefinition handle
+            let enclosing = definition.GetDeclaringType ()
+
+            if enclosing.IsNil then
+                definition :: inner
+            else
+                chain enclosing (definition :: inner)
+
+        let rec define
+            (resolution : ResolutionScope)
+            (looking : bool)
+            (chain : TypeDefinition list)
+            (scope : EmitScope)
+            : TypeRefRid * EmitScope
+            =
+            match chain with
+            | [] -> failwith "unreachable: a TypeDef's chain holds at least the TypeDef"
+            | definition :: inner ->
+                let ns = source.GetString definition.Namespace
+                let name = source.GetString definition.Name
+
+                let found =
+                    if looking then
+                        tryFindTypeRef resolution ns name scope
+                    else
+                        None
+
+                let row, scope =
+                    match found with
+                    | Some row -> row, scope
+                    | None ->
+                        // An empty namespace is the heap's empty string, which interning finds.
+                        let ns, scope = EmitScope.internString ns scope
+                        let name, scope = EmitScope.internString name scope
+
+                        EmitScope.addTypeRef
+                            {
+                                ResolutionScope = resolution
+                                Name = name
+                                Namespace = ns
+                            }
+                            scope
+
+                match inner with
+                | [] -> row, scope
+                | _ -> define (ResolutionScope.TypeRef row) found.IsSome inner scope
+
+        define (ResolutionScope.AssemblyRef assemblyRef) true (chain handle []) scope
+
+    /// <summary>
     /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
-    /// II.23.2.1) of another module, walking it as <c>ImportHelper::MergeUpdateTokenInSig</c> does. A
-    /// class or value type, a generic type it instantiates, or a custom modifier names a type by token,
-    /// which the emitter rewrites. Of the rest, the index of a type or method parameter is written in
-    /// its shortest form, every other byte is copied, and bytes after the signature's last type are
-    /// dropped.
+    /// II.23.2.1) of another module, read by <paramref name="source"/>, walking it as
+    /// <c>ImportHelper::MergeUpdateTokenInSig</c> does. A class or value type, a generic type it
+    /// instantiates, or a custom modifier names a type by token, which is rewritten where the walk meets
+    /// it, so that a row added for one token is found for a later one. A TypeDef of the source module
+    /// names the TypeRef <c>ImportTypeDef</c> finds or adds, scoped by the AssemblyRef
+    /// <c>CreateAssemblyRefFromAssembly</c> finds or adds for the source assembly; any other token is
+    /// refused. Of the rest, the index of a type or method parameter is written in its shortest form,
+    /// every other byte is copied, and bytes after the signature's last type are dropped.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The signature is empty, ends early, is not a method signature, or holds an element type the
-    /// emitter refuses.
+    /// The signature is empty, ends early, is not a method signature, holds an element type the emitter
+    /// refuses, or names a TypeDef the source module does not have.
     /// </exception>
-    let importMethodSignature (signature : ImmutableArray<byte>) : MethodSignatureImport =
+    let importMethodSignature
+        (source : MetadataReader)
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : MethodSignatureImport
+        =
         if signature.IsDefaultOrEmpty then
             invalidArg (nameof signature) "a method signature is never empty"
 
         let output = ResizeArray<byte> ()
         let position = ref 0
+        let scope = ref scope
+        let refusal : SignatureTokenRefusal option ref = ref None
+        // `CreateAssemblyRefFromAssembly` reads the source's `Assembly` row afresh for each TypeDef.
+        let assemblyRequest = lazy (AssemblyRefRequest.ofDefinition source)
 
         let fail (reason : string) : 'a =
             invalidArg
@@ -521,7 +651,39 @@ module EmitScopeReferences =
         let isModifier (element : int) : bool =
             element = 0x0F || element = 0x10 || element &&& 0x40 <> 0
 
-        // Each returns false, as soon as it meets one, for a type named by token.
+        // `CorSigUncompressToken`'s table for each tag of a `TypeDefOrRefOrSpecEncoded` token.
+        let translateToken (coded : int) : int option =
+            let rid = coded >>> 2
+
+            match coded &&& 3 with
+            | 0 ->
+                if rid < 1 || rid > source.TypeDefinitions.Count then
+                    fail
+                        $"TypeDef %d{rid} is not a row of the source module, which has %d{source.TypeDefinitions.Count}"
+
+                match assemblyRefFromAssembly assemblyRequest.Value scope.Value with
+                | None ->
+                    refusal.Value <-
+                        Some (SignatureTokenRefusal.UnreferencedUnsignedAssembly assemblyRequest.Value.Name)
+
+                    None
+                | Some (assemblyRef, withAssemblyRef) ->
+                    let row, translated =
+                        importTypeDef source assemblyRef (MetadataTokens.TypeDefinitionHandle rid) withAssemblyRef
+
+                    scope.Value <- translated
+                    Some ((row.Rid <<< 2) ||| 1)
+            | 1 ->
+                refusal.Value <- Some (SignatureTokenRefusal.TypeRef (MetadataTokens.TypeReferenceHandle rid))
+                None
+            | 2 ->
+                refusal.Value <- Some (SignatureTokenRefusal.TypeSpec (MetadataTokens.TypeSpecificationHandle rid))
+                None
+            | _ ->
+                refusal.Value <- Some (SignatureTokenRefusal.NoTable coded)
+                None
+
+        // Each returns false, as soon as it meets a token it refuses, having set `refusal`.
         let rec methodSignature () : bool =
             let start = position.Value
             let header = readCompressed ()
@@ -592,11 +754,17 @@ module EmitScopeReferences =
                     true)
             // `FNPTR`
             | 0x1B -> methodSignature ()
-            // `VALUETYPE`, `CLASS`, `CMOD_REQD` and `CMOD_OPT`
+            // `VALUETYPE` and `CLASS`; and `CMOD_REQD` and `CMOD_OPT`, whose token is followed by the
+            // type they modify.
             | 0x11
             | 0x12
             | 0x1F
-            | 0x20 -> false
+            | 0x20 ->
+                match translateToken (readCompressed ()) with
+                | None -> false
+                | Some translated ->
+                    output.AddRange (compressed translated)
+                    element = 0x11 || element = 0x12 || fieldType ()
             // `ELEMENT_TYPE_MAX` and past it, and `VALUEARRAY`, which the emitter refuses as a bad
             // signature.
             | 0x17 -> fail $"element type 0x%02x{element} is refused"
@@ -604,6 +772,8 @@ module EmitScopeReferences =
             | _ -> true
 
         if methodSignature () then
-            MethodSignatureImport.Copied (ImmutableArray.CreateRange output)
+            MethodSignatureImport.Imported (ImmutableArray.CreateRange output, scope.Value)
         else
-            MethodSignatureImport.NamesTypeByToken
+            match refusal.Value with
+            | Some refusal -> MethodSignatureImport.Refused refusal
+            | None -> failwith "unreachable: the walk stopped without refusing a token"

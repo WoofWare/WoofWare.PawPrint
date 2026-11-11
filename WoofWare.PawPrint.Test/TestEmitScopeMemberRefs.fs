@@ -15,7 +15,8 @@ open WoofWare.PawPrint
 
 /// The member references CoreCLR's emitter adds to a dynamic module for
 /// `ModuleBuilder_GetMemberRefOfMethodInfo`: each `MemberRef` row is found among the rows already
-/// there before one is added, and a signature that names no type by token is copied unchanged.
+/// there before one is added, and its signature is the method's own, with each type it names by token
+/// translated into a TypeRef of the dynamic module.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestEmitScopeMemberRefs =
@@ -205,24 +206,91 @@ module TestEmitScopeMemberRefs =
             Parameters : Shape list
         }
 
-    let rec private namesTypeByToken (shape : Shape) : bool =
+    /// The tokens a shape names, in the order its bytes hold them, each as its
+    /// `TypeDefOrRefOrSpecEncoded` value.
+    let rec private tokensOf (shape : Shape) : int list =
         match shape with
         | Shape.Primitive _
         | Shape.VoidPointer
         | Shape.TypeParameter _
-        | Shape.MethodParameter _ -> false
-        | Shape.Named _
-        | Shape.Instance _
-        | Shape.Modified _ -> true
+        | Shape.MethodParameter _ -> []
+        | Shape.Named (_, token) -> [ token ]
+        | Shape.Instance (_, token, _, arguments) -> token :: List.collect tokensOf arguments
+        | Shape.Modified (_, token, inner) -> token :: tokensOf inner
         | Shape.SzArray inner
         | Shape.Pointer inner
-        | Shape.ByRef inner -> namesTypeByToken inner
-        | Shape.Array array -> namesTypeByToken array.Element
-        | Shape.FunctionPointer signature -> methodNamesTypeByToken signature
+        | Shape.ByRef inner -> tokensOf inner
+        | Shape.Array array -> tokensOf array.Element
+        | Shape.FunctionPointer signature -> methodTokensOf signature
 
-    and private methodNamesTypeByToken (signature : MethodShape) : bool =
-        Option.exists namesTypeByToken signature.Return
-        || List.exists namesTypeByToken signature.Parameters
+    and private methodTokensOf (signature : MethodShape) : int list =
+        (Option.toList signature.Return |> List.collect tokensOf)
+        @ List.collect tokensOf signature.Parameters
+
+    /// The shape with each token replaced, in the order `tokensOf` lists them, by the next of
+    /// `replacements`; and the replacements left over.
+    let rec private replaceTokens (replacements : int list) (shape : Shape) : Shape * int list =
+        let take (replacements : int list) : int * int list =
+            match replacements with
+            | head :: rest -> head, rest
+            | [] -> failwith "fewer replacements than tokens"
+
+        let many (replacements : int list) (shapes : Shape list) : Shape list * int list =
+            List.mapFold (fun replacements shape -> replaceTokens replacements shape) replacements shapes
+
+        match shape with
+        | Shape.Primitive _
+        | Shape.VoidPointer
+        | Shape.TypeParameter _
+        | Shape.MethodParameter _ -> shape, replacements
+        | Shape.Named (valueType, _) ->
+            let token, replacements = take replacements
+            Shape.Named (valueType, token), replacements
+        | Shape.Instance (valueType, _, countWidth, arguments) ->
+            let token, replacements = take replacements
+            let arguments, replacements = many replacements arguments
+            Shape.Instance (valueType, token, countWidth, arguments), replacements
+        | Shape.Modified (required, _, inner) ->
+            let token, replacements = take replacements
+            let inner, replacements = replaceTokens replacements inner
+            Shape.Modified (required, token, inner), replacements
+        | Shape.SzArray inner ->
+            let inner, replacements = replaceTokens replacements inner
+            Shape.SzArray inner, replacements
+        | Shape.Pointer inner ->
+            let inner, replacements = replaceTokens replacements inner
+            Shape.Pointer inner, replacements
+        | Shape.ByRef inner ->
+            let inner, replacements = replaceTokens replacements inner
+            Shape.ByRef inner, replacements
+        | Shape.Array array ->
+            let element, replacements = replaceTokens replacements array.Element
+
+            Shape.Array
+                { array with
+                    Element = element
+                },
+            replacements
+        | Shape.FunctionPointer signature ->
+            let signature, replacements = replaceMethodTokens replacements signature
+            Shape.FunctionPointer signature, replacements
+
+    and private replaceMethodTokens (replacements : int list) (signature : MethodShape) : MethodShape * int list =
+        let returns, replacements =
+            match signature.Return with
+            | None -> None, replacements
+            | Some shape ->
+                let shape, replacements = replaceTokens replacements shape
+                Some shape, replacements
+
+        let parameters, replacements =
+            List.mapFold (fun replacements shape -> replaceTokens replacements shape) replacements signature.Parameters
+
+        { signature with
+            Return = returns
+            Parameters = parameters
+        },
+        replacements
 
     /// A shape's bytes. With `shortestIndices`, a type or method parameter's index and an instantiation's
     /// argument count are in their shortest form, as CoreCLR's emitter writes them; every other integer
@@ -311,16 +379,16 @@ module TestEmitScopeMemberRefs =
     let private primitives : byte list =
         [ 0x02uy .. 0x0Euy ] @ [ 0x16uy ; 0x18uy ; 0x19uy ; 0x1Cuy ]
 
-    /// A `TypeDefOrRefOrSpecEncoded` token: a TypeDef or TypeRef, or a TypeSpec where the grammar allows
-    /// one, which is only in a custom modifier.
-    let private genToken (allowSpec : bool) : Gen<int> =
-        Gen.map2
-            (fun rid tag -> (rid <<< 2) ||| tag)
-            (Gen.choose (1, 0x3FFF))
-            (Gen.choose (0, (if allowSpec then 2 else 1)))
+    /// Where a generated signature's tokens come from: one for a named type or an instantiation, and
+    /// one for a custom modifier, where the grammar allows a TypeSpec too.
+    type private TokenGens =
+        {
+            Named : Gen<int>
+            Modifier : Gen<int>
+        }
 
-    /// A type; one that names no type by token unless `allowTokens`.
-    let rec private genShape (allowTokens : bool) (size : int) : Gen<Shape> =
+    /// A type; one that names no type by token unless given `tokens`.
+    let rec private genShape (tokens : TokenGens option) (size : int) : Gen<Shape> =
         let leaf =
             Gen.frequency
                 [
@@ -328,14 +396,15 @@ module TestEmitScopeMemberRefs =
                     yield 1, Gen.constant Shape.VoidPointer
                     yield 3, Gen.map Shape.TypeParameter (genCompressed 0 0x5000)
                     yield 3, Gen.map Shape.MethodParameter (genCompressed 0 0x5000)
-                    if allowTokens then
-                        yield 3, Gen.map2 (fun v t -> Shape.Named (v, t)) genBool (genToken false)
+                    match tokens with
+                    | Some tokens -> yield 3, Gen.map2 (fun v t -> Shape.Named (v, t)) genBool tokens.Named
+                    | None -> ()
                 ]
 
         if size <= 0 then
             leaf
         else
-            let inner = genShape allowTokens (size / 2)
+            let inner = genShape tokens (size / 2)
 
             Gen.frequency
                 [
@@ -366,34 +435,36 @@ module TestEmitScopeMemberRefs =
                                     }
                         }
 
-                    yield 1, Gen.map Shape.FunctionPointer (genMethod allowTokens (size / 2) false)
+                    yield 1, Gen.map Shape.FunctionPointer (genMethod tokens (size / 2) false)
 
-                    if allowTokens then
+                    match tokens with
+                    | None -> ()
+                    | Some tokens ->
                         yield
                             1,
                             gen {
                                 let! valueType = genBool
-                                let! token = genToken false
+                                let! token = tokens.Named
                                 let! countWidth = genWidth
                                 let! count = Gen.choose (1, 3)
                                 let! arguments = Gen.listOfLength count inner
                                 return Shape.Instance (valueType, token, countWidth, arguments)
                             }
 
-                        yield 1, Gen.map3 (fun r t s -> Shape.Modified (r, t, s)) genBool (genToken true) inner
+                        yield 1, Gen.map3 (fun r t s -> Shape.Modified (r, t, s)) genBool tokens.Modifier inner
                 ]
 
     /// A method signature: a definition's when `allowGeneric`, and so possibly generic; a function
-    /// pointer's otherwise. It names no type by token unless `allowTokens`.
-    and private genMethod (allowTokens : bool) (size : int) (allowGeneric : bool) : Gen<MethodShape> =
+    /// pointer's otherwise. It names no type by token unless given `tokens`.
+    and private genMethod (tokens : TokenGens option) (size : int) (allowGeneric : bool) : Gen<MethodShape> =
         gen {
             let! hasThis = genBool
             let! convention = Gen.elements [ 0x00uy ; 0x05uy ]
             let! generic = if allowGeneric then genBool else Gen.constant false
             let! arity = genCompressed 1 3
             let! parameterCountWidth = genWidth
-            let! returns = Gen.optionOf (genShape allowTokens size)
-            let! parameters = Gen.listOf (genShape allowTokens size) |> Gen.map (List.truncate 4)
+            let! returns = Gen.optionOf (genShape tokens size)
+            let! parameters = Gen.listOf (genShape tokens size) |> Gen.map (List.truncate 4)
 
             return
                 {
@@ -408,53 +479,563 @@ module TestEmitScopeMemberRefs =
                 }
         }
 
+    /// A TypeDef of a fabricated source module: its namespace and name, and the index of the earlier type
+    /// enclosing it, if it is nested.
+    type private SourceType =
+        {
+            Namespace : string
+            Name : string
+            Enclosing : int option
+        }
+
+    /// A fabricated source assembly, from whose module a signature is translated. Its TypeDef `i + 2` is
+    /// `Types.[i]`; it has `TypeRefs` TypeRefs and one TypeSpec, which the translation refuses.
+    type private SourceAssembly =
+        {
+            Name : string
+            Version : Version
+            Culture : string
+            Flags : AssemblyFlags
+            /// `None` for an unsigned assembly.
+            PublicKey : byte list option
+            Types : SourceType list
+            TypeRefs : int
+        }
+
+    let private sourceImage (source : SourceAssembly) : byte[] =
+        let metadata = MetadataBuilder ()
+
+        let optionalString (value : string) : StringHandle =
+            if value = "" then
+                StringHandle ()
+            else
+                metadata.GetOrAddString value
+
+        metadata.AddModule (
+            0,
+            metadata.GetOrAddString "Source.dll",
+            metadata.GetOrAddGuid (Guid "6a4b3d0e-1f52-4c8b-9b1e-5f0c2d7e8a91"),
+            GuidHandle (),
+            GuidHandle ()
+        )
+        |> ignore<ModuleDefinitionHandle>
+
+        metadata.AddAssembly (
+            metadata.GetOrAddString source.Name,
+            source.Version,
+            optionalString source.Culture,
+            (match source.PublicKey with
+             | Some key -> metadata.GetOrAddBlob (List.toArray key)
+             | None -> BlobHandle ()),
+            (match source.PublicKey with
+             | Some _ -> source.Flags ||| AssemblyFlags.PublicKey
+             | None -> source.Flags),
+            AssemblyHashAlgorithm.None
+        )
+        |> ignore<AssemblyDefinitionHandle>
+
+        let other =
+            metadata.AddAssemblyReference (
+                metadata.GetOrAddString "Other",
+                Version (1, 0, 0, 0),
+                StringHandle (),
+                BlobHandle (),
+                enum<AssemblyFlags> 0,
+                BlobHandle ()
+            )
+
+        for i in 1 .. source.TypeRefs do
+            metadata.AddTypeReference (
+                AssemblyReferenceHandle.op_Implicit other,
+                metadata.GetOrAddString "N",
+                metadata.GetOrAddString $"R%d{i}"
+            )
+            |> ignore<TypeReferenceHandle>
+
+        metadata.AddTypeSpecification (metadata.GetOrAddBlob [| 0x1Duy ; 0x08uy |])
+        |> ignore<TypeSpecificationHandle>
+
+        metadata.AddTypeDefinition (
+            enum<TypeAttributes> 0,
+            StringHandle (),
+            metadata.GetOrAddString "<Module>",
+            EntityHandle (),
+            MetadataTokens.FieldDefinitionHandle 1,
+            MetadataTokens.MethodDefinitionHandle 1
+        )
+        |> ignore<TypeDefinitionHandle>
+
+        for t in source.Types do
+            metadata.AddTypeDefinition (
+                (if t.Enclosing.IsSome then
+                     TypeAttributes.NestedPublic
+                 else
+                     TypeAttributes.Public),
+                optionalString t.Namespace,
+                metadata.GetOrAddString t.Name,
+                EntityHandle (),
+                MetadataTokens.FieldDefinitionHandle 1,
+                MetadataTokens.MethodDefinitionHandle 1
+            )
+            |> ignore<TypeDefinitionHandle>
+
+        // The NestedClass table is sorted by the nested type.
+        source.Types
+        |> List.iteri (fun i t ->
+            match t.Enclosing with
+            | Some enclosing ->
+                metadata.AddNestedType (
+                    MetadataTokens.TypeDefinitionHandle (i + 2),
+                    MetadataTokens.TypeDefinitionHandle (enclosing + 2)
+                )
+            | None -> ()
+        )
+
+        let image = BlobBuilder ()
+
+        ManagedPEBuilder(
+            PEHeaderBuilder (imageCharacteristics = Characteristics.Dll),
+            MetadataRootBuilder metadata,
+            BlobBuilder ()
+        )
+            .Serialize
+            image
+        |> ignore<BlobContentId>
+
+        image.ToArray ()
+
+    let private genSource : Gen<SourceAssembly> =
+        let genType (earlier : int) : Gen<SourceType> =
+            gen {
+                let! ns = Gen.elements [ "" ; "N" ; "N.M" ]
+                let! name = Gen.elements [ "A" ; "B" ; "C" ]
+
+                let! enclosing =
+                    if earlier = 0 then
+                        Gen.constant None
+                    else
+                        Gen.optionOf (Gen.choose (0, earlier - 1))
+
+                return
+                    {
+                        // Roslyn gives a nested type no namespace, but the emitter copies whatever it has.
+                        Namespace = (if enclosing.IsSome && ns = "N.M" then "" else ns)
+                        Name = name
+                        Enclosing = enclosing
+                    }
+            }
+
+        let rec genTypes (remaining : int) (earlier : SourceType list) : Gen<SourceType list> =
+            if remaining = 0 then
+                Gen.constant (List.rev earlier)
+            else
+                genType earlier.Length
+                |> Gen.bind (fun t -> genTypes (remaining - 1) (t :: earlier))
+
+        gen {
+            let! count = Gen.choose (1, 6)
+            let! types = genTypes count []
+            let! keySeed = Gen.optionOf (Gen.choose (0, 255))
+            // A component of 65535, which `GetTypeRef`'s AssemblyRef stores as 0, so that the translation
+            // does not find it.
+            let! version = Gen.elements [ Version (1, 2, 3, 4) ; Version (1, 2, 65535, 0) ; Version (0, 0, 0, 0) ]
+            let! culture = Gen.elements [ "" ; "fr" ]
+            // None; `afPA_MSIL`; `afPA_AMD64` marked specified; `afRetargetable`.
+            let! flags = Gen.elements [ 0 ; 0x0010 ; 0x00B0 ; 0x0100 ]
+            let! typeRefs = Gen.choose (1, 2)
+
+            return
+                {
+                    Name = "Source"
+                    Version = version
+                    Culture = culture
+                    Flags = enum<AssemblyFlags> flags
+                    PublicKey = keySeed |> Option.map (fun seed -> List.init 160 (fun i -> byte (seed + i * 7)))
+                    Types = types
+                    TypeRefs = typeRefs
+                }
+        }
+
+    /// Tokens for a signature over `source`: mostly its TypeDefs, sometimes a TypeRef, its TypeSpec, or a
+    /// token tagged as no table.
+    let private sourceTokens (source : SourceAssembly) : TokenGens =
+        let typeDef =
+            Gen.choose (2, source.Types.Length + 1) |> Gen.map (fun rid -> rid <<< 2)
+
+        let refused =
+            Gen.oneof
+                [
+                    Gen.choose (1, source.TypeRefs) |> Gen.map (fun rid -> (rid <<< 2) ||| 1)
+                    Gen.constant ((1 <<< 2) ||| 2)
+                    Gen.constant ((1 <<< 2) ||| 3)
+                ]
+
+        let token = Gen.frequency [ 15, typeDef ; 1, refused ]
+
+        {
+            Named = token
+            Modifier = token
+        }
+
+    /// What the dynamic module's scope holds before the signature is translated: perhaps another
+    /// assembly's AssemblyRef; perhaps the source assembly's, as `GetTypeRef` makes it, which the managed
+    /// caller always has made by then; and the TypeRefs `GetTypeRef` makes for some of the source's types.
+    type private Seed =
+        {
+            OtherAssemblyRef : bool
+            SourceAssemblyRef : bool
+            Types : int list
+        }
+
+    let private genSeed : Gen<Seed> =
+        gen {
+            let! other = genBool
+            let! sourceRef = Gen.frequency [ 6, Gen.constant true ; 1, Gen.constant false ]
+            let! types = Gen.listOf (Gen.choose (0, 5)) |> Gen.map (List.truncate 4)
+
+            return
+                {
+                    OtherAssemblyRef = other
+                    SourceAssemblyRef = sourceRef
+                    Types = types
+                }
+        }
+
+    /// The TypeRef `GetTypeRef` makes for the source type `index`: a nested type's by its name alone, in
+    /// the scope of its enclosing type's; any other's by its full name, in the scope of `assemblyRef`.
+    let rec private getTypeRef
+        (source : SourceAssembly)
+        (assemblyRef : AssemblyRefRid)
+        (index : int)
+        (scope : EmitScope)
+        : TypeRefRid * EmitScope
+        =
+        let t = source.Types.[index]
+
+        match t.Enclosing with
+        | Some enclosing ->
+            let enclosing, scope = getTypeRef source assemblyRef enclosing scope
+            EmitScopeReferences.defineTypeRefByName (ResolutionScope.TypeRef enclosing) t.Name scope
+        | None ->
+            let fullName =
+                if t.Namespace = "" then
+                    t.Name
+                else
+                    $"%s{t.Namespace}.%s{t.Name}"
+
+            EmitScopeReferences.defineTypeRefByName (ResolutionScope.AssemblyRef assemblyRef) fullName scope
+
+    /// An AssemblyRef row as the model holds it.
+    type private ModelAssemblyRef =
+        {
+            Name : string
+            Culture : string
+            Version : MetadataVersion
+            Token : byte list
+            Flags : AssemblyFlags
+            Hash : byte list
+        }
+
+    /// A TypeRef row as the model holds it.
+    type private ModelTypeRef =
+        {
+            Scope : ResolutionScope
+            Namespace : string
+            Name : string
+        }
+
+    let private modelAssemblyRefs (scope : EmitScope) : ModelAssemblyRef list =
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row ->
+            {
+                Name = EmitScope.stringAt row.Name scope
+                Culture = EmitScope.stringAt row.Culture scope
+                Version = row.Version
+                Token = List.ofSeq (EmitScope.blobAt row.PublicKeyOrToken scope)
+                Flags = row.Flags
+                Hash = List.ofSeq (EmitScope.blobAt row.HashValue scope)
+            }
+        )
+        |> List.ofSeq
+
+    let private modelTypeRefs (scope : EmitScope) : ModelTypeRef list =
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            {
+                Scope = row.ResolutionScope
+                Namespace = EmitScope.stringAt row.Namespace scope
+                Name = EmitScope.stringAt row.Name scope
+            }
+        )
+        |> List.ofSeq
+
+    /// What the model says translating `tokens`, in order, does to a scope holding `assemblyRefs` and
+    /// `typeRefs`: the refusal for the first token it refuses, or each token's replacement and the rows
+    /// afterwards. A TypeDef names a chain of TypeRefs, outermost first, scoped by the AssemblyRef made
+    /// from the source's `Assembly` row (`CreateAssemblyRefFromAssembly`), found first among the rows by
+    /// name, culture, version and token; the chain is found from the outermost, and from the first miss
+    /// the rest added.
+    let private modelTranslation
+        (source : SourceAssembly)
+        (tokens : int list)
+        (assemblyRefs : ModelAssemblyRef list)
+        (typeRefs : ModelTypeRef list)
+        : Result<int list * ModelAssemblyRef list * ModelTypeRef list * bool, SignatureTokenRefusal>
+        =
+        let wanted : ModelAssemblyRef =
+            {
+                Name = source.Name
+                Culture = source.Culture
+                Version =
+                    {
+                        Major = uint16 source.Version.Major
+                        Minor = uint16 source.Version.Minor
+                        Build = uint16 source.Version.Build
+                        Revision = uint16 source.Version.Revision
+                    }
+                Token =
+                    match source.PublicKey with
+                    | Some key -> List.ofSeq (AssemblyRefRequest.publicKeyToken (ImmutableArray.CreateRange key))
+                    | None -> []
+                Flags = source.Flags
+                Hash = []
+            }
+
+        let rec chain (index : int) : SourceType list =
+            let t = source.Types.[index]
+
+            match t.Enclosing with
+            | Some enclosing -> chain enclosing @ [ t ]
+            | None -> [ t ]
+
+        let rec go
+            (tokens : int list)
+            (replacements : int list)
+            (assemblyRefs : ModelAssemblyRef list)
+            (typeRefs : ModelTypeRef list)
+            (partlyFound : bool)
+            =
+            match tokens with
+            | [] -> Ok (List.rev replacements, assemblyRefs, typeRefs, partlyFound)
+            | token :: rest ->
+                match token &&& 3 with
+                | 1 -> Error (SignatureTokenRefusal.TypeRef (MetadataTokens.TypeReferenceHandle (token >>> 2)))
+                | 2 -> Error (SignatureTokenRefusal.TypeSpec (MetadataTokens.TypeSpecificationHandle (token >>> 2)))
+                | 3 -> Error (SignatureTokenRefusal.NoTable token)
+                | _ ->
+                    let found =
+                        assemblyRefs
+                        |> List.tryFindIndex (fun row ->
+                            row.Name = wanted.Name
+                            && row.Culture = wanted.Culture
+                            && row.Version = wanted.Version
+                            && row.Token = wanted.Token
+                        )
+
+                    let assemblyRef =
+                        match found with
+                        | Some index -> Ok (index, assemblyRefs)
+                        | None when source.PublicKey.IsNone ->
+                            Error (SignatureTokenRefusal.UnreferencedUnsignedAssembly source.Name)
+                        | None -> Ok (assemblyRefs.Length, assemblyRefs @ [ wanted ])
+
+                    match assemblyRef with
+                    | Error refusal -> Error refusal
+                    | Ok (assemblyRefIndex, assemblyRefs) ->
+                        let outermost = ResolutionScope.AssemblyRef (AssemblyRefRid (assemblyRefIndex + 1))
+
+                        let (innermost, typeRefs, missed, foundAny) =
+                            chain ((token >>> 2) - 2)
+                            |> List.fold
+                                (fun (enclosing, typeRefs : ModelTypeRef list, missed, foundAny) t ->
+                                    let row =
+                                        {
+                                            Scope = enclosing
+                                            Namespace = t.Namespace
+                                            Name = t.Name
+                                        }
+
+                                    match
+                                        (if missed then
+                                             None
+                                         else
+                                             List.tryFindIndex ((=) row) typeRefs)
+                                    with
+                                    | Some index ->
+                                        ResolutionScope.TypeRef (TypeRefRid (index + 1)), typeRefs, false, true
+                                    | None ->
+                                        ResolutionScope.TypeRef (TypeRefRid (typeRefs.Length + 1)),
+                                        typeRefs @ [ row ],
+                                        true,
+                                        foundAny
+                                )
+                                (outermost, typeRefs, false, false)
+
+                        let rid =
+                            match innermost with
+                            | ResolutionScope.TypeRef rid -> rid.Rid
+                            | other -> failwith $"a chain ends in a TypeRef, not %O{other}"
+
+                        go
+                            rest
+                            (((rid <<< 2) ||| 1) :: replacements)
+                            assemblyRefs
+                            typeRefs
+                            (partlyFound || (missed && foundAny))
+
+        go tokens [] assemblyRefs typeRefs false
+
     [<Test>]
-    let ``a signature is imported with each type parameter's index shortest and every other byte but trailing ones copied, unless it names a type by token``
+    let ``a signature is translated with each TypeDef token rewritten to the TypeRef chain the model finds or adds, and refused at its first other token``
         ()
         : unit
         =
-        let mutable named = 0
-        let mutable reencoded = 0
         let mutable unchanged = 0
+        let mutable reencoded = 0
+        let mutable added = 0
+        let mutable allFound = 0
+        let mutable partlyFound = 0
+        let mutable assemblyRefAdded = 0
+        let refusals = Collections.Generic.Dictionary<string, int> ()
 
-        let property (signature : MethodShape) (trailing : byte list) : unit =
+        let property (source : SourceAssembly) (seed : Seed) (signature : MethodShape) (trailing : byte list) : unit =
+            use pe = new PEReader (ImmutableArray.Create<byte> (sourceImage source))
+            let reader = pe.GetMetadataReader ()
+
+            let start =
+                let scope = EmitScope.create "Dyn" Guid.Empty
+
+                let scope =
+                    if seed.OtherAssemblyRef then
+                        EmitScopeReferences.defineAssemblyRef
+                            {
+                                Name = "Other"
+                                Version =
+                                    {
+                                        Major = 1us
+                                        Minor = 0us
+                                        Build = 0us
+                                        Revision = 0us
+                                    }
+                                Culture = ""
+                                PublicKeyToken = ImmutableArray.Empty
+                                Flags = enum<AssemblyFlags> 0
+                            }
+                            scope
+                        |> snd
+                    else
+                        scope
+
+                if seed.SourceAssemblyRef then
+                    let assemblyRef, scope =
+                        EmitScopeReferences.defineAssemblyRef (AssemblyRefRequest.ofDefinition reader) scope
+
+                    seed.Types
+                    |> List.fold
+                        (fun scope index -> getTypeRef source assemblyRef (index % source.Types.Length) scope |> snd)
+                        scope
+                else
+                    scope
+
             let input = encodeMethod false signature
+            let tokens = methodTokensOf signature
 
             let expected =
-                if methodNamesTypeByToken signature then
-                    named <- named + 1
-                    MethodSignatureImport.NamesTypeByToken
-                else
-                    let written = encodeMethod true signature
+                modelTranslation source tokens (modelAssemblyRefs start) (modelTypeRefs start)
 
-                    if written = input then
+            let actual =
+                EmitScopeReferences.importMethodSignature reader (ImmutableArray.CreateRange (input @ trailing)) start
+
+            match expected, actual with
+            | Error refusal, MethodSignatureImport.Refused actual ->
+                let kind =
+                    match refusal with
+                    | SignatureTokenRefusal.TypeRef _ -> "TypeRef"
+                    | SignatureTokenRefusal.TypeSpec _ -> "TypeSpec"
+                    | SignatureTokenRefusal.NoTable _ -> "NoTable"
+                    | SignatureTokenRefusal.UnreferencedUnsignedAssembly _ -> "UnreferencedUnsignedAssembly"
+
+                refusals.[kind] <-
+                    match refusals.TryGetValue kind with
+                    | true, n -> n + 1
+                    | false, _ -> 1
+
+                actual |> shouldEqual refusal
+            | Ok (replacements, assemblyRefs, typeRefs, partly), MethodSignatureImport.Imported (written, next) ->
+                let replaced, left = replaceMethodTokens replacements signature
+                left |> shouldEqual []
+                List.ofSeq written |> shouldEqual (encodeMethod true replaced)
+
+                modelAssemblyRefs next |> shouldEqual assemblyRefs
+                modelTypeRefs next |> shouldEqual typeRefs
+
+                // Only TypeRefs and an AssemblyRef are added.
+                Object.ReferenceEquals (EmitScope.memberRefs next, EmitScope.memberRefs start)
+                |> shouldEqual true
+
+                Object.ReferenceEquals (EmitScope.typeDefs next, EmitScope.typeDefs start)
+                |> shouldEqual true
+
+                let addsNothing =
+                    assemblyRefs.Length = (EmitScope.assemblyRefs start).Count
+                    && typeRefs.Length = (EmitScope.typeRefs start).Count
+
+                // A scope the translation finds everything in is the scope it was given.
+                Object.ReferenceEquals (next, start) |> shouldEqual addsNothing
+
+                if tokens.IsEmpty then
+                    if encodeMethod true signature = input then
                         unchanged <- unchanged + 1
                     else
                         reencoded <- reencoded + 1
+                elif addsNothing then
+                    allFound <- allFound + 1
+                else
+                    added <- added + 1
 
-                    MethodSignatureImport.Copied (ImmutableArray.CreateRange written)
+                if partly then
+                    partlyFound <- partlyFound + 1
 
-            EmitScopeReferences.importMethodSignature (ImmutableArray.CreateRange (input @ trailing))
-            |> shouldEqual expected
+                if assemblyRefs.Length > (EmitScope.assemblyRefs start).Count then
+                    assemblyRefAdded <- assemblyRefAdded + 1
+            | expected, actual -> failwith $"expected %A{expected}, but the translation gave %A{actual}"
 
         let arb =
-            Gen.zip
-                (Gen.sized (fun size ->
-                    genBool
-                    |> Gen.bind (fun allowTokens -> genMethod allowTokens (min size 12) true)
-                ))
-                (Gen.listOf (Gen.elements [ 0x00uy ; 0x08uy ; 0x80uy ])
-                 |> Gen.map (List.truncate 2))
+            gen {
+                let! source = genSource
+                let! seed = genSeed
+                let! withTokens = Gen.frequency [ 3, Gen.constant true ; 1, Gen.constant false ]
+
+                let! signature =
+                    Gen.sized (fun size ->
+                        genMethod (if withTokens then Some (sourceTokens source) else None) (min size 12) true
+                    )
+
+                let! trailing =
+                    Gen.listOf (Gen.elements [ 0x00uy ; 0x08uy ; 0x80uy ])
+                    |> Gen.map (List.truncate 2)
+
+                return source, seed, signature, trailing
+            }
             |> Arb.fromGen
 
         Check.One (
             Config.QuickThrowOnFailure.WithMaxTest 2000,
-            Prop.forAll arb (fun (signature, trailing) -> property signature trailing)
+            Prop.forAll arb (fun (source, seed, signature, trailing) -> property source seed signature trailing)
         )
 
-        named |> shouldBeGreaterThan 100
-        reencoded |> shouldBeGreaterThan 100
-        unchanged |> shouldBeGreaterThan 100
+        unchanged |> shouldBeGreaterThan 50
+        reencoded |> shouldBeGreaterThan 50
+        added |> shouldBeGreaterThan 200
+        allFound |> shouldBeGreaterThan 50
+        partlyFound |> shouldBeGreaterThan 20
+        assemblyRefAdded |> shouldBeGreaterThan 50
+
+        for kind in [ "TypeRef" ; "TypeSpec" ; "NoTable" ; "UnreferencedUnsignedAssembly" ] do
+            (match refusals.TryGetValue kind with
+             | true, n -> n
+             | false, _ -> 0)
+            |> shouldBeGreaterThan 10
 
     /// Every method and constructor CoreLib declares on a type that is neither generic nor nested in a
     /// generic type, so that the parent a dynamic module's reference names is a `TypeRef`.
@@ -477,53 +1058,87 @@ module TestEmitScopeMemberRefs =
                             yield c :> MethodBase
             ]
 
+    /// A nested type's name as the managed caller of `ModuleBuilder_GetTypeRef` passes it: its full
+    /// name after the last `+` that is not escaped (`UnmangleTypeName`).
+    let private unmangled (fullName : string) : string =
+        let rec search (from : int) : int =
+            let plus = fullName.LastIndexOf ('+', from)
+
+            if plus < 0 then
+                plus
+            else
+                let mutable slash = plus - 1
+
+                while slash >= 0 && fullName.[slash] = '\\' do
+                    slash <- slash - 1
+
+                // An even run of backslashes before the `+` escapes nothing.
+                if (plus - 1 - slash) % 2 = 0 then plus else search (slash)
+
+        fullName.Substring (search (fullName.Length - 1) + 1)
+
+    /// The types a method's return and parameter types name that `GetTypeMetadataToken` gives a TypeRef
+    /// for: each element type, generic definition and type argument, but no type parameter and no
+    /// instantiation (which would be a TypeSpec).
+    let rec private namedTypes (t : Type) : Type list =
+        if t.IsGenericParameter || t.IsFunctionPointer then
+            []
+        elif t.HasElementType then
+            namedTypes (t.GetElementType ())
+        elif t.IsConstructedGenericType then
+            namedTypes (t.GetGenericTypeDefinition ())
+            @ (t.GetGenericArguments () |> List.ofArray |> List.collect namedTypes)
+        else
+            [ t ]
+
     [<Test>]
-    let ``real .NET imports a CoreLib signature that names no type by token unchanged, and gives each reference the token defineMemberRef gives``
+    let ``real .NET translates a CoreLib signature as importMethodSignature does, into the TypeRefs GetTypeRef gives``
         ()
         : unit
         =
+        use pe = new PEReader (IO.File.OpenRead HostImage.coreLibPath)
+        let coreLib = pe.GetMetadataReader ()
+        let coreLibRef = AssemblyRefRequest.ofDefinition coreLib
+
+        // Every fourth method, to bound the run, then the first thousand of those again, so that some
+        // requests are found.
         let methods =
             coreLibMethods.Value
-            |> List.filter (fun m ->
-                match
-                    EmitScopeReferences.importMethodSignature (
-                        ImmutableArray.Create<byte> (m.Module.ResolveSignature m.MetadataToken)
-                    )
-                with
-                | MethodSignatureImport.Copied _ -> true
-                | MethodSignatureImport.NamesTypeByToken -> false
-            )
+            |> List.indexed
+            |> List.filter (fun (i, _) -> i % 4 = 0)
+            |> List.map snd
 
-        // Each method once in order, then each again in reverse, so that half the requests are found.
-        let requests = methods @ List.rev methods
-        List.length methods |> shouldBeGreaterThan 3000
+        let requests = methods @ List.truncate 1000 methods
+        List.length methods |> shouldBeGreaterThan 5000
 
         let assembly =
-            AssemblyBuilder.DefineDynamicAssembly (AssemblyName "MemberRefOracle", AssemblyBuilderAccess.Run)
+            AssemblyBuilder.DefineDynamicAssembly (AssemblyName "TranslationOracle", AssemblyBuilderAccess.Run)
 
-        let dynamicModule = assembly.DefineDynamicModule "MemberRefOracle"
-        let mutable scope = EmitScope.create "MemberRefOracle" Guid.Empty
+        let dynamicModule = assembly.DefineDynamicModule "TranslationOracle"
+        let mutable scope = EmitScope.create "TranslationOracle" Guid.Empty
 
-        // The model's TypeRefs stand in for the real module's: only their RIDs are compared.
-        let rec withTypeRefs (count : int) (scope : EmitScope) : EmitScope =
-            if (EmitScope.typeRefs scope).Count >= count then
-                scope
-            else
-                let name, scope =
-                    EmitScope.internString $"T%d{(EmitScope.typeRefs scope).Count + 1}" scope
+        // What `ModuleBuilder_GetTypeRef` adds for a CoreLib type, the enclosing type's first.
+        let rec typeRef (t : Type) (scope : EmitScope) : TypeRefRid * EmitScope =
+            if t.IsNested then
+                let enclosing, scope = typeRef t.DeclaringType scope
 
-                EmitScope.addTypeRef
-                    {
-                        ResolutionScope = ResolutionScope.Module
-                        Name = name
-                        Namespace = StringOffset 0
-                    }
+                EmitScopeReferences.defineTypeRefByName
+                    (ResolutionScope.TypeRef enclosing)
+                    (EmitScopeReferences.unescapeTypeName (unmangled t.FullName))
                     scope
-                |> snd
-                |> withTypeRefs count
+            else
+                let assemblyRef, scope = EmitScopeReferences.defineAssemblyRef coreLibRef scope
+
+                EmitScopeReferences.defineTypeRefByName
+                    (ResolutionScope.AssemblyRef assemblyRef)
+                    (EmitScopeReferences.unescapeTypeName t.FullName)
+                    scope
+
+        let mutable named = 0
 
         for m in requests do
-            let definitionSignature = m.Module.ResolveSignature m.MetadataToken
+            let definitionSignature =
+                ImmutableArray.Create<byte> (m.Module.ResolveSignature m.MetadataToken)
 
             let token =
                 match m with
@@ -532,24 +1147,68 @@ module TestEmitScopeMemberRefs =
                 | _ -> failwith $"unexpected method kind %O{m}"
 
             token >>> 24 |> shouldEqual 0x0A
-            dynamicModule.ResolveSignature token |> shouldEqual definitionSignature
 
-            EmitScopeReferences.importMethodSignature (ImmutableArray.Create<byte> definitionSignature)
-            |> shouldEqual (MethodSignatureImport.Copied (ImmutableArray.Create<byte> definitionSignature))
+            // The managed caller makes the declaring type's TypeRef first.
+            let parent, withParent = typeRef m.DeclaringType scope
 
-            let parent = dynamicModule.GetTypeMetadataToken m.DeclaringType
-            parent >>> 24 |> shouldEqual 0x01
-            scope <- withTypeRefs (parent &&& 0xFFFFFF) scope
+            match EmitScopeReferences.importMethodSignature coreLib definitionSignature withParent with
+            | MethodSignatureImport.Refused refusal ->
+                failwith $"%O{m.DeclaringType}::%O{m}'s signature was refused: %A{refusal}"
+            | MethodSignatureImport.Imported (signature, translated) ->
+                if signature <> definitionSignature then
+                    named <- named + 1
 
-            let rid, next =
-                EmitScopeReferences.defineMemberRef
-                    (MemberRefParent.TypeRef (TypeRefRid (parent &&& 0xFFFFFF)))
-                    m.Name
-                    (ImmutableArray.Create<byte> definitionSignature)
-                    scope
+                dynamicModule.ResolveSignature token |> shouldEqual (Seq.toArray signature)
 
-            rid.Rid |> shouldEqual (token &&& 0xFFFFFF)
-            scope <- next
+                let rid, next =
+                    EmitScopeReferences.defineMemberRef (MemberRefParent.TypeRef parent) m.Name signature translated
+
+                rid.Rid |> shouldEqual (token &&& 0xFFFFFF)
+                scope <- next
+
+            // Each type the method names is the TypeRef `GetTypeRef` would make or find, which shows the
+            // translation scoped its TypeRefs as `GetTypeRef` does.
+            let types =
+                match m with
+                | :? MethodInfo as mi -> mi.ReturnType :: [ for p in mi.GetParameters () -> p.ParameterType ]
+                | _ -> [ for p in m.GetParameters () -> p.ParameterType ]
+
+            for t in List.collect namedTypes types do
+                let real = dynamicModule.GetTypeMetadataToken t
+                let rid, next = typeRef t scope
+                real |> shouldEqual (0x01000000 ||| rid.Rid)
+                scope <- next
+
+        named |> shouldBeGreaterThan 2000
+
+        // The same TypeRefs, each naming the same type, and the same AssemblyRef.
+        let typeRefs = EmitScope.typeRefs scope
+
+        for rid in 1 .. typeRefs.Count do
+            let row = typeRefs.[rid - 1]
+            let real = dynamicModule.ResolveType (0x01000000 ||| rid)
+            EmitScope.stringAt row.Name scope |> shouldEqual real.Name
+
+            EmitScope.stringAt row.Namespace scope
+            |> shouldEqual (
+                if real.IsNested then
+                    ""
+                else
+                    // A type in no namespace has a null one.
+                    Option.ofObj real.Namespace |> Option.defaultValue ""
+            )
+
+        Assert.Throws<ArgumentOutOfRangeException> (fun () ->
+            dynamicModule.ResolveType (0x01000000 ||| (typeRefs.Count + 1)) |> ignore
+        )
+        |> ignore
+
+        assembly.GetReferencedAssemblies ()
+        |> Array.map (fun a -> a.Name)
+        |> List.ofArray
+        |> shouldEqual [ coreLibRef.Name ]
+
+        EmitScope.assemblyRefs scope |> Seq.length |> shouldEqual 1
 
     [<Test>]
     let ``an empty name or signature, a signature that ends early, and one that is not a method's are refused``
@@ -576,9 +1235,35 @@ module TestEmitScopeMemberRefs =
         )
         |> ignore
 
+        use source =
+            new PEReader (
+                ImmutableArray.Create<byte> (
+                    sourceImage
+                        {
+                            Name = "Source"
+                            Version = Version (1, 0, 0, 0)
+                            Culture = ""
+                            Flags = enum<AssemblyFlags> 0
+                            PublicKey = None
+                            Types =
+                                [
+                                    {
+                                        Namespace = "N"
+                                        Name = "A"
+                                        Enclosing = None
+                                    }
+                                ]
+                            TypeRefs = 1
+                        }
+                )
+            )
+
         let refused (bytes : byte list) : unit =
             Assert.Throws<ArgumentException> (fun () ->
-                EmitScopeReferences.importMethodSignature (ImmutableArray.CreateRange bytes)
+                EmitScopeReferences.importMethodSignature
+                    (source.GetMetadataReader ())
+                    (ImmutableArray.CreateRange bytes)
+                    scope
                 |> ignore
             )
             |> ignore
@@ -748,6 +1433,9 @@ module TestEmitScopeMemberRefs =
                     .DefineDynamicModule
                     "NoncanonicalOracle"
 
+            use source = new PEReader (ImmutableArray.Create<byte> image)
+            let scope = EmitScope.create "NoncanonicalOracle" Guid.Empty
+
             for name, definition, written in noncanonicalSignatures do
                 let m = c.GetMethod (name, BindingFlags.Public ||| BindingFlags.Instance)
 
@@ -758,7 +1446,15 @@ module TestEmitScopeMemberRefs =
                 let token = dynamicModule.GetMethodMetadataToken m
                 dynamicModule.ResolveSignature token |> List.ofArray |> shouldEqual written
 
-                EmitScopeReferences.importMethodSignature (ImmutableArray.CreateRange definition)
-                |> shouldEqual (MethodSignatureImport.Copied (ImmutableArray.CreateRange written))
+                match
+                    EmitScopeReferences.importMethodSignature
+                        (source.GetMetadataReader ())
+                        (ImmutableArray.CreateRange definition)
+                        scope
+                with
+                | MethodSignatureImport.Imported (imported, next) ->
+                    List.ofSeq imported |> shouldEqual written
+                    Object.ReferenceEquals (next, scope) |> shouldEqual true
+                | MethodSignatureImport.Refused refusal -> failwith $"%s{name} was refused: %A{refusal}"
         finally
             loaded.Unload ()

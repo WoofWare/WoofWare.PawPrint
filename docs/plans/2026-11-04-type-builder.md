@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1007,3 +1007,94 @@ A call to an instantiation of a generic method, such as `Array.Empty<int>`, name
 * A generic `MethodBuilder` (`TypeBuilder_DefineGenericParam`, the GenericParam table), and calls to
   its instantiations through a MethodDef parent.
 * A vararg call site's MemberRef.
+
+### 5g: a method reference whose signature names a type by token
+
+3d copies only a signature that names no type by token, and refuses the rest, so a reference to a method
+of another module that takes or returns a class or a non-primitive value type (`Type.GetType(string)`,
+`Guid.Parse(string)`, `Console.SetOut(TextWriter)`) stops there. CoreCLR translates such a signature
+into the dynamic module (`TranslateSigWithScope`). Read from `ModuleBuilder_GetMemberRefOfMethodInfo`
+(vm/commodule.cpp), `MDInternalRW::TranslateSigWithScope` (md/enc), and `ImportHelper`'s
+`MergeUpdateTokenInFieldSig`, `ImportTypeDef`, `ImportTypeRef`, `CreateNesterHierarchy`,
+`CreateAssemblyRefFromAssembly`, `CreateAssemblyRefFromAssemblyRef`, `CompareAssemblyRefToAssembly` and
+`FindAssemblyRef` (md/compiler/importhelper.cpp):
+
+* The walk is 3d's. Each `CLASS`, `VALUETYPE`, `CMOD_REQD` or `CMOD_OPT` token is rewritten where the
+  walk meets it, so a row the translation adds for an earlier token is found for a later one.
+* A **TypeDef** of the source module (`ImportTypeDef`) names a chain of TypeRefs, outermost first, each
+  scoped by the one enclosing it, with the source TypeDefs' own names and namespaces. The outermost is
+  scoped by the AssemblyRef `CreateAssemblyRefFromAssembly` makes from the source assembly's `Assembly`
+  row: its name, version (with no 65535 rule), culture, flags without `PublicKey` (the
+  processor-architecture bits untouched, unlike `GetTypeRef`'s), the key reduced to its token, and an
+  empty hash. `FindAssemblyRef` looks for it first, as 3a describes. `CreateNesterHierarchy` then finds
+  the chain by name from the outermost, and from the first miss adds the rest without looking again,
+  each interning a non-empty namespace before the name.
+* A **TypeRef** of the source module (`ImportTypeRef`) first compares its outermost AssemblyRef with
+  the emitting assembly's `Assembly` row (`CompareAssemblyRefToAssembly`), then copies that AssemblyRef
+  whole (`CreateAssemblyRefFromAssemblyRef`: flags, full key or token, and hash as they are), found
+  first by `FindAssemblyRef`, which compares a full key with a token by reducing the key. A nil,
+  `Module` or `ModuleRef` outermost scope, and a `TypeSpec` token, each take a path of their own.
+* A dynamic assembly has one module, so the assembly's emit scope and the module's are one `RegMeta`:
+  `CreateAssemblyRef*` adds to the first and finds in the second what it added.
+* The managed caller asks for the declaring type's token first, through `GetTypeRef`, whose AssemblyRef
+  for the source assembly the translation then finds. So its write of a token for an unsigned assembly
+  it has no AssemblyRef for, eight bytes of an uninitialised buffer, is not reached.
+* Measured on .NET 10, for `Type.GetType(string)`, `Console.SetOut`, then `typeof(TextWriter)`,
+  `Environment.GetFolderPath(SpecialFolder)`, `string.Join(string, IEnumerable<string>)`, a method of
+  an unsigned assembly asked for twice and one taking a type nested in it, and `Enumerable.ToList`:
+  thirteen TypeRefs and six AssemblyRefs, as the reading predicts. `Console.SetOut` names `TextWriter`
+  through `System.Console`'s AssemblyRef to `System.Runtime`, and `GetTypeRef` through
+  `System.Private.CoreLib`, so they are two TypeRefs; that is the duplicate 3d measured. `IEnumerable<T>`
+  is two for the same reason.
+
+### 5g: the decisions
+
+* **Two stages, split by the token's kind.** 5g translates a TypeDef of the source module and refuses a
+  TypeRef by name; 5h translates a TypeRef. CoreLib names its own types by TypeDef, so 5g covers every
+  CoreLib method and the guest 3d parked. 5h brings the copied AssemblyRef, which can hold a full key,
+  and its comparison with the emitting assembly. The alternative was one stage, whose AssemblyRef
+  changes and two translation paths would review as one.
+* **The translation is a Domain function over the source module's `MetadataReader`**, threading the
+  scope, which gives the translated bytes and the extended scope, or a refusal naming the token it met.
+  Domain answers what is in a DLL, the handler already holds the reader, and a dynamic source module is
+  read through its own image. The translation finds rows it added itself, so it must thread the scope
+  rather than return rows to add. The alternatives were the interpreter translating over its loaded
+  assemblies, which only a guest could test, and a callback for each token, which hides what is read.
+* **The AssemblyRef is made by a function of its own**, not `defineAssemblyRef`, since it stores the
+  version and flags as they are, where `defineAssemblyRef` applies `_SetAssemblyRefProps`' rules.
+* **Refused by name, each with a TODO:** a TypeRef token (5h), a TypeSpec token, a token tagged as no
+  table (tag 3), and, as an assertion, a TypeDef of an unsigned source assembly whose AssemblyRef the
+  scope lacks, which the managed caller never reaches. No row is added for a refused signature.
+* **No `WithAssemblyRefTarget` for the translation's rows.** CoreCLR records only `GetTypeRef`'s
+  AssemblyRefs in the module's rid map, so a translated reference resolves through the binder, as the
+  source module's own does.
+
+### 5g: the oracle
+
+* Real .NET's emitter, in the test host: for every method of a non-generic CoreLib type whose signature
+  names a type by token, in order, and some asked again, `GetMethodMetadataToken` on a real dynamic
+  module and the Domain functions on a scope (the declaring type's TypeRef as `GetTypeRef` makes it,
+  then the translation and `defineMemberRef`) give the same token and the same signature bytes. After
+  each, `GetTypeMetadataToken` of each type the method names gives the same TypeRef in both, which
+  shows that the translated TypeRef is scoped as `GetTypeRef` scopes it. At the end, both have the same
+  TypeRefs by name and defining assembly, and the same AssemblyRefs.
+* Over signatures generated from the ECMA-335 grammar, against fabricated source images with nested
+  TypeDefs, signed and unsigned, and scopes that may already hold some of the rows: against a model, a
+  signature with a refused token is refused at the first; any other adds exactly the AssemblyRef and
+  TypeRefs the model adds, in its order, and has 3d's bytes with each token rewritten to the model's
+  row.
+* `ModuleBuilderMemberRefTranslatedSignature.cs`, parked since 3d, is unparked and extended with a
+  nested type and an instantiation, with a terminal-state check of its TypeRef, AssemblyRef and
+  MemberRef rows.
+* Each mutant is caught: a TypeDef refused; the AssemblyRef made by `defineAssemblyRef`, never found,
+  or added for an unsigned assembly; the chain reversed, never found, or without its namespaces; the
+  translated token tagged as a TypeDef; the scope not threaded from one token to the next; a custom
+  modifier's type skipped; and the handler adding the reference to the scope it had before translating.
+  Looking on after the chain's first miss is not a mutant: a TypeRef just added scopes nothing yet.
+
+### 5g: left to later stages
+
+* A TypeRef of the source module (5h), and the paths of a nil, `Module` or `ModuleRef` scope.
+* A TypeSpec token in a method signature.
+* Field references, through `ModuleBuilder_GetMemberRefOfFieldInfo`, which translate a field signature
+  the same way.

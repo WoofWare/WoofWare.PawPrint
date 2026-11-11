@@ -450,22 +450,6 @@ module TestImpureCases =
             currentDirectoryCase "/héllo/中文/🐶",
             """A *short* non-ASCII directory, parked for an unrelated reason: it fits the stackalloc, so `SystemNative_GetCwd` succeeds and ERANGE never enters into it, but decoding the bytes back with `Marshal.PtrToStringUTF8` takes CoreLib's non-ASCII UTF-8 path, which stops in `Utf8Utility.GetPointerToFirstInvalidByte` at a `cgt.un` between two byrefs into one stackalloc block ("refusing cgt.un: no structural order between byrefs"). The ASCII siblings in `cases` cover the same handler; what is missing is byref ordering, not anything about the current directory. `TestAbsoluteUnixPath` covers the UTF-8 encoding of such a path directly in the meantime."""
             {
-                FileName = "ModuleBuilderMemberRefTranslatedSignature.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """A member reference to a method whose signature names a type by token, a class (`Type.GetType(string)`) and a value type (`Guid.Parse(string)`). Measured on .NET 10 to exit 0. CoreCLR's `TranslateSigWithScope` rewrites each such token to name a TypeRef of the dynamic module, adding TypeRef and AssemblyRef rows of its own, and `ModuleBuilder_GetMemberRefOfMethodInfo` refuses the signature by name until PawPrint does the same."""
-            {
                 FileName = "TypeBuilderDefinePInvokeMethod.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -1801,6 +1785,69 @@ module TestImpureCases =
                 memberRef 2, [ 0x0Auy ; 0x01uy ; 0x08uy ]
                 memberRef 2, [ 0x0Auy ; 0x01uy ; 0x0Euy ]
                 memberRef 3, [ 0x0Auy ; 0x01uy ; 0x0Auy ]
+            ]
+
+    /// `ModuleBuilderMemberRefTranslatedSignature.cs` has asked for references to four CoreLib methods
+    /// whose signatures name CoreLib types, and for two of those types. A guest cannot read a TypeRef's
+    /// scope or a member reference's signature, so this checks the rows its dynamic module's scope ends
+    /// with, as .NET 10 reports them: each TypeRef a translated signature names is scoped by CoreLib's
+    /// AssemblyRef, or by the TypeRef of the type enclosing it, and is the row `GetTypeRef` gives the
+    /// parent or the type when it asks first or later.
+    let private assertTranslatedSignatureRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "System.Private.CoreLib" ]
+
+        let coreLib =
+            ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid 1 scope).Value
+
+        let typeRef (rid : int) =
+            (EmitScope.tryTypeRefRid rid scope).Value
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            row.ResolutionScope, EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                coreLib, "System", "Type"
+                coreLib, "System", "Guid"
+                coreLib, "System", "Environment"
+                ResolutionScope.TypeRef (typeRef 3), "", "SpecialFolder"
+                coreLib, "System", "String"
+                coreLib, "System.Collections.Generic", "IEnumerable`1"
+            ]
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                MemberRefParent.TypeRef (typeRef 1), "GetType", [ 0x00uy ; 0x01uy ; 0x12uy ; 0x05uy ; 0x0Euy ]
+                MemberRefParent.TypeRef (typeRef 2), "Parse", [ 0x00uy ; 0x01uy ; 0x11uy ; 0x09uy ; 0x0Euy ]
+                MemberRefParent.TypeRef (typeRef 3), "GetFolderPath", [ 0x00uy ; 0x01uy ; 0x0Euy ; 0x11uy ; 0x11uy ]
+                MemberRefParent.TypeRef (typeRef 5),
+                "Join",
+                [
+                    0x00uy
+                    0x02uy
+                    0x0Euy
+                    0x0Euy
+                    0x15uy
+                    0x12uy
+                    0x19uy
+                    0x01uy
+                    0x0Euy
+                ]
             ]
 
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
@@ -5376,6 +5423,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertMethodSpecRows
+            }
+            {
+                // `ModuleBuilder_GetMemberRefOfMethodInfo` for signatures that name CoreLib types by
+                // TypeDef, which the emitter translates into TypeRefs of the dynamic module;
+                // `assertTranslatedSignatureRows` reads the rows. Dynamic-code switch overridden to true
+                // like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderMemberRefTranslatedSignature.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertTranslatedSignatureRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
