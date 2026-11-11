@@ -131,6 +131,7 @@ module TestPureCases =
     /// How each case ends on .NET 10 alone, when that is not a normal exit with code 0.
     let endingsOnNet10 : Map<string, GuestEnding> =
         [
+            "RuntimeAsyncTraceHidesThunk.cs", GuestEnding.ExitCode 7
             "ThreadStateOfEntryThreadAfterMain.cs", GuestEnding.ExitCode 11
             "DelegateOpenStaticVirtualInvoke.cs", GuestEnding.ExitCode 10
             "FileSystemSupportsLockingDirect.cs", GuestEnding.ExitCode 100
