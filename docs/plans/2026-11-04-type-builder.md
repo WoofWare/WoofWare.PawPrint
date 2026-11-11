@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1098,3 +1098,75 @@ into the dynamic module (`TranslateSigWithScope`). Read from `ModuleBuilder_GetM
 * A TypeSpec token in a method signature.
 * Field references, through `ModuleBuilder_GetMemberRefOfFieldInfo`, which translate a field signature
   the same way.
+
+### 5h: a TypeRef in a translated signature
+
+A method of any assembly but CoreLib names the types of other assemblies by TypeRef (`Console.SetOut`'s
+`TextWriter`, through `System.Console`'s AssemblyRef to `System.Runtime`), which 5g refuses. Read from
+`ImportTypeRef`, `GetTRNesterHierarchy`, `CompareAssemblyRefToAssembly`,
+`CreateAssemblyRefFromAssemblyRef` and `FindAssemblyRef` (md/compiler/importhelper.cpp):
+
+* The chain is the source TypeRef and the TypeRefs scoping it, outermost last, each with its own
+  namespace and name. The outermost's resolution scope decides the rest.
+* For an **AssemblyRef**, the emitter first compares it with the emitting assembly's `Assembly` row
+  (`CompareAssemblyRefToAssembly`), which a dynamic assembly always has: equal name, culture and all four
+  version parts, and, if the reference holds a key or token, the definition's key reduced to a token
+  equal to it. A reference holding a full key never matches, since after comparing the keys the
+  function compares the reference's bytes with the definition's eight-byte token too.
+* An AssemblyRef that does not name the emitting assembly is copied whole
+  (`CreateAssemblyRefFromAssemblyRef`): name, version, culture, flags, key or token, and hash value, as
+  they are. `FindAssemblyRef` looks for it first. It reads a row's `PublicKey` flag, and the request's,
+  only when there are key bytes, and compares a full key with a token by reducing the key. The chain of
+  TypeRefs is then found or added in its scope, as for a TypeDef.
+* An AssemblyRef that names the emitting assembly makes the chain name a type of the emitting module
+  (an ExportedType, or a TypeDef). A nil scope is looked up among the source assembly's ExportedTypes;
+  a `Module` or `ModuleRef` scope is the source assembly itself (`CreateAssemblyRefFromAssembly`).
+
+### 5h: the decisions
+
+* **A copied AssemblyRef is a type of its own, `AssemblyRefCopy`, whose key is a union
+  `PublicKeyOrToken = Absent | Token | Key`.** A row's `PublicKey` flag and its bytes can disagree; the
+  union cannot, so the reader of the source row refuses a flag without bytes, and the copy writes the
+  flag from the case. `AssemblyRefRequest`, which only ever holds a token, keeps its shape. The
+  alternative was one request type with a flag and bytes that could disagree.
+* **`tryFindAssemblyRef` gains `FindAssemblyRef`'s three comparisons**, replacing its refusal of a row
+  holding a full key, and one search serves both kinds of request.
+* **The comparison with the emitting assembly is modelled exactly**, the full-key case included, since
+  it decides between copying the reference and refusing it.
+* **Refused by name, each with a TODO**: a nil, `Module` or `ModuleRef` outermost scope, and an
+  AssemblyRef that names the emitting assembly. Compilers write the first three for their own module's
+  types, which a framework method does not name, and the fourth needs a static assembly to name a
+  dynamic one.
+* **A reference holding a full key that `StrongNameIsValidPublicKey` rejects is refused, not copied.**
+  CoreCLR copies one, since `FindAssemblyRef` reduces no key when no row of that name holds key bytes,
+  and then throws `SecurityException` ("Invalid assembly public key", measured on .NET 10) from any later
+  search that reduces it to a token. A loaded assembly's AssemblyRefs can hold such a key, because
+  loading does not check them. Refusing the copy refuses every such later search, at the
+  cost of also refusing copies CoreCLR would never reduce. `StrongName.isValidPublicKey` moves to
+  Domain from `NativeRuntimeAssembly` for this, and `AssemblyRefRequest.publicKeyToken` refuses a blob
+  it rejects.
+
+### 5h: the oracle
+
+* Real .NET's emitter, in the test host, over methods of non-generic types in several framework
+  assemblies other than CoreLib, as 5g's oracle does for CoreLib: the same tokens and signature bytes;
+  `GetTypeMetadataToken` of each type named gives the same TypeRef in both, which now is often a second
+  row for a type the translation named through a facade; the same TypeRefs and AssemblyRefs at the end.
+* Real .NET's emitter over fabricated source images, loaded in the test host: an AssemblyRef holding a
+  full key is copied with its key, and a later reference to the same assembly by token finds it.
+* Over generated signatures against fabricated sources whose TypeRefs are nested and scoped by
+  AssemblyRefs holding nothing, a token or a full key (one naming the emitting assembly), by nil, by the
+  module and by a ModuleRef: against a model, as in 5g.
+* A guest asking for `Console.SetOut`, then `typeof(TextWriter)`, and `Enumerable.ToList`, with a
+  terminal-state check of the TypeRef and AssemblyRef rows, the hash values included.
+* Each mutant is caught: a TypeRef refused; the copy's hash dropped, its key left unflagged, or never
+  found; a row's key, or a request's, compared with a token unreduced; a full key naming the emitting
+  assembly, or the emitting assembly never compared; the chain innermost first; an invalid key copied;
+  and a `Module` scope refused as a `ModuleRef`.
+
+### 5h: left to later stages
+
+* A nil, `Module` or `ModuleRef` outermost scope, an AssemblyRef naming the emitting assembly, and a
+  copied full key that `StrongNameIsValidPublicKey` rejects.
+* A TypeSpec token in a method signature.
+* Field references, through `ModuleBuilder_GetMemberRefOfFieldInfo`.

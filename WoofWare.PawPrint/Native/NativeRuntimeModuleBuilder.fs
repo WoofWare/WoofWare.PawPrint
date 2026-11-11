@@ -394,12 +394,24 @@ module NativeRuntimeModuleBuilder =
             let signature, translated =
                 match EmitScopeReferences.importMethodSignature reader signature held with
                 | MethodSignatureImport.Imported (imported, translated) -> imported, translated
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRef handle) ->
+                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefWithoutScope handle) ->
                     failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, which CoreCLR's ImportTypeRef translates by copying the TypeRef's outermost resolution scope into %s{moduleName}; PawPrint translates only a TypeDef of the source module"
+                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, whose outermost resolution scope is nil, which CoreCLR's ImportTypeRef looks up among the source assembly's ExportedTypes; PawPrint translates only a TypeRef scoped by an AssemblyRef"
+                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfModule handle) ->
+                    failwith
+                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by the module itself, which CoreCLR's ImportTypeRef scopes by the AssemblyRef it makes for the source assembly; PawPrint translates only a TypeRef scoped by an AssemblyRef"
+                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfModuleRef handle) ->
+                    failwith
+                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by a ModuleRef, which CoreCLR's ImportTypeRef scopes by the AssemblyRef it makes for the source assembly; PawPrint translates only a TypeRef scoped by an AssemblyRef"
+                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfEmittingAssembly handle) ->
+                    failwith
+                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by an AssemblyRef naming %s{moduleName} itself, which CoreCLR's ImportTypeRef makes name a type of the emitting module; PawPrint does not"
+                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfInvalidPublicKey handle) ->
+                    failwith
+                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by an AssemblyRef holding a full key that StrongNameIsValidPublicKey rejects; CoreCLR copies it, and throws SecurityException from any later search that reduces the key, which PawPrint does not raise"
                 | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeSpec handle) ->
                     failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeSpec 0x%08x{MetadataTokens.GetToken (TypeSpecificationHandle.op_Implicit handle : EntityHandle)} of its module, which CoreCLR translates in turn and finds or adds in %s{moduleName}; PawPrint translates only a TypeDef of the source module"
+                        $"TODO: %s{operation}: the signature of %s{described} names TypeSpec 0x%08x{MetadataTokens.GetToken (TypeSpecificationHandle.op_Implicit handle : EntityHandle)} of its module, which CoreCLR translates in turn and finds or adds in %s{moduleName}; PawPrint translates only a TypeDef or TypeRef of the source module"
                 | MethodSignatureImport.Refused (SignatureTokenRefusal.NoTable coded) ->
                     failwith
                         $"TODO: %s{operation}: the signature of %s{described} holds the encoded token 0x%x{coded}, whose tag names no table; CoreCLR copies it as an mdtBaseType, which no compiler writes"

@@ -1850,6 +1850,81 @@ module TestImpureCases =
                 ]
             ]
 
+    /// `ModuleBuilderMemberRefTranslatedTypeRef.cs` has asked for references to methods of System.Console
+    /// and System.Linq, whose signatures name types of other assemblies by TypeRef, and for
+    /// `typeof(TextWriter)`. A guest cannot read a TypeRef's scope or an AssemblyRef's hash, so this
+    /// checks the rows its dynamic module's scope ends with, as .NET 10 reports them: the translation
+    /// copies each source TypeRef's AssemblyRef (System.Runtime, System.Collections), with its empty hash,
+    /// so `SetOut`'s `TextWriter` is not `GetTypeRef`'s, which is scoped by System.Private.CoreLib.
+    let private assertTranslatedTypeRefRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.HashValue scope))
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                "System.Console", []
+                "System.Runtime", []
+                "System.Private.CoreLib", []
+                "System.Linq", []
+                "System.Collections", []
+            ]
+
+        let assemblyRef (rid : int) =
+            ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid rid scope).Value
+
+        let typeRef (rid : int) =
+            (EmitScope.tryTypeRefRid rid scope).Value
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            row.ResolutionScope, EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                assemblyRef 1, "System", "Console"
+                assemblyRef 2, "System.IO", "TextWriter"
+                assemblyRef 3, "System.IO", "TextWriter"
+                assemblyRef 4, "System.Linq", "Enumerable"
+                assemblyRef 5, "System.Collections.Generic", "List`1"
+                assemblyRef 2, "System.Collections.Generic", "IEnumerable`1"
+            ]
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                MemberRefParent.TypeRef (typeRef 1), "SetOut", [ 0x00uy ; 0x01uy ; 0x01uy ; 0x12uy ; 0x09uy ]
+                MemberRefParent.TypeRef (typeRef 1), "SetError", [ 0x00uy ; 0x01uy ; 0x01uy ; 0x12uy ; 0x09uy ]
+                MemberRefParent.TypeRef (typeRef 4),
+                "ToList",
+                [
+                    0x10uy
+                    0x01uy
+                    0x01uy
+                    0x15uy
+                    0x12uy
+                    0x15uy
+                    0x01uy
+                    0x1Euy
+                    0x00uy
+                    0x15uy
+                    0x12uy
+                    0x19uy
+                    0x01uy
+                    0x1Euy
+                    0x00uy
+                ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5442,6 +5517,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertTranslatedSignatureRows
+            }
+            {
+                // `ModuleBuilder_GetMemberRefOfMethodInfo` for signatures that name types of other
+                // assemblies by TypeRef, which the emitter translates by copying each TypeRef's
+                // AssemblyRef; `assertTranslatedTypeRefRows` reads the rows. Dynamic-code switch
+                // overridden to true like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderMemberRefTranslatedTypeRef.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertTranslatedTypeRefRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has

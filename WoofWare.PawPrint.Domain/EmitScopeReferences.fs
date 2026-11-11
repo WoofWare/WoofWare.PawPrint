@@ -8,6 +8,52 @@ open System.Reflection.Metadata.Ecma335
 open System.Security.Cryptography
 open System.Text
 
+/// The strong-name facts about public key blobs that CoreCLR checks before it hashes one.
+[<RequireQualifiedAccess>]
+module StrongName =
+    let private ecmaKey : ImmutableArray<byte> =
+        ImmutableArray.Create<byte> (Convert.FromHexString "00000000000000000400000000000000")
+
+    /// <summary>
+    /// <c>StrongNameIsValidPublicKey</c> (md/runtime/strongnameinternal.cpp): does this blob look like a
+    /// public key, in the sense the strong-name code checks before hashing one? CoreCLR's
+    /// <c>StrongNameTokenFromPublicKey</c> refuses any other with <c>CORSEC_E_INVALID_PUBLICKEY</c>, which
+    /// its callers throw as a <c>SecurityException</c>.
+    /// </summary>
+    /// <remarks>
+    /// The blob is a <c>PublicKeyBlob</c>: a signature algorithm, a hash algorithm and a key length as
+    /// little-endian 32-bit words, then the CryptoAPI key bytes. It must be at least the unpacked struct's
+    /// sixteen bytes, its key length must account for everything after the twelve-byte header, an
+    /// algorithm that is given must be of the right class (and the hash no weaker than SHA-1), and the key
+    /// must announce itself as a <c>PUBLICKEYBLOB</c>. The sixteen-byte ECMA key passes without those
+    /// checks, since it is not a real key.
+    /// </remarks>
+    let isValidPublicKey (blob : ImmutableArray<byte>) : bool =
+        if blob.AsSpan().SequenceEqual (ecmaKey.AsSpan ()) then
+            true
+        elif blob.Length < 16 then
+            false
+        else
+            let word (offset : int) : uint32 =
+                uint32 blob.[offset]
+                ||| (uint32 blob.[offset + 1] <<< 8)
+                ||| (uint32 blob.[offset + 2] <<< 16)
+                ||| (uint32 blob.[offset + 3] <<< 24)
+
+            let sigAlgId = word 0
+            let hashAlgId = word 4
+            let keyLength = word 8
+
+            // GET_ALG_CLASS keeps bits 13-15; GET_ALG_SID keeps the low nine. ALG_CLASS_HASH is
+            // 4 << 13, ALG_CLASS_SIGNATURE is 1 << 13, ALG_SID_SHA1 is 4 and PUBLICKEYBLOB is 6.
+            let algClass (id : uint32) = id &&& (7u <<< 13)
+            let algSid (id : uint32) = id &&& 511u
+
+            keyLength = uint32 (blob.Length - 12)
+            && (hashAlgId = 0u || (algClass hashAlgId = (4u <<< 13) && algSid hashAlgId >= 4u))
+            && (sigAlgId = 0u || algClass sigAlgId = (1u <<< 13))
+            && blob.[12] = 6uy
+
 /// <summary>
 /// What CoreCLR's emitter is asked to reference when a dynamic module refers to a type of another
 /// assembly: the arguments <c>AssemblySpec::EmitToken</c> passes to <c>DefineAssemblyRef</c>, read
@@ -36,6 +82,11 @@ module AssemblyRefRequest =
     let publicKeyToken (publicKey : ImmutableArray<byte>) : ImmutableArray<byte> =
         if publicKey.IsDefaultOrEmpty then
             invalidArg (nameof publicKey) "an assembly with no public key has no public key token"
+
+        if not (StrongName.isValidPublicKey publicKey) then
+            invalidArg
+                (nameof publicKey)
+                $"a %d{publicKey.Length}-byte blob that StrongNameIsValidPublicKey rejects has no token: CoreCLR refuses it with CORSEC_E_INVALID_PUBLICKEY"
 
         let hash = SHA1.HashData (publicKey.AsSpan ())
         ImmutableArray.CreateRange (Seq.init 8 (fun i -> hash.[hash.Length - 1 - i]))
@@ -73,13 +124,92 @@ module AssemblyRefRequest =
                     definition.Flags &&& ~~~AssemblyFlags.PublicKey
         }
 
+/// What an <c>AssemblyRef</c> row says identifies an assembly's key: nothing, the key's token, or the
+/// full key. A row says which by its <c>PublicKey</c> flag, which only key bytes give meaning to.
+[<RequireQualifiedAccess>]
+type PublicKeyOrToken =
+    | Absent
+    | Token of ImmutableArray<byte>
+    | Key of ImmutableArray<byte>
+
+/// <summary>
+/// An <c>AssemblyRef</c> of another module, as CoreCLR's
+/// <c>ImportHelper::CreateAssemblyRefFromAssemblyRef</c> copies it into a dynamic module: every column as
+/// it is.
+/// </summary>
+type AssemblyRefCopy =
+    {
+        Name : string
+        Version : MetadataVersion
+        Culture : string
+        PublicKeyOrToken : PublicKeyOrToken
+        /// The row's flags without <c>PublicKey</c>, which a copy sets exactly for a full key.
+        Flags : AssemblyFlags
+        HashValue : ImmutableArray<byte>
+    }
+
+/// Reading an <c>AssemblyRef</c> of another module as the emitter copies it.
+[<RequireQualifiedAccess>]
+module AssemblyRefCopy =
+    /// <summary>The <c>AssemblyRef</c> <paramref name="handle"/> of the module <paramref name="reader"/> reads.</summary>
+    /// <exception cref="ArgumentException">
+    /// The row is marked as holding a full key but holds no key bytes, which ECMA-335 II.22.5 does not
+    /// allow and which a copy could not say.
+    /// </exception>
+    let ofReference (reader : MetadataReader) (handle : AssemblyReferenceHandle) : AssemblyRefCopy =
+        let reference = reader.GetAssemblyReference handle
+        let bytes = reader.GetBlobContent reference.PublicKeyOrToken
+        let marked = reference.Flags.HasFlag AssemblyFlags.PublicKey
+
+        let key =
+            if bytes.IsEmpty then
+                if marked then
+                    invalidArg
+                        (nameof handle)
+                        $"AssemblyRef %d{MetadataTokens.GetRowNumber (AssemblyReferenceHandle.op_Implicit handle : EntityHandle)} (%s{reader.GetString reference.Name}) is marked as holding a full public key, but holds no key bytes"
+
+                PublicKeyOrToken.Absent
+            elif marked then
+                PublicKeyOrToken.Key bytes
+            else
+                PublicKeyOrToken.Token bytes
+
+        {
+            Name = reader.GetString reference.Name
+            Version =
+                {
+                    Major = uint16 reference.Version.Major
+                    Minor = uint16 reference.Version.Minor
+                    Build = uint16 reference.Version.Build
+                    Revision = uint16 reference.Version.Revision
+                }
+            Culture = reader.GetString reference.Culture
+            PublicKeyOrToken = key
+            Flags = reference.Flags &&& ~~~AssemblyFlags.PublicKey
+            HashValue = reader.GetBlobContent reference.HashValue
+        }
+
 /// A token in another module's method signature that <c>EmitScopeReferences.importMethodSignature</c>
 /// does not translate into the dynamic module, the first the walk meets.
 [<RequireQualifiedAccess>]
 type SignatureTokenRefusal =
-    /// A TypeRef of the source module, which CoreCLR's <c>ImportTypeRef</c> translates by copying its
-    /// outermost resolution scope.
-    | TypeRef of TypeReferenceHandle
+    /// A TypeRef of the source module whose outermost resolution scope is nil, which CoreCLR's
+    /// <c>ImportTypeRef</c> looks up among the source assembly's ExportedTypes.
+    | TypeRefWithoutScope of TypeReferenceHandle
+    /// A TypeRef of the source module whose outermost resolution scope is the source module itself,
+    /// which CoreCLR scopes by the AssemblyRef it makes for the source assembly.
+    | TypeRefOfModule of TypeReferenceHandle
+    /// A TypeRef of the source module whose outermost resolution scope is a ModuleRef, which CoreCLR
+    /// scopes by the AssemblyRef it makes for the source assembly.
+    | TypeRefOfModuleRef of TypeReferenceHandle
+    /// A TypeRef of the source module whose outermost resolution scope is an AssemblyRef naming the
+    /// emitting assembly, which CoreCLR makes name a type of the emitting module.
+    | TypeRefOfEmittingAssembly of TypeReferenceHandle
+    /// A TypeRef of the source module whose outermost resolution scope is an AssemblyRef holding a full
+    /// key that <c>StrongNameIsValidPublicKey</c> rejects. CoreCLR copies such a reference, but throws a
+    /// <c>SecurityException</c> from any later search that reduces the key to its token, which PawPrint
+    /// does not model, so it refuses to copy it at all.
+    | TypeRefOfInvalidPublicKey of TypeReferenceHandle
     /// A TypeSpec of the source module, which CoreCLR translates in turn and finds or adds.
     | TypeSpec of TypeSpecificationHandle
     /// A token whose tag names no table (<c>mdtBaseType</c>), given as the encoded token.
@@ -153,38 +283,73 @@ module EmitScopeReferences =
             fullName.Substring (0, separator), fullName.Substring (separator + 1)
 
     /// <summary>
-    /// The <c>AssemblyRef</c> row that CoreCLR's <c>ImportHelper::FindAssemblyRef</c> finds for
-    /// <paramref name="request"/>: the first with the same name, culture, version and public key token.
-    /// Build and revision are not compared for a row named <c>mscorlib</c> or
-    /// <c>Microsoft.VisualC</c>, in any case, and flags are not compared at all.
+    /// The first <c>AssemblyRef</c> row with this name, culture, version and key, as CoreCLR's
+    /// <c>ImportHelper::FindAssemblyRef</c> finds it. Build and revision are not compared for a row named
+    /// <c>mscorlib</c> or <c>Microsoft.VisualC</c>, in any case. Of the flags, only <c>PublicKey</c> is
+    /// read, and only of a row holding key bytes: a full key and a token are compared by reducing the key
+    /// to its token.
     /// </summary>
-    let tryFindAssemblyRef (request : AssemblyRefRequest) (scope : EmitScope) : AssemblyRefRid option =
-        let matches (row : AssemblyRefRow) : bool =
-            let name = EmitScope.stringAt row.Name scope
-            let key = EmitScope.blobAt row.PublicKeyOrToken scope
+    let private findAssemblyRef
+        (name : string)
+        (culture : string)
+        (version : MetadataVersion)
+        (key : PublicKeyOrToken)
+        (scope : EmitScope)
+        : AssemblyRefRid option
+        =
+        let same (x : ImmutableArray<byte>) (y : ImmutableArray<byte>) : bool = x.AsSpan().SequenceEqual (y.AsSpan ())
 
-            // `FindAssemblyRef` reads a row's `PublicKey` flag only when the row holds key bytes. A row
-            // holding a full key is compared by the key's token, and nothing here writes one yet.
-            if not key.IsEmpty && row.Flags.HasFlag AssemblyFlags.PublicKey then
-                failwith
-                    "TODO: EmitScopeReferences.tryFindAssemblyRef: an AssemblyRef row holds a full public key, which ImportHelper::FindAssemblyRef compares by its token"
+        let matches (row : AssemblyRefRow) : bool =
+            let rowName = EmitScope.stringAt row.Name scope
+            let held = EmitScope.blobAt row.PublicKeyOrToken scope
+            let heldIsKey = row.Flags.HasFlag AssemblyFlags.PublicKey
 
             let unified =
-                String.Equals (name, "mscorlib", StringComparison.OrdinalIgnoreCase)
-                || String.Equals (name, "microsoft.visualc", StringComparison.OrdinalIgnoreCase)
+                String.Equals (rowName, "mscorlib", StringComparison.OrdinalIgnoreCase)
+                || String.Equals (rowName, "microsoft.visualc", StringComparison.OrdinalIgnoreCase)
 
-            String.Equals (name, request.Name, StringComparison.Ordinal)
-            && String.Equals (EmitScope.stringAt row.Culture scope, request.Culture, StringComparison.Ordinal)
-            && row.Version.Major = request.Version.Major
-            && row.Version.Minor = request.Version.Minor
+            let keyMatches =
+                match key with
+                | PublicKeyOrToken.Absent -> held.IsEmpty
+                | PublicKeyOrToken.Token token ->
+                    not held.IsEmpty
+                    && (if heldIsKey then
+                            same (AssemblyRefRequest.publicKeyToken held) token
+                        else
+                            same held token)
+                | PublicKeyOrToken.Key publicKey ->
+                    not held.IsEmpty
+                    && (if heldIsKey then
+                            same held publicKey
+                        else
+                            same held (AssemblyRefRequest.publicKeyToken publicKey))
+
+            String.Equals (rowName, name, StringComparison.Ordinal)
+            && String.Equals (EmitScope.stringAt row.Culture scope, culture, StringComparison.Ordinal)
+            && row.Version.Major = version.Major
+            && row.Version.Minor = version.Minor
             && (unified
-                || row.Version.Build = request.Version.Build
-                   && row.Version.Revision = request.Version.Revision)
-            && key.AsSpan().SequenceEqual (request.PublicKeyToken.AsSpan ())
+                || row.Version.Build = version.Build && row.Version.Revision = version.Revision)
+            && keyMatches
 
         EmitScope.assemblyRefs scope
         |> Seq.tryFindIndex matches
         |> Option.map (fun index -> AssemblyRefRid (index + 1))
+
+    /// <summary>
+    /// The <c>AssemblyRef</c> row that CoreCLR's <c>ImportHelper::FindAssemblyRef</c> finds for
+    /// <paramref name="request"/>: the first with the same name, culture, version and public key token,
+    /// comparing a row holding a full key by its token. Build and revision are not compared for a row
+    /// named <c>mscorlib</c> or <c>Microsoft.VisualC</c>, in any case.
+    /// </summary>
+    let tryFindAssemblyRef (request : AssemblyRefRequest) (scope : EmitScope) : AssemblyRefRid option =
+        let key =
+            if request.PublicKeyToken.IsDefaultOrEmpty then
+                PublicKeyOrToken.Absent
+            else
+                PublicKeyOrToken.Token request.PublicKeyToken
+
+        findAssemblyRef request.Name request.Culture request.Version key scope
 
     let private storedVersion (version : MetadataVersion) : MetadataVersion =
         let given (part : uint16) : uint16 =
@@ -480,6 +645,65 @@ module EmitScopeReferences =
             ]
 
     /// <summary>
+    /// The <c>AssemblyRef</c> row CoreCLR's <c>ImportHelper::CreateAssemblyRefFromAssemblyRef</c> gives
+    /// for <paramref name="copy"/>: the one <c>FindAssemblyRef</c> finds, or a new one holding every
+    /// column as it is, marked <c>PublicKey</c> exactly for a full key.
+    /// </summary>
+    let defineAssemblyRefCopy (copy : AssemblyRefCopy) (scope : EmitScope) : AssemblyRefRid * EmitScope =
+        match findAssemblyRef copy.Name copy.Culture copy.Version copy.PublicKeyOrToken scope with
+        | Some row -> row, scope
+        | None ->
+            let bytes, flags =
+                match copy.PublicKeyOrToken with
+                | PublicKeyOrToken.Absent -> ImmutableArray.Empty, copy.Flags
+                | PublicKeyOrToken.Token token -> token, copy.Flags
+                | PublicKeyOrToken.Key key -> key, copy.Flags ||| AssemblyFlags.PublicKey
+
+            // `CreateAssemblyRefFromAssemblyRef` puts the key or token, the name, the culture and the
+            // hash, in that order.
+            let bytes, scope = EmitScope.internBlob bytes scope
+            let name, scope = EmitScope.internString copy.Name scope
+            let culture, scope = EmitScope.internString copy.Culture scope
+            let hash, scope = EmitScope.internBlob copy.HashValue scope
+
+            EmitScope.addAssemblyRef
+                {
+                    Version = copy.Version
+                    Flags = flags
+                    PublicKeyOrToken = bytes
+                    Name = name
+                    Culture = culture
+                    HashValue = hash
+                }
+                scope
+
+    /// <summary>
+    /// Whether <paramref name="reference"/> names the assembly whose <c>Assembly</c> row the scope holds,
+    /// as CoreCLR's <c>ImportHelper::CompareAssemblyRefToAssembly</c> decides it: the same name, culture
+    /// and four version parts, and, where either holds a key, a token equal to the definition's key's.
+    /// A reference holding a full key never names it, since after comparing the keys the function
+    /// compares the reference's bytes with the definition's token too. False for a scope with no
+    /// <c>Assembly</c> row, for which CoreCLR does not compare.
+    /// </summary>
+    let private namesEmittingAssembly (reference : AssemblyRefCopy) (scope : EmitScope) : bool =
+        match EmitScope.assembly scope with
+        | None -> false
+        | Some definition ->
+            let definitionKey = EmitScope.blobAt definition.PublicKey scope
+
+            definition.Version = reference.Version
+            && String.Equals (EmitScope.stringAt definition.Name scope, reference.Name, StringComparison.Ordinal)
+            && String.Equals (EmitScope.stringAt definition.Culture scope, reference.Culture, StringComparison.Ordinal)
+            && (
+                match reference.PublicKeyOrToken with
+                | PublicKeyOrToken.Absent -> definitionKey.IsEmpty
+                | PublicKeyOrToken.Key _ -> false
+                | PublicKeyOrToken.Token token ->
+                    not definitionKey.IsEmpty
+                    && (AssemblyRefRequest.publicKeyToken definitionKey).AsSpan().SequenceEqual (token.AsSpan ())
+            )
+
+    /// <summary>
     /// The <c>AssemblyRef</c> row that CoreCLR's <c>ImportHelper::CreateAssemblyRefFromAssembly</c>
     /// gives for the assembly <paramref name="request"/> was read from: the one
     /// <c>tryFindAssemblyRef</c> finds, or a new one holding the request's version and flags as they are
@@ -515,41 +739,27 @@ module EmitScopeReferences =
             |> Some
 
     /// <summary>
-    /// The <c>TypeRef</c> row CoreCLR's <c>ImportHelper::ImportTypeDef</c> gives for a TypeDef of
-    /// another assembly: the last of a chain, outermost first, each scoped by the one before and the
-    /// first by <paramref name="assemblyRef"/>, holding the source TypeDefs' own namespaces and names.
-    /// <c>CreateNesterHierarchy</c> finds the chain from the outermost, and from the first it does not
-    /// find adds the rest without looking.
+    /// The last <c>TypeRef</c> of a chain, given outermost first as namespaces and names, each scoped by
+    /// the one before and the first by <paramref name="resolution"/>, as CoreCLR's
+    /// <c>ImportHelper::CreateNesterHierarchy</c> gives it: found from the outermost, and from the first
+    /// it does not find, the rest added without looking.
     /// </summary>
-    let private importTypeDef
-        (source : MetadataReader)
-        (assemblyRef : AssemblyRefRid)
-        (handle : TypeDefinitionHandle)
+    let private nesterHierarchy
+        (resolution : ResolutionScope)
+        (chain : (string * string) list)
         (scope : EmitScope)
         : TypeRefRid * EmitScope
         =
-        let rec chain (handle : TypeDefinitionHandle) (inner : TypeDefinition list) : TypeDefinition list =
-            let definition = source.GetTypeDefinition handle
-            let enclosing = definition.GetDeclaringType ()
-
-            if enclosing.IsNil then
-                definition :: inner
-            else
-                chain enclosing (definition :: inner)
-
         let rec define
             (resolution : ResolutionScope)
             (looking : bool)
-            (chain : TypeDefinition list)
+            (chain : (string * string) list)
             (scope : EmitScope)
             : TypeRefRid * EmitScope
             =
             match chain with
-            | [] -> failwith "unreachable: a TypeDef's chain holds at least the TypeDef"
-            | definition :: inner ->
-                let ns = source.GetString definition.Namespace
-                let name = source.GetString definition.Name
-
+            | [] -> invalidArg (nameof chain) "a chain of TypeRefs is never empty"
+            | (ns, name) :: inner ->
                 let found =
                     if looking then
                         tryFindTypeRef resolution ns name scope
@@ -576,7 +786,80 @@ module EmitScopeReferences =
                 | [] -> row, scope
                 | _ -> define (ResolutionScope.TypeRef row) found.IsSome inner scope
 
-        define (ResolutionScope.AssemblyRef assemblyRef) true (chain handle []) scope
+        define resolution true chain scope
+
+    /// <summary>
+    /// The <c>TypeRef</c> row CoreCLR's <c>ImportHelper::ImportTypeDef</c> gives for a TypeDef of
+    /// another assembly: the chain of the TypeDef and the types enclosing it, with their own namespaces
+    /// and names, scoped by <paramref name="assemblyRef"/>.
+    /// </summary>
+    let private importTypeDef
+        (source : MetadataReader)
+        (assemblyRef : AssemblyRefRid)
+        (handle : TypeDefinitionHandle)
+        (scope : EmitScope)
+        : TypeRefRid * EmitScope
+        =
+        let rec chain (handle : TypeDefinitionHandle) (inner : (string * string) list) : (string * string) list =
+            let definition = source.GetTypeDefinition handle
+            let named = source.GetString definition.Namespace, source.GetString definition.Name
+            let enclosing = definition.GetDeclaringType ()
+
+            if enclosing.IsNil then
+                named :: inner
+            else
+                chain enclosing (named :: inner)
+
+        nesterHierarchy (ResolutionScope.AssemblyRef assemblyRef) (chain handle []) scope
+
+    /// <summary>
+    /// The <c>TypeRef</c> row CoreCLR's <c>ImportHelper::ImportTypeRef</c> gives for a TypeRef of
+    /// another assembly: the chain of it and the TypeRefs scoping it, with their own namespaces and
+    /// names, scoped by a copy of the outermost's AssemblyRef. Refused for any other outermost scope, and
+    /// for an AssemblyRef that names the emitting assembly.
+    /// </summary>
+    let private importTypeRef
+        (source : MetadataReader)
+        (handle : TypeReferenceHandle)
+        (scope : EmitScope)
+        : Result<TypeRefRid * EmitScope, SignatureTokenRefusal>
+        =
+        let rec chain (current : TypeReferenceHandle) (inner : (string * string) list) =
+            let reference = source.GetTypeReference current
+            let named = source.GetString reference.Namespace, source.GetString reference.Name
+            let resolution = reference.ResolutionScope
+
+            if not resolution.IsNil && resolution.Kind = HandleKind.TypeReference then
+                chain (TypeReferenceHandle.op_Explicit resolution) (named :: inner)
+            else
+                resolution, named :: inner
+
+        let outermost, chain = chain handle []
+
+        if outermost.IsNil then
+            Error (SignatureTokenRefusal.TypeRefWithoutScope handle)
+        else
+            match outermost.Kind with
+            | HandleKind.AssemblyReference ->
+                let copy =
+                    AssemblyRefCopy.ofReference source (AssemblyReferenceHandle.op_Explicit outermost)
+
+                if namesEmittingAssembly copy scope then
+                    Error (SignatureTokenRefusal.TypeRefOfEmittingAssembly handle)
+                else
+
+                match copy.PublicKeyOrToken with
+                | PublicKeyOrToken.Key key when not (StrongName.isValidPublicKey key) ->
+                    Error (SignatureTokenRefusal.TypeRefOfInvalidPublicKey handle)
+                | _ ->
+                    let assemblyRef, scope = defineAssemblyRefCopy copy scope
+                    Ok (nesterHierarchy (ResolutionScope.AssemblyRef assemblyRef) chain scope)
+            | HandleKind.ModuleDefinition -> Error (SignatureTokenRefusal.TypeRefOfModule handle)
+            | HandleKind.ModuleReference -> Error (SignatureTokenRefusal.TypeRefOfModuleRef handle)
+            | kind ->
+                invalidArg
+                    (nameof handle)
+                    $"TypeRef %d{MetadataTokens.GetRowNumber (TypeReferenceHandle.op_Implicit handle : EntityHandle)}'s resolution scope is a %O{kind}, which ECMA-335 II.22.38 does not allow"
 
     /// <summary>
     /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
@@ -585,13 +868,16 @@ module EmitScopeReferences =
     /// instantiates, or a custom modifier names a type by token, which is rewritten where the walk meets
     /// it, so that a row added for one token is found for a later one. A TypeDef of the source module
     /// names the TypeRef <c>ImportTypeDef</c> finds or adds, scoped by the AssemblyRef
-    /// <c>CreateAssemblyRefFromAssembly</c> finds or adds for the source assembly; any other token is
-    /// refused. Of the rest, the index of a type or method parameter is written in its shortest form,
-    /// every other byte is copied, and bytes after the signature's last type are dropped.
+    /// <c>CreateAssemblyRefFromAssembly</c> finds or adds for the source assembly. A TypeRef of the source
+    /// module scoped, at its outermost, by an AssemblyRef names the TypeRef <c>ImportTypeRef</c> finds or
+    /// adds, scoped by a copy of that AssemblyRef. Any other token is refused. Of the rest, the index of a
+    /// type or method parameter is written in its shortest form, every other byte is copied, and bytes
+    /// after the signature's last type are dropped.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The signature is empty, ends early, is not a method signature, holds an element type the emitter
-    /// refuses, or names a TypeDef the source module does not have.
+    /// refuses, or names a TypeDef or TypeRef the source module does not have; or the source module holds
+    /// a TypeRef or AssemblyRef that ECMA-335 does not allow.
     /// </exception>
     let importMethodSignature
         (source : MetadataReader)
@@ -674,8 +960,16 @@ module EmitScopeReferences =
                     scope.Value <- translated
                     Some ((row.Rid <<< 2) ||| 1)
             | 1 ->
-                refusal.Value <- Some (SignatureTokenRefusal.TypeRef (MetadataTokens.TypeReferenceHandle rid))
-                None
+                if rid < 1 || rid > source.TypeReferences.Count then
+                    fail $"TypeRef %d{rid} is not a row of the source module, which has %d{source.TypeReferences.Count}"
+
+                match importTypeRef source (MetadataTokens.TypeReferenceHandle rid) scope.Value with
+                | Error refused ->
+                    refusal.Value <- Some refused
+                    None
+                | Ok (row, translated) ->
+                    scope.Value <- translated
+                    Some ((row.Rid <<< 2) ||| 1)
             | 2 ->
                 refusal.Value <- Some (SignatureTokenRefusal.TypeSpec (MetadataTokens.TypeSpecificationHandle rid))
                 None
