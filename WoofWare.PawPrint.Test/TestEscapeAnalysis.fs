@@ -14899,6 +14899,45 @@ public static class Runners
                 }
         )
 
+    /// A call binds a runtime-async method's ordinary variant. Where the method returns a promise
+    /// type, that runs the task-returning thunk CoreCLR's VM emits, not the method's IL; where it
+    /// returns none, as `AsyncHelpers.Await` does, it runs the IL.
+    [<Test>]
+    let ``a promise-returning runtime-async method is opaque as the task-returning thunk`` () : unit =
+        match FrameworkUnderTest.runtime () with
+        | EmulatedRuntime.Net10 -> Assert.Ignore ".NET 10's CoreLib declares no promise-returning runtime-async method"
+        | EmulatedRuntime.Net11 -> ()
+
+        let corelib = hostCoreLib ()
+        let analysis = analysisOver [] id
+
+        let thunkSource (key : MethodKey) : Opacity option =
+            let _, sources = EscapeAnalysis.unknownSources analysis key
+
+            sources
+            |> Seq.tryFind (fun source -> source.Method = key && source.Offset.IsNone)
+            |> Option.map _.Reason
+
+        thunkSource (methodNamed corelib "System.IO.StreamReader" "ReadToEndAsyncInternal")
+        |> shouldEqual (Some Opacity.TaskReturningThunk)
+
+        let await =
+            corelib.Methods
+            |> Seq.pick (fun (KeyValue (handle, method)) ->
+                if
+                    method.Name = "Await"
+                    && method.RequiredDeclaringType.Name = "AsyncHelpers"
+                    && method.Signature.GenericParameterCount = 0
+                    && method.Signature.ParameterTypes.Length = 1
+                    && method.Body.IsAsyncIl
+                then
+                    Some (MethodKey.make corelib handle)
+                else
+                    None
+            )
+
+        thunkSource await |> shouldEqual None
+
     /// Where the object a `throw` raises comes from, in an emitted method.
     [<RequireQualifiedAccess>]
     type private Raise =
