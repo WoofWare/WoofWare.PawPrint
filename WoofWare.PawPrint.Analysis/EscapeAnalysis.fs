@@ -4220,10 +4220,13 @@ module EscapeAnalysis =
                 with
                 | assemblies, Ok true -> withAssemblies state assemblies, Runs.Il (body, None)
                 | assemblies, Ok false -> withAssemblies state assemblies, Runs.Opaque Opacity.TaskReturningThunk
-                // CoreCLR classifies the method's return type as it loads the declaring type.
+                // CoreCLR classifies the method's return type as it loads the declaring type, so it
+                // cannot load that type either.
+                | assemblies, Error (TypeBindingFailure.AssemblyUnavailable _) ->
+                    withAssemblies state assemblies, Runs.Opaque Opacity.UnresolvedAssembly
                 | _, Error failure ->
                     failwith
-                        $"%O{key}: classifying the return type of a runtime-async method needs a type that does not bind, so CoreCLR cannot load its declaring type: %s{TypeBindingFailure.describe failure}"
+                        $"%O{key}: classifying the return type of a runtime-async method reaches a type CoreCLR cannot load, which the analysis does not model: %s{TypeBindingFailure.describe failure}"
 
     /// What one body does by itself.
     /// The facts of `key`'s body, where CoreCLR runs `runs` for it (`runsFor`).
