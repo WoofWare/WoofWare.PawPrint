@@ -269,6 +269,7 @@ module internal UnaryMetadataFieldOps =
         =
         match fieldId with
         | FieldId.Named _
+        | FieldId.ContinuationSlot _
         | FieldId.InlineArrayElement _ -> FieldThroughByref.Projected, state
         | FieldId.Metadata (declaringType, _, _) ->
 
@@ -284,6 +285,7 @@ module internal UnaryMetadataFieldOps =
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _
             | ConcreteTypeHandle.OneDimArrayZero _
+            | ConcreteTypeHandle.Continuation _
             | ConcreteTypeHandle.Array _ -> false
 
         // `zeroOf` stores only CoreLib's non-generic primitives as bare cells, so this guard is

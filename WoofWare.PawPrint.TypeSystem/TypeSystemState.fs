@@ -819,6 +819,31 @@ module TypeSystemState =
         | ConcreteTypeHandle.FunctionPointer _ ->
             failwith
                 $"TODO: resolveBaseConcreteType: function pointer types (%O{concreteType}) not yet supported; the runtime base type is System.ValueType but the lookup path needs adjusting"
+        | ConcreteTypeHandle.Continuation _ ->
+            // The runtime makes every continuation type a subclass of CoreLib's `Continuation`
+            // (`CreateNewContinuationMethodTable`, vm/asynccontinuations.cpp).
+            let continuation =
+                baseClassTypes.Corelib.TypeDefs
+                |> Seq.choose (fun (KeyValue (_, ty)) ->
+                    if ty.Namespace = "System.Runtime.CompilerServices" && ty.Name = "Continuation" then
+                        Some ty
+                    else
+                        None
+                )
+                |> Seq.exactlyOne
+
+            let state, continuationHandle =
+                LoadedTypeInfo.typeInfoToTypeDefn' baseClassTypes state._LoadedAssemblies continuation
+                |> concretizeType
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    state
+                    baseClassTypes.Corelib.DefinitionFullName
+                    ImmutableArray.Empty
+                    ImmutableArray.Empty
+
+            state, continuationHandle |> Result.map Some
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _ ->
@@ -872,7 +897,8 @@ module TypeSystemState =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> None
 
     /// Does this handle denote a reference type (as opposed to a value type)?
     ///
@@ -893,7 +919,8 @@ module TypeSystemState =
         =
         match handle with
         | ConcreteTypeHandle.OneDimArrayZero _
-        | ConcreteTypeHandle.Array _ -> true
+        | ConcreteTypeHandle.Array _
+        | ConcreteTypeHandle.Continuation _ -> true
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> false
@@ -917,7 +944,8 @@ module TypeSystemState =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> state, Ok false
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> state, Ok false
         | ConcreteTypeHandle.Concrete _ ->
             match resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state handle with
             | state, Error failure -> state, Error failure

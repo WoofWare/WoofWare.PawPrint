@@ -82,6 +82,7 @@ module internal MethodTableProjection =
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.FunctionPointer _ -> None
 
     let private isStringType
@@ -202,6 +203,7 @@ module internal MethodTableProjection =
         =
         match handle with
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ -> Some NATIVE_INT_SIZE
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
@@ -226,6 +228,7 @@ module internal MethodTableProjection =
         =
         match handle with
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ -> Some true
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
@@ -285,6 +288,7 @@ module internal MethodTableProjection =
         match handle with
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ -> categoryArray
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "MethodTable category flags" layout
         | ConcreteTypeHandle.Concrete _ ->
             let _, typeInfo = concreteTypeInfoOrFail state handle
             categoryFlagsForTypeInfo baseClassTypes state typeInfo
@@ -396,6 +400,8 @@ module internal MethodTableProjection =
                     |> List.exists (fun field -> CliType.containsObjectReferences field.Contents)
 
                 containsGcPointers, state
+        | ConcreteTypeHandle.Continuation layout ->
+            ContinuationType.unasked "MethodTable::ContainsGCPointers projection" layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> false, state
@@ -1051,6 +1057,8 @@ module internal MethodTableProjection =
                 else
                     failwith
                         $"TODO: MethodTable::GetNumInstanceFieldBytes projection for non-value type %O{methodTableFor}"
+        | ConcreteTypeHandle.Continuation layout ->
+            ContinuationType.unasked "MethodTable::GetNumInstanceFieldBytes projection" layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> uint32 NATIVE_INT_SIZE, state
@@ -1270,6 +1278,8 @@ module internal MethodTableProjection =
                                 $"MethodTable::PerInstInfo projection refused for %O{handle}: System.Nullable`1 instantiation unexpectedly has no generic arguments"
                         else
                             Some (CliType.RuntimePointer (CliRuntimePointer.PerInstInfoPtr handle), state)
+                    | ConcreteTypeHandle.Continuation layout ->
+                        ContinuationType.unasked "MethodTable::PerInstInfo projection" layout
                     | ConcreteTypeHandle.OneDimArrayZero _
                     | ConcreteTypeHandle.Array _ ->
                         failwith
@@ -1435,6 +1445,8 @@ module internal MethodTableProjection =
             | RuntimeTypeHandleTarget.Composite (CompositeShape.Pointer, _)
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer _) ->
                 uint32 SignatureTypeCode.Pointer ||| dependenciesLoaded
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                ContinuationType.unasked "TypeDesc element type projection" layout
             | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _)
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ | ConcreteTypeHandle.OneDimArrayZero _ | ConcreteTypeHandle.Array _)
             | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _

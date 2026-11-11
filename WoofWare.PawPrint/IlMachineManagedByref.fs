@@ -33,6 +33,7 @@ module IlMachineManagedByref =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.FunctionPointer _ -> ValueNone
         | ConcreteTypeHandle.Concrete _ ->
 
@@ -1401,6 +1402,16 @@ module IlMachineManagedByref =
         let buf = StackMemoryPool.readNamedBytes block byteOffset targetSize pool
         CliType.ofSymbolicBytesLike targetTemplate buf
 
+    /// `true` iff `cell` holds a function pointer and `target` is a pointer: the read `ldfld void*`
+    /// makes of a slot into which a function pointer was stored. `EvalStackValue.toCliTypeCoerced`
+    /// stores a function pointer into a pointer slot as the native int it is, since no
+    /// `CliRuntimePointer` names code, so the cell is that slot's value as it stands.
+    let private isFunctionPointerCellReadAsPointer (cell : CliType) (target : CliType) : bool =
+        match cell, target with
+        | CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.FunctionPointer _)), CliType.RuntimePointer _ ->
+            true
+        | _ -> false
+
     /// Mirror of `readStackMemoryBytesAs` for native-heap blocks. Use-after-free is
     /// reported if the block was freed.
     let private readNativeMemoryBytesAs
@@ -1433,6 +1444,7 @@ module IlMachineManagedByref =
                 | CliByteAddressability.SymbolicallyAddressable _
                 | CliByteAddressability.Rejected _ -> Some cell
                 | CliByteAddressability.ByteAddressable -> None
+            | Some cell when isFunctionPointerCellReadAsPointer cell targetTemplate -> Some cell
             | _ -> None
 
         match fastPath with

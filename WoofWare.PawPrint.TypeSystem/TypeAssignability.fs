@@ -36,7 +36,8 @@ module TypeAssignability =
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
-            | ConcreteTypeHandle.FunctionPointer _ -> None
+            | ConcreteTypeHandle.FunctionPointer _
+            | ConcreteTypeHandle.Continuation _ -> None
 
         let rec checkInterfaces
             (state : TypeSystemState)
@@ -104,7 +105,8 @@ module TypeAssignability =
             | ConcreteTypeHandle.FunctionPointer _ -> state, Ok false
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ ->
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ ->
                 let state, baseType =
                     TypeSystemState.resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state current
 
@@ -408,7 +410,8 @@ module TypeAssignability =
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
-            | ConcreteTypeHandle.FunctionPointer _ -> None
+            | ConcreteTypeHandle.FunctionPointer _
+            | ConcreteTypeHandle.Continuation _ -> None
 
         match objType with
         | ConcreteTypeHandle.OneDimArrayZero _
@@ -432,7 +435,8 @@ module TypeAssignability =
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> walk state objType
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> walk state objType
 
     /// Check whether the concrete type `objType` is assignable to `targetType`.
     /// Walks the base type chain and checks implemented interfaces at each level.

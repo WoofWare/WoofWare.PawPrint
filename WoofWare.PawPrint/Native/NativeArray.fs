@@ -66,6 +66,7 @@ module NativeArray =
         | ConcreteTypeHandle.Byref _ -> Some "Type is not supported."
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "Array element type check" layout
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ ->

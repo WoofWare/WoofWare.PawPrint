@@ -45,7 +45,8 @@ module JitTypeComparison =
             | ConcreteTypeHandle.Array _
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
-            | ConcreteTypeHandle.FunctionPointer _ -> None
+            | ConcreteTypeHandle.FunctionPointer _
+            | ConcreteTypeHandle.Continuation _ -> None
 
         let toNullable =
             nominal

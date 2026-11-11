@@ -1,6 +1,5 @@
 namespace WoofWare.PawPrint
 
-open System.Collections.Immutable
 open Microsoft.Extensions.Logging
 
 /// <summary>
@@ -19,9 +18,6 @@ open Microsoft.Extensions.Logging
 [<RequireQualifiedAccess>]
 module AsyncContextSaving =
 
-    /// Call the static `AsyncHelpers.methodName` with `arguments` from the active frame of
-    /// `thread`, whose program counter stays where it is; `step` is what the frame does once it
-    /// returns.
     let private callHelper
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -32,55 +28,12 @@ module AsyncContextSaving =
         (state : IlMachineState)
         : ExecutionResult
         =
-        let helper =
-            CorelibEntryPoint.findCorelibStaticMethod
-                baseClassTypes
-                "System.Runtime.CompilerServices"
-                "AsyncHelpers"
-                methodName
-                (List.length arguments)
-                "save and restore a runtime-async body's contexts as CoreCLR's JIT does"
-
-        let state, concretized =
-            ExecutionConcretization.concretizeMethodWithAllGenerics
-                loggerFactory
-                baseClassTypes
-                ImmutableArray.Empty
-                helper
-                ImmutableArray.Empty
-                state
-
-        let concretized, _ = BindingStop.bound concretized
-
-        let state =
-            (state, arguments)
-            ||> List.fold (fun state argument -> IlMachineState.pushToEvalStack argument thread state)
-
-        let state, commitment =
-            IlMachineStateExecution.callMethodWithCommitment
-                loggerFactory
-                baseClassTypes
-                None
-                ConstructionState.NotConstructing
-                IlMachineStateExecution.CallDispatch.Direct
-                false
-                false
-                IlMachineStateExecution.CallSiteTransition.StaysCooperative
-                concretized.Generics
-                concretized
-                thread
-                state.ThreadState.[thread]
-                None
-                (ReturnValueDisposition.ResumeAsyncContexts step)
-                ExceptionEscape.AsyncContextHelper
-                state
-
-        match commitment with
-        | IlMachineStateExecution.CallCommitment.Committed -> ExecutionResult.stepped (state, WhatWeDid.Executed)
-        | IlMachineStateExecution.CallCommitment.Raised ->
-            failwith
-                $"TODO: calling AsyncHelpers.%s{methodName} for a runtime-async body's contexts raised before it ran; what CoreCLR raises then is not modelled"
-        | IlMachineStateExecution.CallCommitment.Aborted fatal -> ExecutionResult.Aborted (state, thread, fatal)
+        match
+            IlMachineStateExecution.callAsyncHelper loggerFactory baseClassTypes methodName arguments step thread state
+        with
+        | state, IlMachineStateExecution.CallCommitment.Committed -> ExecutionResult.stepped (state, WhatWeDid.Executed)
+        | state, IlMachineStateExecution.CallCommitment.Raised -> ExecutionResult.stepped (state, WhatWeDid.Executed)
+        | state, IlMachineStateExecution.CallCommitment.Aborted fatal -> ExecutionResult.Aborted (state, thread, fatal)
 
     let private restore
         (loggerFactory : ILoggerFactory)
@@ -148,7 +101,7 @@ module AsyncContextSaving =
             |> Some
         | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _))
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
-        | Some AsyncFrame.Transparent
+        | Some (AsyncFrame.Transparent _)
         | None -> None
 
     /// What the active frame of `thread` does at a `ret`, before it returns, if it is a user-written
@@ -168,7 +121,7 @@ module AsyncContextSaving =
             restore loggerFactory baseClassTypes contexts AsyncContextStep.AfterRestoreOnReturn thread state
             |> Some
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
-        | Some AsyncFrame.Transparent
+        | Some (AsyncFrame.Transparent _)
         | None -> None
         | Some (AsyncFrame.SavesContexts handling) ->
             failwith $"BUG: %O{frame.ExecutingMethod} reached a ret while its contexts were %A{handling}"
@@ -225,6 +178,14 @@ module AsyncContextSaving =
             | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
             | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
                 ExecutionResult.UnhandledException (state, thread, exn)
+        | AsyncContextStep.AfterFinishSuspension suspension,
+          Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)) ->
+            match IlMachineStateExecution.completeSuspension loggerFactory baseClassTypes thread suspension state with
+            | state, IlMachineStateExecution.CallCommitment.Committed
+            | state, IlMachineStateExecution.CallCommitment.Raised ->
+                ExecutionResult.stepped (state, WhatWeDid.Executed)
+            | state, IlMachineStateExecution.CallCommitment.Aborted fatal ->
+                ExecutionResult.Aborted (state, thread, fatal)
         | step, asyncFrame ->
             failwith
                 $"BUG: AsyncHelpers returned to %O{frame.ExecutingMethod} for the step %A{step}, but the frame is %A{asyncFrame}"

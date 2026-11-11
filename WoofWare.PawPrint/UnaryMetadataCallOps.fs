@@ -486,6 +486,7 @@ module internal UnaryMetadataCallOps =
         let isReferenceType (state : IlMachineState) (declared : ConcreteTypeHandle) : bool =
             match declared with
             | ConcreteTypeHandle.OneDimArrayZero _
+            | ConcreteTypeHandle.Continuation _
             | ConcreteTypeHandle.Array _ -> true
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
@@ -1366,6 +1367,7 @@ module internal UnaryMetadataCallOps =
                     // Arrays are reference types: take ECMA case 1 without consulting the
                     // concrete-type mapping (which doesn't store structural wrappers).
                     applyCase1 state
+                | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "constrained.callvirt" layout
                 | ConcreteTypeHandle.Byref _
                 | ConcreteTypeHandle.Pointer _
                 | ConcreteTypeHandle.FunctionPointer _ ->
@@ -2209,6 +2211,94 @@ module internal UnaryMetadataCallOps =
         | IlMachineStateExecution.CallCommitment.Committed
         | IlMachineStateExecution.CallCommitment.Raised -> state, WhatWeDid.Executed
 
+    /// `calli` through `FunctionPointerTarget.AsyncResume`, as CoreLib's dispatcher resumes a
+    /// continuation PawPrint made: `ResumeInfo->Resume(continuation, ref resultLocation)`. The frame
+    /// that suspended with `continuation` leaves `IlMachineState.SuspendedAsyncFrames` and becomes the
+    /// callee, carrying on past the call it awaited with that call's result, from the
+    /// continuation's result slot, pushed. Its return is the `calli`'s
+    /// (`ReturnValueDisposition.ResumedAsync`).
+    let private executeAsyncResumeCalli
+        (ctx : UnaryMetadataIlOpContext)
+        (state : IlMachineState)
+        : IlMachineState * WhatWeDid
+        =
+        let thread = ctx.Thread
+        let _functionPointer, state = IlMachineState.popEvalStack thread state
+        let resultLocation, state = IlMachineState.popEvalStack thread state
+        let continuation, state = IlMachineState.popEvalStack thread state
+
+        let resultLocation =
+            match resultLocation with
+            | EvalStackValue.ManagedPointer location -> location
+            | other ->
+                failwith
+                    $"BUG: CoreLib's dispatcher resumed a continuation with the result location %O{other}, which is not a managed pointer"
+
+        let continuation =
+            match continuation with
+            | EvalStackValue.ObjectRef continuation -> continuation
+            | other -> failwith $"BUG: CoreLib's dispatcher resumed %O{other}, which is not a continuation"
+
+        let suspended, frames =
+            SuspendedFrames.resume continuation state.SuspendedAsyncFrames
+
+        let state =
+            { state with
+                SuspendedAsyncFrames = frames
+            }
+            |> AsyncSuspension.freeResumeInfo suspended.ResumeInfo
+
+        let callerId = state.ThreadState.[thread].ActiveMethodState
+        let caller = state.ThreadState.[thread].MethodState
+
+        let frame =
+            { suspended.Frame with
+                ReturnState =
+                    Some
+                        {
+                            JumpTo = callerId
+                            WasInitialisingType = None
+                            Constructing = ConstructionState.NotConstructing
+                            CallSiteIlOpIndex = caller.IlOpIndex
+                            ReturnValueDisposition = ReturnValueDisposition.ResumedAsync resultLocation
+                            ExceptionEscape = ExceptionEscape.Propagate
+                        }
+                AsyncFrame =
+                    match suspended.Frame.AsyncFrame with
+                    // The frame's `resumed` flag, which `RestoreContexts` and the suspension helpers
+                    // read (`StoreResumedDef`, jit/async.cpp).
+                    | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured contexts)) ->
+                        Some (
+                            AsyncFrame.SavesContexts (
+                                AsyncContextHandling.Captured
+                                    { contexts with
+                                        Resumed = true
+                                    }
+                            )
+                        )
+                    | Some (AsyncFrame.Transparent TailAwait.NotRequested) as transparent -> transparent
+                    | other ->
+                        failwith
+                            $"BUG: %O{suspended.Frame.ExecutingMethod} suspended as %A{other}, which no suspension leaves a frame in"
+            }
+
+        // The awaited call's result, which the continuation before this one wrote into the slot.
+        let frame =
+            match AsyncSuspension.readResult continuation suspended.Layout state with
+            | None -> frame
+            | Some result -> MethodState.pushToEvalStack result frame
+
+        let state = IlMachineState.advanceProgramCounter thread state
+        let threadState = state.ThreadState.[thread]
+        let frameId, threadState = ThreadState.appendFrame frame threadState
+
+        { state with
+            ThreadState =
+                state.ThreadState
+                |> Map.add thread (ThreadState.setActiveFrame frameId threadState)
+        },
+        WhatWeDid.Executed
+
     /// `calli` (ECMA-335 III.3.20). The function pointer sits on top of the eval stack,
     /// above the arguments; the metadata token is a StandaloneSignature describing the
     /// *call site*, not the callee.
@@ -2294,6 +2384,10 @@ module internal UnaryMetadataCallOps =
                 thread
                 state
         | Some FunctionPointerTarget.RuntimeAllocator -> executeAllocatorCalli ctx callSiteSignature state
+        | Some FunctionPointerTarget.AsyncResume -> executeAsyncResumeCalli ctx state
+        | Some (FunctionPointerTarget.SuspensionPoint _ as suspensionPoint) ->
+            failwith
+                $"BUG: calli through %O{suspensionPoint}, which a continuation's ResumeInfo holds for diagnostics and CoreLib never calls"
         | Some (FunctionPointerTarget.Dynamic handle) ->
             // The same boundary `FunctionPointerTarget.requireManaged` enforces on the delegate
             // path, stated separately because `calli` does not go through it. Reachable in

@@ -25,6 +25,7 @@ module internal IntrinsicHelpers =
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ -> false
         | ConcreteTypeHandle.Concrete _ ->
             match

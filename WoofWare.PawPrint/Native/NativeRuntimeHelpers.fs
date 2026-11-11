@@ -54,6 +54,8 @@ module NativeRuntimeHelpers =
                     // Pointer, byref, fnptr, and array type descriptors have no .cctor;
                     // CoreCLR treats this as a no-op. Return immediately.
                     NativeHandlerResult.completed state |> Some
+                | ConcreteTypeHandle.Continuation layout ->
+                    ContinuationType.unasked "RuntimeHelpers.RunClassConstructor" layout
                 | ConcreteTypeHandle.Concrete _ ->
                     let state, typeInit =
                         IlMachineStateExecution.ensureTypeInitialised

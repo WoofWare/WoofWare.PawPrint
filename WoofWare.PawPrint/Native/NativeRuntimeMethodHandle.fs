@@ -357,6 +357,8 @@ module NativeRuntimeMethodHandle =
             // `NativeIntSource.MethodTablePtr` requires producer sites to reject them.
             Error
                 $"declaring type %O{declaringType} is a byref/pointer/function-pointer, which is a TypeDesc and owns no MethodTable; a MethodDesc's declaring type is never a TypeDesc"
+        | ConcreteTypeHandle.Continuation _ ->
+            Error $"declaring type %O{declaringType} is a continuation type, which declares no methods"
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ ->
             // Arrays do have MethodTables (they are not TypeDescs), and in CoreCLR their `Get`/`Set`/
@@ -585,6 +587,8 @@ module NativeRuntimeMethodHandle =
             // A `Closed` handle is fully bound, so it is never a generic type *definition*; it has
             // an instantiation exactly when it was built with generic arguments.
             factsOfTypeInfo (typeInfoOf concreteType.Identity) (not concreteType.Generics.IsEmpty) false
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+            ContinuationType.unasked operation layout
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _)
         | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) ->
@@ -699,6 +703,7 @@ module NativeRuntimeMethodHandle =
 
                     let typeInfo = assembly.TypeDefs.[concreteType.Definition.Get]
                     assembly, typeInfo
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _

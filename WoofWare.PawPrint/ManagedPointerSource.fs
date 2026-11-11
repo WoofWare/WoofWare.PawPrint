@@ -115,6 +115,7 @@ module CompositeShape =
         | ConcreteTypeHandle.OneDimArrayZero element -> Some (CompositeShape.OneDimArrayZero, element)
         | ConcreteTypeHandle.Array (element, rank) -> Some (CompositeShape.Array rank, element)
         | ConcreteTypeHandle.Concrete _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.FunctionPointer _ -> None
 
 /// Identity of the target of a `RuntimeTypeHandle`. The target may be a fully

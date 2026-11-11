@@ -1042,13 +1042,16 @@ module ConcreteInterfaceDispatch =
             | ConcreteTypeHandle.FunctionPointer _ -> state, Ok None
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ ->
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ ->
 
             let state, found =
                 match TypeSystemState.tryGetConcreteTypeInfo state level with
                 | None ->
                     // A synthesised array has no TypeDef row and declares nothing; its interfaces
-                    // come from `System.Array` above it, or from the SZ-array carve-out.
+                    // come from `System.Array` above it, or from the SZ-array carve-out. Neither
+                    // has a continuation type, whose interfaces are those of CoreLib's
+                    // `Continuation`.
                     state, Ok None
                 | Some _ ->
                     match ownDispatchMapOf loggerFactory dotnetRuntimeDirs baseClassTypes operation state level with

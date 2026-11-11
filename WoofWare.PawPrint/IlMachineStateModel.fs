@@ -200,6 +200,10 @@ type IlMachineState =
         /// is an interpreter-level concern — it isn't a syscall the guest
         /// can observe or perturb.
         Scheduling : SchedulerState
+        /// The runtime-async frames that suspended and have not resumed, keyed by their
+        /// continuations: a suspended frame belongs to no thread until CoreLib's dispatcher resumes
+        /// it, on whichever thread that is.
+        SuspendedAsyncFrames : SuspendedFrames
     }
 
     member this.WithKernel (kernel : EmulatedKernel) : IlMachineState =
@@ -733,6 +737,14 @@ type ReturnFrameResult =
     /// user-written runtime-async body it returned to, and the runtime does `step` next; state is
     /// positioned at that body's frame.
     | ResumeAsyncContexts of IlMachineState * step : AsyncContextStep
+    /// The frame that returned was a suspended runtime-async frame CoreLib's dispatcher resumed
+    /// (`ReturnValueDisposition.ResumedAsync`), so the frame's value, if it returned one, goes
+    /// through `resultLocation`, and the dispatcher's `calli` gets null; state is positioned at the
+    /// dispatcher's frame.
+    | ResumedAsyncReturned of
+        IlMachineState *
+        resultLocation : ManagedPointerSource *
+        returned : (EvalStackValue * ConcreteTypeHandle) option
 
 /// How a run of the simulated process ended: the process itself ended, and each case
 /// carries the machine as it stood when it did, and how the kernel says it ended

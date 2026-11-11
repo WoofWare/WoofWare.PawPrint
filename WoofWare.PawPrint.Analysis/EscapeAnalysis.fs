@@ -6362,6 +6362,8 @@ module EscapeAnalysis =
         | ConcreteTypeHandle.Pointer element
         | ConcreteTypeHandle.OneDimArrayZero element
         | ConcreteTypeHandle.Array (element, _) -> 1 + depthOf state element
+        | ConcreteTypeHandle.Continuation layout ->
+            1 + (layout.Result |> Option.map (depthOf state) |> Option.defaultValue 0)
         | ConcreteTypeHandle.FunctionPointer signature ->
             let returned =
                 match signature.ReturnType with
@@ -7274,6 +7276,8 @@ module EscapeAnalysis =
             | ConcreteTypeHandle.OneDimArrayZero inner
             | ConcreteTypeHandle.Array (inner, _) -> named state inner
             | ConcreteTypeHandle.FunctionPointer _ -> false
+            // No metadata names a continuation type, so no spelling the analysis compares does.
+            | ConcreteTypeHandle.Continuation _ -> false
 
         match query with
         | TypeQuery.IsValueType spelled ->

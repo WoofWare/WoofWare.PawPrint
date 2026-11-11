@@ -940,6 +940,7 @@ module NativeCall =
                         )
 
                     concreteType.AssemblyFullName
+                | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
                 | ConcreteTypeHandle.Byref inner -> assemblyFullNameOfHandle inner
                 | ConcreteTypeHandle.Pointer inner -> assemblyFullNameOfHandle inner
                 | ConcreteTypeHandle.OneDimArrayZero inner -> assemblyFullNameOfHandle inner
@@ -994,6 +995,7 @@ module NativeCall =
             | Some ct -> $"{ct.Namespace}.{ct.Name}"
             | None ->
                 match cth with
+                | ConcreteTypeHandle.Continuation layout -> layout.ToString ()
                 | ConcreteTypeHandle.Byref inner -> $"&({formatTypeHandle inner})"
                 | ConcreteTypeHandle.Pointer inner -> $"*({formatTypeHandle inner})"
                 | ConcreteTypeHandle.FunctionPointer signature ->

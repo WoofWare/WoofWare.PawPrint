@@ -79,6 +79,7 @@ module TestInterfaceDispatchMap =
         | ConcreteTypeHandle.Pointer element -> (toHost hostAssemblies state element).MakePointerType ()
         | ConcreteTypeHandle.Byref element -> (toHost hostAssemblies state element).MakeByRefType ()
         | ConcreteTypeHandle.FunctionPointer _ -> failwith $"no host type is built for the function pointer %O{handle}"
+        | ConcreteTypeHandle.Continuation _ -> failwith $"no host type is built for the continuation type %O{handle}"
 
     let private concretizeDefinition
         (state : IlMachineState)

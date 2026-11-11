@@ -65,6 +65,7 @@ module ArrayConstructor =
                 ArrayConstructor.MultiDim (element, rank, false)
                 ArrayConstructor.MultiDim (element, rank, true)
             ]
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _

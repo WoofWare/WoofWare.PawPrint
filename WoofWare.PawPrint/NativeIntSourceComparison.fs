@@ -146,6 +146,7 @@ module NativeIntSourceComparison =
                 match h2 with
                 | ConcreteTypeHandle.Concrete _
                 | ConcreteTypeHandle.OneDimArrayZero _
+                | ConcreteTypeHandle.Continuation _
                 | ConcreteTypeHandle.Array _ -> h1 = h2
                 | ConcreteTypeHandle.Byref _
                 | ConcreteTypeHandle.Pointer _
