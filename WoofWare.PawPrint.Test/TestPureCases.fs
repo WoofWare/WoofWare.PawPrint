@@ -108,6 +108,8 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 10.
     let parkedOnNet10 : Map<string, string> =
         [
+            "RuntimeAsyncTraceHidesThunk.cs",
+            """On .NET 10, where the guest's methods are state machines, every check passes and `Main` returns 0 (measured by a probe printing before each `return`), but the run ends with exit code 2. A sibling reading the same faulted task's exception without formatting its `StackTrace` (`RuntimeAsyncFaultsBeforeAwait.cs`) exits 0, so the code comes from something formatting the trace starts. Un-park when a run whose `Main` returns 0 exits 0. Verified to exit 0 on real .NET 10."""
             "MarshalDestroyStructurePointerOrEmpty.cs",
             """On .NET 10, `Marshal.DestroyStructure` asks `MarshalNative_TryGetStructMarshalStub`, which hands back no stub for a blittable struct. PawPrint's arm of it calls blittable only a struct it can copy as bytes, so for a struct holding a pointer, or one without fields, it builds a stub, and its plan refuses both, the pointer field first: "TODO MarshalNative_TryGetStructMarshalStub: type 95 has layout but is not blittable, and PawPrint has not implemented its marshalling: field P is neither blittable nor a marshalling case PawPrint implements (contents RuntimePointer (Managed Null))", and a struct without fields because "the type has raw-byte storage rather than declared fields". Un-park when that arm answers blittable as `Blittability.ofValue` does. Verified to exit 0 on real .NET 10."""
             "FileSystemSupportsLockingDirect.cs",
