@@ -97,15 +97,19 @@ public static unsafe class Program
     [ThreadStatic]
     private static RuntimeAsyncAwaitState t_runtimeAsyncAwaitState;
 
-    private static object? Leaf()
+    private static void Leaf()
     {
         ref RuntimeAsyncAwaitState state = ref t_runtimeAsyncAwaitState;
         state.CaptureContexts();
-        return state.StackState->LeafExecutionContext;
     }
 
     // As `DispatchContinuations` brackets its loop: push both, run the chain, pop both.
-    private static int Dispatch(Continuation head, int nested, AsyncDispatcherInfo* outer)
+    private static int Dispatch(
+        Continuation head,
+        int nested,
+        AsyncDispatcherInfo* outer,
+        ExecutionContext expectedEc,
+        SynchronizationContext expectedSc)
     {
         RuntimeAsyncStackState stackState;
 
@@ -129,12 +133,20 @@ public static unsafe class Program
             if (AsyncDispatcherInfo.t_current != &asyncDispatcherInfo) return -1000;
             if (asyncDispatcherInfo.Next != outer) return -2000;
 
-            if (!ReferenceEquals(Leaf(), stackState.LeafExecutionContext)) return -3000;
-            if (!ReferenceEquals(stackState.LeafSynchronizationContext, SynchronizationContext.Current)) return -4000;
+            stackState.LeafExecutionContext = null;
+            stackState.LeafSynchronizationContext = null;
+            Leaf();
+            if (!ReferenceEquals(stackState.LeafExecutionContext, expectedEc)) return -3000;
+            if (!ReferenceEquals(stackState.LeafSynchronizationContext, expectedSc)) return -4000;
 
             if (cur.State == 2 && nested < 3)
             {
-                int inner = Dispatch(new Continuation { State = 100 * nested }, nested + 1, &asyncDispatcherInfo);
+                int inner = Dispatch(
+                    new Continuation { State = 100 * nested },
+                    nested + 1,
+                    &asyncDispatcherInfo,
+                    expectedEc,
+                    expectedSc);
                 if (inner < 0) return inner;
                 sum += inner;
                 if (AsyncDispatcherInfo.t_current != &asyncDispatcherInfo) return -5000;
@@ -148,9 +160,30 @@ public static unsafe class Program
         return sum;
     }
 
+    // Contexts that `CaptureContexts` can only have found by reading the thread: a fresh execution
+    // context, made by setting an `AsyncLocal`, and a synchronization context installed on the
+    // thread.
+    private static int InstallContexts(AsyncLocal<int> local, int value, out ExecutionContext ec, out SynchronizationContext sc)
+    {
+        ExecutionContext? before = ExecutionContext.Capture();
+        local.Value = value;
+        sc = new SynchronizationContext();
+        SynchronizationContext.SetSynchronizationContext(sc);
+        ExecutionContext? captured = ExecutionContext.Capture();
+        ec = captured!;
+        if (captured == null) return 1;
+        if (ReferenceEquals(captured, before)) return 2;
+        if (!ReferenceEquals(SynchronizationContext.Current, sc)) return 3;
+        return 0;
+    }
+
     private static int Run()
     {
         if (AsyncDispatcherInfo.t_current != null) return 1;
+
+        var local = new AsyncLocal<int>();
+        int installed = InstallContexts(local, 1, out ExecutionContext ec, out SynchronizationContext sc);
+        if (installed != 0) return 20 + installed;
 
         var chain = new Continuation
         {
@@ -158,7 +191,7 @@ public static unsafe class Program
             Next = new Continuation { State = 2, Next = new Continuation { State = 3 } },
         };
 
-        int sum = Dispatch(chain, 1, null);
+        int sum = Dispatch(chain, 1, null, ec, sc);
         if (sum != 1 + 2 + 3 + 100) return 2;
         if (AsyncDispatcherInfo.t_current != null) return 3;
         if (t_runtimeAsyncAwaitState.StackState != null) return 4;
@@ -174,7 +207,19 @@ public static unsafe class Program
                 return;
             }
 
-            other = Dispatch(new Continuation { State = 7 }, 1, null) == 7 ? 0 : 2;
+            if (InstallContexts(local, 2, out ExecutionContext otherEc, out SynchronizationContext otherSc) != 0)
+            {
+                other = 3;
+                return;
+            }
+
+            if (ReferenceEquals(otherEc, ec) || ReferenceEquals(otherSc, sc))
+            {
+                other = 4;
+                return;
+            }
+
+            other = Dispatch(new Continuation { State = 7 }, 1, null, otherEc, otherSc) == 7 ? 0 : 2;
         });
         thread.Start();
         thread.Join();
