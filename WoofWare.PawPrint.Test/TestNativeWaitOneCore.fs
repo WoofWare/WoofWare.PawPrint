@@ -7,7 +7,7 @@ open Microsoft.CodeAnalysis
 open NUnit.Framework
 open WoofWare.PawPrint
 
-/// Direct-call test for the `WaitHandle_WaitOneCore` QCall handler's third argument,
+/// Direct-call test for .NET 10's `WaitHandle_WaitOneCore` QCall handler's third argument,
 /// `useTrivialWaits`. CoreCLR waits with `WaitMode_None` rather than `WaitMode_Alertable`
 /// when it is set, and no guest can yet observe the difference except through
 /// `Thread.ThreadState`, so this pins the decoding directly.
@@ -80,6 +80,9 @@ public static class Entry
 
         state, waitHandleType, method
 
+    let private onlyNet10 : string =
+        "Only .NET 10's CoreLib waits through the `WaitHandle_WaitOneCore` QCall; .NET 11's has no such import, and waits on Unix through the managed `WaitSubsystem`. Nothing to un-park: the test is about .NET 10's QCall."
+
     /// Park the entry thread in an infinite wait on an unsignalled event, passing
     /// `useTrivialWaits`, and report the status it parks in.
     let private parkedStatus (useTrivialWaits : int) : WaitHandleId * ThreadStatus =
@@ -122,8 +125,7 @@ public static class Entry
 
     [<Test>]
     let ``An ordinary wait parks alertably`` () : unit =
-        Net11Frontier.park
-            "On .NET 11, `WaitHandle` on Unix waits through the managed `WaitSubsystem`, and the fixture finds no `QCall`/`WaitHandle_WaitOneCore` import to call (\"QCall entry point WaitHandle_WaitOneCore not found on System.Threading.WaitHandle\"). Un-park when the fixture reaches each runtime's wait."
+        ParkedOn.check [ EmulatedRuntime.Net11 ] onlyNet10
 
         let id, status = parkedStatus 0
 
@@ -132,8 +134,7 @@ public static class Entry
 
     [<Test>]
     let ``A trivial wait parks non-alertably`` () : unit =
-        Net11Frontier.park
-            "On .NET 11, `WaitHandle` on Unix waits through the managed `WaitSubsystem`, and the fixture finds no `QCall`/`WaitHandle_WaitOneCore` import to call (\"QCall entry point WaitHandle_WaitOneCore not found on System.Threading.WaitHandle\"). Un-park when the fixture reaches each runtime's wait."
+        ParkedOn.check [ EmulatedRuntime.Net11 ] onlyNet10
 
         let id, status = parkedStatus 1
 

@@ -121,8 +121,8 @@ public class Program
         terminalState.LatchedExitCode |> shouldEqual 0
         loadedCorelibPath terminalState |> shouldEqual (corelibPath frameworkDir)
 
-    /// The production path for `SystemNative_TryGetUInt32OSThreadId`, which is the whole reason
-    /// the two arms of `Lock.NonNativeAot.cs`'s `#if` are worth distinguishing.
+    /// The production path for `SystemNative_TryGetUInt32OSThreadId` on .NET 10, which is the
+    /// whole reason the two arms of `Lock.NonNativeAot.cs`'s `#if` are worth distinguishing.
     ///
     /// `sourcesPure/SystemNativeOSThreadId.cs` covers the handler through a hand-rolled
     /// `DllImport`, which reaches it on any host but proves nothing about how CoreLib gets
@@ -138,8 +138,9 @@ public class Program
     /// thread and a nested `Exit` does not throw `SynchronizationLockException`.
     [<Test>]
     let ``System.Threading.Lock reaches TryGetUInt32OSThreadId on the linux-x64 CoreLib`` () : unit =
-        Net11Frontier.park
-            "On .NET 11, `System.Threading.Lock` identifies its owner by the managed thread id (`ManagedThreadId.CurrentManagedThreadIdUnchecked`), not by an OS thread id, so no CoreLib flavour reaches `TryGetUInt32OSThreadId` from it; the guest's sentinel no longer tells the flavours apart. Un-park when the test picks a distinction .NET 11's flavours still have."
+        ParkedOn.check
+            [ EmulatedRuntime.Net11 ]
+            "Only .NET 10's `System.Threading.Lock` reaches `TryGetUInt32OSThreadId`: .NET 11's identifies its owner by the managed thread id, and its CoreLib calls that entry point nowhere. .NET 11's Linux flavour is told apart by its futex waits instead, which `TestLowLevelFutex` drives through the thread pool. Nothing to un-park: the test is about .NET 10's arm."
 
         let frameworkDir = FrameworkUnderTest.requireLinuxFrameworkDirectory ()
 
