@@ -472,7 +472,9 @@ public static class Driver
 
                 let token =
                     match fst occupant.Method.IdentityKey with
-                    | Some handle ->
+                    | Some (_, MethodVariant.AsyncVariant) ->
+                        failwith "a vtable slot holds an async variant, which PawPrint's tables never place"
+                    | Some (handle, MethodVariant.Ordinary) ->
                         System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken (
                             System.Reflection.Metadata.MethodDefinitionHandle.op_Implicit handle
                             : System.Reflection.Metadata.EntityHandle

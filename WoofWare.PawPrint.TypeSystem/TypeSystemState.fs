@@ -61,9 +61,10 @@ type ConcreteMethodKey =
     {
         /// Identity of the definition that declares the method.
         DeclaringType : ResolvedTypeIdentity
-        /// Which method of that definition: its MethodDef row and its synthesised kind, one of
-        /// which is set, exactly as `MethodInfo.IdentityKey` pairs them.
-        MethodRow : int option
+        /// Which method of that definition: its MethodDef row with which of the row's
+        /// `MethodDesc`s it is, or its synthesised kind, one of which is set, exactly as
+        /// `MethodInfo.IdentityKey` pairs them.
+        MethodRow : (int * MethodVariant) option
         Synthesised : SynthesisedMethod option
         /// The declaring type's generic arguments.
         TypeGenerics : ConcreteTypeHandle list
@@ -91,8 +92,9 @@ module ConcreteMethodKey =
                     DeclaringType = declaringType.Identity
                     MethodRow =
                         row
-                        |> Option.map (fun h ->
-                            Ecma335.MetadataTokens.GetRowNumber (MethodDefinitionHandle.op_Implicit h : EntityHandle)
+                        |> Option.map (fun (h, variant) ->
+                            Ecma335.MetadataTokens.GetRowNumber (MethodDefinitionHandle.op_Implicit h : EntityHandle),
+                            variant
                         )
                     Synthesised = synthesised
                     TypeGenerics = List.ofSeq typeGenerics

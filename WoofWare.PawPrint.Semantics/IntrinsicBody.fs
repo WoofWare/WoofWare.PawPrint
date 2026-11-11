@@ -355,7 +355,10 @@ module IntrinsicBody =
         | MethodBody.RuntimeProvided _
         | MethodBody.Abstract
         | MethodBody.MissingIl -> IntrinsicBody.NoIl
-        | MethodBody.Il body ->
+        // A runtime-async method's IL is what its async-convention `MethodDesc` runs; whether a given
+        // call reaches that `MethodDesc` is the caller's to decide.
+        | MethodBody.Il body
+        | MethodBody.AsyncIl body ->
             if callsItself assembly method body then
                 IntrinsicBody.JitExpansion (expansionOf assembly method)
             else if

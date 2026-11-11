@@ -349,6 +349,21 @@ type MethodBody =
     | Il of MethodInstructions
 
     /// <summary>
+    /// The IL of a MethodDef flagged <c>MethodImplAttributes.Async</c> (0x2000): a runtime-async
+    /// method, whose IL is written for the async calling convention and, where the method returns
+    /// a promise type, for the signature with that promise unwrapped.
+    /// </summary>
+    /// <remarks>
+    /// Which method runs this IL is not a fact of the row. For a method returning <c>Task</c>,
+    /// <c>Task&lt;T&gt;</c>, <c>ValueTask</c> or <c>ValueTask&lt;T&gt;</c>, CoreCLR makes two
+    /// <c>MethodDesc</c>s, and the async variant runs this IL while the ordinary variant, which every
+    /// token binds, runs a thunk the VM emits; a method returning anything else has one
+    /// <c>MethodDesc</c>, which runs it. <see cref="MethodVariant"/> says which a method is, and
+    /// <c>RuntimeAsyncMethod.hasAsyncCallingConvention</c> whether it runs this IL.
+    /// </remarks>
+    | AsyncIl of MethodInstructions
+
+    /// <summary>
     /// Marked <c>[MethodImpl(MethodImplOptions.InternalCall)]</c>. The implementation is
     /// supplied by the runtime; PawPrint dispatches via <c>NativeDispatch</c>.
     /// </summary>
@@ -392,9 +407,12 @@ type MethodBody =
 
 [<RequireQualifiedAccess>]
 module MethodBody =
+    /// The IL this body runs as. `None` for a runtime-async method's IL (`MethodBody.AsyncIl`), which
+    /// only some of the methods carrying it run: a caller wanting that IL matches on it.
     let tryIl (body : MethodBody) : MethodInstructions option =
         match body with
         | MethodBody.Il instr -> Some instr
+        | MethodBody.AsyncIl _
         | MethodBody.InternalCall
         | MethodBody.PInvoke
         | MethodBody.RuntimeProvided _
@@ -747,6 +765,49 @@ type MethodCore<'typeGenerics, 'methodGenerics, 'methodVars> =
     }
 
 /// <summary>
+/// Which of the <c>MethodDesc</c>s CoreCLR's class loader makes for one MethodDef a method is.
+/// </summary>
+/// <remarks>
+/// <para>
+/// For a MethodDef returning <c>Task</c>, <c>Task&lt;T&gt;</c>, <c>ValueTask</c> or
+/// <c>ValueTask&lt;T&gt;</c>, CoreCLR makes two <c>MethodDesc</c>s sharing its token
+/// (<c>methodtablebuilder.cpp</c>): the ordinary variant, with the metadata signature, and the async
+/// variant, with the promise unwrapped and the async calling convention. Every other MethodDef has
+/// only the ordinary one.
+/// </para>
+/// <para>
+/// Every token, delegate and reflection call binds the ordinary variant,
+/// <see cref="MethodVariant.ordinary"/>. Only
+/// <c>RuntimeAsyncMethod.asyncVariantOf</c> makes the async variant, so a method carrying it has
+/// been checked to have one. Match on a variant with <c>MethodVariant.Ordinary</c> and
+/// <c>MethodVariant.AsyncVariant</c>.
+/// </para>
+/// </remarks>
+[<RequireQualifiedAccess>]
+type MethodVariant =
+    internal
+    // Named apart from the active pattern below, which is how code outside this assembly and
+    // Loader matches on a variant: a union case of the same name would shadow it.
+    | OrdinaryMethodDesc
+    | AsyncVariantMethodDesc
+
+    override this.ToString () : string =
+        match this with
+        | MethodVariant.OrdinaryMethodDesc -> "ordinary variant"
+        | MethodVariant.AsyncVariantMethodDesc -> "async variant"
+
+[<RequireQualifiedAccess>]
+module MethodVariant =
+    /// The <c>MethodDesc</c> a MethodDef's token binds, with the MethodDef's own signature.
+    let ordinary : MethodVariant = MethodVariant.OrdinaryMethodDesc
+
+    /// Which variant this is.
+    let (|Ordinary|AsyncVariant|) (variant : MethodVariant) : Choice<unit, unit> =
+        match variant with
+        | MethodVariant.OrdinaryMethodDesc -> Ordinary
+        | MethodVariant.AsyncVariantMethodDesc -> AsyncVariant
+
+/// <summary>
 /// Represents detailed information about a method: either one declared by a MethodDef row, or one
 /// the runtime synthesises.
 /// </summary>
@@ -757,14 +818,21 @@ type MethodCore<'typeGenerics, 'methodGenerics, 'methodVars> =
 /// synthesised method being asked for a token it does not have.
 /// </remarks>
 type MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars> =
-    /// Read from a MethodDef row.
-    | Metadata of core : MethodCore<'typeGenerics, 'methodGenerics, 'methodVars> * facts : MetadataMethodFacts
+    /// <summary>
+    /// Read from a MethodDef row, as one of the <c>MethodDesc</c>s CoreCLR makes for it. The core
+    /// is that <c>MethodDesc</c>'s, so an async variant's <c>Signature</c> is the unwrapped one, while
+    /// <c>facts.RawSignature</c> is the row's.
+    /// </summary>
+    | Metadata of
+        core : MethodCore<'typeGenerics, 'methodGenerics, 'methodVars> *
+        facts : MetadataMethodFacts *
+        variant : MethodVariant
     /// Supplied by the runtime; see <see cref="SynthesisedMethod"/>.
     | Synthesised of core : MethodCore<'typeGenerics, 'methodGenerics, 'methodVars> * kind : SynthesisedMethod
 
     member this.Core : MethodCore<'typeGenerics, 'methodGenerics, 'methodVars> =
         match this with
-        | MethodInfo.Metadata (core, _) -> core
+        | MethodInfo.Metadata (core, _, _) -> core
         | MethodInfo.Synthesised (core, _) -> core
 
     member this.Owner : MethodOwner<'typeGenerics> = this.Core.Owner
@@ -819,16 +887,27 @@ type MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars> =
         | MethodInfo.Metadata _ -> None
         | MethodInfo.Synthesised (_, kind) -> Some kind
 
+    /// Which of its MethodDef's `MethodDesc`s this is, or `None` if it was synthesised.
+    member this.TryVariant : MethodVariant option =
+        match this with
+        | MethodInfo.Metadata (_, _, variant) -> Some variant
+        | MethodInfo.Synthesised _ -> None
+
     /// A hashable stand-in for "which method within its declaring type is this". Pairs the
-    /// metadata token with the synthesised kind, exactly the disjunction `NominallyEqual`
-    /// compares, so anything hashing a method identity stays consistent with it.
-    member this.IdentityKey : MethodDefinitionHandle option * SynthesisedMethod option =
-        (this.TryMetadata |> Option.map _.Handle), this.SynthesisedKind
+    /// metadata token and variant with the synthesised kind, exactly the disjunction
+    /// `NominallyEqual` compares, so anything hashing a method identity stays consistent with it.
+    member this.IdentityKey : (MethodDefinitionHandle * MethodVariant) option * SynthesisedMethod option =
+        let metadata =
+            match this with
+            | MethodInfo.Metadata (_, facts, variant) -> Some (facts.Handle, variant)
+            | MethodInfo.Synthesised _ -> None
+
+        metadata, this.SynthesisedKind
 
     /// The metadata facts, when this method has any. `None` for a synthesised method.
     member this.TryMetadata : MetadataMethodFacts option =
         match this with
-        | MethodInfo.Metadata (_, facts) -> Some facts
+        | MethodInfo.Metadata (_, facts, _) -> Some facts
         | MethodInfo.Synthesised _ -> None
 
     // The four predicates below are projected deliberately, where the raw `MethodAttributes` is
@@ -841,21 +920,21 @@ type MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars> =
     /// True iff this method is `virtual`. A synthesised method never is.
     member this.IsVirtual : bool =
         match this with
-        | MethodInfo.Metadata (_, facts) -> facts.MethodAttributes.HasFlag MethodAttributes.Virtual
+        | MethodInfo.Metadata (_, facts, _) -> facts.MethodAttributes.HasFlag MethodAttributes.Virtual
         | MethodInfo.Synthesised _ -> false
 
     /// True iff this method introduces a new vtable slot rather than overriding one. A synthesised
     /// method occupies no slot at all.
     member this.IsNewSlot : bool =
         match this with
-        | MethodInfo.Metadata (_, facts) -> facts.MethodAttributes.HasFlag MethodAttributes.NewSlot
+        | MethodInfo.Metadata (_, facts, _) -> facts.MethodAttributes.HasFlag MethodAttributes.NewSlot
         | MethodInfo.Synthesised _ -> false
 
     /// True iff this method is sealed against further overriding. Vacuously true of a synthesised
     /// method, which is not virtual to begin with.
     member this.IsFinal : bool =
         match this with
-        | MethodInfo.Metadata (_, facts) -> facts.MethodAttributes.HasFlag MethodAttributes.Final
+        | MethodInfo.Metadata (_, facts, _) -> facts.MethodAttributes.HasFlag MethodAttributes.Final
         | MethodInfo.Synthesised _ -> true
 
     /// True iff naming this method at a call site leaves the body still to be chosen by the
@@ -886,14 +965,14 @@ type MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars> =
     /// metadata-backed methods, so no information is lost by projecting it.
     member this.TryNativeImport : NativeMethodImport option =
         match this with
-        | MethodInfo.Metadata (_, facts) -> facts.NativeImport
+        | MethodInfo.Metadata (_, facts, _) -> facts.NativeImport
         | MethodInfo.Synthesised _ -> None
 
     /// True iff this method is `public`. A synthesised method is not: it has no declaration for
     /// anything to name, and nothing outside the interpreter can reach it.
     member this.IsPublic : bool =
         match this with
-        | MethodInfo.Metadata (_, facts) ->
+        | MethodInfo.Metadata (_, facts, _) ->
             (facts.MethodAttributes &&& MethodAttributes.MemberAccessMask) = MethodAttributes.Public
         | MethodInfo.Synthesised _ -> false
 
@@ -921,7 +1000,7 @@ module MethodInfo =
         : MethodInfo<'d, 'e, 'f>
         =
         match m with
-        | MethodInfo.Metadata (core, facts) -> MethodInfo.Metadata (f core, facts)
+        | MethodInfo.Metadata (core, facts, variant) -> MethodInfo.Metadata (f core, facts, variant)
         | MethodInfo.Synthesised (core, kind) -> MethodInfo.Synthesised (f core, kind)
 
     /// The metadata facts, for a caller that can only meaningfully act on a declared method —
@@ -946,7 +1025,8 @@ module MethodInfo =
         (requireMetadata operation m).RawSignature
 
     /// True iff both methods are metadata-backed and are one MethodDef of one assembly — that is,
-    /// they are the same *declared* method, ignoring generic instantiation.
+    /// they are the same *declared* method, ignoring generic instantiation and which of the
+    /// MethodDef's `MethodDesc`s each is (`MethodVariant`).
     ///
     /// False whenever either is synthesised. A synthesised method has no declaration, so it is
     /// not the same declared method as anything, including another synthesised one; callers that
@@ -977,12 +1057,13 @@ module MethodInfo =
         // synthesised kind, compared below where a metadata method's token is.
         a.Owner = b.Owner
         && a.Generics = b.Generics
-        && // Within a declaring type, a metadata method is identified by its token and a
-        // synthesised one by its kind. The two are never equal: a synthesised method has no
+        && // Within a declaring type, a metadata method is identified by its token and variant, and
+        // a synthesised one by its kind. The two are never equal: a synthesised method has no
         // MethodDef row, so nothing it could be confused with.
         (
             match a, b with
-            | MethodInfo.Metadata (_, a), MethodInfo.Metadata (_, b) -> a.Handle = b.Handle
+            | MethodInfo.Metadata (_, a, variantA), MethodInfo.Metadata (_, b, variantB) ->
+                a.Handle = b.Handle && variantA = variantB
             | MethodInfo.Synthesised (_, a), MethodInfo.Synthesised (_, b) -> a = b
             | MethodInfo.Metadata _, MethodInfo.Synthesised _
             | MethodInfo.Synthesised _, MethodInfo.Metadata _ -> false
@@ -1040,7 +1121,7 @@ module MethodInfo =
         // the answer for a runtime-supplied method is simply "no".
         match this with
         | MethodInfo.Synthesised _ -> false
-        | MethodInfo.Metadata (_, facts) ->
+        | MethodInfo.Metadata (_, facts, _) ->
             hasIntrinsicAttribute getMemberRefParentType methodDefs facts.CustomAttributes
 
     /// May this method be entered only from native code — that is, does it carry
@@ -1052,7 +1133,7 @@ module MethodInfo =
     let isUnmanagedCallersOnly (this : MethodInfo<'a, 'b, 'c>) : bool =
         match this with
         | MethodInfo.Synthesised _ -> false
-        | MethodInfo.Metadata (_, facts) -> facts.UnmanagedCallersOnly.IsSome
+        | MethodInfo.Metadata (_, facts, _) -> facts.UnmanagedCallersOnly.IsSome
 
     /// What this method's `[System.Runtime.InteropServices.UnmanagedCallersOnly]` names as its
     /// calling conventions, as CoreCLR reads them; `None` if it does not carry the attribute, as a
@@ -1060,7 +1141,7 @@ module MethodInfo =
     let unmanagedCallersOnly (this : MethodInfo<'a, 'b, 'c>) : UnmanagedCallersOnlyApplication option =
         match this with
         | MethodInfo.Synthesised _ -> None
-        | MethodInfo.Metadata (_, facts) -> facts.UnmanagedCallersOnly
+        | MethodInfo.Metadata (_, facts, _) -> facts.UnmanagedCallersOnly
 
     /// The sequence number of each of this method's Param rows, with what its FieldMarshal row says
     /// (`MetadataMethodFacts.ParameterMarshalling`); none for a synthesised method, which has no
@@ -1068,7 +1149,7 @@ module MethodInfo =
     let parameterMarshalling (this : MethodInfo<'a, 'b, 'c>) : (int * ParameterMarshal) list =
         match this with
         | MethodInfo.Synthesised _ -> []
-        | MethodInfo.Metadata (_, facts) -> facts.ParameterMarshalling
+        | MethodInfo.Metadata (_, facts, _) -> facts.ParameterMarshalling
 
     let mapTypeGenerics<'a, 'b, 'methodGen, 'vars>
         (f : 'a -> 'b)
@@ -1480,14 +1561,21 @@ module MethodInfo =
             else
                 match readMethodBody peReader metadataReader assemblyName methodDef with
                 | Some raw ->
-                    {
-                        MethodInstructions.Instructions = raw.Instructions
-                        Locations = raw.Instructions |> List.map (fun (a, b) -> b, a) |> Map.ofList
-                        LocalsInit = raw.LocalInit
-                        LocalVars = raw.LocalSig
-                        ExceptionRegions = raw.ExceptionRegions
-                    }
-                    |> MethodBody.Il
+                    let instructions =
+                        {
+                            MethodInstructions.Instructions = raw.Instructions
+                            Locations = raw.Instructions |> List.map (fun (a, b) -> b, a) |> Map.ofList
+                            LocalsInit = raw.LocalInit
+                            LocalVars = raw.LocalSig
+                            ExceptionRegions = raw.ExceptionRegions
+                        }
+
+                    // `MethodImplAttributes.Async`, which the `System.Reflection` of this project's
+                    // target framework does not name.
+                    if implAttrs.HasFlag (enum<MethodImplAttributes> 0x2000) then
+                        MethodBody.AsyncIl instructions
+                    else
+                        MethodBody.Il instructions
                 | None ->
                     // ECMA-335 II.22.26 nominally requires one of PinvokeImpl / Abstract /
                     // Runtime / InternalCall when RVA = 0, but C# 12+ [UnsafeAccessor] extern
@@ -1629,7 +1717,8 @@ module MethodInfo =
                 NativeImport = nativeImport
                 UnmanagedCallersOnly = unmanagedCallersOnly
                 ParameterMarshalling = parameterMarshalling
-            }
+            },
+            MethodVariant.ordinary
         )
 
     let rec resolveBaseType

@@ -579,7 +579,7 @@ module internal UnaryMetadataObjectOps =
         // dynamic method is never shared, so it sees the types as they are anyway.
         let inlinable =
             match method with
-            | MethodInfo.Metadata (_, facts) ->
+            | MethodInfo.Metadata (_, facts, _) ->
                 let forbidden =
                     facts.ImplAttributes.HasFlag MethodImplAttributes.NoInlining
                     || facts.ImplAttributes.HasFlag MethodImplAttributes.NoOptimization

@@ -525,6 +525,17 @@ and MethodState =
                 failwith
                     $"%s{shape} {method.Name} should have had %i{expected} parameters, but was given %i{args.Length}"
 
+            match method.Body with
+            | MethodBody.AsyncIl _ ->
+                failwith
+                    $"BUG: a frame of %O{method} was asked for with its runtime-async IL; callMethod gives a frame that IL only as an IL body"
+            | MethodBody.Il _
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _
+            | MethodBody.Abstract
+            | MethodBody.MissingIl -> ()
+
             CatchClauseRefusal.check baseClassTypes loadedAssemblies containingAssembly method
 
         let declaredLocals =

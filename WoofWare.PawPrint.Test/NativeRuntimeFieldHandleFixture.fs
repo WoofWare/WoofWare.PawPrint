@@ -119,6 +119,7 @@ public sealed class GenericHolder<T>
                 match method.Body with
                 | MethodBody.InternalCall -> method.Name = methodName
                 | MethodBody.Il _
+                | MethodBody.AsyncIl _
                 | MethodBody.PInvoke
                 | MethodBody.RuntimeProvided _
                 | MethodBody.Abstract

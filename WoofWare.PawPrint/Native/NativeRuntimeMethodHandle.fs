@@ -1027,7 +1027,7 @@ module NativeRuntimeMethodHandle =
                     // A custom attribute's constructor is always a declared method; a synthesised
                     // one has no attribute flags to report.
                     failwith $"%s{operation}: attribute constructor %O{m} is synthesised and has no MethodAttributes"
-                | Some (MethodInfo.Metadata (_, facts)) -> facts.MethodAttributes
+                | Some (MethodInfo.Metadata (_, facts, _)) -> facts.MethodAttributes
                 | None ->
                     // No constructor was supplied or found.
                     if

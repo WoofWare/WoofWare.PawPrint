@@ -843,9 +843,9 @@ module ConcreteVirtualDispatch =
                >
             =
             let interfaceMethod =
-                match methodToCall.TryMetadata with
-                | Some metadata -> methodToCall.DeclaringAssemblyFullName, (Some metadata.Handle, None)
-                | None ->
+                match methodToCall.IdentityKey with
+                | Some row, None -> methodToCall.DeclaringAssemblyFullName, (Some row, None)
+                | _ ->
                     failwith
                         $"TODO: interface dispatch to synthesised method %s{methodToCall.Name} on %O{methodToCall.RequiredDeclaringType.Name}, which has no MethodDef row to key the dispatch map on"
 
@@ -1071,6 +1071,7 @@ module ConcreteVirtualDispatch =
 
                 state, Ok (VirtualImplementation.Reabstracted candidate.Body)
             | MethodBody.Il _
+            | MethodBody.AsyncIl _
             | MethodBody.MissingIl
             | MethodBody.InternalCall
             | MethodBody.PInvoke
@@ -1422,6 +1423,13 @@ module ConcreteVirtualDispatch =
         if methodToCall.IsStatic then
             failwith
                 $"virtual dispatch of %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}: a static virtual is resolved by StaticVirtualDispatch.resolve, not by instance dispatch"
+
+        match methodToCall.TryVariant with
+        | Some MethodVariant.AsyncVariant ->
+            failwith
+                $"TODO: virtual dispatch of the async variant of %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}: CoreCLR gives a promise-returning virtual method's async variant a slot of its own, which PawPrint's tables do not have (runtime-async plan, stage 4)"
+        | Some MethodVariant.Ordinary
+        | None -> ()
 
         tryResolveVirtualImplementationForSlot
             loggerFactory

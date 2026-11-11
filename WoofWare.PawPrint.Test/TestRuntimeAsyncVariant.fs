@@ -115,8 +115,10 @@ module TestRuntimeAsyncVariant =
                     if expected.Contains handle then
                         failwith $"%s{name}: %O{method} is an Async method with IL, but reads as %O{method.Body}"
 
+        // .NET 10's CoreLib already declares runtime async's infrastructure (`AsyncHelpers.Await` and
+        // the like); .NET 11 compiles every async method of both assemblies as runtime-async.
         match runtime with
-        | EmulatedRuntime.Net10 -> asyncBodies |> shouldEqual 0
+        | EmulatedRuntime.Net10 -> asyncBodies |> shouldBeGreaterThan 0
         | EmulatedRuntime.Net11 -> asyncBodies |> shouldBeGreaterThan 100
 
     /// What the corpus check below found, for asserting it is not vacuous.
@@ -176,7 +178,7 @@ module TestRuntimeAsyncVariant =
                         assemblies.Value
                     |> ok $"%s{name}: the calling convention of %O{method}"
 
-                method.TryVariant |> shouldEqual (Some MethodVariant.Ordinary)
+                method.TryVariant |> shouldEqual (Some MethodVariant.ordinary)
 
                 let updated, variant =
                     RuntimeAsyncMethod.asyncVariantOf loggerFactory runtimeDirs coreLib image method assemblies.Value
@@ -196,7 +198,9 @@ module TestRuntimeAsyncVariant =
                   Ok asyncVariant ->
                     ordinaryConvention |> shouldEqual false
 
-                    asyncVariant.TryVariant |> shouldEqual (Some MethodVariant.AsyncVariant)
+                    match asyncVariant.TryVariant with
+                    | Some MethodVariant.AsyncVariant -> ()
+                    | other -> failwith $"%s{name}: the async variant of %O{method} is %O{other}"
 
                     asyncVariant.Signature
                     |> shouldEqual
@@ -205,7 +209,7 @@ module TestRuntimeAsyncVariant =
                         }
 
                     // Everything but the signature and the variant is the row's.
-                    asyncVariant.Body |> shouldEqual method.Body
+                    obj.ReferenceEquals (asyncVariant.Body, method.Body) |> shouldEqual true
                     asyncVariant.Name |> shouldEqual method.Name
                     asyncVariant.Owner |> shouldEqual method.Owner
                     asyncVariant.Generics |> shouldEqual method.Generics
@@ -260,10 +264,11 @@ module TestRuntimeAsyncVariant =
                     failwith
                         $"%s{name}: %O{method} (declares Async: %b{declaresAsync}, returns %O{kind}) gave %A{result}"
 
-        outcomes.Contains CorpusOutcome.NotAsync |> shouldEqual true
-
         match runtime with
-        | EmulatedRuntime.Net10 -> outcomes.Count |> shouldEqual 1
+        | EmulatedRuntime.Net10 ->
+            outcomes
+            |> Set.ofSeq
+            |> shouldEqual (Set.ofList [ CorpusOutcome.NotAsync ; CorpusOutcome.NoPromise ])
         | EmulatedRuntime.Net11 ->
             outcomes
             |> Set.ofSeq

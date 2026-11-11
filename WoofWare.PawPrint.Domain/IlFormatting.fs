@@ -494,7 +494,18 @@ module IlFormatting =
             [ header ; $"  // No IL body (runtime-provided, unclassified: {name})" ]
         | MethodBody.Abstract -> [ header ; "  // No IL body (abstract)" ]
         | MethodBody.MissingIl -> [ header ; "  // No IL body (an IL method whose RVA is 0)" ]
-        | MethodBody.Il instructions ->
+        | MethodBody.Il instructions
+        | MethodBody.AsyncIl instructions ->
+            // A runtime-async method's IL is written for its async variant, whose signature unwraps
+            // the promise the header shows.
+            let asyncLines =
+                match method.Body with
+                | MethodBody.AsyncIl _ ->
+                    [
+                        "  // Runtime-async IL (MethodImplAttributes.Async), written for the async calling convention"
+                    ]
+                | _ -> []
+
             let localLines =
                 match instructions.LocalVars with
                 | None -> []
@@ -513,4 +524,9 @@ module IlFormatting =
                 instructions.Instructions
                 |> List.map (fun (ilOp, offset) -> formatIlOp assembly scope ilOp offset)
 
-            [ yield header ; yield! localLines ; yield! instructionLines ]
+            [
+                yield header
+                yield! asyncLines
+                yield! localLines
+                yield! instructionLines
+            ]
