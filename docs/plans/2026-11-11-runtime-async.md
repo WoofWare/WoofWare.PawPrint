@@ -278,6 +278,19 @@ Each stage is one pull request, with its tests first.
    pointer read from native memory, and writes of a struct holding references through
    `GetRawData`, `Unsafe.Add` and `Unsafe.As<byte, T>` into an object's field and into
    `Task<T>.m_result`.
+
+   As measured: all of these already worked, so the stage is four guests and no interpreter
+   change (`FixedAddressResumeInfo`, `CalliThroughNativeResumeInfo`, `RawDataResultSlotWrites`,
+   `AsyncDispatcherStackPointers`). `[FixedAddressValueType]` needs no handling, because a
+   PawPrint static never moves. In RC1 it marks only the two `ResumeInfo` statics of CoreLib's
+   own continuations. `t_runtimeAsyncAwaitState` is a plain `[ThreadStatic]` struct, which CoreLib
+   only takes by `ref`. The pointers CoreLib keeps in thread statics point at locals instead:
+   `RuntimeAsyncAwaitState.StackState` and `AsyncDispatcherInfo.t_current`.
+
+   One gap is left. A pointer stored with `stind.i` through a `ref T*`, as `t_current` is stored,
+   reads back as a native int, and `ldfld` cannot dereference that. Only CoreLib's async
+   instrumentation dereferences `t_current`, and it is off unless a profiler or debugger turns
+   it on.
 4. **(2b) Suspension and resumption.** The continuation type; `AsyncSuspend`; suspending callers;
    `TailAwait`; the suspended-frame map; `ResumeInfo` and `AsyncResume`; delivering a result;
    `DiagnosticIP`, with its QCall refused.
