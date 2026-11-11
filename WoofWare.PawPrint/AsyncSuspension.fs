@@ -297,15 +297,36 @@ module AsyncSuspension =
             | None -> values
         )
 
-    /// `stack`, with each managed pointer made null and each value of a type `zeroed` names
-    /// replaced by its zero.
+    /// `stack`, with each pointer into a stack frame made null and each value of a type `zeroed`
+    /// names replaced by its zero.
+    ///
+    /// The evaluation stack records no IL types, and a provenance-tracked unmanaged pointer is a
+    /// `ManagedPointer` on it as a byref is. The JIT zeroes a byref and keeps an unmanaged pointer
+    /// as the number it is, so a pointer into storage that outlives the frame (the heap, native
+    /// memory, a static) is kept: kept, a byref is one the method cannot use after the await, and an
+    /// unmanaged pointer is right. A pointer into a stack frame, which a suspension ends, is made
+    /// null either way.
     let zeroStack (zeroed : ConcreteTypeHandle -> CliType option) (stack : EvalStack) : EvalStack =
         {
             Values =
                 stack.Values
                 |> List.map (fun value ->
                     match value with
-                    | EvalStackValue.ManagedPointer _ -> EvalStackValue.ManagedPointer ManagedPointerSource.Null
+                    | EvalStackValue.ManagedPointer (ManagedPointerSource.Byref addressed) ->
+                        match addressed.Root with
+                        | ByrefRoot.LocalVariable _
+                        | ByrefRoot.Argument _
+                        | ByrefRoot.StackMemoryByte _ -> EvalStackValue.ManagedPointer ManagedPointerSource.Null
+                        | ByrefRoot.NativeMemoryByte _
+                        | ByrefRoot.HeapValue _
+                        | ByrefRoot.HeapObjectField _
+                        | ByrefRoot.ArrayElement _
+                        | ByrefRoot.PeByteRange _
+                        | ByrefRoot.StaticField _
+                        | ByrefRoot.StringCharAt _
+                        | ByrefRoot.ExposedClassObject _ -> value
+                    | EvalStackValue.ManagedPointer ManagedPointerSource.Null
+                    | EvalStackValue.ManagedPointer (ManagedPointerSource.NativeIntPlaceholder _) -> value
                     | EvalStackValue.UserDefinedValueType contents ->
                         match zeroed contents.Declared with
                         | Some zero -> EvalStackValue.ofCliType zero
@@ -320,8 +341,9 @@ module AsyncSuspension =
         }
 
     /// `frame` as a suspension keeps it, as CoreCLR's JIT and interpreter keep a suspended frame:
-    /// every byref, and every value of a byref-like type, in its locals, arguments and evaluation
-    /// stack zeroed, and its `stackalloc` memory dropped, so a pointer into either that the frame
+    /// every byref, and every value of a byref-like type, in its locals and arguments zeroed, every
+    /// pointer into a stack frame on its evaluation stack too (`zeroStack`), and its `stackalloc`
+    /// memory dropped, so a pointer into either that the frame
     /// kept fails when used rather than reaching storage that no longer exists.
     let suspendedFrame
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)

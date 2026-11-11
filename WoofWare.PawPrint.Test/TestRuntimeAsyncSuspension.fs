@@ -261,17 +261,37 @@ module TestRuntimeAsyncSuspension =
         /// A `Span<int>` over a stack frame.
         | Span
 
+    /// What an evaluation-stack slot of a test frame holds.
+    [<RequireQualifiedAccess>]
+    type private StackKind =
+        | Int32
+        /// A byref into a stack frame.
+        | Byref
+        /// A provenance-tracked unmanaged pointer into native memory, which the evaluation stack
+        /// holds as it holds a byref.
+        | NativePointer
+
+    let private stackByref : ManagedPointerSource =
+        ManagedPointerSource.Byref
+            {
+                Root = ByrefRoot.LocalVariable (ThreadId.ThreadId 0, FrameId.FrameId 0, 0us)
+                Projections = []
+            }
+
+    /// A slot holding `kind`, and what a suspension leaves of it.
+    let private stackValue (nativeBlock : ManagedPointerSource) (kind : StackKind) : EvalStackValue * EvalStackValue =
+        match kind with
+        | StackKind.Int32 ->
+            let value = EvalStackValue.Int32 (Int32Source.Verbatim 3)
+            value, value
+        | StackKind.Byref ->
+            EvalStackValue.ManagedPointer stackByref, EvalStackValue.ManagedPointer ManagedPointerSource.Null
+        | StackKind.NativePointer ->
+            let value = EvalStackValue.ManagedPointer nativeBlock
+            value, value
+
     [<Test>]
     let ``A suspended frame keeps no byref, and nothing else changes`` () : unit =
-        let thread = ThreadId.ThreadId 0
-        let frameId = FrameId.FrameId 0
-
-        let stackByref : ManagedPointerSource =
-            ManagedPointerSource.Byref
-                {
-                    Root = ByrefRoot.LocalVariable (thread, frameId, 0us)
-                    Projections = []
-                }
 
         let gen =
             gen {
@@ -287,11 +307,11 @@ module TestRuntimeAsyncSuspension =
                             ]
                     )
 
-                let! stackByrefs = Gen.listOf (Gen.elements [ true ; false ])
-                return locals, stackByrefs
+                let! stack = Gen.listOf (Gen.elements [ StackKind.Int32 ; StackKind.Byref ; StackKind.NativePointer ])
+                return locals, stack
             }
 
-        let property (locals : LocalKind list, stackByrefs : bool list) : unit =
+        let property (locals : LocalKind list, stack : StackKind list) : unit =
             let state = initialState ()
             let bct = bct ()
 
@@ -368,14 +388,7 @@ module TestRuntimeAsyncSuspension =
                         |> ImmutableArray.CreateRange
                     EvaluationStack =
                         {
-                            Values =
-                                stackByrefs
-                                |> List.map (fun byref ->
-                                    if byref then
-                                        EvalStackValue.ManagedPointer stackByref
-                                    else
-                                        EvalStackValue.Int32 (Int32Source.Verbatim 3)
-                                )
+                            Values = stack |> List.map (stackValue nativeBlock >> fst)
                         }
                 }
 
@@ -386,15 +399,7 @@ module TestRuntimeAsyncSuspension =
             |> shouldEqual (typedLocals |> List.map (fun (_, _, expected) -> expected))
 
             suspended.EvaluationStack.Values
-            |> shouldEqual (
-                stackByrefs
-                |> List.map (fun byref ->
-                    if byref then
-                        EvalStackValue.ManagedPointer ManagedPointerSource.Null
-                    else
-                        EvalStackValue.Int32 (Int32Source.Verbatim 3)
-                )
-            )
+            |> shouldEqual (stack |> List.map (stackValue nativeBlock >> snd))
 
             suspended.Arguments |> shouldEqual original.Arguments
             suspended.IlOpIndex |> shouldEqual original.IlOpIndex
