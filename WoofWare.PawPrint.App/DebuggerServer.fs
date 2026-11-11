@@ -555,9 +555,20 @@ module DebuggerServer =
 
         writer.WriteEndObject ()
 
+    /// Which of a thread's frames `/thread/{id}` renders the values of.
+    [<RequireQualifiedAccess>]
+    type private ThreadValues =
+        /// Every frame's evaluation stack, arguments and locals.
+        | AllFrames
+        /// The active frame's evaluation stack, arguments and locals; every other frame's are
+        /// `null`. Rendering a value is most of what `/thread/{id}` costs, so a client stepping
+        /// through a deep stack that reads only the active frame's values should ask for this.
+        | ActiveFrame
+
     let private writeFrameDetails
         (writer : Utf8JsonWriter)
         (state : IlMachineState)
+        (values : ThreadValues)
         (sourceIlOffset : int)
         (activeFrame : FrameId)
         (frameId : FrameId)
@@ -568,14 +579,22 @@ module DebuggerServer =
         writer.WriteStartObject ()
         writeFrameProperties writer state sourceIlOffset true activeFrame frameId frame
 
-        writeValueArray
-            writer
-            "evalStack"
-            frame.EvaluationStack.Values
-            (fun writer value -> writeEvalStackValue writer context value)
+        match values with
+        | ThreadValues.ActiveFrame when frameId <> activeFrame ->
+            writer.WriteNull "evalStack"
+            writer.WriteNull "arguments"
+            writer.WriteNull "locals"
+        | ThreadValues.ActiveFrame
+        | ThreadValues.AllFrames ->
+            writeValueArray
+                writer
+                "evalStack"
+                frame.EvaluationStack.Values
+                (fun writer value -> writeEvalStackValue writer context value)
 
-        writeValueArray writer "arguments" frame.Arguments (fun writer value -> writeCliType writer context value)
-        writeValueArray writer "locals" frame.LocalVariables (fun writer value -> writeCliType writer context value)
+            writeValueArray writer "arguments" frame.Arguments (fun writer value -> writeCliType writer context value)
+            writeValueArray writer "locals" frame.LocalVariables (fun writer value -> writeCliType writer context value)
+
         writer.WriteEndObject ()
 
     let private writeRunOutcome (writer : Utf8JsonWriter) (outcome : RunOutcome) : unit =
@@ -876,7 +895,13 @@ module DebuggerServer =
 
         writer.WriteEndObject ()
 
-    let private writeThreadResponse (writer : Utf8JsonWriter) (session : SessionState) (threadId : ThreadId) : unit =
+    let private writeThreadResponse
+        (writer : Utf8JsonWriter)
+        (session : SessionState)
+        (values : ThreadValues)
+        (threadId : ThreadId)
+        : unit
+        =
         let state = sessionState session
 
         match state.ThreadState |> Map.tryFind threadId with
@@ -907,6 +932,7 @@ module DebuggerServer =
                     writeFrameDetails
                         writer
                         state
+                        values
                         (Map.find frameId offsets)
                         threadState.ActiveMethodState
                         frameId
@@ -1621,6 +1647,17 @@ module DebuggerServer =
             match Int32.TryParse raw with
             | true, value when value > 0 -> Some (min value maximum)
             | _ -> None
+
+    /// A missing `values` is every frame's; one that names an unknown mode is refused rather than
+    /// silently defaulted.
+    let private parseThreadValues (query : IQueryCollection) : Result<ThreadValues, string> =
+        match query.TryGetValue "values" with
+        | false, _ -> Ok ThreadValues.AllFrames
+        | true, raw ->
+            match raw.ToString () with
+            | "all" -> Ok ThreadValues.AllFrames
+            | "active" -> Ok ThreadValues.ActiveFrame
+            | other -> Error $"values must be 'all' or 'active', not '%s{other}'"
 
     type private RunStepsResult =
         {
@@ -2527,7 +2564,7 @@ module DebuggerServer =
                 "POST /run?maxSteps=10000"
                 $"POST /trace?maxSteps=%d{traceDefaultMaxSteps}&maxBytes=%d{traceByteCap}&values=none|active"
                 $"     (at most %d{traceStepCap} steps and about %d{traceByteCap} bytes a page; repeat to page on)"
-                "GET  /thread/{id}"
+                "GET  /thread/{id}?values=all|active"
                 "GET  /thread/{id}/stack-summary"
                 "GET  /thread/{id}/active-method/il"
                 "GET  /heap?after=<address>&limit=200"
@@ -2873,16 +2910,18 @@ module DebuggerServer =
                                             |> responseOnly
                                         | _ -> responseOnly (textResponse 400 $"Invalid thread id: %s{rawThread}")
                                     | "GET", [ "thread" ; rawThread ] ->
-                                        match Int32.TryParse rawThread with
-                                        | true, thread ->
+                                        match Int32.TryParse rawThread, parseThreadValues context.Request.Query with
+                                        | (true, thread), Ok values ->
                                             let threadId = ThreadId.ThreadId thread
                                             let statusCode = if hasThread session threadId then 200 else 404
 
                                             jsonResponse
                                                 statusCode
-                                                (fun writer -> writeThreadResponse writer session threadId)
+                                                (fun writer -> writeThreadResponse writer session values threadId)
                                             |> responseOnly
-                                        | _ -> responseOnly (textResponse 400 $"Invalid thread id: %s{rawThread}")
+                                        | (true, _), Error message -> responseOnly (textResponse 400 message)
+                                        | (false, _), _ ->
+                                            responseOnly (textResponse 400 $"Invalid thread id: %s{rawThread}")
                                     | "GET", [ "heap" ] ->
                                         let limit = parsePositiveInt "limit" 200 2000 context.Request.Query
                                         let rawAfter = context.Request.Query.["after"].ToString ()
