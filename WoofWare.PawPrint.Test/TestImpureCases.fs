@@ -6946,7 +6946,7 @@ module TestImpureCases =
     [<Test>]
     let ``FileSystemWatcher on the pinned linux-x64 CoreLib raises an event for each change, and ends`` () : unit =
         Net11Frontier.park (
-            "On .NET 11's linux-x64 CoreLib the watcher's read loop reaches `AsyncHelpers.Await`, a runtime-async method's, whose `TailAwait` call PawPrint refuses: \"CoreCLR's JIT replaces every call to this method with code of its own\" (measured on 11.0.0-rc.1). Un-park when runtime-async methods run."
+            "On .NET 11's linux-x64 CoreLib, `Watcher.Start` calls `Watcher.DequeueEvents`, a runtime-async method returning a promise type, whose task-returning thunk PawPrint does not yet emit: \"TODO: calling the ordinary variant of System.IO.FileSystem.Watcher.Watcher.DequeueEvents, a runtime-async method (MethodImplAttributes.Async) returning a promise type\" (measured on 11.0.0-rc.1, 2026-11-11). Un-park when runtime-async methods run."
         )
 
         // On a macOS host the framework under test is a Darwin CoreLib, whose

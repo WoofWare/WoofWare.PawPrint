@@ -5,11 +5,13 @@
 .NET 11 compiles every async method in CoreLib, and in every shared-framework library, as a
 *runtime-async* method (`System.Private.CoreLib.csproj` sets `Features=runtime-async=on`;
 `libraries/Directory.Build.targets` does the same for the shared framework). PawPrint runs none
-of them. Today it runs such a method's IL as if it were the `Task`-returning method its metadata
-signature names, and the IL's `ret` (of a `T`, or of nothing) fails the signature check; or it
-reaches `AsyncHelpers.Await`'s `TailAwait()` call and refuses it. Four .NET 11 tests are parked
-on this: `StringContentRoundTrip.cs`, the Linux-CoreLib `FileSystemWatcher` test, and the two
-ASP.NET two-process tests.
+of them. Since stage 1a it refuses, by name, to call such a method's ordinary variant, which runs
+the task-returning thunk (below). Four .NET 11 tests are parked on this: `StringContentRoundTrip.cs`
+(at `HttpContent.LoadIntoBufferAsyncCore`), and the Linux-CoreLib `FileSystemWatcher` test and the
+two ASP.NET two-process tests (all three at `Watcher.DequeueEvents`).
+
+.NET 10's CoreLib declares runtime async's infrastructure too (`AsyncHelpers.Await` and the like,
+flagged `Async` and returning no promise).
 
 ## The mechanism
 
