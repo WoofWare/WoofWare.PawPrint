@@ -20,6 +20,11 @@ using System.Threading.Tasks;
 // completes the first read, so it is the `ExecutionContext` the suspension captured, and not
 // whatever the resuming thread has, that the second read sees.
 //
+// The guest calls with a `SynchronizationContext` of its own installed. The reader's awaits are
+// `ConfigureAwait(false)`, so the methods resume on the thread pool, and once they have resumed
+// they leave the thread's contexts as they find them: a continuation that runs synchronously when
+// the read completes sees no `SynchronizationContext`, not the one the methods found on entry.
+//
 // .NET 10 compiles the same methods as state machines, with the same results.
 //
 // The exit code is the index of the first check that failed; 0 means all passed.
@@ -92,15 +97,30 @@ public class Program
         }
     }
 
+    private sealed class MarkerContext : SynchronizationContext
+    {
+        public override void Post (SendOrPostCallback d, object state) =>
+            ThreadPool.QueueUserWorkItem (_ => d (state));
+    }
+
     public static int Main (string[] args)
     {
         var stream = new PendingStream ();
         var reader = new StreamReader (stream, new UTF8Encoding (false), false);
         char[] chars = new char[16];
 
+        var marker = new MarkerContext ();
+        SynchronizationContext.SetSynchronizationContext (marker);
         s_flowed.Value = 42;
         ValueTask<int> read = reader.ReadAsync (chars.AsMemory ());
         if (read.IsCompleted) return 1;
+
+        SynchronizationContext seenOnCompletion = marker;
+        Task<int> readTask = read.AsTask ();
+        Task observed =
+            readTask.ContinueWith (
+                _ => { seenOnCompletion = SynchronizationContext.Current; },
+                TaskContinuationOptions.ExecuteSynchronously);
         if (stream.Requests != 1) return 2;
 
         s_flowed.Value = 7;
@@ -110,13 +130,15 @@ public class Program
 
         stream.Deliver (new byte[] { 0xA9, (byte) '!' });
 
-        int count = read.AsTask ().Result;
+        int count = readTask.Result;
+        observed.Wait ();
         if (count != 2) return 4;
         if (chars[0] != 'é') return 5;
         if (chars[1] != '!') return 6;
         if (stream.Requests != 2) return 7;
         if (stream.FlowedValueMismatches != 0) return 8;
         if (s_flowed.Value != 7) return 9;
+        if (seenOnCompletion != null) return 10;
 
         return 0;
     }
