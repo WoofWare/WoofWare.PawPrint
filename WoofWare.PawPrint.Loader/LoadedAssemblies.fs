@@ -537,16 +537,18 @@ type TypeResolutionMiss =
     /// No <c>TypeDef</c> and no top-level <c>ExportedType</c> row of this name, in this assembly.
     | TopLevelTypeAbsent of searchedIn : string * ns : string option * name : string
 
-    /// This assembly declares the given type, but nothing of this name nested inside it.
-    | NestedTypeAbsent of searchedIn : string * declaringType : string * name : string
+    /// This assembly declares the given type, but nothing of this namespace and name nested inside
+    /// it. The namespace is the nested row's own, empty for every nested type a compiler emits.
+    | NestedTypeAbsent of searchedIn : string * declaringType : string * ns : string * name : string
 
     override this.ToString () : string =
         match this with
         | TypeResolutionMiss.TopLevelTypeAbsent (searchedIn, ns, name) ->
             let ns = ns |> Option.defaultValue "<global>"
             $"top-level type %s{ns}.%s{name} is not declared in %s{searchedIn}"
-        | TypeResolutionMiss.NestedTypeAbsent (searchedIn, declaringType, name) ->
-            $"no type named %s{name} is nested inside %s{declaringType} in %s{searchedIn}"
+        | TypeResolutionMiss.NestedTypeAbsent (searchedIn, declaringType, ns, name) ->
+            let spelled = if ns = "" then name else $"%s{ns}.%s{name}"
+            $"no type named %s{spelled} is nested inside %s{declaringType} in %s{searchedIn}"
 
 type TypeResolutionResult =
     | FirstLoadAssy of WoofWare.PawPrint.AssemblyReference

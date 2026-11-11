@@ -66,15 +66,17 @@ module LoadedTypeResolution =
         (genericArgs : ImmutableArray<TypeDefn>)
         (assy : DumpedAssembly)
         (declaringType : ResolvedTypeIdentity)
+        (childNamespace : string)
         (childName : string)
         : TypeResolutionResult
         =
-        match assy.TryGetNestedTypeDef declaringType.TypeDefinition.Get childName with
+        match assy.TryGetNestedTypeDef declaringType.TypeDefinition.Get childNamespace childName with
         | Some typeDef -> resolveDefinedType genericArgs assy typeDef
         | None ->
             TypeResolutionMiss.NestedTypeAbsent (
                 assy.DefinitionFullName,
                 Assembly.fullName assy declaringType,
+                childNamespace,
                 childName
             )
             |> TypeResolutionResult.NotFound
@@ -97,7 +99,11 @@ module LoadedTypeResolution =
         =
         match resolvedParent with
         | Some parent ->
-            match targetAssembly.TryGetNestedTypeDef parent.TypeDefinition.Get exportedType.Name with
+            // The row's own namespace, as CoreCLR hashes it (`ComputeHashFunctionWithExportedType`,
+            // classhash.cpp).
+            let ns = exportedType.Namespace |> Option.defaultValue ""
+
+            match targetAssembly.TryGetNestedTypeDef parent.TypeDefinition.Get ns exportedType.Name with
             | Some nested ->
                 ResolvedTypeIdentity.ofDefinitionInAssembly targetAssembly.DefinitionFullName nested.TypeDefHandle
                 |> Ok
@@ -105,6 +111,7 @@ module LoadedTypeResolution =
                 TypeResolutionMiss.NestedTypeAbsent (
                     targetAssembly.DefinitionFullName,
                     Assembly.fullName targetAssembly parent,
+                    ns,
                     exportedType.Name
                 )
                 |> Error
@@ -195,7 +202,15 @@ module LoadedTypeResolution =
             | TypeResolutionResult.NotFound miss -> TypeResolutionResult.NotFound miss
             | TypeResolutionResult.Unmodelled unmodelled -> TypeResolutionResult.Unmodelled unmodelled
             | TypeResolutionResult.Resolved (targetAssembly, parentIdentity, _) ->
-                resolveNestedTypeInAssembly assemblies genericArgs targetAssembly parentIdentity target.Name
+                // The TypeRef's own namespace, as CoreCLR hashes it (`ComputeHashFunctionWithTypeRef`,
+                // classhash.cpp).
+                resolveNestedTypeInAssembly
+                    assemblies
+                    genericArgs
+                    targetAssembly
+                    parentIdentity
+                    target.Namespace
+                    target.Name
         | TypeRefResolutionScope.ModuleDef _ ->
             // The type is defined in the current module.
             resolveTopLevelTypeInAssembly

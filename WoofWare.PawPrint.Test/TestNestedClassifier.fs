@@ -202,7 +202,7 @@ module TestNestedClassifier =
             |> Option.defaultWith (fun () -> failwith "Probe.Outer should be a top-level type")
 
         let inner =
-            assembly.TryGetNestedTypeDef outer.TypeDefHandle "Inner"
+            assembly.TryGetNestedTypeDef outer.TypeDefHandle "" "Inner"
             |> Option.defaultWith (fun () -> failwith "Inner should be nested in Probe.Outer")
 
         inner.IsNested |> shouldEqual true
@@ -246,7 +246,7 @@ module TestNestedClassifier =
             |> Option.defaultWith (fun () -> failwith "Probe.Outer should be a top-level type")
 
         let inner =
-            assembly.TryGetNestedTypeDef outer.TypeDefHandle "Inner"
+            assembly.TryGetNestedTypeDef outer.TypeDefHandle "" "Inner"
             |> Option.defaultWith (fun () -> failwith "Inner should be nested in Probe.Outer")
 
         let get (handle : TypeDefinitionHandle) : TypeInfo<GenericParamFromMetadata, TypeDefn> =

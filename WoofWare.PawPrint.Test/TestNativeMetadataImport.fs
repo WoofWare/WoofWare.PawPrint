@@ -425,7 +425,7 @@ public class MarshalShapes
         let outerType = requiredTopLevelType assembly "" "OuterMetadataField"
 
         let innerType =
-            assembly.TryGetNestedTypeDef outerType.TypeDefHandle "InnerMetadataField"
+            assembly.TryGetNestedTypeDef outerType.TypeDefHandle "" "InnerMetadataField"
             |> Option.defaultWith (fun () -> failwith "nested type InnerMetadataField not found")
 
         let severalNestedType = requiredTopLevelType assembly "" "OuterWithSeveralNested"
@@ -1138,7 +1138,7 @@ public class MarshalShapes
         (name : string)
         : int32
         =
-        fixture.Assembly.TryGetNestedTypeDef enclosing.TypeDefHandle name
+        fixture.Assembly.TryGetNestedTypeDef enclosing.TypeDefHandle "" name
         |> Option.defaultWith (fun () -> failwith $"nested type %s{name} not found in %s{enclosing.Name}")
         |> fun ty -> typeDefToken ty.TypeDefHandle
 
@@ -1167,7 +1167,7 @@ public class MarshalShapes
         let fixture = makeFixture ()
 
         let thirdType =
-            fixture.Assembly.TryGetNestedTypeDef fixture.SeveralNestedType.TypeDefHandle "NestedThirdWithOwnNested"
+            fixture.Assembly.TryGetNestedTypeDef fixture.SeveralNestedType.TypeDefHandle "" "NestedThirdWithOwnNested"
             |> Option.defaultWith (fun () -> failwith "nested type NestedThirdWithOwnNested not found")
 
         // `DeeplyNested` belongs to this list and, per the previous test, not to its grandparent's.

@@ -665,7 +665,8 @@ namespace {scenario.Namespace}
 
                         let foundAsNested =
                             let found =
-                                assy.TryGetNestedTypeDef ty.DeclaringType ty.Name |> Option.map _.TypeDefHandle
+                                assy.TryGetNestedTypeDef ty.DeclaringType ty.Namespace ty.Name
+                                |> Option.map _.TypeDefHandle
 
                             found = Some handle
 

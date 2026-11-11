@@ -153,7 +153,7 @@ module ParentLoadVouching =
                 | TypeResolutionResult.Resolved (definedIn, identity, resolved) ->
                     Ok (Named.Found (identity, definedIn.TypeDefs.[resolved.TypeDefHandle]))
                 | TypeResolutionResult.NotFound (TypeResolutionMiss.TopLevelTypeAbsent _) -> Ok Named.Absent
-                | TypeResolutionResult.NotFound (TypeResolutionMiss.NestedTypeAbsent (searchedIn, _, _)) when
+                | TypeResolutionResult.NotFound (TypeResolutionMiss.NestedTypeAbsent (searchedIn, _, _, _)) when
                     searchedIn = corelib
                     ->
                     Ok Named.Absent

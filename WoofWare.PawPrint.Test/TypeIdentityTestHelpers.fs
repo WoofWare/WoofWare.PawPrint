@@ -115,7 +115,7 @@ module TypeIdentityTestHelpers =
         (name : string)
         : TypeInfo<GenericParamFromMetadata, TypeDefn>
         =
-        assy.TryGetNestedTypeDef parent.TypeDefHandle name
+        assy.TryGetNestedTypeDef parent.TypeDefHandle "" name
         |> Option.defaultWith (fun () -> failwithf "Missing nested type %s inside %s" name parent.Name)
 
     let getResolvedIdentity
@@ -194,7 +194,7 @@ module TypeIdentityTestHelpers =
         (forwarder : DumpedAssembly)
         : ExportedType * DumpedAssembly
         =
-        match forwarder.TryGetNestedExportedType parentExport.Handle nestedName with
+        match forwarder.TryGetNestedExportedType parentExport.Handle "" nestedName with
         | Some nestedExport -> nestedExport, forwarder
         | None ->
             let nestedHandle =
@@ -217,7 +217,7 @@ module TypeIdentityTestHelpers =
                     ExportedTypes = forwarder.ExportedTypes.Add (nestedHandle, nestedExport)
                     _NestedExportedTypesLookup =
                         forwarder._NestedExportedTypesLookup.Add (
-                            (parentExport.Handle, nestedExport.Name),
+                            (parentExport.Handle, "", nestedExport.Name),
                             nestedExport
                         )
                 }

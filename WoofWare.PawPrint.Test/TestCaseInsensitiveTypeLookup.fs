@@ -209,7 +209,7 @@ public class Marker
 
             [
                 lib.TryGetTopLevelTypeDefIgnoreCase "ci" "ünknown" everyDefinition |> isMiss
-                lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "ünknown" |> isMiss
+                lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "" "ünknown" |> isMiss
                 facade.TryGetTopLevelExportedTypeIgnoreCase (Some "ci") "ünknown" |> isMiss
             ]
         )
@@ -224,7 +224,7 @@ public class Marker
                 lib.TryGetTopLevelTypeDef "Ci" "Outer"
                 |> Option.defaultWith (fun () -> failwith "Ci.Outer is missing")
 
-            match lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "STRAßE" with
+            match lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "" "STRAßE" with
             | Ok (Some found) -> found.Name
             | other -> failwith $"expected the nested type, got %O{other}"
         )
@@ -261,12 +261,12 @@ public class Marker
                 lib.TryGetTopLevelTypeDef "Ci" "Outer"
                 |> Option.defaultWith (fun () -> failwith "Ci.Outer is missing")
 
-            // By simple name: a nested type carries no namespace of its own in metadata.
-            match lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "solo" with
+            // A compiler gives a nested type no namespace of its own, so it is asked for under none.
+            match lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "" "solo" with
             | Ok (Some solo) -> solo.Name |> shouldEqual "Solo"
             | other -> failwith $"expected the nested type, got %O{other}"
 
-            match lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "inner" with
+            match lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "" "inner" with
             | Error (CaseInsensitiveLookupRefusal.Ambiguous (folded, candidates)) ->
                 folded |> shouldEqual "inner"
                 candidates |> shouldEqual [ "INNER" ; "Inner" ]
@@ -274,7 +274,7 @@ public class Marker
 
             // A nested name is scoped to its declaring type: `Target` is top-level, not under
             // `Outer`, so folding must not reach it.
-            lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "target"
+            lib.TryGetNestedTypeDefIgnoreCase outer.TypeDefHandle "" "target"
             |> isMiss
             |> shouldEqual true
         )
