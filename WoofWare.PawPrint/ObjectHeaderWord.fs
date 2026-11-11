@@ -16,7 +16,8 @@ type HeaderWordAccess =
 /// CoreCLR lays a 64-bit object out as 4 bytes of padding, the 4-byte header word, the
 /// method-table pointer, and then the object's raw data, so .NET 11's thin lock reaches the
 /// word as `(int*)&obj.GetMethodTableRef() - 1`, 12 bytes before `RuntimeHelpers.GetRawData`.
-/// An SZ array's raw data begins with its length and padding, one `nint` before element 0.
+/// An array's raw data begins with its length and padding, one `nint`; a multi-dimensional array's
+/// then has an int32 length and an int32 lower bound per dimension before element 0.
 /// PawPrint targets 64-bit guests only.
 [<RequireQualifiedAccess>]
 module internal ObjectHeaderWord =
@@ -31,6 +32,16 @@ module internal ObjectHeaderWord =
     /// The word's offset in an SZ array's `ByteStorageIdentity.Array` container, whose offset 0
     /// is element 0: the length and its padding, the method-table pointer, then the word.
     let szArrayStart : int64 = -20L
+
+    /// Where a multi-dimensional array of `rank` dimensions begins its raw data, in its
+    /// `ByteStorageIdentity.Array` container, whose offset 0 is element 0: below the elements,
+    /// its bounds block (an int32 length and an int32 lower bound per dimension), then its length
+    /// and padding.
+    let multiDimArrayRawDataStart (rank : int) : int64 = -(8L + 8L * int64<int> rank)
+
+    /// The word's offset in a multi-dimensional array's `ByteStorageIdentity.Array` container:
+    /// below its raw data (`multiDimArrayRawDataStart`), the method-table pointer, then the word.
+    let multiDimArrayStart (rank : int) : int64 = multiDimArrayRawDataStart rank - 12L
 
     /// How the access of `width` bytes at `start` relates to a word at `wordStart`.
     let classify (wordStart : int64) (start : int64) (width : int) : HeaderWordAccess =

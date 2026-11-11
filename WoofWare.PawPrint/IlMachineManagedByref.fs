@@ -1610,9 +1610,9 @@ module IlMachineManagedByref =
                 | ByrefRoot.ArrayElement (arr, _) ->
                     match (ManagedHeap.getArrayShape arr state.ManagedHeap).ConcreteType with
                     | ConcreteTypeHandle.OneDimArrayZero _ -> ValueSome (arr, ObjectHeaderWord.szArrayStart)
-                    // A multi-dimensional array's raw data is refused (`RuntimeFieldProjection`), so
-                    // no pointer is built below its bounds block.
-                    | _ -> ValueNone
+                    | ConcreteTypeHandle.Array (_, rank) -> ValueSome (arr, ObjectHeaderWord.multiDimArrayStart rank)
+                    | other ->
+                        failwith $"tryHeaderWordOf: array %O{arr} has a concrete type that is not an array's: %O{other}"
                 | ByrefRoot.LocalVariable _
                 | ByrefRoot.Argument _
                 | ByrefRoot.StackMemoryByte _

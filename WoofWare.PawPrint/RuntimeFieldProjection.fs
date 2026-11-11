@@ -115,15 +115,11 @@ module internal RuntimeFieldProjection =
     /// shape over `HeapValue`; the SZ-array case starts at `ArrayElement(arr, 0)` carrying
     /// a trailing negative `ByteOffset` so the canonical `+sizeof(nint)` skip used by
     /// `CastCache.TableData` collapses cleanly to `&array[0]` via the existing
-    /// `ManagedPointerSource` offset arithmetic.
-    ///
-    /// MD arrays are explicitly *not* supported by this projection. CoreCLR places
-    /// `2 * rank` int32 bounds entries (lengths and lower bounds) between the length
-    /// header and the first element, so the canonical `+sizeof(nint)` arithmetic that
-    /// works for SZ arrays would land in the middle of the bounds region rather than at
-    /// element 0. `MethodTableProjection.baseSize` already accounts for this with
-    /// `(3 + rank) * NATIVE_INT_SIZE`. We fail loudly here rather than silently produce a
-    /// byref to the wrong location.
+    /// `ManagedPointerSource` offset arithmetic. An MD array's raw data begins at the same
+    /// length header, which on CoreCLR is followed by `2 * rank` int32 bounds entries (lengths
+    /// and lower bounds) before the first element, so its byref sits that much further below
+    /// element 0 (`ObjectHeaderWord.multiDimArrayRawDataStart`), where
+    /// `MethodTableProjection.baseSize`'s `(3 + rank) * NATIVE_INT_SIZE` puts it too.
     let private tryProjectRawDataFieldAddress
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (field : FieldInfo<'typeGeneric, 'fieldGeneric>)
@@ -155,13 +151,8 @@ module internal RuntimeFieldProjection =
                     // array-access boundary with a tightened error message; this is the
                     // intended degradation for any caller that tries to read the
                     // length-header bytes through `RawData::Data` rather than via
-                    // `RawArrayData::Length`.
-                    //
-                    // MD arrays have `2 * rank` int32 bounds entries between the length
-                    // header and the first element, so the canonical `+sizeof(nint)`
-                    // arithmetic would not land on element 0. Rather than synthesise a
-                    // byref to the bounds region (which no current caller wants), refuse
-                    // the projection and surface the layout mismatch.
+                    // `RawArrayData::Length`. An MD array is anchored the same way, below
+                    // its bounds block too, and reads of the bounds through it fail alike.
                     match arr.ConcreteType with
                     | ConcreteTypeHandle.OneDimArrayZero _ ->
                         ManagedPointerSource.Byref
@@ -171,8 +162,18 @@ module internal RuntimeFieldProjection =
                             }
                         |> Some
                     | ConcreteTypeHandle.Array (_, rank) ->
-                        failwith
-                            $"TODO: RawData::Data projection for multi-dimensional array (rank %i{rank}) at %O{addr}; CoreCLR places %i{2 * rank} int32 bounds entries between the length header and element data, which this projection does not yet model"
+                        ManagedPointerSource.Byref
+                            {
+                                Root = ByrefRoot.ArrayElement (addr, 0)
+                                Projections =
+                                    [
+                                        byteView
+                                        ByrefProjection.ByteOffset (
+                                            int<int64> (ObjectHeaderWord.multiDimArrayRawDataStart rank)
+                                        )
+                                    ]
+                            }
+                        |> Some
                     | other ->
                         failwith
                             $"RawData::Data projection encountered array at %O{addr} whose ConcreteType is not an array handle: %O{other}"

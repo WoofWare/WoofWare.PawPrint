@@ -121,8 +121,6 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 11.
     let parkedOnNet11 : Map<string, string> =
         [
-            "LockOnArray.cs",
-            """On .NET 11, `lock` on a multi-dimensional array reaches `RuntimeHelpers.GetRawData` on it, whose `RawData::Data` projection PawPrint refuses for a multi-dimensional array: "TODO: RawData::Data projection for multi-dimensional array (rank 2)". Its single-dimensional array locks before that. Un-park when that projection is modelled and the header word is placed before a multi-dimensional array's bounds."""
             "StringContentRoundTrip.cs",
             """On .NET 11, `HttpContent.LoadIntoBufferAsyncCore` in System.Net.Http is a runtime-async method: it awaits through `AsyncHelpers.Await` and returns its `Task` from an empty stack, which PawPrint does not run, and its stack-shape check refuses the body: "is executing offset 49, which is invalid IL: StackUnderflow (49, Nullary Ret, 0)". Un-park when runtime-async methods run. Verified to exit 0 on real .NET 11."""
             "ProcessStartRootedSeeded.cs",

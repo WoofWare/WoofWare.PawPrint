@@ -1028,6 +1028,23 @@ public unsafe struct PointerWrapper
         project "BaseSize" (ConcreteTypeHandle.Array (intHandle, 2))
         |> shouldEqual (CliType.Numeric (CliNumericType.Int32 (5 * NATIVE_INT_SIZE)))
 
+    /// CoreLib finds an array's element 0 `BaseSize - 2 * sizeof(nint)` bytes past its raw data
+    /// (`MemoryMarshal.GetArrayDataReference(Array)`), so where PawPrint begins a multi-dimensional
+    /// array's raw data, below its bounds block, must agree with the `BaseSize` it reports, at
+    /// every rank.
+    [<Test>]
+    let ``a multi-dimensional array's raw data is BaseSize less two words below element 0`` () : unit =
+        let intHandle = handleFor bct.Int32
+
+        for rank in 1..32 do
+            match project "BaseSize" (ConcreteTypeHandle.Array (intHandle, rank)) with
+            | CliType.Numeric (CliNumericType.Int32 baseSize) ->
+                (rank,
+                 ObjectHeaderWord.multiDimArrayRawDataStart rank
+                 + int64<int> (baseSize - 2 * NATIVE_INT_SIZE))
+                |> shouldEqual (rank, 0L)
+            | other -> failwith $"BaseSize of a rank-%d{rank} array projected as %O{other}"
+
     [<Test>]
     let ``ComponentSize is computed from the structured element type`` () : unit =
         project "ComponentSize" (ConcreteTypeHandle.OneDimArrayZero (handleFor bct.Int32))
@@ -4443,33 +4460,47 @@ public unsafe struct PointerWrapper
                 $"Expected canonical +sizeof(nint) skip to collapse to a clean byte byref at &array[0], got %O{other}"
 
     [<Test>]
-    let ``RawData data projection rejects multi-dimensional arrays`` () : unit =
+    let ``RawData data projects a multi-dimensional array below its bounds block`` () : unit =
         // CoreCLR places `2 * rank` int32 bounds entries between the length header and the
-        // first element of an MD array (`MethodTableProjection.baseSize` models this as
-        // `(3 + rank) * NATIVE_INT_SIZE`). The SZ-array projection's canonical
-        // `+sizeof(nint)` skip would therefore not land on element 0 for MD arrays, so the
-        // projection must refuse them rather than silently produce a byref to the bounds
-        // region. We fail loudly with a TODO that names the rank so a future caller knows
-        // exactly what needs modelling.
-        let state = state ()
+        // first element of an MD array, so its raw data begins `sizeof(nint) + 2 * rank * 4`
+        // bytes before element 0, and CoreLib's `BaseSize - 2 * sizeof(nint)` skip
+        // (`MemoryMarshal.GetArrayDataReference(Array)`) collapses to `&array[0]`.
+        for rank in [ 2 ; 3 ] do
+            let state = state ()
+            let arrayType = ConcreteTypeHandle.Array (handleFor bct.Int32, rank)
+            let byteView = concreteTypeFor bct.Byte
 
-        let arrayType = ConcreteTypeHandle.Array (handleFor bct.Int32, 2)
+            let arrayAddr, state =
+                IlMachineState.allocateMultiDimArray
+                    arrayType
+                    (fun () -> CliType.Numeric (CliNumericType.Int32 0))
+                    (ImmutableArray.CreateRange (List.replicate rank 2))
+                    state
 
-        let arrayAddr, state =
-            IlMachineState.allocateMultiDimArray
-                arrayType
-                (fun () -> CliType.Numeric (CliNumericType.Int32 0))
-                (ImmutableArray.Create<int> (2, 3))
-                state
+            let ptr = projectRawDataDataPointer arrayAddr state
+            let below = NATIVE_INT_SIZE + 2 * rank * 4
 
-        let ex =
-            Assert.Throws<System.Exception> (fun () ->
-                RuntimeFieldProjection.tryProjectFieldAddress bct (rawDataField "Data") arrayAddr state
-                |> ignore
-            )
+            match ptr with
+            | ManagedPointerSource.Byref {
+                                             Root = ByrefRoot.ArrayElement (actualAddr, 0)
+                                             Projections = [ ByrefProjection.ReinterpretAs view
+                                                             ByrefProjection.ByteOffset offset ]
+                                         } ->
+                actualAddr |> shouldEqual arrayAddr
+                view |> shouldEqual byteView
+                (rank, offset) |> shouldEqual (rank, -below)
+            | other ->
+                failwith
+                    $"Expected RawData::Data on a rank-%d{rank} array to project below its bounds block, got %O{other}"
 
-        ex.Message
-        |> shouldContainText "TODO: RawData::Data projection for multi-dimensional array (rank 2)"
+            match ManagedPointerSource.appendProjection (ByrefProjection.ByteOffset below) ptr with
+            | ManagedPointerSource.Byref {
+                                             Root = ByrefRoot.ArrayElement (actualAddr, 0)
+                                             Projections = [ ByrefProjection.ReinterpretAs view ]
+                                         } ->
+                actualAddr |> shouldEqual arrayAddr
+                view |> shouldEqual byteView
+            | other -> failwith $"Expected the skip past the bounds block to collapse to &array[0], got %O{other}"
 
     [<Test>]
     let ``RawData data projects reference-type heap object as a byte-view byref`` () : unit =
