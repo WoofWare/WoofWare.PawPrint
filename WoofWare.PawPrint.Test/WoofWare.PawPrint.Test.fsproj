@@ -126,6 +126,7 @@
     <Compile Include="TestMarshalByValArrayLayout.fs" />
     <Compile Include="TestStructureMarshalerRefusal.fs" />
     <Compile Include="TestRuntimeAsyncMethod.fs" />
+    <Compile Include="TestRuntimeAsyncVariant.fs" />
     <Compile Include="TestManagedHeap.fs" />
     <Compile Include="TestStaticStorage.fs" />
     <Compile Include="TestByrefContainer.fs" />

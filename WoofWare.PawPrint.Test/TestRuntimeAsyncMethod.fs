@@ -10,7 +10,8 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// `RuntimeAsyncMethod.isAsyncCall`, which .NET 11's `RuntimeMethodHandle.IsAsyncMethod` FCall
-/// answers, checked against real .NET 11 over every method two framework assemblies declare.
+/// answers, and `RuntimeAsyncMethod.hasAsyncCallingConvention` of the method a MethodDef's token binds,
+/// checked against real .NET 11 over every method two framework assemblies declare.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestRuntimeAsyncMethod =
@@ -117,6 +118,24 @@ public static class Program
                                 match isAsync with
                                 | Ok isAsync -> isAsync
                                 | Error failure -> failwith (TypeBindingFailure.describe failure)
+
+                            // The MethodDesc a MethodDef's token binds has the async calling
+                            // convention exactly when `IsAsyncMethod` says it is async.
+                            let assemblies, convention =
+                                RuntimeAsyncMethod.hasAsyncCallingConvention
+                                    loggerFactory
+                                    [ frameworkDirectory ]
+                                    images.Head
+                                    image
+                                    method
+                                    assemblies
+
+                            match convention with
+                            | Ok convention when convention = isAsync -> ()
+                            | Ok convention ->
+                                failwith
+                                    $"%O{method}: hasAsyncCallingConvention says %b{convention}, isAsyncCall says %b{isAsync}"
+                            | Error failure -> failwith (TypeBindingFailure.describe failure)
 
                             let declaresAsync =
                                 facts.ImplAttributes.HasFlag RuntimeAsyncMethod.asyncImplAttribute
