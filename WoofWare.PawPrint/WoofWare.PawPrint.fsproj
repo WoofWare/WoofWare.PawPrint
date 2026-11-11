@@ -133,6 +133,7 @@
     <Compile Include="Intrinsics.fs" />
     <Compile Include="Blittability.fs" />
     <Compile Include="IlMachineStateExecution.fs" />
+    <Compile Include="AsyncContextSaving.fs" />
     <Compile Include="StructMarshalStub.fs" />
     <Compile Include="DelegateInvocations.fs" />
     <Compile Include="MulticastDelegateStub.fs" />
@@ -144,6 +145,7 @@
     <Compile Include="DynamicMethodBody.fs" />
     <Compile Include="DynamicMethodExecution.fs" />
     <Compile Include="UnaryMetadataIlOpContext.fs" />
+    <Compile Include="VmStubOperand.fs" />
     <Compile Include="Boxing.fs" />
     <Compile Include="UnaryMetadataCallOps.fs" />
     <Compile Include="UnaryMetadataObjectOps.fs" />

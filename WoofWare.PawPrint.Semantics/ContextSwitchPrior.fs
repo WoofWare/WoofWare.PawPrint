@@ -459,7 +459,10 @@ module ContextSwitchPrior =
         // rewrite the entry at any time — so it must not keep the lower prior.
         | IlOp.UnaryMetadataToken (_, MetadataOperand.FromDynamicScope _)
         | IlOp.UnaryStringToken (_, StringOperand.FromDynamicScope _) -> ContextSwitchPrior.AlwaysGuestVisible
-        | IlOp.UnaryMetadataToken (op, MetadataOperand.FromMetadata _) -> ofUnaryMetadata op
+        // A stub's operand is fixed when the runtime emits the stub, as a metadata token is when the
+        // image is loaded, so the opcode alone decides.
+        | IlOp.UnaryMetadataToken (op, MetadataOperand.FromMetadata _)
+        | IlOp.UnaryMetadataToken (op, MetadataOperand.FromStubScope _) -> ofUnaryMetadata op
         | IlOp.UnaryStringToken (op, StringOperand.FromMetadata _) -> ofUnaryString op
         // Multi-target branch on the integer at the top of the eval
         // stack; pure frame-local control flow.

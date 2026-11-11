@@ -98,6 +98,9 @@ type ExceptionCatchType =
     /// to. Resolved when that method is first prepared for execution, which is where CoreCLR
     /// resolves it too — see <c>DynamicMethodExecution.concretize</c>.
     | FromDynamicScope of index : int
+    /// An entry of the operands of the stub the runtime emits for the method whose body the clause
+    /// belongs to, as `MetadataOperand.FromStubScope` names one for an instruction.
+    | FromStubScope of index : int
 
 type ExceptionRegion =
     | Filter of filterOffset : int * ExceptionOffset

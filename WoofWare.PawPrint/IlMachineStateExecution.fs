@@ -961,6 +961,69 @@ module IlMachineStateExecution =
                         | _ ->
                             failwith
                                 $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces a call to this method with the address the calling method's next call returns to. PawPrint has no representation of a code address, so it runs only a `call` whose next instruction pops the address unread, as CoreLib's reflection invoke stubs do (`InvokerEmitUtil`); this call is not one (%s{MethodOwner.describe activeMethodState.ExecutingMethod.Owner}::%s{activeMethodState.ExecutingMethod.Name} at IL_%04X{activeMethodState.IlOpIndex}: %A{callSite})"
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.AsyncHelpers"
+                        && key.MethodName = "AsyncCallContinuation"
+                        ->
+                        // The hidden continuation the caller's last runtime-async call returned, which
+                        // the JIT reads from its return register (`GT_ASYNC_CONTINUATION`) and
+                        // CoreCLR's interpreter from a side slot it clears as it reads
+                        // (`INTOP_GET_CONTINUATION`).
+                        match activeMethodState.AsyncFrame with
+                        | Some _ ->
+                            // CoreCLR's interpreter calls this bad code (compiler.cpp): a method with
+                            // the async calling convention suspends on a continuation rather than
+                            // reading it.
+                            failwith
+                                $"%s{Intrinsics.formatMethodKey key}: called from %O{activeMethodState.ExecutingMethod}, which has runtime async's calling convention; only code without it (the task-returning thunk, the resumption stub) reads a call's hidden continuation"
+                        | None ->
+
+                        let continuation = activeMethodState.AsyncCallContinuation
+
+                        let state =
+                            state
+                            |> IlMachineState.mapFrame
+                                thread
+                                threadState.ActiveMethodState
+                                (fun frame ->
+                                    { frame with
+                                        AsyncCallContinuation = None
+                                    }
+                                )
+                            |> IlMachineState.pushToEvalStack (CliType.ObjectRef continuation) thread
+
+                        let state =
+                            if advanceProgramCounterOfCaller then
+                                IlMachineState.advanceProgramCounter thread state
+                            else
+                                state
+
+                        IntrinsicOutcome.Handled (state, CallCommitment.Committed)
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.RuntimeHelpers"
+                        && key.MethodName = "IsRuntimeAsync"
+                        ->
+                        // `compIsAsync()` of the calling method (importercalls.cpp), which is whether
+                        // it has runtime async's calling convention.
+                        let state =
+                            IlMachineState.pushToEvalStack
+                                (CliType.ofBool activeMethodState.AsyncFrame.IsSome)
+                                thread
+                                state
+
+                        let state =
+                            if advanceProgramCounterOfCaller then
+                                IlMachineState.advanceProgramCounter thread state
+                            else
+                                state
+
+                        IntrinsicOutcome.Handled (state, CallCommitment.Committed)
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.AsyncHelpers"
+                        && (key.MethodName = "TailAwait" || key.MethodName = "AsyncSuspend")
+                        ->
+                        failwith
+                            $"TODO: %O{activeMethodState.ExecutingMethod} calls AsyncHelpers.%s{key.MethodName}, which suspends the runtime-async methods on the stack until the task an await found pending completes. PawPrint does not yet suspend a runtime-async method (docs/plans/2026-11-11-runtime-async.md, stage 2b)"
                     | IntrinsicBody.CallSiteExpansion ->
                         failwith
                             $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces every call to this method with code of its own, and its IL is not what runs. Only code the runtime generates (IL stubs, the async resumption stub) and runtime-async methods call it, and PawPrint models none of those replacements"
@@ -984,7 +1047,9 @@ module IlMachineStateExecution =
         | IntrinsicOutcome.Handled (state, commitment) -> state, commitment
         | IntrinsicOutcome.RunBody (state, methodToCall) ->
 
-        let state, methodToCall =
+        // What of runtime async's machinery the frame carries: the stub it runs in place of the
+        // method's own body, and what it keeps of runtime async's calling convention.
+        let state, methodToCall, vmStub, asyncFrame =
             match methodToCall.Body with
             | MethodBody.MissingIl ->
                 failwith
@@ -1003,17 +1068,40 @@ module IlMachineStateExecution =
                         methodToCall
                         state.TypeSystem._LoadedAssemblies
                 with
-                | assemblies, Ok true ->
-                    { state with
-                        TypeSystem =
-                            { state.TypeSystem with
-                                _LoadedAssemblies = assemblies
-                            }
-                    },
-                    MethodInfo.setMethodVars (MethodBody.Il instructions) methodToCall.Signature methodToCall
-                | _, Ok false ->
-                    failwith
-                        $"TODO: calling the ordinary variant of %O{methodToCall}, a runtime-async method (MethodImplAttributes.Async) returning a promise type. CoreCLR runs the task-returning thunk the VM emits in its place, which calls the async variant that owns this IL; PawPrint does not yet emit that thunk"
+                | assemblies, Ok hasAsyncConvention ->
+                    let state =
+                        { state with
+                            TypeSystem =
+                                { state.TypeSystem with
+                                    _LoadedAssemblies = assemblies
+                                }
+                        }
+
+                    if hasAsyncConvention then
+                        let asyncFrame =
+                            match methodToCall.TryVariant with
+                            | Some MethodVariant.AsyncVariant ->
+                                // Only a method flagged `Async` has an async variant
+                                // (`RuntimeAsyncMethod.asyncVariantOf`), and its body is
+                                // user-written.
+                                AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture
+                            | Some MethodVariant.Ordinary
+                            | None -> AsyncFrame.Transparent
+
+                        state,
+                        MethodInfo.setMethodVars (MethodBody.Il instructions) methodToCall.Signature methodToCall,
+                        None,
+                        Some asyncFrame
+                    else
+                        let facts = MethodInfo.requireMetadata "the task-returning thunk" methodToCall
+
+                        let stub =
+                            TaskReturningThunk.ofMethod baseClassTypes.Corelib declaringAssy.Methods.[facts.Handle]
+
+                        state,
+                        MethodInfo.setMethodVars (MethodBody.Il stub.Body) methodToCall.Signature methodToCall,
+                        Some stub,
+                        None
                 // CoreCLR classified the method when it loaded the declaring type, which PawPrint has
                 // loaded too.
                 | _, Error failure ->
@@ -1023,7 +1111,15 @@ module IlMachineStateExecution =
             | MethodBody.InternalCall
             | MethodBody.PInvoke
             | MethodBody.RuntimeProvided _
-            | MethodBody.Abstract -> state, methodToCall
+            | MethodBody.Abstract -> state, methodToCall, None, None
+
+        // Decision 7 of docs/plans/2026-11-11-runtime-async.md: the caller reads the hidden
+        // continuation of its last runtime-async call before it calls anything else.
+        match activeMethodState.AsyncCallContinuation with
+        | None -> ()
+        | Some continuation ->
+            failwith
+                $"BUG: %O{activeMethodState.ExecutingMethod} is calling %O{methodToCall} while it holds the continuation %O{continuation} that a runtime-async call returned, which it has not read through AsyncHelpers.AsyncCallContinuation()"
 
         // Get zero values for all parameters.
         //
@@ -1173,7 +1269,12 @@ module IlMachineStateExecution =
                     args
                     returnInfo
             with
-            | Ok frame -> state, frame
+            | Ok frame ->
+                state,
+                { frame with
+                    VmStub = vmStub
+                    AsyncFrame = asyncFrame
+                }
             | Error toLoad ->
                 let state' =
                     (state, toLoad)

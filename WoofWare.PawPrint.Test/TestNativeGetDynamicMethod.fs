@@ -1677,6 +1677,8 @@ public class Box<T>
                 | MetadataOperand.FromDynamicScope index -> Some index
                 | MetadataOperand.FromMetadata token ->
                     failwith $"expected a dynamic-scope operand, got the metadata token %O{token.Token}"
+                | MetadataOperand.FromStubScope index ->
+                    failwith $"expected a dynamic-scope operand, got stub-scope operand %d{index}"
             | _ -> None
         )
 
@@ -1693,6 +1695,8 @@ public class Box<T>
                 | MetadataOperand.FromDynamicScope index -> Some index
                 | MetadataOperand.FromMetadata token ->
                     failwith $"expected a dynamic-scope operand, got the metadata token %O{token.Token}"
+                | MetadataOperand.FromStubScope index ->
+                    failwith $"expected a dynamic-scope operand, got stub-scope operand %d{index}"
             | _ -> None
         )
 
@@ -1779,6 +1783,8 @@ public class Box<T>
                 | MetadataOperand.FromDynamicScope index -> Some index
                 | MetadataOperand.FromMetadata token ->
                     failwith $"expected a dynamic-scope operand, got the metadata token %O{token.Token}"
+                | MetadataOperand.FromStubScope index ->
+                    failwith $"expected a dynamic-scope operand, got stub-scope operand %d{index}"
             | _ -> None
         )
 
@@ -1856,6 +1862,8 @@ public class Box<T>
                 | MetadataOperand.FromDynamicScope index -> Some index
                 | MetadataOperand.FromMetadata token ->
                     failwith $"expected a dynamic-scope operand, got the metadata token %O{token.Token}"
+                | MetadataOperand.FromStubScope index ->
+                    failwith $"expected a dynamic-scope operand, got stub-scope operand %d{index}"
             | _ -> None
         )
 

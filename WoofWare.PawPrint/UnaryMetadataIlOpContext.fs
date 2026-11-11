@@ -59,6 +59,10 @@ type internal ResolvedMetadataOperand =
     /// <c>System.Void</c> all reach here, and all are legal for the only opcode that asks,
     /// <c>ldtoken</c>.
     | ScopeTypeTarget of RuntimeTypeHandleTarget
+    /// A method an operand of the stub the executing frame runs names, which no token of any image
+    /// names: an async variant, or a CoreLib method at an instantiation the stub's method supplies.
+    /// Concretised, since the runtime resolved it when it emitted the stub. Only `call` names one.
+    | StubMethod of WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
 
 /// <summary>
 /// <see cref="ResolvedMetadataOperand"/> as an op whose operand names a *type* sees it.
@@ -141,6 +145,9 @@ type internal UnaryMetadataIlOpContext =
         | ResolvedMetadataOperand.ScopeTypeTarget _ ->
             failwith
                 $"TODO: %O{this.Op} read its operand as a metadata token, but this operand names a DynamicScope entry. IlDecoding.scopeOperandKind lists this opcode as scope-resolvable, so the op needs a matching ResolvedMetadataOperand arm; the two have gone out of step."
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: %O{this.Op} read its operand as a metadata token, but this operand names %O{method}, which an operand of a runtime-emitted stub names and no token does; only call accepts one"
 
     /// <summary>
     /// This operand, for an op whose operand names a type.
@@ -163,6 +170,9 @@ type internal UnaryMetadataIlOpContext =
         | ResolvedMetadataOperand.ScopeTypeTarget _ ->
             failwith
                 $"BUG: %O{this.Op} reads its operand as a closed type, but this one names an unnarrowed DynamicScope target. IlDecoding.scopeOperandKind says AnyType for this opcode, which only ldtoken should be; read it through LdtokenOperand instead."
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: %O{this.Op} reads its operand as a type, but this one names the method %O{method}, an operand of a runtime-emitted stub"
 
     /// <summary>
     /// This operand, for an op whose operand names a field.
@@ -179,6 +189,9 @@ type internal UnaryMetadataIlOpContext =
         | ResolvedMetadataOperand.ScopeTypeTarget _ ->
             failwith
                 $"BUG: %O{this.Op} reads its operand as a field, but this one names a type or a method in the DynamicScope. IlDecoding.scopeOperandKind decides which kind an opcode's scope operand is read as, and it does not say Field for this opcode."
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: %O{this.Op} reads its operand as a field, but this one names the method %O{method}, an operand of a runtime-emitted stub"
 
     /// <summary>
     /// This operand, for <c>ldtoken</c>.
@@ -198,6 +211,9 @@ type internal UnaryMetadataIlOpContext =
         | ResolvedMetadataOperand.ScopeField _ ->
             failwith
                 $"BUG: %O{this.Op} reads its operand as an ldtoken target, but this one is a narrowed type, a method or a field in the DynamicScope. IlDecoding.scopeOperandKind says AnyType for ldtoken, so only ScopeTypeTarget should reach here."
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: %O{this.Op} reads its operand as an ldtoken target, but this one names the method %O{method}, an operand of a runtime-emitted stub"
 
     /// The metadata token this operand is. Partial in exactly the way <see cref="ActiveAssembly"/>
     /// is, and for the same reason.
@@ -210,6 +226,9 @@ type internal UnaryMetadataIlOpContext =
         | ResolvedMetadataOperand.ScopeTypeTarget _ ->
             failwith
                 $"TODO: %O{this.Op} read its operand as a metadata token, but this operand names a DynamicScope entry. IlDecoding.scopeOperandKind lists this opcode as scope-resolvable, so the op needs a matching ResolvedMetadataOperand arm; the two have gone out of step."
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: %O{this.Op} read its operand as a metadata token, but this operand names %O{method}, which an operand of a runtime-emitted stub names and no token does; only call accepts one"
 
 [<RequireQualifiedAccess>]
 module internal UnaryMetadataIlOpContext =

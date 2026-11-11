@@ -234,6 +234,14 @@ type MetadataOperand =
     /// (`DynamicILGenerator.cs:772`) reads `m_scope[token]` at JIT, and a guest that replaces the
     /// entry between minting the method and first invoking it sees the *new* type.
     | FromDynamicScope of scopeIndex : int
+    /// Entry <paramref name="scopeIndex"/> of the operands of the stub the runtime emits for the
+    /// executing method, which the runtime resolved itself (CoreCLR's `TokenLookupMap`): what an
+    /// instruction names that no token of any image names, such as a method's async variant or a
+    /// CoreLib method instantiated over a type of the method's own signature.
+    ///
+    /// The index and nothing else, as for `FromDynamicScope`: the stub's operands belong to the stub,
+    /// and the frame running it holds them.
+    | FromStubScope of scopeIndex : int
 
 /// A string token operand together with the assembly whose string heap owns it.
 /// CLI string tokens are only meaningful relative to a module, so executable IL

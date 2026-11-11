@@ -47,6 +47,14 @@ module StackFrameCapture =
         | _ -> false
 
     /// <summary>
+    /// Whether <paramref name="frame" /> runs a stub the runtime emits in place of its method's own
+    /// body (<c>MethodState.VmStub</c>), such as a runtime-async method's task-returning thunk, which
+    /// no trace CoreCLR builds reports, and no stack-crawl mark's walk counts
+    /// (<c>MethodDesc::IsDiagnosticsHidden</c>, method.inl).
+    /// </summary>
+    let isVmStub (frame : MethodState) : bool = frame.VmStub.IsSome
+
+    /// <summary>
     /// Whether <paramref name="frame" /> is CoreLib's <c>System.Environment.CallEntryPoint</c>,
     /// through which .NET 11's VM calls <c>Main</c>, and which no trace CoreCLR builds reports:
     /// neither a captured trace (debugdebugger.cpp's <c>GetStackFramesCallback</c>) nor an
@@ -159,7 +167,7 @@ module StackFrameCapture =
             )
 
             let acc =
-                if isDelegateInvokeStub frame || isEntryPointCaller frame then
+                if isDelegateInvokeStub frame || isVmStub frame || isEntryPointCaller frame then
                     acc
                 else
                     describe frame ilOffset :: acc

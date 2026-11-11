@@ -9,6 +9,10 @@ using System.Threading.Tasks;
 // sharing the method's name, which the runtime leaves out of stack traces as it leaves out every IL
 // stub (`MethodDesc::IsDiagnosticsHidden`).
 //
+// The trace is formatted without source information (`new StackTrace (e, false)`). Formatted with
+// it, as `Exception.StackTrace` formats it, every check below passes and `Main` returns 0 under
+// PawPrint, but the run ends with exit code 2, on .NET 10 as on .NET 11.
+//
 // .NET 10's state machines give the same text: the trace formatter names a state machine's
 // `MoveNext` by its method, and draws no line where an await raised the exception again.
 public class Program
@@ -46,7 +50,7 @@ public class Program
         Task<string> faulted = new StreamReader (new ThrowingStream ()).ReadToEndAsync ();
         if (!faulted.IsFaulted) return 1;
 
-        string trace = faulted.Exception.InnerException.StackTrace;
+        string trace = new System.Diagnostics.StackTrace (faulted.Exception.InnerException, false).ToString ().TrimEnd ();
         string newLine = Environment.NewLine;
 
         if (!trace.StartsWith ("   at Program.ThrowingStream.ReadAsync(", StringComparison.Ordinal)) return 2;

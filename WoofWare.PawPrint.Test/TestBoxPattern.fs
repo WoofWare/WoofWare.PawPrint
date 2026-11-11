@@ -245,7 +245,8 @@ module TestBoxPattern =
                 // The only type specification any step names.
                 | MetadataToken.TypeSpecification _ -> "Nullable`1"
                 | other -> failwith $"BUG: a step names %O{other}"
-            | MetadataOperand.FromDynamicScope _ -> failwith "BUG: a body read from an image has no scope operand"
+            | MetadataOperand.FromDynamicScope _
+            | MetadataOperand.FromStubScope _ -> failwith "BUG: a body read from an image has no scope operand"
 
         // What `BoxPattern` says of the box in `M<index>`. Every type a step names is exact, so the
         // JIT proves two equal where they are the same, and decides every cast but to a nullable.

@@ -1606,11 +1606,17 @@ module NullaryIlOp =
             |> Tuple.withRight WhatWeDid.Executed
             |> ExecutionResult.stepped
         | Ret ->
+            match AsyncContextSaving.beforeReturn loggerFactory corelib currentThread state with
+            | Some restoring -> restoring
+            | None ->
+
             match IlMachineState.returnStackFrame loggerFactory corelib currentThread state with
             | ReturnFrameResult.NoFrameToReturn -> ExecutionResult.Terminated (state, currentThread)
             | ReturnFrameResult.NormalReturn state -> (state, WhatWeDid.Executed) |> ExecutionResult.stepped
             | ReturnFrameResult.ResumeVmRaise (state, step) ->
                 IlMachineStateExecution.resumeVmRaise loggerFactory corelib step currentThread state
+            | ReturnFrameResult.ResumeAsyncContexts (state, step) ->
+                AsyncContextSaving.resume loggerFactory corelib step currentThread state
             | ReturnFrameResult.DispatchException (state, exnAddr, exnType, making) ->
                 let state, origin =
                     match making with

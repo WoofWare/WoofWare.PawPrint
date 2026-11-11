@@ -4452,6 +4452,11 @@ module EscapeAnalysis =
                 match operand with
                 // No metadata names the field, so nothing says whose initializer runs.
                 | MetadataOperand.FromDynamicScope _ -> state, [], [], [ offset, Opacity.IndirectCall, None ]
+                // The analysis reads only bodies of PE images (a task-returning thunk is
+                // `Opacity.TaskReturningThunk`), whose operands are metadata.
+                | MetadataOperand.FromStubScope index ->
+                    failwith
+                        $"BUG: %O{op} at offset %d{offset} names operand %d{index} of a runtime-emitted stub, which no body the analysis reads has"
                 | MetadataOperand.FromMetadata token ->
 
                 match staticFieldOwner state token.Token with
@@ -5015,6 +5020,10 @@ module EscapeAnalysis =
                     match operand, methodTarget, selfCall with
                     | MetadataOperand.FromDynamicScope _, _, _ ->
                         state, raises, (offset, Opacity.IndirectCall, None) :: opaque, calls
+                    // The analysis reads only bodies of PE images, whose operands are metadata.
+                    | MetadataOperand.FromStubScope index, _, _ ->
+                        failwith
+                            $"BUG: %O{call} at offset %d{offset} names operand %d{index} of a runtime-emitted stub, which no body the analysis reads has"
                     | MetadataOperand.FromMetadata _, Some (CallTarget.Method callee), Some expansion when
                         callee.Callee = key
                         && call <> UnaryMetadataTokenIlOp.Newobj

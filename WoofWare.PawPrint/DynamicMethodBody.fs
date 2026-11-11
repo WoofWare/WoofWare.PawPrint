@@ -372,6 +372,9 @@ module internal DynamicMethodBody =
             | ExceptionRegion.Catch (ExceptionCatchType.FromMetadata token, _) ->
                 failwith
                     $"BUG: %s{operation} decoded a catch clause carrying the metadata token %O{token}; a dynamic method's clause types come from its DynamicScope"
+            | ExceptionRegion.Catch (ExceptionCatchType.FromStubScope index, _) ->
+                failwith
+                    $"BUG: %s{operation} decoded a catch clause naming operand %d{index} of a runtime-emitted stub; a dynamic method's clause types come from its DynamicScope"
             | ExceptionRegion.Catch (ExceptionCatchType.FromDynamicScope _, _)
             | ExceptionRegion.Filter _
             | ExceptionRegion.Finally _

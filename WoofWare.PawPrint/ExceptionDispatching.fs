@@ -38,10 +38,33 @@ module ExceptionDispatching =
         (typeGenerics : ImmutableArray<ConcreteTypeHandle>)
         (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
         (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, 'methodVar>)
+        (stub : VmStub option)
         (catchType : ExceptionCatchType)
         : IlMachineState * ConcreteTypeHandle
         =
         match catchType with
+        | ExceptionCatchType.FromStubScope index ->
+            match stub with
+            | None ->
+                failwith
+                    $"BUG: a catch clause of %s{method.Name} names operand %d{index} of a stub the runtime emits, but the frame runs no stub"
+            | Some stub ->
+
+            match stub.Operands.[index] with
+            | StubOperand.CoreLibType handle ->
+                let definition = baseClassTypes.Corelib.TypeDefs.[handle]
+
+                IlMachineState.concretizeType
+                    loggerFactory
+                    baseClassTypes
+                    state
+                    baseClassTypes.Corelib.DefinitionFullName
+                    ImmutableArray.Empty
+                    ImmutableArray.Empty
+                    (TypeDefn.FromDefinition (definition.Identity, System.Reflection.Metadata.SignatureTypeKind.Class))
+            | other ->
+                failwith
+                    $"BUG: a catch clause of %s{method.Name} names operand %d{index} of the stub it runs, %O{other}, which is not a type"
         | ExceptionCatchType.FromMetadata catchTypeToken ->
             let state, catchTypeDefnResult =
                 IlMachineState.resolveTypeMetadataToken loggerFactory baseClassTypes state activeAssy catchTypeToken
@@ -107,11 +130,21 @@ module ExceptionDispatching =
         (methodGenerics : ImmutableArray<ConcreteTypeHandle>)
         (matchType : ConcreteTypeHandle)
         (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, 'methodVar>)
+        (stub : VmStub option)
         (catchType : ExceptionCatchType)
         : IlMachineState * bool
         =
         let state, catchTypeHandle =
-            catchClauseType loggerFactory baseClassTypes state activeAssy typeGenerics methodGenerics method catchType
+            catchClauseType
+                loggerFactory
+                baseClassTypes
+                state
+                activeAssy
+                typeGenerics
+                methodGenerics
+                method
+                stub
+                catchType
 
         let rec walk (state : IlMachineState) (current : ConcreteTypeHandle) : IlMachineState * bool =
             if current = catchTypeHandle then
@@ -203,7 +236,13 @@ module ExceptionDispatching =
     ///
     /// The frame stays on the stack and in the trace either way; it is only its clauses that are
     /// out of scope, for both passes. A frame that never began has no `finally` to run either.
-    let private hasNotStarted (frame : MethodState) : bool = frame.PendingTypeInit.IsSome
+    ///
+    /// A user-written runtime-async body that has yet to capture the thread's contexts has not
+    /// begun either: CoreCLR's JIT calls `AsyncHelpers.CaptureContexts` before every region of the
+    /// body (`SaveAsyncContexts`, jit/async.cpp).
+    let private hasNotStarted (frame : MethodState) : bool =
+        frame.PendingTypeInit.IsSome
+        || frame.AsyncFrame = Some (AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture)
 
     /// What `exceptionObject`, of type `exceptionType`, wraps if it is a
     /// `RuntimeWrappedException` (its `_wrappedException`, which may be null), and `None` if it is
@@ -294,6 +333,7 @@ module ExceptionDispatching =
         (exceptionObject : ManagedHeapAddress)
         (exceptionType : ConcreteTypeHandle)
         (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, 'methodVar>)
+        (stub : VmStub option)
         (skippedFilters : ExceptionFilterRegion list)
         : IlMachineState * WoofWare.PawPrint.ExceptionRegion option
         =
@@ -338,6 +378,7 @@ module ExceptionDispatching =
                         method.Generics
                         (typedClauseMatchType baseClassTypes state activeAssy exceptionObject exceptionType)
                         method
+                        stub
                         catchType
 
                 if catches then state, Some region else offer state rest
@@ -664,7 +705,10 @@ module ExceptionDispatching =
         (state : IlMachineState)
         : IlMachineState * CliException<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
         =
-        if StackFrameCapture.isDelegateInvokeStub caller then
+        if
+            StackFrameCapture.isDelegateInvokeStub caller
+            || StackFrameCapture.isVmStub caller
+        then
             state, cliException
         elif StackFrameCapture.isEntryPointCaller caller then
             // CoreCLR's `AppendElement` clears a pending foreign-raise flag before it declines to
@@ -780,6 +824,7 @@ module ExceptionDispatching =
                 search.Exception.ExceptionObject
                 search.ExceptionType
                 frame.ExecutingMethod
+                frame.VmStub
                 search.SkippedFilters
 
         match accepting with
@@ -854,6 +899,9 @@ module ExceptionDispatching =
         | ExceptionEscape.UnhandledAtNativeCaller runtimeCaller ->
             failwith
                 $"An exception escaped %s{frame.ExecutingMethod.Name}, an [UnmanagedCallersOnly] method which the runtime called from %s{runtimeCaller}. No exception may unwind into native code there: real .NET ends the process, which PawPrint does not model, so it refuses to continue."
+        | ExceptionEscape.AsyncContextHelper ->
+            failwith
+                $"TODO: an exception escaped %s{frame.ExecutingMethod.Name}, which the runtime called for the contexts of the runtime-async body beneath it. CoreCLR's JIT makes that call outside the body's handlers, so the exception would leave the body without restoring its contexts again; PawPrint does not model that, and refuses to continue."
         | ExceptionEscape.Propagate
         | ExceptionEscape.WrapInTargetInvocation ->
 
@@ -1048,6 +1096,9 @@ module ExceptionDispatching =
         | ExceptionEscape.UnhandledAtNativeCaller runtimeCaller ->
             failwith
                 $"Logic error: the second pass of exception dispatch unwound past an [UnmanagedCallersOnly] method that %s{runtimeCaller} calls, through which no exception may unwind; the first pass refuses to search past such a frame"
+        | ExceptionEscape.AsyncContextHelper ->
+            failwith
+                "Logic error: the second pass of exception dispatch unwound past a helper the runtime called for a runtime-async body's contexts; the first pass refuses to search past such a frame"
         | ExceptionEscape.RaisedAgainFromCaller ->
             // `WrapNonCompliantException`'s `EX_CATCH` hands the exception back to `IL_Throw`,
             // which dispatches it from the `throw`. That raise continues the trace the exception
@@ -1207,6 +1258,32 @@ module ExceptionDispatching =
         if atTarget then
             deliverToTarget loggerFactory corelib state currentThread frame threadState unwind
         else
+
+        match frame.AsyncFrame with
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured contexts)) ->
+            // The fault handler CoreCLR's JIT wraps round a user-written runtime-async body
+            // (`SaveAsyncContexts`, jit/async.cpp) calls `AsyncHelpers.RestoreContexts`, which is
+            // managed code, as the exception leaves it. The frame's next step makes that call, and
+            // the unwind resumes from here once it returns (`resumeUnwindAfterContextRestore`).
+            let threadState =
+                ThreadState.setFrame
+                    unwind.Frame
+                    (MethodState.withAsyncContextHandling
+                        (AsyncContextHandling.RestoringOnUnwind (contexts, unwind))
+                        frame)
+                    threadState
+
+            { state with
+                ThreadState = state.ThreadState |> Map.add currentThread threadState
+            }
+            |> ExceptionDispatchResult.Dispatched
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.RestoringOnUnwind _)) ->
+            failwith
+                $"BUG: the second pass of exception dispatch reached %O{frame.ExecutingMethod} again while its contexts were still to be restored for an earlier unwind"
+        | Some (AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture)
+        | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
+        | Some AsyncFrame.Transparent
+        | None ->
 
         match frame.ReturnState with
         | None ->
@@ -1447,6 +1524,27 @@ module ExceptionDispatching =
             { unwind with
                 PC = threadState.MethodState.IlOpIndex
             }
+
+    /// Resume a second-pass unwind that left a user-written runtime-async body's frame to restore
+    /// the thread's contexts, now that `AsyncHelpers.RestoreContexts` has returned to it. The caller
+    /// has marked the frame's contexts restored.
+    let resumeUnwindAfterContextRestore
+        (loggerFactory : ILoggerFactory)
+        (corelib : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (currentThread : ThreadId)
+        (unwind : ExceptionUnwindState<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        : ExceptionDispatchResult
+        =
+        let threadState = state.ThreadState.[currentThread]
+
+        if threadState.ActiveMethodState <> unwind.Frame then
+            failwith
+                $"Logic error: AsyncHelpers.RestoreContexts resumed an unwind parked on frame %O{unwind.Frame} while the thread was executing frame %O{threadState.ActiveMethodState}"
+
+        // The unwind as it was parked: every cleanup clause of the frame between its program counter
+        // and the frame's boundary had already run.
+        secondPass loggerFactory corelib state currentThread unwind
 
     /// CoreCLR's `ExceptionObject::ClearStackTraceForThrow` (object.h): null the three fields a
     /// previous raise, or a guest's own write, left a trace in — `_remoteStackTraceString`,

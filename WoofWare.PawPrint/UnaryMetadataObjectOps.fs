@@ -545,6 +545,9 @@ module internal UnaryMetadataObjectOps =
                     | Error (_, why) ->
                         failwith
                             $"TODO: the box of byref-like %O{boxed} in dynamic method %s{method.Name} at offset %d{frame.IlOpIndex} is followed by an instruction whose DynamicScope entry %d{scopeIndex} the JIT refuses (%s{why}); it raises that refusal as it matches the pattern, which PawPrint does not model"
+                | MetadataOperand.FromStubScope index ->
+                    failwith
+                        $"BUG: a box in %s{method.Name} at offset %d{frame.IlOpIndex} is followed by an instruction naming operand %d{index} of a runtime-emitted stub, and no stub PawPrint emits boxes"
 
             match TypeOperand.refusal baseClassTypes state.TypeSystem.ConcreteTypes handle with
             | Some refusal -> state, Error refusal

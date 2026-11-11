@@ -6946,7 +6946,7 @@ module TestImpureCases =
     [<Test>]
     let ``FileSystemWatcher on the pinned linux-x64 CoreLib raises an event for each change, and ends`` () : unit =
         Net11Frontier.park (
-            "On .NET 11's linux-x64 CoreLib, `Watcher.Start` calls `Watcher.DequeueEvents`, a runtime-async method returning a promise type, whose task-returning thunk PawPrint does not yet emit: \"TODO: calling the ordinary variant of System.IO.FileSystem.Watcher.Watcher.DequeueEvents, a runtime-async method (MethodImplAttributes.Async) returning a promise type\" (measured on 11.0.0-rc.1, 2026-11-11). Un-park when runtime-async methods run."
+            "On .NET 11's linux-x64 CoreLib, `Watcher.Start` calls `Watcher.DequeueEvents`, a runtime-async method returning a promise type, whose await of the inotify read finds it pending and asks CoreLib's await helper to suspend, which PawPrint does not yet do: \"TODO: System.Private.CoreLib.AsyncHelpers.Await calls AsyncHelpers.TailAwait, which suspends the runtime-async methods on the stack until the task an await found pending completes. PawPrint does not yet suspend a runtime-async method\" (measured on 11.0.0-rc.1, 2026-11-11). Un-park when runtime-async methods suspend and resume (docs/plans/2026-11-11-runtime-async.md, stages 2b and 3)."
         )
 
         // On a macOS host the framework under test is a Darwin CoreLib, whose

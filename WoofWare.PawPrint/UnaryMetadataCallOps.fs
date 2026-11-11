@@ -783,6 +783,10 @@ module internal UnaryMetadataCallOps =
                      |> List.map RuntimeExceptionField.Message)
                     ctx.Thread
                     state
+        | ResolvedMetadataOperand.StubMethod method ->
+            // The runtime resolved the callee when it emitted the stub, which has no `constrained.`
+            // prefix, and calls it directly (`EmitCALL`).
+            enterCallee ctx method state
         | ResolvedMetadataOperand.FromMetadata _
         | ResolvedMetadataOperand.ScopeType _
         | ResolvedMetadataOperand.ScopeField _
@@ -1012,6 +1016,9 @@ module internal UnaryMetadataCallOps =
         // `ctx.MetadataToken` are partial, and a scope operand has neither.
         match ctx.Operand with
         | ResolvedMetadataOperand.ScopeMethod callee -> executeScopeCallvirt ctx callee state
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: callvirt names %O{method}, an operand of a runtime-emitted stub, but the stubs PawPrint emits name methods only with call"
         | ResolvedMetadataOperand.FromMetadata _
         | ResolvedMetadataOperand.ScopeType _
         | ResolvedMetadataOperand.ScopeField _

@@ -166,6 +166,9 @@ module IlMachineThreadState =
                 | ReturnValueDisposition.ResumeVmRaise _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of the runtime's wrapping of a thrown non-exception"
+                | ReturnValueDisposition.ResumeAsyncContexts _ ->
+                    failwith
+                        $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of a runtime-async body's context handling"
                 | ReturnValueDisposition.Discard ->
                     // A trampoline has no value of its own to discard: the concrete callee it
                     // dispatches to produces the return value, and does so into the caller this
@@ -246,6 +249,12 @@ module IlMachineThreadState =
                 failwith
                     $"Invalid CIL: method %s{returningMethodState.ExecutingMethod.Name} returned with more than one evaluation stack value"
 
+        match returningMethodState.AsyncCallContinuation with
+        | None -> ()
+        | Some continuation ->
+            failwith
+                $"BUG: %O{returningMethodState.ExecutingMethod} is returning while it holds the continuation %O{continuation} that a runtime-async call returned, which it has not read through AsyncHelpers.AsyncCallContinuation()"
+
         match returningMethodState.ReturnState with
         | None -> ReturnFrameResult.NoFrameToReturn
         | Some returnState ->
@@ -261,6 +270,21 @@ module IlMachineThreadState =
             threadStateAtEndOfMethod
             |> ThreadState.setActiveFrame returnState.JumpTo
             |> ThreadState.removeFrame returningFrameId
+
+        // A method with runtime async's calling convention that returns has completed, so its
+        // hidden continuation, which the caller reads, is null.
+        let threadState =
+            match returningMethodState.AsyncFrame with
+            | None -> threadState
+            | Some _ ->
+                let caller = ThreadState.getFrame returnState.JumpTo threadState
+
+                ThreadState.setFrame
+                    returnState.JumpTo
+                    { caller with
+                        AsyncCallContinuation = None
+                    }
+                    threadState
 
         let state =
             { state with
@@ -279,6 +303,9 @@ module IlMachineThreadState =
             | ReturnValueDisposition.ResumeVmRaise _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"
+            | ReturnValueDisposition.ResumeAsyncContexts _ ->
+                failwith
+                    $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of a runtime-async body's context handling, which only the runtime's void helpers carry"
             | ReturnValueDisposition.Discard ->
                 // A constructor's product is the object, and it is already allocated and reachable
                 // from `Constructing` — there is nothing here to throw away, and the caller
@@ -322,6 +349,12 @@ module IlMachineThreadState =
             | Some _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} returned a value, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"
+        | ReturnValueDisposition.ResumeAsyncContexts step ->
+            match returned with
+            | None -> ReturnFrameResult.ResumeAsyncContexts (state, step)
+            | Some _ ->
+                failwith
+                    $"logic error: %s{returningMethodState.ExecutingMethod.Name} returned a value, but its frame carried a step of a runtime-async body's context handling, which only the runtime's void helpers carry"
         | ReturnValueDisposition.Discard ->
             // The caller is mid-instruction and will re-execute it; its evaluation stack still
             // holds that instruction's operands, so there is nowhere to put this value that would
