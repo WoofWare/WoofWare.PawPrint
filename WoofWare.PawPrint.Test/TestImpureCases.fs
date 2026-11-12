@@ -1987,6 +1987,45 @@ module TestImpureCases =
                 MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid 1 scope).Value, "Item1", [ 0x06uy ; 0x13uy ; 0x00uy ]
             ]
 
+    /// `ModuleBuilderOwnTypeReferences.cs` has asked for the tokens of its own created types, their
+    /// field, method and constructor, and emitted a method using them, then referred to `string` and
+    /// `object.ToString`. None of its own types gained a TypeRef or a MemberRef, so the module's scope
+    /// ends with `object`'s TypeRef and the default constructor's `object..ctor`, then the two the guest
+    /// asked for last, as .NET 10 numbers them.
+    let private assertOwnTypeRefRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "System.Private.CoreLib" ]
+
+        let corelib =
+            ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid 1 scope).Value
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            row.ResolutionScope, EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+        )
+        |> List.ofSeq
+        |> shouldEqual [ corelib, "System", "Object" ; corelib, "System", "String" ]
+
+        let objectRef = MemberRefParent.TypeRef (EmitScope.tryTypeRefRid 1 scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                objectRef, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                objectRef, "ToString", [ 0x20uy ; 0x00uy ; 0x0Euy ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5617,6 +5656,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertFieldRefRows
+            }
+            {
+                // A dynamic module's references to its own created types: the type's TypeDef found by
+                // name, and its method's and field's own tokens, through which a second type's method
+                // then runs; `assertOwnTypeRefRows` reads the rows. Dynamic-code switch overridden to true
+                // like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderOwnTypeReferences.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertOwnTypeRefRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
