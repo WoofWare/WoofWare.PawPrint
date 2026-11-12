@@ -37,6 +37,7 @@
         <Compile Include="AssemblyBinding.fs" />
         <Compile Include="TypeResolution.fs" />
         <Compile Include="RuntimeAsyncMethod.fs" />
+        <Compile Include="AwaitSiteBinding.fs" />
         <Compile Include="SignatureComparison.fs" />
         <Compile Include="TypeLoad.fs" />
         <Compile Include="MemberReferenceParent.fs" />

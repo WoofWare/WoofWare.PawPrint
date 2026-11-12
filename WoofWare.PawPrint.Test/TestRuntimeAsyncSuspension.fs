@@ -106,6 +106,14 @@ module TestRuntimeAsyncSuspension =
         ]
 
     [<Test>]
+    let ``A continuation that continues on the thread pool says so in its Flags as CoreLib reads them`` () : unit =
+        ContinuationSlots.handlingFlags ContinuationContextHandling.ContinueOnThreadPool
+        |> shouldEqual (corelibConstant "ContinuationFlags" "ContinueOnThreadPool")
+
+        ContinuationSlots.handlingFlags ContinuationContextHandling.NoPreference
+        |> shouldEqual 0
+
+    [<Test>]
     let ``Each slot of a continuation lies where its Flags tell CoreLib's accessors to look`` () : unit =
         let pointerSize = corelibConstant "Continuation" "PointerSize"
         let dataOffset = corelibConstant "Continuation" "DataOffset"
