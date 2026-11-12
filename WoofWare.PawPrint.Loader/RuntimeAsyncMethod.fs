@@ -14,6 +14,16 @@ type MethodReturnKind =
     /// Returns CoreLib's `System.Threading.Tasks.Task<T>` or `ValueTask<T>`.
     | GenericTaskReturningMethod
 
+/// A body of a promise-returning method, to which CoreCLR gives an async variant, whose variant
+/// PawPrint does not model.
+[<RequireQualifiedAccess>]
+type UnmodelledVariantBody =
+    | PInvoke
+    | InternalCall
+    | RuntimeProvided of RuntimeBehaviour
+    /// The row names no IL.
+    | MissingIl
+
 /// Why a method has no async variant for `RuntimeAsyncMethod.asyncVariantOf` to construct.
 [<RequireQualifiedAccess>]
 type AsyncVariantRefusal =
@@ -21,15 +31,22 @@ type AsyncVariantRefusal =
     | Synthesised
     /// The method is already its MethodDef's async variant.
     | AlreadyAsyncVariant
-    /// The method does not declare `MethodImplAttributes.Async`. If it returns a promise type,
-    /// CoreCLR's async variant of it is its own IL compiled as an async version (every `ret`
-    /// awaiting the returned promise), which PawPrint does not construct.
-    | NotDeclaredAsync
-    /// The method declares `MethodImplAttributes.Async` and returns no promise type, so CoreCLR makes
-    /// it one `MethodDesc`, which is the ordinary one and has the async calling convention.
+    /// The method returns no promise type, so CoreCLR makes it one `MethodDesc`, the ordinary one. It
+    /// has the async calling convention if it declares `MethodImplAttributes.Async`.
     | ReturnsNoPromise
     /// Classifying the method's return type needed a type that does not bind.
     | ReturnTypeUnbound of TypeBindingFailure
+    /// The method's type is a delegate, whose methods CoreCLR's class loader takes to return no
+    /// promise type, whatever they return.
+    | DelegateMethod
+    /// Deciding whether the method's type is a delegate needed its base type, which does not bind.
+    | BaseTypeUnbound of TypeBindingFailure
+    /// The method's type is ComImport (`TypeAttributes.Import`). CoreCLR binds no await to an async
+    /// variant of such a method (`CORINFO_TOKENKIND_Await`, jitinterface.cpp).
+    | ComImportType
+    /// CoreCLR gives the method an async variant, but its body is one whose async variant PawPrint
+    /// does not model.
+    | UnmodelledBody of UnmodelledVariantBody
 
 /// Which methods CoreCLR's class loader makes callable with runtime async's calling convention.
 [<RequireQualifiedAccess>]
@@ -176,6 +193,47 @@ module RuntimeAsyncMethod =
         | assemblies, Ok MethodReturnKind.GenericTaskReturningMethod -> assemblies, Ok false
         | assemblies, Error failure -> assemblies, Error failure
 
+    /// Whether `typeDef`, which `declaringAssembly` declares, is a delegate type: CoreCLR's class
+    /// loader makes it one exactly when its immediate base type is CoreLib's
+    /// `System.MulticastDelegate` (`ClassLoader::CreateTypeHandleForTypeDefThrowing`,
+    /// methodtablebuilder.cpp). A TypeRef is bound only when its name matches.
+    let private isDelegate
+        (loggerFactory : ILoggerFactory)
+        (runtimeDirs : string seq)
+        (coreLib : DumpedAssembly)
+        (declaringAssembly : DumpedAssembly)
+        (typeDef : WoofWare.PawPrint.TypeInfo<GenericParamFromMetadata, TypeDefn>)
+        (assemblies : LoadedAssemblies)
+        : LoadedAssemblies * Result<bool, TypeBindingFailure>
+        =
+        let isMulticastDelegate (ns : string) (name : string) : bool =
+            ns = "System" && name = "MulticastDelegate"
+
+        match typeDef.BaseType with
+        | None
+        | Some (BaseTypeInfo.TypeSpec _) -> assemblies, Ok false
+        | Some (BaseTypeInfo.TypeDef handle) ->
+            let baseType = declaringAssembly.TypeDefs.[handle]
+
+            assemblies,
+            Ok (
+                isMulticastDelegate baseType.Namespace baseType.Name
+                && declaringAssembly.DefinitionFullName = coreLib.DefinitionFullName
+            )
+        | Some (BaseTypeInfo.TypeRef handle) ->
+            let reference = declaringAssembly.TypeRefs.[handle]
+
+            if not (isMulticastDelegate reference.Namespace reference.Name) then
+                assemblies, Ok false
+            else
+                definedInCoreLib
+                    loggerFactory
+                    runtimeDirs
+                    coreLib
+                    declaringAssembly
+                    (TypeDefn.FromReference (reference, System.Reflection.Metadata.SignatureTypeKind.Class))
+                    assemblies
+
     /// The return column of a promise-returning method's async variant, as CoreCLR's class loader
     /// rewrites the signature blob (`methodtablebuilder.cpp`): the bytes of `Task<T>` or
     /// `ValueTask<T>` become those of `T`, and those of `Task` or `ValueTask` become `void`, after
@@ -218,13 +276,22 @@ module RuntimeAsyncMethod =
     /// <summary>
     /// The async variant of <paramref name="method" />, the ordinary variant of a method
     /// <paramref name="declaringAssembly" /> declares: the second <c>MethodDesc</c> CoreCLR's class
-    /// loader makes for a MethodDef flagged <c>MethodImplAttributes.Async</c> that returns
-    /// <c>Task</c>, <c>Task&lt;T&gt;</c>, <c>ValueTask</c> or <c>ValueTask&lt;T&gt;</c>. It has the
-    /// same token and IL, and the signature with the promise type unwrapped (<c>Task&lt;T&gt;</c> and
-    /// <c>ValueTask&lt;T&gt;</c> to <c>T</c>, <c>Task</c> and <c>ValueTask</c> to <c>void</c>).
+    /// loader makes for a MethodDef that returns <c>Task</c>, <c>Task&lt;T&gt;</c>, <c>ValueTask</c>
+    /// or <c>ValueTask&lt;T&gt;</c>, and that an await binds. It has the same token and body, and the
+    /// signature with the promise type unwrapped (<c>Task&lt;T&gt;</c> and <c>ValueTask&lt;T&gt;</c>
+    /// to <c>T</c>, <c>Task</c> and <c>ValueTask</c> to <c>void</c>).
     /// </summary>
     /// <remarks>
-    /// This is the only way to construct an async variant. Any other method is refused.
+    /// <para>
+    /// What the variant runs follows from its body: runtime-async IL (<c>MethodBody.AsyncIl</c>) is
+    /// the user's body, which saves contexts; IL (<c>MethodBody.Il</c>) runs as an async version, each
+    /// <c>ret</c> awaiting the promise it returns; and an abstract method's variant is a name to
+    /// dispatch on.
+    /// </para>
+    /// <para>
+    /// This is the only way to construct an async variant. A method of a delegate type, or of a
+    /// ComImport type, and a method whose body PawPrint models no variant of, are refused by name.
+    /// </para>
     /// </remarks>
     let asyncVariantOf
         (loggerFactory : ILoggerFactory)
@@ -240,9 +307,19 @@ module RuntimeAsyncMethod =
         | MethodInfo.Metadata (_, _, MethodVariant.AsyncVariant) ->
             assemblies, Error AsyncVariantRefusal.AlreadyAsyncVariant
         | MethodInfo.Metadata (core, facts, MethodVariant.Ordinary) ->
-            if not (facts.ImplAttributes.HasFlag asyncImplAttribute) then
-                assemblies, Error AsyncVariantRefusal.NotDeclaredAsync
-            else
+            let typeDef =
+                match core.Owner with
+                | MethodOwner.DeclaredOn declaringType ->
+                    declaringAssembly.TypeDefs.[declaringType.Identity.TypeDefinition.Get]
+                | MethodOwner.DynamicMethodsClass _ ->
+                    failwith $"logic error: %O{method} is read from a MethodDef row, but has no declaring type"
+
+            // A delegate's methods all return normally to the class loader, which classifies no
+            // return type of theirs.
+            match isDelegate loggerFactory runtimeDirs coreLib declaringAssembly typeDef assemblies with
+            | assemblies, Error failure -> assemblies, Error (AsyncVariantRefusal.BaseTypeUnbound failure)
+            | assemblies, Ok true -> assemblies, Error AsyncVariantRefusal.DelegateMethod
+            | assemblies, Ok false ->
 
             match
                 classifyReturn
@@ -256,11 +333,35 @@ module RuntimeAsyncMethod =
             | assemblies, Error failure -> assemblies, Error (AsyncVariantRefusal.ReturnTypeUnbound failure)
             | assemblies, Ok MethodReturnKind.NormalMethod -> assemblies, Error AsyncVariantRefusal.ReturnsNoPromise
             | assemblies, Ok kind ->
-                match core.Body with
-                | MethodBody.AsyncIl _ -> ()
-                | body ->
-                    failwith
-                        $"logic error: %O{method} declares MethodImplAttributes.Async and returns a promise type, but its body is %O{body} rather than runtime-async IL"
+                if typeDef.TypeAttributes.HasFlag TypeAttributes.Import then
+                    assemblies, Error AsyncVariantRefusal.ComImportType
+                else
+
+                let declaresAsync = facts.ImplAttributes.HasFlag asyncImplAttribute
+
+                let unmodelled =
+                    match core.Body with
+                    | MethodBody.AsyncIl _ ->
+                        if not declaresAsync then
+                            failwith
+                                $"logic error: %O{method} has runtime-async IL but does not declare MethodImplAttributes.Async"
+
+                        None
+                    | MethodBody.Il _ ->
+                        if declaresAsync then
+                            failwith
+                                $"logic error: %O{method} declares MethodImplAttributes.Async, but its IL was read as IL for the ordinary calling convention"
+
+                        None
+                    | MethodBody.Abstract -> None
+                    | MethodBody.InternalCall -> Some UnmodelledVariantBody.InternalCall
+                    | MethodBody.PInvoke -> Some UnmodelledVariantBody.PInvoke
+                    | MethodBody.RuntimeProvided behaviour -> Some (UnmodelledVariantBody.RuntimeProvided behaviour)
+                    | MethodBody.MissingIl -> Some UnmodelledVariantBody.MissingIl
+
+                match unmodelled with
+                | Some body -> assemblies, Error (AsyncVariantRefusal.UnmodelledBody body)
+                | None ->
 
                 let variant =
                     MethodInfo.Metadata (

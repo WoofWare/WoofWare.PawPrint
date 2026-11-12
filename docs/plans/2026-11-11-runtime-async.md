@@ -193,7 +193,8 @@ what was chosen.
   fallback when the VM supplies no variant. Every `await M()` makes a `Task` and awaits it through
   `Await`'s IL.
 * **(b, stage 4) Match the pattern as the JIT does**, binding the callee's async variant. Not
-  optional: scheduling order differs between the two.
+  optional: the two differ in traces, in what `IsRuntimeAsync()` answers, and in which thread
+  schedules a continuation, as decision 13 measures.
 
 ### 7. The hidden return
 
@@ -254,12 +255,302 @@ Lifted in stage 3. A suspension in a filter or handler stays refused by name.
 (`MethodTableLayout.fs` assumes none). The thunk calls its async variant directly, so this first
 matters in stage 4, when `callvirt` binds an async variant.
 
+### 13. Which await sites bind a variant while stage 4 is part built
+
+The JIT matches the await pattern only in a body with the async calling convention that is not an
+async version, and the tail patterns only in an async version (`jit/importer.cpp:9229-9263`). At a
+matched site it asks the VM for the named method's async variant
+(`CORINFO_TOKENKIND_Await`, `vm/jitinterface.cpp:1082-1090`), and where there is none it compiles
+the site as decision 6(a) does.
+
+* (a) Bind at every matched site in one change. Nothing of it is testable until all of it is
+  built: async versions, dispatch and both ways of continuing.
+* (b) Bind at the sites a stage supports and refuse the rest by name. Every guest that reaches
+  runtime-async library code would stop until the last stage, the ASP.NET tests among them.
+* **(c, chosen) Classify each matched site from static facts, and keep decision 6(a) at the sites
+  a stage does not yet bind.** The classification is one value, of three kinds: the site binds a
+  variant; CoreCLR's VM supplies none there, with why; or PawPrint does not bind there yet, with
+  why. It reads only what the JIT reads when it compiles the caller (the caller's frame kind, the
+  pattern's shape, the opcode and its `constrained.` prefix, and the named method's row), never the
+  receiver, so a site behaves one way on every execution. Each stage removes cases of the third
+  kind, and stage 4f removes the kind. Every intermediate state is one the JIT can produce, since
+  awaiting the task an ordinary variant returns is always legal, and none is a new divergence:
+  each narrows decision 6(a)'s.
+
+What the two differ in, measured on real .NET 11.0.0-rc.1 with methods the devshell SDK's compiler
+makes runtime-async (see "Test guests"), a matched `await M()` against the same await of a task read
+from a field, which the pattern does not match:
+
+* **Traces**, where the callee is an `Async` body or tail-awaits its way to one. An exception
+  crossing an unmatched await is thrown again by the task's awaiter, and the formatted trace gains
+  `RuntimeAsyncTaskContinuation.GetResult(Task, Byte&)` (or its generic overload) between the
+  callee's frame and the caller's. Across a matched await the two frames are adjacent. The caller's
+  frame is reported at the IL offset of the `call Await`, not of the `call M`
+  (`opcodeOffs = awaitOffset`, `:9305`). Where the callee is an async version that awaits what it
+  returns, the awaiter's frames are there either way, and the traces are the same.
+* **`RuntimeHelpers.IsRuntimeAsync()`** answers true in an async version. Five CoreLib methods
+  call it (`StreamReader.ReadAsync(char[], int, int)`, both `StreamReader.ReadBlockAsync`s and both
+  `StreamWriter.FlushAsync`s), and nothing else in RC1's shared framework or ASP.NET Core.
+* **Scheduling**, where the callee is an async version and the await continues on a captured
+  context. The async version's `ret` awaits through `TransparentSuspend`, whose continuation
+  carries no continuation flags, where `Await`'s carries the captured context. When the awaited
+  task forbids inline continuations (`RunContinuationsAsynchronously`),
+  `RuntimeAsyncTaskContinuation.Execute` hands a flagged continuation to its context from the
+  completing thread, and queues an unflagged one to the thread pool, whose thread then hands the
+  next continuation to its context. Measured, 300 runs of each: a `SynchronizationContext`'s `Post`
+  came from a pool thread every time for `await tcs.Task`, and from the completing thread every
+  time for the field's task. And through a library method, from an ordinary guest:
+  `Parallel.ForEachAsync` with a `TaskScheduler` of the guest's, over an enumerator whose
+  `MoveNextAsync` returns such a task, has its continuation queued to the scheduler by a pool
+  thread on real .NET 11, and by the completing thread on real .NET 10 and on PawPrint running
+  .NET 11's CoreLib under decision 6(a).
+* Nothing else found. Three `Async` methods awaiting one another over a pending task posted and
+  resumed identically matched and unmatched, in eight configurations (captured context throughout
+  or `ConfigureAwait(false)` inside, inline continuations allowed or not, completed by the
+  context's thread or another), 300 runs each.
+
+How many sites, in RC1's linux-x64 `Microsoft.NETCore.App` and `Microsoft.AspNetCore.App`
+(195,315 methods):
+
+* 6,580 methods return a promise type and so have an async variant: 1,679 flagged `Async`, 4,440
+  with IL and no flag (async versions), 461 abstract, none without IL. 3,081 are virtual and 31
+  static virtual. 28 delegate methods return a promise type and have none.
+* 3,540 calls of `AsyncHelpers.Await` in `Async` methods, 3,404 of them the end of a matched
+  pattern: 975 name an `Async` method called directly, 788 a method with IL and no flag called
+  directly, 1,321 a method that dispatches (1,085 virtual, 196 interface, 40 static virtual through
+  `constrained.`), 300 one with no variant (a delegate's `Invoke`, or a row returning no promise
+  type, such as `ConfigureAwait` itself applied to a local), and 20 the census's resolver did not
+  classify. 8 more would match textually across a basic-block boundary, which the JIT's matcher
+  cannot cross.
+* Of the sites that bind, 1,822 have `ConfigureAwait(false)` and 1,262 continue on the captured
+  context; 1,259 of the latter are ASP.NET Core's, three are `Microsoft.NETCore.App`'s
+  (`Parallel.ForEachAsync`'s await of `MoveNextAsync`, and two awaits of `Stream.DisposeAsync` in
+  `ZipArchiveEntry`), and none is CoreLib's. No site has `ConfigureAwait(true)`.
+* Async versions hold 5,933 `ret`s: 4,274 end `call M; ret` where `M` has a variant, 73
+  `call M; newobj ValueTask; ret`, and 1,586 wrap what they return. The census read each
+  `call M; stloc; ldloca; call AsTask; ret` as the `call AsTask; ret` it ends with, among the
+  4,274; the JIT matches the longer shape at `M` first, and never reads the shorter. Stage 4a's
+  matcher finds 99 (74 in `Microsoft.NETCore.App`, 25 in `Microsoft.AspNetCore.App`), most a
+  `Stream` override's `ReadAsync` or `WriteAsync` returning `ReadAsync(Memory<byte>, …).AsTask()`. Of the `call; ret`s, 67 return a `Task<T>` as a `Task` and 3 are in a
+  `NoInlining` method. 22 async versions are of synchronized methods (`TextReader.SyncTextReader`,
+  `TextWriter.SyncTextWriter`), and none holds `jmp` or `tail.`.
+* No method carries `PreserveBaseOverridesAttribute` over a promise return, and no ComImport type
+  declares a promise-returning method.
+
+### 14. Where the patterns are recognised
+
+* (a) In the interpreter, when `call Await` runs, by looking back at what made its operand. The
+  task has been made by then: the thunk has run, and nothing can undo it.
+* (b) By rewriting the IL when the frame is made (`frameBody`), replacing the pattern with one call
+  through the stub operand scope of decision 9. The rewritten body is a second version of the
+  method that every reader of IL offsets must map back, and the escape analysis would have to make
+  the same rewrite to agree.
+* **(c, chosen) As data in `WoofWare.PawPrint.Semantics`, read where the instruction's token is
+  bound.** A pure function of a body and a call's offset says what follows the call in its basic
+  block, as `BoxPattern.follower` does for `box`: in a runtime-async body, the `ConfigureAwait`
+  call if any, with its constant, and the `Await` call, with its offset and the offset after it; in
+  an async version, which of the three tail shapes. It returns the operands of the calls it read
+  past, and its caller confirms they name the intrinsics the JIT tests for (`ConfigureAwait` of the
+  four promise types, `AsyncHelpers.Await`, `ValueTask`'s one-argument constructors and `AsTask`).
+  It never reads past the block's end, because the JIT's matchers are given the block's
+  (`codeEndp`, `jit/importer.cpp:6494-6495`); a block starts wherever `BoxPattern` says one does.
+
+  The interpreter reads it in the binder (`CallSiteBinding.bindCall`, and `callvirt`'s own
+  binding), so that the method-entry import of `docs/plans/2026-10-24-jit-import-at-method-entry.md`
+  binds the variant when it binds the call, as the JIT resolves the pattern's three tokens when
+  it imports the first. The analysis reads the same function.
+
+### 15. What a matched site executes
+
+* (a) Each instruction of the pattern stays a step: the call pushes the variant's result where a
+  promise was expected, and the instructions after it pass it through. `stloc` would then store a
+  `T` in a `ValueTask<T>` local, and every step would lie about the stack's shape.
+* **(b, chosen) The call's step is the whole pattern**, as the JIT imports it. The variant's frame
+  returns to the instruction after `call Await`; the instructions between never run; and for
+  suspension, `DiagnosticIP`, exception dispatch and a live stack walk, the caller stands at the
+  `Await` call's offset while the variant runs. No instruction skipped is the start of a block, so
+  none has entry processing of its own to skip (a join's widening, a stack-shape check): the next
+  instruction entered is the one after the pattern, whose shape is the same either way. The `try`
+  regions round the call and round the `Await` are the same, since a region's bounds start blocks.
+
+The call is then any call. Virtual dispatch comes first (decision 19), then intrinsic
+classification, then `frameBody`. A variant whose method PawPrint implements without running its
+IL is refused by name; a search of PawPrint's own implementations finds none that returns a
+promise type. The JIT folds
+the variants of `Task.FromResult`, `Task.CompletedTask` and their `ValueTask` forms to their values;
+running their async versions gives the same values and never suspends, so PawPrint does not fold.
+The thunk takes no part: it stays the body of the ordinary variant of every `Async` method, for
+callers without the async convention and for sites that bind no variant.
+
+A matched site in a frame of runtime async's own machinery (CoreLib's `Async` methods returning no
+promise) is refused by name. RC1 has none.
+
+### 16. Which methods have a variant, and what PawPrint constructs
+
+The VM gives a variant to the method a token names when its own row returns a promise type
+(`ReturnsTaskOrValueTask`), its type is not a delegate, and its type is not ComImport. A generic
+method returning its own type parameter has none, whatever the parameter is instantiated at.
+
+`RuntimeAsyncMethod.asyncVariantOf` stays the one constructor, and constructs the variant of every
+such method, with the unwrapped signature and the method's own body. What the variant is follows
+from the body, as CoreCLR's follows from its flags:
+
+* `MethodBody.AsyncIl`: the user's runtime-async body, which saves contexts.
+* `MethodBody.Il`: an async version (decision 17).
+* `MethodBody.Abstract`: only a name to dispatch on.
+* Anything else (a P/Invoke, an InternalCall, a runtime-provided body): refused by name. RC1 has
+  none.
+
+Rejected: a third case of `MethodVariant` for an async version. CoreCLR has one `MethodDesc` for
+it, the async variant, and a third case would make every consumer of a method's identity say what
+it means by a distinction that only `frameBody` needs.
+
+### 17. How an async version runs
+
+* (a) Rewrite its IL, each `ret` becoming a call of `TransparentAwait` and a `ret`. A `ret` is one
+  byte and a call five, so every offset after the first `ret` moves (decision 8 rejected this for
+  the same reason).
+* (b) A stub of `Semantics` data that calls the ordinary variant and awaits what it returns. The
+  ordinary body would then run in a frame without the async convention, where
+  `IsRuntimeAsync()` answers false and no tail pattern binds: decision 6(a) again, one frame down.
+* **(c, chosen) The method's own IL in a frame that knows it is an async version**, a third case of
+  `AsyncFrame`. It saves no contexts (`RequiresAsyncContextSaveAndRestore` is false for it),
+  `IsRuntimeAsync()` answers true in it, and it appears in traces under the method's name
+  (`IsDiagnosticsHidden` is false for it). Two instructions mean something else in it:
+  * A `call` or `callvirt` followed in its block by one of the tail shapes, naming a method with a
+    variant, calls the variant, and the frame then returns what it returned
+    (`impMatchAsyncVersionTailCall`). A `Task<T>`-returning callee in a `Task`-returning method
+    leaves a value the frame drops.
+  * Any other `ret` awaits the promise on the stack: the frame calls
+    `AsyncHelpers.TransparentAwait` at the method's unwrapped return type (`getAwaitReturnCall`),
+    as the context helpers of decision 8 are called, and returns what it returns. The JIT's folds
+    of `return default` and `return new ValueTask<T>(value)` (`impFoldAwaitedTopOfStack`) give
+    what `TransparentAwait` gives for a completed `ValueTask`, so they are not modelled.
+
+  Whether an await in an async version is a tail await, which passes the callee's continuation on
+  and leaves no frame of the async version in a trace, is the JIT's rule, kept as a function in
+  `Semantics` (`jit/importercalls.cpp:7899-7909`, `jit/importer.cpp:12008`): always for the wrapped
+  `ret`; for `call; ret` and `call; newobj ValueTask; ret`, when the JIT optimises the body
+  (`Tier0OptimizationEnabled`, which `Debuggable.allowsJitOptimisation` and `NoOptimization` decide),
+  the callee's unwrapped return type is the method's, and `canTailCall` agrees (the caller is not
+  the entry point and not `NoInlining`; a callee named exactly does not require a security object,
+  `vm/jitinterface.cpp:8293`); never for the `AsTask` shape, whose continuation carries
+  `ValueTaskAdaptedToTask`. An await that is not a tail await suspends the frame as a frame of
+  runtime async's machinery suspends (`CaptureExecutionContext`, no continuation flags). Measured:
+  a trace crossing `Task<int> M() => Leaf()` has no frame of `M`, nor has one crossing
+  `new ValueTask<int>(Leaf())` or a wrapped `ret`; one crossing `Task M() => Leaf()` (a `Task<int>`
+  as a `Task`), a `NoInlining` `M`, or `LeafVT().AsTask()` has `M` at its call's offset; and the
+  same assembly compiled without optimisation has `M` in the first two cases as well, and still
+  not for the wrapped `ret`.
+
+  Refused by name: an async version of a synchronized method, which releases its monitor before
+  the await and matches no tail shape (22 in RC1); `jmp`; and the `AsTask` shape until a guest
+  needs it (99 in RC1, decision 13).
+
+### 18. Where a caller keeps what it does if its call suspends
+
+At an async call the JIT decides, per call, whether a suspension is passed on (a tail await) or
+makes a continuation, and for the latter how the continuation continues: on the captured context
+(a matched await without `ConfigureAwait(false)`), on the thread pool (with it), or with no
+preference (every other async call), and whether it is flagged `ValueTaskAdaptedToTask`.
+
+* (a) On the caller's frame, as `TailAwait.InFlight` is today. The frame then holds a fact about
+  one call for as long as the frame lives, and each new fact is another state to clear.
+* (b) Recomputed when the callee suspends, from the call site's offset. The binder decided once
+  whether the site binds; a second reading that disagreed would suspend a call one way that was
+  made the other.
+* **(c, chosen) On the callee's return state**, beside the call site's offset, set by whatever
+  made the call. It lives exactly as long as the call, `leaveBySuspension` reads it where it reads
+  the disposition, and a frame made without it cannot be suspended through. `TailAwait.InFlight`
+  moves there in the same change, leaving `TailAwait` to say only whether `TailAwait()` has been
+  called.
+
+`beginSuspension` lays the continuation out from it: for the thread pool, the
+`ContinueOnThreadPool` flag and `FinishSuspensionNoContinuationContext`; for the captured context,
+a continuation-context slot and `FinishSuspensionWithContinuationContext`, which writes the slot
+and the flags itself; for no preference, what it does today.
+
+### 19. The second vtable slot
+
+Measured on .NET 11.0.0-rc.1: `abstract Task<int> V(); virtual Task W(); void N()` in a class take
+slots 4, 6 and 9, and `GetNumVirtuals` is 8; an interface's `Task<int> A(); int B(); ValueTask C()`
+take 0, 2 and 3 of 5. The variant's slot follows its ordinary sibling's. Reflection cannot name it:
+`GetMethodAt` answers null for it (`vm/runtimehandles.cpp:444-451`), the method iterators skip it,
+and every managed reader of a slot number uses it only to index the same table.
+
+CoreCLR fills the variants' slots variant-to-variant: a declaration's variant is overridden by the
+variant of whatever overrides the declaration. The builder finds a MethodImpl's declaration by
+finding the ordinary one and taking its variant (`vm/methodtablebuilder.cpp:6217-6224`), and a
+static virtual method's implementation the same way (`vm/methodtable.cpp:8351-8401`). The unwrapped
+signatures are in bijection with the wrapped ones, given the `Task`-or-`ValueTask` kind the
+comparison keeps (`SameAsyncVariantKind`), so the two slots can differ in one case only: an
+override whose promise type differs from its declaration's, legal only as a covariant return
+(`Task<T>` for `Task`), for which the builder adds a return-dropping thunk.
+
+* (a) Lay the variants' slots out in `MethodTableLayout`, as CoreCLR does. Every slot number on
+  .NET 11 moves, though nothing can see that; the layout becomes a function of the runtime, since
+  .NET 10 makes no variants; and every reader of the tables must skip entries that are not
+  methods reflection knows.
+* (b) A second table of variants beside the first. Two tables that must agree, filled by the same
+  matching.
+* **(c, chosen) Dispatch a variant through its ordinary sibling.** The implementation of a
+  variant on a receiver is the variant of the implementation of its ordinary sibling, which is the
+  relation CoreCLR's own builder uses. `MethodTableLayout` keeps answering only for methods a
+  MethodDef row declares, and a lookup of a variant in it stays an error; the dispatch functions
+  (`ConcreteVirtualDispatch`, `StaticVirtualDispatch`) take the step, in one place each, and check
+  that the implementation's unwrapped return type is the declaration's. Where it is not, the
+  call is refused by name: CoreCLR runs a return-dropping thunk there, or, for an override that
+  returns a subclass of `Task`, the inherited variant. RC1 has no return-dropping thunk; the
+  census did not count the other.
+
+  PawPrint's slot numbers on .NET 11 therefore stay those of a table without variants, which
+  differ from CoreCLR's and which no guest can read except by reflecting over CoreLib's internals.
+
+### 20. What the JIT's tier decides
+
+Some of what a trace shows depends on how a body was compiled, and for each PawPrint gives the
+answer of the JIT's first tier, which inlines nothing and makes no tail call, as it does
+elsewhere:
+
+* An async version that is not tail-awaiting is inlined into its caller by the optimising tier,
+  and its frame leaves the trace: measured, `Task M() => Leaf()` shows `M` under tiered
+  compilation's first tier and not with `TieredCompilation=0`. PawPrint shows it.
+* The wrapped `ret`'s call of `TransparentAwait` is a real tail call when the JIT optimises fully
+  (`GTF_CALL_M_IMPLICIT_TAILCALL`, `jit/importer.cpp:12010-12016`; read, not measured), so an
+  exception from a task already faulted is thrown with no frame of the async version beneath it.
+  PawPrint keeps the frame.
+* Which of the awaiter's frames a trace has (decision 13's `GetResult`) depends on what the JIT
+  inlined into them.
+* The offset a library frame is reported at. Measured from an ordinary guest,
+  `TarHeader.TryGetNextHeaderCoreAsync` suspended at its await at IL_0035 is reported at IL_001D,
+  where the statement begins, while `StreamReader.ReadToEndAsyncInternal` is reported at its
+  `Await` call, as methods the JIT's first tier compiled are. The first awaits a static method of
+  a struct the compiler can inline, and the framework's code is precompiled; that this is why is
+  read, not established. PawPrint reports the `Await` call's offset.
+
+The rule of decision 17 for a tail await is not among them: both tiers apply it, and only a body
+compiled without optimisation, which is a property of its assembly and its method, differs.
+
 ### Test guests
 
 The test project's Roslyn (4.14) cannot compile a runtime-async method (5.x can). The stages test
 through CoreLib's and the shared framework's runtime-async methods, called from ordinary guests,
 which is how real programs reach them. A Roslyn bump, so that guests can declare runtime-async
 methods of their own, is a separate change if a stage needs shapes no library method has.
+
+The devshell SDK's compiler (10.0.401) does compile them: a project targeting `net10.0` with
+`<Features>runtime-async=on</Features>`, `EnablePreviewFeatures` and `LangVersion` `preview` gives
+methods flagged `Async`, which run on .NET 11 by roll-forward and fail to load on .NET 10. The
+probes behind decisions 13 to 20 were built so, and run out of process on real .NET 11. Such a
+probe's unmatched await must read its task from a field: in a Release build the compiler removes
+a local between the call and the `Await`, and the pattern matches after all.
+
+Shapes stage 4 handles that no method of RC1's shared framework or ASP.NET Core has: a covariant
+override's return-dropping thunk, and an await of a method
+called directly that continues on the captured context outside ASP.NET Core. Shapes only a guest's
+own assembly gives: a tail shape in a body compiled without optimisation, as the test project
+compiles guests (`Roslyn.compileAssembly`), which runs as an async version when library code awaits
+a guest's override.
 
 ## Stages
 
@@ -463,19 +754,181 @@ Each stage is one pull request, with its tests first.
 
    Parks, re-measured on 11.0.0-rc.1 (2026-11-12): both ASP.NET two-process tests pass and are
    un-parked.
-7. **(4) The await pattern.** Binding async variants at `await` sites and in async versions'
-   tail-call patterns; async versions of plain `Task`-returning methods; the second vtable slot.
+7. **(4) The await pattern**, in the stages below. Each depends on the one before it unless it
+   says otherwise, and each leaves every matched site either bound or awaiting as decision 6(a)
+   does, by decision 13's classification, so each merges alone.
 
-   What stage 2b leaves for it: once an await binds a variant, chains hold several continuations
-   of user bodies, and an await without `ConfigureAwait(false)` gets a continuation-context slot
-   and calls `FinishSuspensionWithContinuationContext`; `beginSuspension` now always lays out an
-   `ExecutionContext` slot and the result's and calls the helper for no continuation context,
-   which is right only under decision 6. The JIT also reuses a resumed frame's continuation when
-   it suspends again; PawPrint makes a fresh one, which nothing managed can tell apart.
+   A stage's guest shows that its sites bind by a difference decision 13 measured. Where the
+   callee is, or tail-awaits its way to, an `Async` body, an exception that crosses the await
+   after a suspension has the callee's frame and the caller's adjacent in its formatted trace,
+   with no `RuntimeAsyncTaskContinuation.GetResult(Task, Byte&)` between them. Each guest is an
+   ordinary program run on real .NET 11 first, as `RuntimeAsyncTraceCrossesSuspension.cs` was, and
+   checks its constants only there. The traces quoted below were measured so.
 
-   What stage 3 leaves for it: binding variants makes one chain of the continuations an exception
-   crosses, so its trace loses the awaiter frames each task added under decision 6, and the guests
-   that compare traces (`RuntimeAsyncTraceCrossesSuspension.cs`, `StreamWriter.DisposeAsync`'s in
-   `RuntimeAsyncFinallyAfterSuspension.cs`) can then check whole traces against real .NET 11's.
-   A reused continuation must have its exception slot cleared on resumption, which
-   `AsyncSuspension.takeException` already does.
+8. **(4a) Await sites as data.** No interpreter behaviour changes.
+   * `Semantics`: what follows a call in its block (decision 14), for the await pattern and the
+     three tail shapes, and the tail-await rule of decision 17 as a function of static facts.
+   * `Loader`: `asyncVariantOf` constructs the variant of every method decision 16 gives one, and
+     refuses a delegate's method and a ComImport type's by name. `frameBody` refuses to run an
+     async version, by name, and no call makes one.
+
+   Tests first: properties of the matcher against a reference that reads the instructions
+   backwards from each `call Await` and each `ret`, over generated instruction sequences and over
+   every body of the framework under test (a match never contains a block's start; every
+   `call Await` whose operand comes straight from a call in its block ends a match); and
+   `TestRuntimeAsyncVariant` for the variants: `StreamReader.ReadBufferAsync` (`AsyncIl`),
+   `StreamWriter.FlushAsyncInternal` and `TaskCompletionSource<T>.get_Task` (async versions),
+   `Stream.ReadAsync` (virtual), `IAsyncEnumerator<T>.MoveNextAsync` (abstract), and none for
+   `Func<Task>.Invoke` or `Task<T>.ConfigureAwait`. As a fact to pin: in
+   `StreamReader.ReadToEndAsyncInternal`, the call at IL_0045 is followed by `ConfigureAwait(false)`
+   and an `Await` at IL_0053.
+
+   Depends on stage 3b.
+
+   As built:
+   * `AwaitPattern` (`WoofWare.PawPrint.Semantics`) reads what follows a `call` or `callvirt` in its
+     block: `awaitAfter` the await pattern, as an `AwaitFollower` (the `ConfigureAwait` call with its
+     constant, and the `Await` call's operand, its offset and the offset after it), and
+     `tailShapeAfter` an async version's `TailShape` (`Return`, `NewValueTask`, `AsTask`). Each
+     returns the operands it read past without resolving them. Where the caller finds one that does
+     not name the intrinsic the JIT tests for, the JIT matches nothing at that call, since nothing
+     shorter it would read instead can match there. A block starts where `BoxPattern.blockStarts`,
+     now public, says.
+   * Each answers at any call, so it answers too for the `ConfigureAwait` or `AsTask` call inside a
+     longer match. The JIT never imports such a call once the longer match binds; the caller asks
+     only at a call it runs.
+   * `AwaitPattern.isTailAwait` is decision 17's rule over an `AsyncVersionAwait`: a wrapped `ret`,
+     or a call in a tail shape with the `TailCallFacts` that `Tier0OptimizationEnabled` and
+     `canTailCall` read.
+   * `RuntimeAsyncMethod.asyncVariantOf` constructs the variant of every promise-returning method
+     whose body is runtime-async IL, IL (an async version) or none (`MethodBody.Abstract`), and the
+     variant keeps that body. It refuses by name a delegate's method (`DelegateMethod`, decided
+     before the return type is classified, as the class loader decides it, so `Func<Task>.Invoke`
+     is refused as a delegate's), a ComImport type's (`ComImportType`), and a P/Invoke, an
+     InternalCall, a runtime-provided body or a row naming no IL (`UnmodelledBody`). A type is a
+     delegate when its immediate base type is CoreLib's `MulticastDelegate`, bound by identity.
+   * `IlMachineStateExecution.frameBody` refuses by name a variant whose body is not runtime-async
+     IL.
+   * `TestAwaitPattern` checks both matchers at every call against a reference that reads backwards
+     from each `call Await` and each `ret`: over 3,000 generated bodies, whose block starts (branch
+     targets and exception-region bounds) the generator records and `BoxPattern.blockStarts` must
+     agree with, and over every IL body of the framework under test. Over RC1's linux-x64
+     `Microsoft.NETCore.App` it reads the census's 1,932 awaits in 901 runtime-async bodies, and the
+     4 that a block's start splits. `TestRuntimeAsyncVariant` checks the variant of every method of
+     CoreLib and `System.Net.Http` on both runtimes, the methods named above, and the refusals over
+     Roslyn-compiled fixtures, among them a `MulticastDelegate` of another assembly.
+   * Not modelled: in debuggable code compiled with a debugger's scope information, the JIT also
+     starts a block where a local's scope begins or ends (`fgMakeBasicBlocks`). PawPrint has no
+     debugger.
+
+9. **(4b) Awaits of `Async` methods called directly.** A matched site with `ConfigureAwait(false)`
+   in a user's runtime-async body, whose method is flagged `Async` and does not dispatch (a `call`,
+   or a `callvirt` of a method that is not virtual), binds the variant.
+   * The binder returns decision 13's classification, and the call's step is the pattern
+     (decision 15).
+   * The callee's return state says what its caller does if it suspends (decision 18), and
+     `TailAwait.InFlight` moves there.
+   * `beginSuspension` sets `ContinueOnThreadPool` for such a call. A chain now holds several
+     continuations of user bodies, which `leaveBySuspension`, the dispatcher's `calli` and
+     exception slots already carry.
+
+   The guest first: `StreamReader.ReadToEndAsync` over a stream of the guest's whose `ReadAsync`
+   returns a pending task and then faults it. `ReadToEndAsyncInternal` awaits `ReadBufferAsync`
+   directly, in a `try`. Real .NET 11's trace is `GetResult[T](Task, Byte&)`, `ReadBufferAsync`,
+   `ReadToEndAsyncInternal`, the last at IL_0053; before the stage a second `GetResult` frame
+   separates the two methods. The same guest reads to the end across two suspensions.
+   `RuntimeAsyncResumesWithInt.cs` (`ReadAsyncInternal`, which awaits `ReadBufferAsync` outside any
+   `try`) and the other `RuntimeAsync*` guests keep passing.
+
+   Not yet bound: a site that continues on the captured context; a callee without the `Async`
+   flag; a callee that dispatches; a `constrained.` call. Refused by name: a matched site in a
+   frame of runtime async's machinery.
+
+10. **(4c) Async versions.** `frameBody` runs the variant of a promise-returning IL method without
+    the `Async` flag as decision 17 says: the tail shapes, the wrapped `ret`, the tail-await rule,
+    and a suspension that is not a tail await. Matched sites with `ConfigureAwait(false)` bind such
+    a method called directly, and a tail shape binds a callee called directly, `Async` or not.
+    `IsRuntimeAsync()` already answers true in any frame with the async convention.
+
+    The guest first: `StreamWriter.WriteAsync(string)` with `AutoFlush` over a stream of the
+    guest's whose `WriteAsync` returns a pending task and then faults it. `WriteAsyncInternal`
+    awaits `FlushAsyncInternal`, which has no `Async` flag and ends `call Core; ret`, a tail await of
+    the local function that awaits the stream. Real .NET 11's trace is `GetResult(Task, Byte&)`,
+    `<FlushAsyncInternal>g__Core|82_0`, `WriteAsyncInternal`, with no frame of `FlushAsyncInternal`;
+    before the stage a second `GetResult` frame separates the two methods. A second guest, for a
+    suspension that is not a tail await (a `Task<T>` returned as a `Task`: 67 `call; ret`s in RC1),
+    takes whichever such method a guest reaches most simply, and shows its frame in the trace at
+    its call's offset. The tail-await rule's property test is against a table measured on real
+    .NET 11 from methods of each shape, compiled with and without optimisation.
+
+    Not yet bound: a tail shape whose callee dispatches, which wraps instead, as it does where the
+    callee has no variant. Refused by name: the async version of a synchronized method; `jmp`; the
+    `AsTask` shape; a variant of a method with no IL, or one PawPrint implements itself.
+
+11. **(4d) Dispatch of a variant.** A matched site or tail shape whose `callvirt` names a virtual or
+    interface method binds the named method's variant, and `ConcreteVirtualDispatch` finds its
+    implementation through the ordinary sibling (decision 19). The implementation is an `Async`
+    body or an async version, both built.
+
+    The guest first: `StreamWriter.DisposeAsync` over a pending, then faulting, stream.
+    `DisposeAsyncCore` awaits `FlushAsync()` by `callvirt`; its async version is the first frame in
+    which `IsRuntimeAsync()` answers true to a caller that reads it, so `FlushAsync` tail-awaits
+    `FlushAsyncInternalWithGuard`. Real .NET 11's trace is `GetResult(Task, Byte&)`,
+    `<FlushAsyncInternal>g__Core|82_0`, `FlushAsyncInternalWithGuard`, `DisposeAsyncCore`; before the
+    stage it lacks `FlushAsyncInternalWithGuard`, as `RuntimeAsyncFinallyAfterSuspension.cs` records.
+    A second guest, for an `Async` body reached by dispatch: `IndentedTextWriter.WriteAsync(string)`
+    over a pending, then faulting, writer of the guest's, which awaits its own virtual
+    `OutputTabsAsync`. Real .NET 11's trace is `GetResult(Task, Byte&)`, `OutputTabsAsync`,
+    `WriteAsync`.
+
+    Refused by name: an implementation whose unwrapped return type is not its declaration's (the
+    return-dropping thunk, and an override returning a subclass of `Task`). Not yet bound: a
+    `constrained.` call.
+
+12. **(4e) Constrained calls and static virtual methods.** A matched site whose call has a
+    `constrained.` prefix binds the variant of what the prefix resolves: 40 sites in RC1 call a
+    static abstract method of `IReadWriteAdapter` (`System.Formats.Tar`, `System.Net.Security`,
+    `System.Net.Mail`), and 2 an interface's instance method. `StaticVirtualDispatch` takes
+    decision 19's step.
+
+    The guest first: `TarWriter.WriteEntryAsync` of a `UstarTarEntry` whose data stream is the
+    guest's, cannot seek, and pends, then faults, on a read.
+    `TarHeader.WriteWithUnseekableDataStreamCoreAsync<AsyncReadWriteAdapter>` awaits
+    `constrained. !!TAdapter call IReadWriteAdapter::CopyToAsync`, whose async version tail-awaits
+    `Stream.CopyToAsync`'s, which tail-awaits the `Async` local function `<CopyToAsync>g__Core|30_0`.
+    Real .NET 11's trace is `GetResult[T](Task, Byte&)`, `<CopyToAsync>g__Core|30_0`,
+    `WriteWithUnseekableDataStreamCoreAsync`, `GetResult(Task, Byte&)`, `WriteEntryCoreAsync`; before
+    the stage another `GetResult` frame separates the local function from its caller.
+    `TarReader.GetNextEntryAsync`, whose `TryGetNextHeaderCoreAsync` awaits the adapter's
+    `ReadExactlyAsync`, will not do: no `Async` body lies under that await, and its trace is the
+    same bound or not.
+
+13. **(4f) Awaits that continue on the captured context.** A matched site without
+    `ConfigureAwait(false)` binds as the others do, and its continuation gets a continuation-context
+    slot and `FinishSuspensionWithContinuationContext` (decision 18). With this the classification's
+    third kind has no case left, and is deleted: every matched site binds unless CoreCLR's VM
+    supplies no variant there.
+
+    The guest first: `Parallel.ForEachAsync` over an `IAsyncEnumerable<T>` of the guest's, with
+    `ParallelOptions.TaskScheduler` a scheduler of the guest's that counts what it is given, and a
+    `MoveNextAsync` that returns a pending `ValueTask<bool>` and then completes it from another
+    thread. The loop body's await of `MoveNextAsync()` (`<ForEachAsync>b__57_0`, IL_002F) is one of
+    the three such sites outside ASP.NET Core. With a task that forbids inline continuations, real
+    .NET 11 queues the continuation to the guest's scheduler from a pool thread; before the stage
+    PawPrint queues it from the completing thread (decision 13). The guest also checks that the
+    loop's body runs on its scheduler, which holds before the stage too, where `Await` captures
+    the scheduler: a mutant that calls the helper for no continuation context must fail it.
+
+14. **(4g) Whole traces.** The guests that compare traces (`RuntimeAsyncTraceCrossesSuspension.cs`,
+    `StreamWriter.DisposeAsync`'s in `RuntimeAsyncFinallyAfterSuspension.cs`, and the guests of
+    stages 4b to 4f) compare whole traces with real .NET 11's, less the awaiter frames decision 20
+    names. `docs/divergences.md` records what decision 20 leaves, and decision 19's slot numbers.
+    The JIT also reuses a resumed frame's continuation when it suspends again; PawPrint makes a
+    fresh one, which nothing managed can tell apart, and `AsyncSuspension.takeException` clears the
+    exception slot a reused one would carry.
+
+15. **(4h) The escape analysis reads await sites.** `EscapeAnalysis` asks decision 13's
+    classification what a call in a runtime-async body runs: at a bound site the variant's body,
+    whose exceptions escape at the site, rather than the opaque thunk. Depends on stage 4a alone
+    for the data, and on stage 4f for the classification being final; its oracle is
+    `TestEscapeAnalysis`, whose fixture needs runtime-async methods of its own (see "Test guests").
