@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1286,3 +1286,63 @@ module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemb
   `TypeNameBuilder::EscapeName` does: a created type named `Odd+One` is `Odd\+One` on .NET 10 and
   `Odd+One` under PawPrint. So no guest yet asks `GetTypeRef` for an escaped name of its own module; the
   host oracle covers the unescaping.
+
+### 5k: a reference to a member of another module's builder
+
+`ModuleBuilder_GetMemberRef` takes the referring module, the module that defines the member, the parent
+token the managed caller made, and the member's MethodDef or FieldDef token in its own module. Read from
+it (vm/commodule.cpp) and its callers in `RuntimeModuleBuilder.cs`:
+
+* The QCall reads the member's name and signature from the defining module's metadata, a MethodDef's for
+  a MethodDef token and a FieldDef's otherwise, translates the signature into the referring module
+  (`TranslateSigWithScope`), and finds or adds the MemberRef (`DefineMemberRef`, under `MDDupMemberRef`)
+  under the parent. For a TypeDef parent it first makes a TypeRef for it (`DefineTypeRefHelper`).
+* `GetFieldTokenNoLock`, `GetMethodTokenNoLock` and `GetMethodMetadataToken(ConstructorInfo)` call it for
+  a `FieldBuilder`, `MethodBuilder` or `ConstructorBuilder` of another module, with the declaring type's
+  TypeRef as the parent; and for a field or constructor of a `TypeBuilder` instantiation
+  (`FieldOnTypeBuilderInstantiation`, `ConstructorOnTypeBuilderInstantiation`), and a `FieldBuilder` of a
+  generic `TypeBuilder`, with the instantiation's TypeSpec. A method of a `TypeBuilder` instantiation goes
+  through `GetMemberRefToken` and `GetMemberRefFromSignature` instead, as 5e describes.
+* The defining module is the referring module itself for a member of an instantiation of one of its own
+  generic `TypeBuilder`s. That needs no created type: a generic parameter's `GenericParam` row is added
+  only by `CreateType`, and a TypeSpec naming `!0` can be made before. The translation is then from the
+  module into itself, where `ImportTypeDef` keeps each TypeDef token. (For a `FieldBuilder` of a generic
+  type the caller passes its own module as the defining one, even when the field is of another.)
+* Measured on .NET 10, with `DynLib` defining `Lib.Thing` and a generic `Lib.Box<T>` that it does not
+  create, and `DynUser` referring to their members: a field of `int`, a field of type `Thing`, a method and
+  a constructor of `Thing`, each a new MemberRef under `Thing`'s TypeRef, the second's signature naming
+  `Thing` by that TypeRef; `Box<int>`'s field and constructor, each under `Box<int>`'s TypeSpec, the
+  field's signature `!0` as `DynLib` wrote it; the created type's `RuntimeFieldInfo` and
+  `RuntimeMethodInfo` finding the rows the builders added; and a method of `DynUser` constructing, calling,
+  storing and loading through them.
+
+### 5k: the decisions
+
+* **A member of another module, method or field, under a TypeRef or TypeSpec parent.** The defining
+  module's metadata is read as 5i and 5j read a declaring module's: a dynamic module's image is re-read
+  as its scope grows, so the builder's row is there whether or not its type is created.
+* **The referring module's own member is refused by name, with a TODO.** Two options were weighed. One
+  translates from a scope into itself now, keeping each TypeDef and TypeRef token: a second import mode
+  beside 5h's, which maps a source TypeDef to a TypeRef chain, and whose only guest would ask for tokens
+  it can never run through. The other waits for a generic `TypeBuilder` that can be created, which wants
+  `GenericParam` rows (`TypeBuilder_DefineGenericParam`), and then tests the translation by running
+  through it. This stage takes the second.
+* **A TypeDef parent is refused by name, with a TODO.** No caller passes one for a builder of another
+  module, since its declaring type's token is a TypeRef; only a user-derived `FieldBuilder`,
+  `MethodBuilder` or `ConstructorBuilder` claiming a type of this module could.
+* **The three handlers that translate a member of another module share their tail**: the parent token's
+  row, and the MemberRef found or added with the scope re-read. Each handler still decides which parents
+  it accepts.
+
+### 5k: the oracle
+
+* `ModuleBuilderMemberRefOfBuilder.cs`, the measurement above, exits 0 on .NET 10. Its terminal-state
+  check reads `DynUser`'s AssemblyRef, TypeRef, TypeSpec and MemberRef rows.
+* Each mutant is caught: the name and signature read from the referring module, a field's read as a
+  method's, the TypeSpec parent read as a TypeRef, the MemberRef added without the find, and the scope
+  the handler extended not kept.
+
+### 5k: left to later stages
+
+* A member of an instantiation of the module's own generic `TypeBuilder`, once `CreateType` can add its
+  `GenericParam` rows.
