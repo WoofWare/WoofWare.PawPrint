@@ -948,6 +948,76 @@ Each stage is one pull request, with its tests first.
     callee has no variant. Refused by name: `jmp`; a variant of a method with no IL, or one
     PawPrint implements itself.
 
+    As built:
+    * `frameBody` gives the async variant of a method with IL a frame of a third kind,
+      `AsyncFrame.AsyncVersion`, which runs the method's own IL and saves no contexts. Its step
+      (`AsyncVersionStep`) is `Running` until it makes the call that ends its IL, and then
+      `Returning`: once that call has completed, by returning or by the frame's resuming, the frame
+      returns the call's result before running another instruction
+      (`AsyncVersionReturn.returnsNow`, asked by `executeOneStep` as it asks for a context helper's
+      call), dropping a `Task<T>`'s result in a method returning `Task`. No instruction of a tail
+      shape after its call runs, as none of a matched await's does, and the IL is not rewritten.
+    * A `ret` of a `Running` frame calls the `AsyncHelpers.TransparentAwait` that
+      `getAwaitReturnCall` chooses, at the method's unwrapped return type, with the promise on the
+      stack as its argument, standing at the `ret`, as a tail await
+      (`AsyncVersionReturn.beforeReturn`). An exception it throws leaves through the async
+      version's frame, which stays in the trace (decision 20).
+    * `CallSiteBinding.awaitSite` reads a tail shape at a call an async version runs, unless the
+      method is synchronized, confirms that the `newobj`'s or `AsTask`'s operand names CoreLib's
+      intrinsic (a one-argument constructor of `ValueTask` or `ValueTask<T>`, not `ValueTask<T>(T)`),
+      and classifies the site. Where it binds, `TailCallFacts.ofCall` (`Semantics`) reads decision
+      17's facts from metadata, and `AwaitPattern.isTailAwait` decides: a tail await passes the
+      callee's continuation on (`OnSuspension.TailAwait`); any other makes a continuation as runtime
+      async's machinery does, through `CaptureExecutionContext`, flagged `ValueTaskAdaptedToTask`
+      for the `AsTask` shape. The callee's unwrapped result type must be the method's or the method
+      must return nothing; any other pair is refused by name, as only unverifiable IL makes one.
+    * Decision 13's classification takes the pattern (`MatchedPattern.Await` with whether it
+      continues on the captured context, or `MatchedPattern.TailShape`). An await with
+      `ConfigureAwait(false)` binds an async version as it binds an `Async` method; a tail shape
+      binds either with no continuation preference. `AwaitNotYetBound.CalleeIsAsyncVersion` is
+      gone, and a variant whose body PawPrint does not model is `AwaitSiteBinding.Unmodelled`,
+      refused by name where the site runs.
+    * Decision 18's record says what a suspending caller's continuation is flagged with
+      (`OnSuspension.CallerSuspends` of `SuspendedCallFlags`: `Continues` with a handling, or
+      `ValueTaskAdaptedToTask`), and `callMethodWithCommitment` takes the caller's record, checked
+      against the caller's frame kind. `ContinuationSlots.callFlags` gives the bits.
+    * The stack-shape import reads an async version's IL against the ordinary variant's signature,
+      whose `ret` returns the promise.
+    * `jmp` is refused wherever it runs ("TODO: Jmp unimplemented"), an async version included.
+
+    Guests, each run on real .NET 10 and 11 first:
+    `RuntimeAsyncAsyncVersionTailAwait.cs` (`StreamWriter.WriteAsync(string)`, the trace above);
+    `RuntimeAsyncAsyncVersionSuspends.cs` (an asynchronous `XmlReader` whose declaration names
+    another encoding, so that `ParseXmlDeclarationAsync` awaits the async version of
+    `SwitchEncodingAsync`, which ends `call ReadDataAsync; ret`, a `Task<int>` returned as a `Task`:
+    real .NET 11's trace has `ReadDataAsync`, `SwitchEncodingAsync` at its call's offset, IL_0051,
+    and `ParseXmlDeclarationAsync` adjacent); and `RuntimeAsyncAsyncVersionWrappedReturn.cs`, for
+    the wrapped `ret`'s tail await, which no other guest suspends at (an asynchronous `XmlWriter`'s
+    `FlushAsync` reaches `XmlUtf8RawTextWriter.FlushAsync`, which awaits the async version of
+    `Stream.FlushAsync()`, whose `ret` awaits the guest's pending flush: real .NET 11's trace has no
+    frame of `Stream.FlushAsync`). The last behaves the same bound or not, so it cannot fail first;
+    a mutant whose wrapped `ret` suspends with a continuation of its own fails it. Real .NET 11
+    reports `ParseXmlDeclarationAsync` at IL_024F, where a statement begins, rather than at its
+    `call Await` at IL_026F, which PawPrint reports (decision 20), so that guest does not check it.
+
+    The `AsTask` guest, `sourcesImpure/RuntimeAsyncAsyncVersionAsTask.cs`, exits 0 on real .NET 10
+    and 11 but is parked on both runtimes: it stops before any await, where
+    `TarWriter.ConstructEntryForWriting` names a file entry's owner from the passwd database,
+    whatever the entry's format, through `SystemNative_GetPwUidR`, which PawPrint does not
+    implement (and its group after it). Of RC1's `AsTask` shapes in methods that are not virtual,
+    only `TarWriter.WriteEntryAsync`'s and `Socket`'s are awaited directly with
+    `ConfigureAwait(false)`, so no active guest reaches the shape at this stage;
+    `TestRuntimeAsyncSuspension` checks the flag's bit and a fresh continuation's `Flags`.
+
+    `TestAwaitPattern` checks `TailCallFacts.ofCall` and `isTailAwait`, over methods of each shape
+    that the test's Roslyn compiles in Release and in Debug, against which of them real .NET 11
+    shows in a trace (under tiered compilation, `Ret`, `RetVoid`, `NewValueTask`, `NewValueTaskVoid`
+    and `RetVT` have no frame in Release, and every shape has one in Debug; `Covariant`,
+    `NoInlining`, `NoOptimization`, `AsTask` and `AsTaskVoid` have one in both). Two of the rule's
+    facts no guest or fixture reaches: an entry point that is an async version, which C# cannot
+    make (a `Task`-returning `Main` is wrapped by a synthesised entry point), and a callee flagged
+    `RequireSecObject`. `TestAwaitSiteBinding` checks the classification against stage 4c's rule.
+
 11. **(4d) Dispatch of a variant.** A matched site or tail shape whose `callvirt` names a virtual or
     interface method binds the named method's variant, and `ConcreteVirtualDispatch` finds its
     implementation through the ordinary sibling (decision 19). The implementation is an `Async`
