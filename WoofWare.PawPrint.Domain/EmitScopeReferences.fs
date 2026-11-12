@@ -243,22 +243,15 @@ module EmitScopeReferences =
     /// it kept. Every other character, a backslash before any other character included, is kept.
     /// </summary>
     let unescapeTypeName (name : string) : string =
-        let isReserved (c : char) : bool =
-            match c with
-            | ','
-            | '['
-            | ']'
-            | '&'
-            | '*'
-            | '+'
-            | '\\' -> true
-            | _ -> false
-
         let result = StringBuilder name.Length
         let mutable i = 0
 
         while i < name.Length do
-            if name.[i] = '\\' && i + 1 < name.Length && isReserved name.[i + 1] then
+            if
+                name.[i] = '\\'
+                && i + 1 < name.Length
+                && TypeNameEscaping.isReserved name.[i + 1]
+            then
                 result.Append name.[i + 1] |> ignore<StringBuilder>
                 i <- i + 2
             else

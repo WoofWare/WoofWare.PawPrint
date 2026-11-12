@@ -477,23 +477,41 @@ type BaseClassTypes<'corelib> =
 
 [<RequireQualifiedAccess>]
 module TypeInfo =
-    /// The type's name as `Type.FullName` and `Type.ToString()` render it for a non-generic type,
-    /// following CoreCLR's `TypeString::AppendNestedTypeDef` (`vm/typestring.cpp`): each row of the
-    /// nesting chain, outermost first, is its own Namespace column and Name joined with `.`, and the
-    /// rows are joined with `+`. So `typeof(Enclosing.Inner).FullName` is `Enclosing+Inner`, and a
-    /// row with namespace `A` and name `Sys` nested in `Probe.Outer` is `Probe.Outer+A.Sys`.
-    let rec fullName (get : TypeDefinitionHandle -> TypeInfo<_, _>) (ty : TypeInfo<'a, 'b>) : string =
+    // CoreCLR's `TypeString::AppendNestedTypeDef` (`vm/typestring.cpp`), with `render` applied to
+    // each Namespace column and Name before they are joined.
+    let rec private nestedName
+        (render : string -> string)
+        (get : TypeDefinitionHandle -> TypeInfo<_, _>)
+        (ty : TypeInfo<'a, 'b>)
+        : string
+        =
         let own =
             if String.IsNullOrEmpty ty.Namespace then
-                ty.Name
+                render ty.Name
             else
-                $"%s{ty.Namespace}.%s{ty.Name}"
+                $"%s{render ty.Namespace}.%s{render ty.Name}"
 
         if ty.IsNested then
-            let parent = get ty.DeclaringType |> fullName get
+            let parent = get ty.DeclaringType |> nestedName render get
             $"%s{parent}+%s{own}"
         else
             own
+
+    /// The type's full name by CoreCLR's nesting rule, `TypeString::AppendNestedTypeDef`
+    /// (`vm/typestring.cpp`): each row of the nesting chain, outermost first, is its own Namespace
+    /// column and Name joined with `.`, and the rows are joined with `+`. So
+    /// `typeof(Enclosing.Inner).FullName` is `Enclosing+Inner`, and a row with namespace `A` and name
+    /// `Sys` nested in `Probe.Outer` is `Probe.Outer+A.Sys`. The columns are as the metadata holds
+    /// them; `escapedFullName` is the spelling `Type.FullName` and `Type.ToString()` give a
+    /// non-generic type.
+    let fullName (get : TypeDefinitionHandle -> TypeInfo<_, _>) (ty : TypeInfo<'a, 'b>) : string = nestedName id get ty
+
+    /// `fullName` as `Type.FullName` and `Type.ToString()` render it for a non-generic type: each
+    /// Namespace column and Name is escaped by `TypeNameEscaping.escape` before the rows are joined,
+    /// as CoreCLR's `TypeNameBuilder::AddName` escapes each, so the `.` and `+` that join them are
+    /// never escaped.
+    let escapedFullName (get : TypeDefinitionHandle -> TypeInfo<_, _>) (ty : TypeInfo<'a, 'b>) : string =
+        nestedName TypeNameEscaping.escape get ty
 
     let withGenerics<'a, 'b, 'field> (gen : 'b ImmutableArray) (t : TypeInfo<'a, 'field>) : TypeInfo<'b, 'field> =
         {
