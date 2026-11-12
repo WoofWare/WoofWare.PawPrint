@@ -384,6 +384,104 @@ module IlMachineStateExecution =
             failwith
                 $"logic error: asked for the permitted faults of %s{MethodOwner.describe methodState.ExecutingMethod.Owner}::%s{methodState.ExecutingMethod.Name}, whose body is %O{body} rather than IL; only an instruction has an OpcodeFaults entry"
 
+    /// What a frame running a method executes, as `frameBody` chooses it.
+    type FrameBody =
+        {
+            /// The method as the frame holds it, with the body the frame executes: an IL body
+            /// whenever the frame runs IL. Its locals are the frame's.
+            Method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
+            /// The stub the frame runs in place of the method's own body.
+            VmStub : VmStub option
+            /// What the frame keeps of runtime async's calling convention.
+            AsyncFrame : AsyncFrame option
+        }
+
+    /// What a frame for `method`, declared in `declaringAssy`, runs. `callMethodWithCommitment`
+    /// builds every frame a guest's call reaches (by token, `calli`, delegate, reflection or an
+    /// emitted stub) from this, after virtual dispatch and intrinsics; a path that loads a
+    /// method's locals before the frame exists asks it which body's locals those are.
+    ///
+    /// A method's runtime-async IL (`MethodBody.AsyncIl`) is the frame's IL body only when `method`
+    /// has the async calling convention. A method flagged `Async` and returning a promise type,
+    /// named by its ordinary variant as a token, `ldftn`, delegate or reflection names it, runs the
+    /// task-returning thunk instead.
+    let frameBody
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (declaringAssy : DumpedAssembly)
+        (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (state : IlMachineState)
+        : IlMachineState * FrameBody
+        =
+        match method.Body with
+        | MethodBody.MissingIl ->
+            failwith
+                $"TODO: calling %s{MethodOwner.describe method.Owner}::%s{method.Name}, an IL method whose row names no body; real .NET raises BadImageFormatException (COR_E_BADIMAGEFORMAT) from the callee when the JIT finds no IL, before anything of it runs"
+        | MethodBody.AsyncIl instructions ->
+            match
+                RuntimeAsyncMethod.hasAsyncCallingConvention
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    baseClassTypes.Corelib
+                    declaringAssy
+                    method
+                    state.TypeSystem._LoadedAssemblies
+            with
+            | assemblies, Ok hasAsyncConvention ->
+                let state =
+                    { state with
+                        TypeSystem =
+                            { state.TypeSystem with
+                                _LoadedAssemblies = assemblies
+                            }
+                    }
+
+                if hasAsyncConvention then
+                    let asyncFrame =
+                        match method.TryVariant with
+                        | Some MethodVariant.AsyncVariant ->
+                            // Only a method flagged `Async` has an async variant
+                            // (`RuntimeAsyncMethod.asyncVariantOf`), and its body is
+                            // user-written.
+                            AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture
+                        | Some MethodVariant.Ordinary
+                        | None -> AsyncFrame.Transparent TailAwait.NotRequested
+
+                    state,
+                    {
+                        Method = MethodInfo.setMethodVars (MethodBody.Il instructions) method.Signature method
+                        VmStub = None
+                        AsyncFrame = Some asyncFrame
+                    }
+                else
+                    let facts = MethodInfo.requireMetadata "the task-returning thunk" method
+
+                    let stub =
+                        TaskReturningThunk.ofMethod baseClassTypes.Corelib declaringAssy.Methods.[facts.Handle]
+
+                    state,
+                    {
+                        Method = MethodInfo.setMethodVars (MethodBody.Il stub.Body) method.Signature method
+                        VmStub = Some stub
+                        AsyncFrame = None
+                    }
+            // CoreCLR classified the method when it loaded the declaring type, which PawPrint has
+            // loaded too.
+            | _, Error failure ->
+                failwith
+                    $"calling %O{method}: classifying its return type needs a type PawPrint cannot bind, though it loaded the method's declaring type: %s{TypeBindingFailure.describe failure}"
+        | MethodBody.Il _
+        | MethodBody.InternalCall
+        | MethodBody.PInvoke
+        | MethodBody.RuntimeProvided _
+        | MethodBody.Abstract ->
+            state,
+            {
+                Method = method
+                VmStub = None
+                AsyncFrame = None
+            }
+
     /// What a call does once `callMethod` has offered it to PawPrint's own intrinsic
     /// implementations.
     [<RequireQualifiedAccess>]
@@ -1092,71 +1190,10 @@ module IlMachineStateExecution =
         | IntrinsicOutcome.Handled (state, commitment) -> state, commitment
         | IntrinsicOutcome.RunBody (state, methodToCall) ->
 
-        // What of runtime async's machinery the frame carries: the stub it runs in place of the
-        // method's own body, and what it keeps of runtime async's calling convention.
-        let state, methodToCall, vmStub, asyncFrame =
-            match methodToCall.Body with
-            | MethodBody.MissingIl ->
-                failwith
-                    $"TODO: calling %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}, an IL method whose row names no body; real .NET raises BadImageFormatException (COR_E_BADIMAGEFORMAT) from the callee when the JIT finds no IL, before anything of it runs"
-            | MethodBody.AsyncIl instructions ->
-                // A runtime-async method's IL is run by the `MethodDesc` with the async calling
-                // convention, so the frame gets it as an ordinary IL body. The other `MethodDesc`,
-                // the ordinary variant of a method returning a promise type, runs the thunk the VM
-                // emits in its place.
-                match
-                    RuntimeAsyncMethod.hasAsyncCallingConvention
-                        loggerFactory
-                        state.DotnetRuntimeDirs
-                        baseClassTypes.Corelib
-                        declaringAssy
-                        methodToCall
-                        state.TypeSystem._LoadedAssemblies
-                with
-                | assemblies, Ok hasAsyncConvention ->
-                    let state =
-                        { state with
-                            TypeSystem =
-                                { state.TypeSystem with
-                                    _LoadedAssemblies = assemblies
-                                }
-                        }
+        let state, body =
+            frameBody loggerFactory baseClassTypes declaringAssy methodToCall state
 
-                    if hasAsyncConvention then
-                        let asyncFrame =
-                            match methodToCall.TryVariant with
-                            | Some MethodVariant.AsyncVariant ->
-                                // Only a method flagged `Async` has an async variant
-                                // (`RuntimeAsyncMethod.asyncVariantOf`), and its body is
-                                // user-written.
-                                AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture
-                            | Some MethodVariant.Ordinary
-                            | None -> AsyncFrame.Transparent TailAwait.NotRequested
-
-                        state,
-                        MethodInfo.setMethodVars (MethodBody.Il instructions) methodToCall.Signature methodToCall,
-                        None,
-                        Some asyncFrame
-                    else
-                        let facts = MethodInfo.requireMetadata "the task-returning thunk" methodToCall
-
-                        let stub =
-                            TaskReturningThunk.ofMethod baseClassTypes.Corelib declaringAssy.Methods.[facts.Handle]
-
-                        state,
-                        MethodInfo.setMethodVars (MethodBody.Il stub.Body) methodToCall.Signature methodToCall,
-                        Some stub,
-                        None
-                // CoreCLR classified the method when it loaded the declaring type, which PawPrint has
-                // loaded too.
-                | _, Error failure ->
-                    failwith
-                        $"calling %O{methodToCall}: classifying its return type needs a type PawPrint cannot bind, though it loaded the method's declaring type: %s{TypeBindingFailure.describe failure}"
-            | MethodBody.Il _
-            | MethodBody.InternalCall
-            | MethodBody.PInvoke
-            | MethodBody.RuntimeProvided _
-            | MethodBody.Abstract -> state, methodToCall, None, None
+        let methodToCall = body.Method
 
         // Decision 7 of docs/plans/2026-11-11-runtime-async.md: the caller reads the hidden
         // continuation of its last runtime-async call before it calls anything else.
@@ -1317,8 +1354,8 @@ module IlMachineStateExecution =
             | Ok frame ->
                 state,
                 { frame with
-                    VmStub = vmStub
-                    AsyncFrame = asyncFrame
+                    VmStub = body.VmStub
+                    AsyncFrame = body.AsyncFrame
                 }
             | Error toLoad ->
                 let state' =
@@ -1437,7 +1474,7 @@ module IlMachineStateExecution =
         // The tail await a frame of runtime async's machinery asked for is its next call with runtime
         // async's calling convention, which this is.
         let oldFrame =
-            match asyncFrame, oldFrame.AsyncFrame with
+            match body.AsyncFrame, oldFrame.AsyncFrame with
             | Some _, Some (AsyncFrame.Transparent TailAwait.Requested) ->
                 { oldFrame with
                     AsyncFrame = Some (AsyncFrame.Transparent TailAwait.InFlight)

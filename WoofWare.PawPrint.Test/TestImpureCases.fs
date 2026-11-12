@@ -4960,6 +4960,25 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `MethodInfo.Invoke` of runtime-async methods through the `InvokeStub_` dynamic
+                // method, which binds their task-returning thunks. Registered with the dynamic-code
+                // switch overridden, like its siblings; verified to exit 0 on real .NET 10 and 11,
+                // whose default is true.
+                FileName = "RuntimeAsyncReflectionInvokeEmittedStub.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // Executing the body of a `Reflection.Emit` method: the first slice that runs the
                 // IL rather than only minting, describing or binding it. Registered with the
                 // dynamic-code switch overridden, like its siblings.

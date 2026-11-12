@@ -655,7 +655,7 @@ and MethodState =
             match method.Body with
             | MethodBody.AsyncIl _ ->
                 failwith
-                    $"BUG: a frame of %O{method} was asked for with its runtime-async IL; callMethod gives a frame that IL only as an IL body"
+                    $"BUG: a frame of %O{method} was asked for with its runtime-async IL; IlMachineStateExecution.frameBody gives a frame that IL only as an IL body"
             | MethodBody.Il _
             | MethodBody.InternalCall
             | MethodBody.PInvoke

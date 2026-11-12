@@ -2811,7 +2811,7 @@ module Concretization =
     /// `concretizeMethod` does for its signature, since a frame zeroes each local. This is what
     /// CoreCLR loads when it compiles the method. A method with no IL body, or no locals, has none.
     /// `method` must not carry runtime-async IL (`MethodBody.AsyncIl`), which a frame is given only as
-    /// an IL body.
+    /// an IL body (`IlMachineStateExecution.frameBody`).
     ///
     /// A type a local names that does not bind is the result's failure, with what was loaded and
     /// registered before it.
@@ -2828,7 +2828,7 @@ module Concretization =
             | MethodBody.Il body -> body.LocalVars
             | MethodBody.AsyncIl _ ->
                 failwith
-                    $"BUG: asked for the locals of %O{method}, whose body is runtime-async IL; a frame runs that IL only once callMethod has given it to the frame as an IL body"
+                    $"BUG: asked for the locals of %O{method}, whose body is runtime-async IL; a frame runs that IL only once IlMachineStateExecution.frameBody has given it to the frame as an IL body, and the locals to ask for are those of the method frameBody returns"
             | MethodBody.InternalCall
             | MethodBody.PInvoke
             | MethodBody.RuntimeProvided _
