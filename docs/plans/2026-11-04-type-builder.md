@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1170,3 +1170,55 @@ A method of any assembly but CoreLib names the types of other assemblies by Type
   copied full key that `StrongNameIsValidPublicKey` rejects.
 * A TypeSpec token in a method signature.
 * Field references, through `ModuleBuilder_GetMemberRefOfFieldInfo`.
+
+### 5i: a reference to a field of another module
+
+`ILGenerator.Emit(OpCodes.Ldsfld, field)` and its kin ask `ModuleBuilder.GetFieldMetadataToken`, which
+for a `RuntimeFieldInfo` takes the declaring type's token (a TypeRef, or for a generic instantiation the
+TypeSpec from `GetTokenFromTypeSpec`) and calls `ModuleBuilder_GetMemberRefOfFieldInfo`. PawPrint does
+not implement that QCall. Read from it (vm/commodule.cpp), `GetFieldTokenNoLock` (RuntimeModuleBuilder.cs)
+and `MergeUpdateTokenInSig`:
+
+* For a TypeDef parent, a type of the dynamic module itself, the QCall hands back the field's own
+  FieldDef token. Only a created type has a `RuntimeFieldInfo`.
+* Otherwise it reads the field's name and signature from the FieldDef of the declaring type's module,
+  translates the signature (`TranslateSigWithScope`) and finds or adds the MemberRef, as 3d and 5g do
+  for a method. `MergeUpdateTokenInSig` writes a field signature's calling convention in its shortest
+  form and walks its one type as it walks a method's parameter.
+* A literal field is an `MdFieldInfo`, not a `RuntimeFieldInfo`, and the managed caller builds its
+  signature itself and goes through `GetMemberRefFromSignature`, as 5e describes. A `FieldBuilder` or a
+  field of a `TypeBuilder` instantiation goes through `ModuleBuilder_GetMemberRef`.
+* Measured on .NET 10, for `String.Empty`, `Type.EmptyTypes`, `Regex.InfiniteMatchTimeout` and
+  `ValueTuple<int,int>.Item1`, and a created type's own field: the tokens and signatures the reading
+  predicts, the last being its FieldDef. `InfiniteMatchTimeout`'s `TimeSpan` is named through a copy of the
+  `System.Text.RegularExpressions` reference to `System.Runtime`, so `typeof(TimeSpan)` is another
+  TypeRef.
+
+### 5i: the decisions
+
+* **`importFieldSignature` beside `importMethodSignature`, over one walk**, each refusing the other's
+  calling convention. The result type becomes `SignatureImport`, since it is no longer only a method's.
+* **The TypeDef parent is refused by name.** The managed caller passes one only for a created type's
+  field, after `ModuleBuilder_GetTypeRef` has found the type's TypeDef by name, which 3a refuses; so no
+  guest can reach the parent until that is implemented.
+
+### 5i: the oracle
+
+* A property: a field signature of a type translates as a method signature with that type as its one
+  parameter does, to the same rows, with the field's calling convention in place of the method's
+  header; and each function refuses the other's calling convention.
+* Real .NET's emitter over every non-literal field of the non-generic types of CoreLib and the seven
+  framework assemblies 5h's oracle reads, alongside their methods: the same tokens, signatures and
+  rows.
+* `ModuleBuilderMemberRefOfFieldInfo.cs` emits a method reading `String.Empty` and `Type.EmptyTypes`,
+  checks their tokens, `Regex.InfiniteMatchTimeout`'s and `ValueTuple<int,int>.Item1`'s, and invokes
+  the method, with a terminal-state check of the rows.
+* Each mutant is caught: a field walked as a method, its calling convention copied as it is encoded or
+  not checked, and the handler translating it as a method's, adding the reference to the scope it had
+  before translating, or naming the wrong TypeSpec.
+
+### 5i: left to later stages
+
+* `ModuleBuilder_GetMemberRef`, for a `FieldBuilder` and a field of a `TypeBuilder` instantiation.
+* A created type's own field (the TypeDef parent), with `ModuleBuilder_GetTypeRef` for a type of the
+  module itself.

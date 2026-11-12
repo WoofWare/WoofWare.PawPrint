@@ -189,8 +189,8 @@ module AssemblyRefCopy =
             HashValue = reader.GetBlobContent reference.HashValue
         }
 
-/// A token in another module's method signature that <c>EmitScopeReferences.importMethodSignature</c>
-/// does not translate into the dynamic module, the first the walk meets.
+/// A token in another module's signature that <c>EmitScopeReferences.importMethodSignature</c> or
+/// <c>importFieldSignature</c> does not translate into the dynamic module, the first the walk meets.
 [<RequireQualifiedAccess>]
 type SignatureTokenRefusal =
     /// A TypeRef of the source module whose outermost resolution scope is nil, which CoreCLR's
@@ -219,12 +219,12 @@ type SignatureTokenRefusal =
     /// asks for the declaring type's TypeRef first, which makes the AssemblyRef, so it never reaches this.
     | UnreferencedUnsignedAssembly of assembly : string
 
-/// What CoreCLR's emitter writes into a dynamic module for a method signature read from another module
-/// (<c>TranslateSigWithScope</c>).
+/// What CoreCLR's emitter writes into a dynamic module for a method or field signature read from another
+/// module (<c>TranslateSigWithScope</c>).
 [<RequireQualifiedAccess>]
 [<NoEquality>]
 [<NoComparison>]
-type MethodSignatureImport =
+type SignatureImport =
     /// The bytes the emitter writes, and the scope with the AssemblyRef and TypeRefs the translation
     /// added, which is the scope it was given if it added none.
     | Imported of signature : ImmutableArray<byte> * scope : EmitScope
@@ -861,32 +861,21 @@ module EmitScopeReferences =
                     (nameof handle)
                     $"TypeRef %d{MetadataTokens.GetRowNumber (TypeReferenceHandle.op_Implicit handle : EntityHandle)}'s resolution scope is a %O{kind}, which ECMA-335 II.22.38 does not allow"
 
-    /// <summary>
-    /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
-    /// II.23.2.1) of another module, read by <paramref name="source"/>, walking it as
-    /// <c>ImportHelper::MergeUpdateTokenInSig</c> does. A class or value type, a generic type it
-    /// instantiates, or a custom modifier names a type by token, which is rewritten where the walk meets
-    /// it, so that a row added for one token is found for a later one. A TypeDef of the source module
-    /// names the TypeRef <c>ImportTypeDef</c> finds or adds, scoped by the AssemblyRef
-    /// <c>CreateAssemblyRefFromAssembly</c> finds or adds for the source assembly. A TypeRef of the source
-    /// module scoped, at its outermost, by an AssemblyRef names the TypeRef <c>ImportTypeRef</c> finds or
-    /// adds, scoped by a copy of that AssemblyRef. Any other token is refused. Of the rest, the index of a
-    /// type or method parameter is written in its shortest form, every other byte is copied, and bytes
-    /// after the signature's last type are dropped.
-    /// </summary>
-    /// <exception cref="ArgumentException">
-    /// The signature is empty, ends early, is not a method signature, holds an element type the emitter
-    /// refuses, or names a TypeDef or TypeRef the source module does not have; or the source module holds
-    /// a TypeRef or AssemblyRef that ECMA-335 does not allow.
-    /// </exception>
-    let importMethodSignature
+    /// What `TranslateSigWithScope` is translating: a method's signature or a field's.
+    [<RequireQualifiedAccess>]
+    type private SignatureKind =
+        | Method
+        | Field
+
+    let private importSignature
+        (kind : SignatureKind)
         (source : MetadataReader)
         (signature : ImmutableArray<byte>)
         (scope : EmitScope)
-        : MethodSignatureImport
+        : SignatureImport
         =
         if signature.IsDefaultOrEmpty then
-            invalidArg (nameof signature) "a method signature is never empty"
+            invalidArg (nameof signature) "a signature is never empty"
 
         let output = ResizeArray<byte> ()
         let position = ref 0
@@ -1003,6 +992,16 @@ module EmitScopeReferences =
 
             fieldType () && parameters count
 
+        // `MergeUpdateTokenInSig` writes a field's calling convention in its shortest form, then its type.
+        and fieldSignature () : bool =
+            let header = readCompressed ()
+
+            if header &&& 0x0F <> 0x06 then
+                fail $"calling convention 0x%02x{header} is not a field's"
+
+            output.AddRange (compressed header)
+            fieldType ()
+
         and fieldType () : bool =
             let start = position.Value
             let mutable element = readCompressed ()
@@ -1065,9 +1064,58 @@ module EmitScopeReferences =
             | _ when element >= 0x22 -> fail $"element type 0x%02x{element} is refused"
             | _ -> true
 
-        if methodSignature () then
-            MethodSignatureImport.Imported (ImmutableArray.CreateRange output, scope.Value)
+        let walked =
+            match kind with
+            | SignatureKind.Method -> methodSignature ()
+            | SignatureKind.Field -> fieldSignature ()
+
+        if walked then
+            SignatureImport.Imported (ImmutableArray.CreateRange output, scope.Value)
         else
             match refusal.Value with
-            | Some refusal -> MethodSignatureImport.Refused refusal
+            | Some refusal -> SignatureImport.Refused refusal
             | None -> failwith "unreachable: the walk stopped without refusing a token"
+
+    /// <summary>
+    /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
+    /// II.23.2.1) of another module, read by <paramref name="source"/>, walking it as
+    /// <c>ImportHelper::MergeUpdateTokenInSig</c> does. A class or value type, a generic type it
+    /// instantiates, or a custom modifier names a type by token, which is rewritten where the walk meets
+    /// it, so that a row added for one token is found for a later one. A TypeDef of the source module
+    /// names the TypeRef <c>ImportTypeDef</c> finds or adds, scoped by the AssemblyRef
+    /// <c>CreateAssemblyRefFromAssembly</c> finds or adds for the source assembly. A TypeRef of the source
+    /// module scoped, at its outermost, by an AssemblyRef names the TypeRef <c>ImportTypeRef</c> finds or
+    /// adds, scoped by a copy of that AssemblyRef. Any other token is refused. Of the rest, the index of a
+    /// type or method parameter is written in its shortest form, every other byte is copied, and bytes
+    /// after the signature's last type are dropped.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The signature is empty, ends early, is not a method signature, holds an element type the emitter
+    /// refuses, or names a TypeDef or TypeRef the source module does not have; or the source module holds
+    /// a TypeRef or AssemblyRef that ECMA-335 does not allow.
+    /// </exception>
+    let importMethodSignature
+        (source : MetadataReader)
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : SignatureImport
+        =
+        importSignature SignatureKind.Method source signature scope
+
+    /// <summary>
+    /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a field signature (ECMA-335
+    /// II.23.2.4) of another module, read by <paramref name="source"/>: its calling convention in its
+    /// shortest form, then its type, translated as <c>importMethodSignature</c> translates a parameter's.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The signature is empty, ends early, is not a field signature, holds an element type the emitter
+    /// refuses, or names a TypeDef or TypeRef the source module does not have; or the source module holds
+    /// a TypeRef or AssemblyRef that ECMA-335 does not allow.
+    /// </exception>
+    let importFieldSignature
+        (source : MetadataReader)
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : SignatureImport
+        =
+        importSignature SignatureKind.Field source signature scope

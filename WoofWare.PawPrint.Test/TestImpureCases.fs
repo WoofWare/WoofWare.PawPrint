@@ -1925,6 +1925,68 @@ module TestImpureCases =
                 ]
             ]
 
+    /// `ModuleBuilderMemberRefOfFieldInfo.cs` has referred to `String.Empty`, `Type.EmptyTypes`,
+    /// `Regex.InfiniteMatchTimeout` and `ValueTuple<int,int>.Item1`. A guest cannot read a member
+    /// reference's parent or signature, or a TypeRef's scope, so this checks the rows its dynamic
+    /// module's scope ends with, as .NET 10 reports them: each field's signature translated into the
+    /// module, `TimeSpan` through a copy of System.Text.RegularExpressions' reference to System.Runtime,
+    /// and `Item1` a member of the instantiation's TypeSpec.
+    let private assertFieldRefRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                "System.Private.CoreLib"
+                "System.Text.RegularExpressions"
+                "System.Runtime"
+            ]
+
+        let assemblyRef (rid : int) =
+            ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid rid scope).Value
+
+        let typeRef (rid : int) =
+            (EmitScope.tryTypeRefRid rid scope).Value
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            row.ResolutionScope, EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                assemblyRef 1, "System", "Object"
+                assemblyRef 1, "System", "String"
+                assemblyRef 1, "System", "Type"
+                assemblyRef 2, "System.Text.RegularExpressions", "Regex"
+                assemblyRef 3, "System", "TimeSpan"
+                assemblyRef 1, "System", "ValueTuple`2"
+            ]
+
+        EmitScope.typeSpecs scope
+        |> Seq.map (fun row -> EmitScope.blobAt row.Signature scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual [ [ 0x15uy ; 0x11uy ; 0x19uy ; 0x02uy ; 0x08uy ; 0x08uy ] ]
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                MemberRefParent.TypeRef (typeRef 2), "Empty", [ 0x06uy ; 0x0Euy ]
+                MemberRefParent.TypeRef (typeRef 2), "get_Length", [ 0x20uy ; 0x00uy ; 0x08uy ]
+                MemberRefParent.TypeRef (typeRef 3), "EmptyTypes", [ 0x06uy ; 0x1Duy ; 0x12uy ; 0x0Duy ]
+                MemberRefParent.TypeRef (typeRef 4), "InfiniteMatchTimeout", [ 0x06uy ; 0x11uy ; 0x15uy ]
+                MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid 1 scope).Value, "Item1", [ 0x06uy ; 0x13uy ; 0x00uy ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5536,6 +5598,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertTranslatedTypeRefRows
+            }
+            {
+                // `ModuleBuilder_GetMemberRefOfFieldInfo`, through `ldsfld` and `GetFieldMetadataToken`:
+                // each field's signature translated into the dynamic module, and a field of an
+                // instantiation a member of its TypeSpec; `assertFieldRefRows` reads the rows. Dynamic-code switch overridden to true like its
+                // siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderMemberRefOfFieldInfo.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertFieldRefRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has

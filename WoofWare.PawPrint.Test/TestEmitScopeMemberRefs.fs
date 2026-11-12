@@ -1160,6 +1160,71 @@ module TestEmitScopeMemberRefs =
 
         go tokens [] assemblyRefs typeRefs false
 
+    /// The dynamic module's scope `seed` describes, before a signature of `source`, which `reader` reads,
+    /// is translated into it.
+    let private seededScope (source : SourceAssembly) (seed : Seed) (reader : MetadataReader) : EmitScope =
+        let scope = EmitScope.create emittingName Guid.Empty
+        let name, scope = EmitScope.internString emittingName scope
+
+        let key, scope =
+            EmitScope.internBlob
+                (if seed.EmittingKey then
+                     ImmutableArray.CreateRange keyTwo
+                 else
+                     ImmutableArray.Empty)
+                scope
+
+        let scope =
+            EmitScope.defineAssembly
+                {
+                    HashAlgorithm = AssemblyHashAlgorithm.Sha1
+                    Version =
+                        {
+                            Major = 0us
+                            Minor = 0us
+                            Build = 0us
+                            Revision = 0us
+                        }
+                    Flags =
+                        (if seed.EmittingKey then
+                             AssemblyFlags.PublicKey
+                         else
+                             enum<AssemblyFlags> 0)
+                    PublicKey = key
+                    Name = name
+                    Culture = StringOffset 0
+                }
+                scope
+
+        let scope =
+            match seed.OtherAssemblyRef with
+            | None -> scope
+            | Some key ->
+                EmitScopeReferences.defineAssemblyRef
+                    {
+                        Name = "Other"
+                        Version = metadataVersion (Version (1, 0, 0, 0))
+                        Culture = ""
+                        PublicKeyToken =
+                            match key with
+                            | PublicKeyOrToken.Token token -> token
+                            | _ -> ImmutableArray.Empty
+                        Flags = enum<AssemblyFlags> 0
+                    }
+                    scope
+                |> snd
+
+        if seed.SourceAssemblyRef then
+            let assemblyRef, scope =
+                EmitScopeReferences.defineAssemblyRef (AssemblyRefRequest.ofDefinition reader) scope
+
+            seed.Types
+            |> List.fold
+                (fun scope index -> getTypeRef source assemblyRef (index % source.Types.Length) scope |> snd)
+                scope
+        else
+            scope
+
     [<Test>]
     let ``a signature is translated with each TypeDef or TypeRef token rewritten to the TypeRef chain the model finds or adds, and refused at its first other token``
         ()
@@ -1179,68 +1244,7 @@ module TestEmitScopeMemberRefs =
             use pe = new PEReader (ImmutableArray.Create<byte> (sourceImage source))
             let reader = pe.GetMetadataReader ()
 
-            let start =
-                let scope = EmitScope.create emittingName Guid.Empty
-                let name, scope = EmitScope.internString emittingName scope
-
-                let key, scope =
-                    EmitScope.internBlob
-                        (if seed.EmittingKey then
-                             ImmutableArray.CreateRange keyTwo
-                         else
-                             ImmutableArray.Empty)
-                        scope
-
-                let scope =
-                    EmitScope.defineAssembly
-                        {
-                            HashAlgorithm = AssemblyHashAlgorithm.Sha1
-                            Version =
-                                {
-                                    Major = 0us
-                                    Minor = 0us
-                                    Build = 0us
-                                    Revision = 0us
-                                }
-                            Flags =
-                                (if seed.EmittingKey then
-                                     AssemblyFlags.PublicKey
-                                 else
-                                     enum<AssemblyFlags> 0)
-                            PublicKey = key
-                            Name = name
-                            Culture = StringOffset 0
-                        }
-                        scope
-
-                let scope =
-                    match seed.OtherAssemblyRef with
-                    | None -> scope
-                    | Some key ->
-                        EmitScopeReferences.defineAssemblyRef
-                            {
-                                Name = "Other"
-                                Version = metadataVersion (Version (1, 0, 0, 0))
-                                Culture = ""
-                                PublicKeyToken =
-                                    match key with
-                                    | PublicKeyOrToken.Token token -> token
-                                    | _ -> ImmutableArray.Empty
-                                Flags = enum<AssemblyFlags> 0
-                            }
-                            scope
-                        |> snd
-
-                if seed.SourceAssemblyRef then
-                    let assemblyRef, scope =
-                        EmitScopeReferences.defineAssemblyRef (AssemblyRefRequest.ofDefinition reader) scope
-
-                    seed.Types
-                    |> List.fold
-                        (fun scope index -> getTypeRef source assemblyRef (index % source.Types.Length) scope |> snd)
-                        scope
-                else
-                    scope
+            let start = seededScope source seed reader
 
             let input = encodeMethod false signature
             let tokens = methodTokensOf signature
@@ -1257,7 +1261,7 @@ module TestEmitScopeMemberRefs =
                 EmitScopeReferences.importMethodSignature reader (ImmutableArray.CreateRange (input @ trailing)) start
 
             match expected, actual with
-            | Error refusal, MethodSignatureImport.Refused actual ->
+            | Error refusal, SignatureImport.Refused actual ->
                 let kind =
                     match refusal with
                     | SignatureTokenRefusal.TypeRefWithoutScope _ -> "TypeRefWithoutScope"
@@ -1275,7 +1279,7 @@ module TestEmitScopeMemberRefs =
                     | false, _ -> 1
 
                 actual |> shouldEqual refusal
-            | Ok (replacements, assemblyRefs, typeRefs, partly), MethodSignatureImport.Imported (written, next) ->
+            | Ok (replacements, assemblyRefs, typeRefs, partly), SignatureImport.Imported (written, next) ->
                 let replaced, left = replaceMethodTokens replacements signature
                 left |> shouldEqual []
                 List.ofSeq written |> shouldEqual (encodeMethod true replaced)
@@ -1402,6 +1406,73 @@ module TestEmitScopeMemberRefs =
              | false, _ -> 0)
             |> shouldBeGreaterThan 10
 
+    [<Test>]
+    let ``a field signature translates as a method signature taking its type does, with the field's calling convention shortest``
+        ()
+        : unit
+        =
+        let mutable imported = 0
+        let mutable refused = 0
+        let mutable overlongHeaders = 0
+
+        let property (source : SourceAssembly) (seed : Seed) (shape : Shape) (headerWidth : int) : unit =
+            use pe = new PEReader (ImmutableArray.Create<byte> (sourceImage source))
+            let reader = pe.GetMetadataReader ()
+            let start = seededScope source seed reader
+            let fieldType = encode false shape
+
+            // `void M(T)`, and a field of type `T` whose calling convention may be overlong.
+            let asMethod =
+                EmitScopeReferences.importMethodSignature
+                    reader
+                    (ImmutableArray.CreateRange ([ 0x00uy ; 0x01uy ; 0x01uy ] @ fieldType))
+                    start
+
+            let asField =
+                EmitScopeReferences.importFieldSignature
+                    reader
+                    (ImmutableArray.CreateRange (overlong 0x06 headerWidth @ fieldType))
+                    start
+
+            if headerWidth > 1 then
+                overlongHeaders <- overlongHeaders + 1
+
+            match asMethod, asField with
+            | SignatureImport.Refused fromMethod, SignatureImport.Refused fromField ->
+                refused <- refused + 1
+                fromField |> shouldEqual fromMethod
+            | SignatureImport.Imported (methodBytes, methodScope), SignatureImport.Imported (fieldBytes, fieldScope) ->
+                imported <- imported + 1
+
+                List.ofSeq fieldBytes
+                |> shouldEqual (0x06uy :: List.skip 3 (List.ofSeq methodBytes))
+
+                modelAssemblyRefs fieldScope |> shouldEqual (modelAssemblyRefs methodScope)
+                modelTypeRefs fieldScope |> shouldEqual (modelTypeRefs methodScope)
+
+                Object.ReferenceEquals (fieldScope, start)
+                |> shouldEqual (Object.ReferenceEquals (methodScope, start))
+            | asMethod, asField -> failwith $"as a method %A{asMethod}, but as a field %A{asField}"
+
+        let arb =
+            gen {
+                let! source = genSource
+                let! seed = genSeed
+                let! shape = Gen.sized (fun size -> genShape (Some (sourceTokens source)) (min size 12))
+                let! headerWidth = Gen.elements [ 1 ; 1 ; 2 ; 4 ]
+                return source, seed, shape, headerWidth
+            }
+            |> Arb.fromGen
+
+        Check.One (
+            Config.QuickThrowOnFailure.WithMaxTest 1000,
+            Prop.forAll arb (fun (source, seed, shape, headerWidth) -> property source seed shape headerWidth)
+        )
+
+        imported |> shouldBeGreaterThan 200
+        refused |> shouldBeGreaterThan 100
+        overlongHeaders |> shouldBeGreaterThan 200
+
     /// Every method and constructor `assembly` declares on a type that is neither generic nor nested in
     /// a generic type, so that the parent a dynamic module's reference names is a `TypeRef`.
     let private methodsOf (assembly : Assembly) : MethodBase list =
@@ -1420,6 +1491,25 @@ module TestEmitScopeMemberRefs =
 
                     for c in t.GetConstructors flags |> Array.sortBy (fun c -> c.MetadataToken) do
                         yield c :> MethodBase
+        ]
+
+    /// Every field `assembly` declares on a type that is neither generic nor nested in a generic type,
+    /// but a literal one: reflection gives a literal field as an `MdFieldInfo`, for which the managed
+    /// caller builds the signature itself rather than asking `GetMemberRefOfFieldInfo`.
+    let private fieldsOf (assembly : Assembly) : FieldInfo list =
+        [
+            let flags =
+                BindingFlags.DeclaredOnly
+                ||| BindingFlags.Public
+                ||| BindingFlags.NonPublic
+                ||| BindingFlags.Instance
+                ||| BindingFlags.Static
+
+            for t in assembly.GetTypes () |> Array.sortBy (fun t -> t.MetadataToken) do
+                if not t.ContainsGenericParameters && not t.IsGenericType then
+                    for f in t.GetFields flags |> Array.sortBy (fun f -> f.MetadataToken) do
+                        if not f.IsLiteral then
+                            yield f
         ]
 
     /// A nested type's name as the managed caller of `ModuleBuilder_GetTypeRef` passes it: its full
@@ -1459,9 +1549,10 @@ module TestEmitScopeMemberRefs =
     /// in order, then the first thousand of those again, so that some requests are found: for each, the
     /// same token and signature bytes, the declaring type's TypeRef made first as `GetTypeRef` makes it;
     /// then, for each type the method names, the same TypeRef from `GetTypeMetadataToken`; and at the
-    /// end, the same TypeRefs, each naming the same type, and the same AssemblyRefs. Returns how many
-    /// methods there were, and how many signatures the translation changed.
-    let private translationOracle (assemblies : Assembly list) (every : int) : int * int =
+    /// end, the same TypeRefs, each naming the same type, and the same AssemblyRefs. Then the same for
+    /// every `every`th field. Returns how many methods and fields there were, and how many signatures the
+    /// translation changed.
+    let private translationOracle (assemblies : Assembly list) (every : int) : int * int * int =
         let readers = Collections.Generic.Dictionary<string, PEReader> ()
 
         try
@@ -1533,9 +1624,9 @@ module TestEmitScopeMemberRefs =
                 let parent, withParent = typeRef m.DeclaringType scope
 
                 match EmitScopeReferences.importMethodSignature source definitionSignature withParent with
-                | MethodSignatureImport.Refused refusal ->
+                | SignatureImport.Refused refusal ->
                     failwith $"%O{m.DeclaringType}::%O{m}'s signature was refused: %A{refusal}"
-                | MethodSignatureImport.Imported (signature, translated) ->
+                | SignatureImport.Imported (signature, translated) ->
                     if signature <> definitionSignature then
                         named <- named + 1
 
@@ -1555,6 +1646,46 @@ module TestEmitScopeMemberRefs =
                     | _ -> [ for p in m.GetParameters () -> p.ParameterType ]
 
                 for t in List.collect namedTypes types do
+                    let real = dynamicModule.GetTypeMetadataToken t
+                    let rid, next = typeRef t scope
+                    real |> shouldEqual (0x01000000 ||| rid.Rid)
+                    scope <- next
+
+            let fields =
+                assemblies
+                |> List.collect fieldsOf
+                |> List.indexed
+                |> List.filter (fun (i, _) -> i % every = 0)
+                |> List.map snd
+
+            for f in fields @ List.truncate 1000 fields do
+                let source = readerOf f.Module.Assembly
+
+                let definitionSignature =
+                    ImmutableArray.Create<byte> (f.Module.ResolveSignature f.MetadataToken)
+
+                let token = dynamicModule.GetFieldMetadataToken f
+                token >>> 24 |> shouldEqual 0x0A
+
+                // The managed caller makes the declaring type's TypeRef first.
+                let parent, withParent = typeRef f.DeclaringType scope
+
+                match EmitScopeReferences.importFieldSignature source definitionSignature withParent with
+                | SignatureImport.Refused refusal ->
+                    failwith $"%O{f.DeclaringType}::%s{f.Name}'s signature was refused: %A{refusal}"
+                | SignatureImport.Imported (signature, translated) ->
+                    if signature <> definitionSignature then
+                        named <- named + 1
+
+                    dynamicModule.ResolveSignature token |> shouldEqual (Seq.toArray signature)
+
+                    let rid, next =
+                        EmitScopeReferences.defineMemberRef (MemberRefParent.TypeRef parent) f.Name signature translated
+
+                    rid.Rid |> shouldEqual (token &&& 0xFFFFFF)
+                    scope <- next
+
+                for t in namedTypes f.FieldType do
                     let real = dynamicModule.GetTypeMetadataToken t
                     let rid, next = typeRef t scope
                     real |> shouldEqual (0x01000000 ||| rid.Rid)
@@ -1614,28 +1745,29 @@ module TestEmitScopeMemberRefs =
                 |> List.ofSeq
             )
 
-            methods.Length, named
+            methods.Length, fields.Length, named
         finally
             for reader in readers.Values do
                 reader.Dispose ()
 
     [<Test>]
-    let ``real .NET translates a CoreLib signature as importMethodSignature does, into the TypeRefs GetTypeRef gives``
+    let ``real .NET translates CoreLib's method and field signatures as Domain does, into the TypeRefs GetTypeRef gives``
         ()
         : unit
         =
         // Every fourth method, to bound the run. CoreLib names its own types by TypeDef.
-        let methods, named = translationOracle [ typeof<obj>.Assembly ] 4
+        let methods, fields, named = translationOracle [ typeof<obj>.Assembly ] 4
         methods |> shouldBeGreaterThan 5000
+        fields |> shouldBeGreaterThan 1000
         named |> shouldBeGreaterThan 2000
 
     [<Test>]
-    let ``real .NET translates other framework assemblies' signatures as importMethodSignature does, copying their AssemblyRefs``
+    let ``real .NET translates other framework assemblies' method and field signatures as Domain does, copying their AssemblyRefs``
         ()
         : unit
         =
         // These name CoreLib's types, and each other's, by TypeRefs through facades such as System.Runtime.
-        let methods, named =
+        let methods, fields, named =
             translationOracle
                 [
                     typeof<Console>.Assembly
@@ -1649,6 +1781,7 @@ module TestEmitScopeMemberRefs =
                 1
 
         methods |> shouldBeGreaterThan 3000
+        fields |> shouldBeGreaterThan 500
         named |> shouldBeGreaterThan 2000
 
     /// An image of an unsigned assembly `name` with an abstract class `C`, whose one method `M` takes a
@@ -1823,8 +1956,8 @@ module TestEmitScopeMemberRefs =
                         (ImmutableArray.Create<byte> (m.Module.ResolveSignature m.MetadataToken))
                         withParent
                 with
-                | MethodSignatureImport.Refused refusal -> failwith $"%s{name}'s M was refused: %A{refusal}"
-                | MethodSignatureImport.Imported (signature, translated) ->
+                | SignatureImport.Refused refusal -> failwith $"%s{name}'s M was refused: %A{refusal}"
+                | SignatureImport.Imported (signature, translated) ->
                     dynamicModule.ResolveSignature token |> shouldEqual (Seq.toArray signature)
 
                     let rid, next =
@@ -1867,10 +2000,7 @@ module TestEmitScopeMemberRefs =
             loaded.Unload ()
 
     [<Test>]
-    let ``an empty name or signature, a signature that ends early, and one that is not a method's are refused``
-        ()
-        : unit
-        =
+    let ``an empty name or signature, a signature that ends early, and one of the wrong kind are refused`` () : unit =
         let scope = EmitScope.create "Dyn" Guid.Empty
         let parent = MemberRefParent.TypeDef (TypeDefRid 1)
         let signature = ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x01uy |]
@@ -1939,6 +2069,28 @@ module TestEmitScopeMemberRefs =
         // `VALUEARRAY`, and an element type past `ELEMENT_TYPE_MAX`.
         refused [ 0x00uy ; 0x00uy ; 0x17uy ]
         refused [ 0x00uy ; 0x00uy ; 0x22uy ]
+
+        let refusedAsField (bytes : byte list) : unit =
+            Assert.Throws<ArgumentException> (fun () ->
+                EmitScopeReferences.importFieldSignature
+                    (source.GetMetadataReader ())
+                    (ImmutableArray.CreateRange bytes)
+                    scope
+                |> ignore
+            )
+            |> ignore
+
+        refusedAsField []
+        // A field's calling convention, but no type.
+        refusedAsField [ 0x06uy ]
+        // A method's, a local's, a property's and an instantiation's signature, each of which would
+        // otherwise be read as a field's.
+        refusedAsField [ 0x00uy ; 0x00uy ; 0x08uy ]
+        refusedAsField [ 0x20uy ; 0x00uy ; 0x08uy ]
+        refusedAsField [ 0x07uy ; 0x01uy ; 0x08uy ]
+        refusedAsField [ 0x08uy ; 0x00uy ; 0x08uy ]
+        refusedAsField [ 0x0Auy ; 0x01uy ; 0x08uy ]
+        refusedAsField [ 0x06uy ; 0x17uy ]
 
     /// Method signatures that CoreCLR reads but did not write, each with the bytes .NET 10's emitter
     /// writes into a dynamic module for it, measured through `Module.ResolveSignature`.
@@ -2109,9 +2261,9 @@ module TestEmitScopeMemberRefs =
                         (ImmutableArray.CreateRange definition)
                         scope
                 with
-                | MethodSignatureImport.Imported (imported, next) ->
+                | SignatureImport.Imported (imported, next) ->
                     List.ofSeq imported |> shouldEqual written
                     Object.ReferenceEquals (next, scope) |> shouldEqual true
-                | MethodSignatureImport.Refused refusal -> failwith $"%s{name} was refused: %A{refusal}"
+                | SignatureImport.Refused refusal -> failwith $"%s{name} was refused: %A{refusal}"
         finally
             loaded.Unload ()

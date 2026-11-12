@@ -19,6 +19,49 @@ module NativeRuntimeModuleBuilder =
     /// `mdtTypeSpec`, the table byte of a `TypeSpec` token.
     let private typeSpecTable : int = 0x1B
 
+    /// The signature of <paramref name="described"/>, of another module, as <c>TranslateSigWithScope</c>
+    /// writes it into <paramref name="moduleName"/>, with the scope holding the rows the translation
+    /// added; or a TODO naming the token it refused.
+    let private translatedSignature
+        (operation : string)
+        (described : string)
+        (moduleName : string)
+        (import : SignatureImport)
+        : System.Collections.Immutable.ImmutableArray<byte> * EmitScope
+        =
+        let typeRef (handle : TypeReferenceHandle) : int =
+            MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)
+
+        // The translation's AssemblyRefs are not recorded with `WithAssemblyRefTarget`: CoreCLR records
+        // only `GetTypeRef`'s in the module's rid map, so a translated reference resolves through the
+        // binder, as the source module's own does.
+        match import with
+        | SignatureImport.Imported (imported, translated) -> imported, translated
+        | SignatureImport.Refused (SignatureTokenRefusal.TypeRefWithoutScope handle) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{typeRef handle} of its module, whose outermost resolution scope is nil, which CoreCLR's ImportTypeRef looks up among the source assembly's ExportedTypes; PawPrint translates only a TypeRef scoped by an AssemblyRef"
+        | SignatureImport.Refused (SignatureTokenRefusal.TypeRefOfModule handle) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{typeRef handle} of its module, scoped by the module itself, which CoreCLR's ImportTypeRef scopes by the AssemblyRef it makes for the source assembly; PawPrint translates only a TypeRef scoped by an AssemblyRef"
+        | SignatureImport.Refused (SignatureTokenRefusal.TypeRefOfModuleRef handle) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{typeRef handle} of its module, scoped by a ModuleRef, which CoreCLR's ImportTypeRef scopes by the AssemblyRef it makes for the source assembly; PawPrint translates only a TypeRef scoped by an AssemblyRef"
+        | SignatureImport.Refused (SignatureTokenRefusal.TypeRefOfEmittingAssembly handle) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{typeRef handle} of its module, scoped by an AssemblyRef naming %s{moduleName} itself, which CoreCLR's ImportTypeRef makes name a type of the emitting module; PawPrint does not"
+        | SignatureImport.Refused (SignatureTokenRefusal.TypeRefOfInvalidPublicKey handle) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{typeRef handle} of its module, scoped by an AssemblyRef holding a full key that StrongNameIsValidPublicKey rejects; CoreCLR copies it, and throws SecurityException from any later search that reduces the key, which PawPrint does not raise"
+        | SignatureImport.Refused (SignatureTokenRefusal.TypeSpec handle) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeSpec 0x%08x{MetadataTokens.GetToken (TypeSpecificationHandle.op_Implicit handle : EntityHandle)} of its module, which CoreCLR translates in turn and finds or adds in %s{moduleName}; PawPrint translates only a TypeDef or TypeRef of the source module"
+        | SignatureImport.Refused (SignatureTokenRefusal.NoTable coded) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} holds the encoded token 0x%x{coded}, whose tag names no table; CoreCLR copies it as an mdtBaseType, which no compiler writes"
+        | SignatureImport.Refused (SignatureTokenRefusal.UnreferencedUnsignedAssembly assembly) ->
+            failwith
+                $"%s{operation}: the signature of %s{described} names a TypeDef of the unsigned assembly %s{assembly}, which %s{moduleName} has no AssemblyRef for, though the managed caller asks for the declaring type's TypeRef, which makes one, first"
+
     let tryExecuteQCall (entryPoint : string) (ctx : NativeCallContext) : NativeHandlerResult option =
         let state = ctx.State
         let instruction = ctx.Instruction
@@ -388,36 +431,9 @@ module NativeRuntimeModuleBuilder =
             // the emitter's collectible-assembly check never applies.
             let signature = reader.GetBlobContent definition.Signature
 
-            // The translation's AssemblyRefs are not recorded with `WithAssemblyRefTarget`: CoreCLR
-            // records only `GetTypeRef`'s in the module's rid map, so a translated reference resolves
-            // through the binder, as the source module's own does.
             let signature, translated =
-                match EmitScopeReferences.importMethodSignature reader signature held with
-                | MethodSignatureImport.Imported (imported, translated) -> imported, translated
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefWithoutScope handle) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, whose outermost resolution scope is nil, which CoreCLR's ImportTypeRef looks up among the source assembly's ExportedTypes; PawPrint translates only a TypeRef scoped by an AssemblyRef"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfModule handle) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by the module itself, which CoreCLR's ImportTypeRef scopes by the AssemblyRef it makes for the source assembly; PawPrint translates only a TypeRef scoped by an AssemblyRef"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfModuleRef handle) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by a ModuleRef, which CoreCLR's ImportTypeRef scopes by the AssemblyRef it makes for the source assembly; PawPrint translates only a TypeRef scoped by an AssemblyRef"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfEmittingAssembly handle) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by an AssemblyRef naming %s{moduleName} itself, which CoreCLR's ImportTypeRef makes name a type of the emitting module; PawPrint does not"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeRefOfInvalidPublicKey handle) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeRef 0x%08x{MetadataTokens.GetToken (TypeReferenceHandle.op_Implicit handle : EntityHandle)} of its module, scoped by an AssemblyRef holding a full key that StrongNameIsValidPublicKey rejects; CoreCLR copies it, and throws SecurityException from any later search that reduces the key, which PawPrint does not raise"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.TypeSpec handle) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} names TypeSpec 0x%08x{MetadataTokens.GetToken (TypeSpecificationHandle.op_Implicit handle : EntityHandle)} of its module, which CoreCLR translates in turn and finds or adds in %s{moduleName}; PawPrint translates only a TypeDef or TypeRef of the source module"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.NoTable coded) ->
-                    failwith
-                        $"TODO: %s{operation}: the signature of %s{described} holds the encoded token 0x%x{coded}, whose tag names no table; CoreCLR copies it as an mdtBaseType, which no compiler writes"
-                | MethodSignatureImport.Refused (SignatureTokenRefusal.UnreferencedUnsignedAssembly assembly) ->
-                    failwith
-                        $"%s{operation}: the signature of %s{described} names a TypeDef of the unsigned assembly %s{assembly}, which %s{moduleName} has no AssemblyRef for, though the managed caller asks for the declaring type's TypeRef, which makes one, first"
+                EmitScopeReferences.importMethodSignature reader signature held
+                |> translatedSignature operation described moduleName
 
             let parent =
                 match tr >>> 24 with
@@ -436,6 +452,119 @@ module NativeRuntimeModuleBuilder =
                 | _ ->
                     failwith
                         $"%s{operation}: parent token 0x%08x{tr} for %s{described} is neither a TypeRef nor a TypeSpec; the managed caller passes its declaring type's token, which is a TypeDef only for a type of this module"
+
+            let memberRef, extended =
+                EmitScopeReferences.defineMemberRef parent name signature translated
+
+            let state =
+                // Found rather than added, so there is nothing to re-read.
+                if Object.ReferenceEquals (extended, held) then
+                    state
+                else
+                    state.WithEmitScope ctx.LoggerFactory moduleName extended |> fst
+
+            state
+            |> IlMachineState.pushToEvalStack
+                (CliType.Numeric (CliNumericType.Int32 ((memberRefTable <<< 24) ||| memberRef.Rid)))
+                ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
+        | "ModuleBuilder_GetMemberRefOfFieldInfo",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeModuleBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        typeGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty && typeGenerics.IsEmpty
+            ->
+            let operation = "ModuleBuilder_GetMemberRefOfFieldInfo"
+
+            if instruction.Arguments.Length <> 4 then
+                failwith $"%s{operation}: expected four native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held =
+                match state.TypeSystem._LoadedAssemblies.TryDynamicScope moduleName with
+                | Some scope -> scope
+                | None ->
+                    failwith
+                        $"%s{operation}: %s{moduleName} is not a dynamic assembly, and only a RuntimeModuleBuilder's module reaches this QCall"
+
+            let tr = NativeCall.int32Argument operation instruction.Arguments.[1]
+            let tkField = NativeCall.int32Argument operation instruction.Arguments.[3]
+
+            if tkField >>> 24 <> 0x04 then
+                failwith
+                    $"%s{operation}: 0x%08x{tkField} is not a FieldDef token, which the managed caller passes as the RuntimeFieldInfo's MetadataToken"
+
+            if tr >>> 24 = 0x02 then
+                failwith
+                    $"TODO: %s{operation}: the parent 0x%08x{tr} is a TypeDef of %s{moduleName}, for which CoreCLR hands back the field's own FieldDef token; the managed caller passes one only for a created type's field, whose TypeDef ModuleBuilder_GetTypeRef must first find by name, which PawPrint refuses"
+
+            // The field is read from the module of its declaring type, which for an instantiation is its
+            // definition's.
+            let declaringName =
+                NativeCall.typeAssemblyFullName
+                    operation
+                    ctx.BaseClassTypes
+                    state
+                    (NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget
+                        operation
+                        state
+                        (instruction.Arguments.[2] |> EvalStackValue.ofCliType))
+
+            let declaring =
+                state.LoadedAssembly declaringName
+                |> Option.defaultWith (fun () -> failwith $"%s{operation}: %s{declaringName} is not loaded")
+
+            let reader = declaring.PeReader.GetMetadataReader ()
+            let fieldRid = tkField &&& 0x00FFFFFF
+
+            if fieldRid < 1 || fieldRid > reader.FieldDefinitions.Count then
+                failwith $"%s{operation}: 0x%08x{tkField} names no field of %s{declaringName}"
+
+            let definition =
+                reader.GetFieldDefinition (MetadataTokens.FieldDefinitionHandle fieldRid)
+
+            let name = reader.GetString definition.Name
+            let declaringType = reader.GetTypeDefinition (definition.GetDeclaringType ())
+
+            let described =
+                $"%s{reader.GetString declaringType.Namespace}.%s{reader.GetString declaringType.Name}::%s{name} of %s{declaringName}"
+
+            // No assembly PawPrint loads is collectible, so the emitter's collectible-assembly check
+            // never applies.
+            let signature, translated =
+                EmitScopeReferences.importFieldSignature reader (reader.GetBlobContent definition.Signature) held
+                |> translatedSignature operation described moduleName
+
+            let parent =
+                match tr >>> 24 with
+                | table when table = typeRefTable ->
+                    match EmitScope.tryTypeRefRid (tr &&& 0x00FFFFFF) held with
+                    | Some rid -> MemberRefParent.TypeRef rid
+                    | None ->
+                        failwith
+                            $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeRef row of %s{moduleName}"
+                | table when table = typeSpecTable ->
+                    match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
+                    | Some rid -> MemberRefParent.TypeSpec rid
+                    | None ->
+                        failwith
+                            $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeSpec row of %s{moduleName}"
+                | _ ->
+                    failwith
+                        $"%s{operation}: parent token 0x%08x{tr} for %s{described} is not a TypeDef, TypeRef or TypeSpec, which are all the managed caller passes"
 
             let memberRef, extended =
                 EmitScopeReferences.defineMemberRef parent name signature translated

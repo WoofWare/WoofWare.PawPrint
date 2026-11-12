@@ -166,6 +166,8 @@ module NativeQCall =
             NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetMemberRefFromSignature"
             "ModuleBuilder_GetMemberRefOfMethodInfo",
             NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetMemberRefOfMethodInfo"
+            "ModuleBuilder_GetMemberRefOfFieldInfo",
+            NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetMemberRefOfFieldInfo"
             "TypeBuilder_DefineType", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineType"
             "TypeBuilder_DefineMethod", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethod"
             "TypeBuilder_SetMethodImpl", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetMethodImpl"
