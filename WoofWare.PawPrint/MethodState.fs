@@ -241,8 +241,8 @@ type SynchronizedMonitor =
 /// `SynchronizedMethodHelpers.onRuntime`.
 [<RequireQualifiedAccess>]
 type SynchronizedFrame =
-    /// The enter helper has not been called, so none of the body has run: this is the frame's
-    /// prologue, after its type-initialisation check.
+    /// The enter helper has not been called, so nothing of the frame has run, not even its
+    /// type-initialisation check, which the JIT puts inside the region the monitor guards.
     | AwaitingEnter
     /// The enter helper has been called, and the body runs inside the region whose fault handler
     /// calls the exit helper.

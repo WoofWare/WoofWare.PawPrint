@@ -697,19 +697,23 @@ module AbstractMachine =
         =
         let logger = logger loggerFactory
 
-        // A synchronized method's call of a monitor helper, and a user-written runtime-async body's
-        // call of a context helper, is a step of its own: CoreCLR's JIT emits it into the body,
-        // after the type-initialisation check. No frame does both, which frame creation refuses.
+        // A user-written runtime-async body's call of a context helper is a step of its own: CoreCLR's
+        // JIT emits it into the body, after the type-initialisation check.
         let afterPrologue (state : IlMachineState) : ExecutionResult =
-            match SynchronizedMethodMonitor.beforeInstruction loggerFactory baseClassTypes thread state with
-            | Some result -> result
-            | None ->
-
             match AsyncContextSaving.beforeInstruction loggerFactory baseClassTypes thread state with
             | Some result -> result
             | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
 
         let ran =
+            // A synchronized method's call of a monitor helper is a step of its own too, and comes
+            // before the type-initialisation check: CoreCLR's JIT inserts the check into the body
+            // (`fgMorphInit`) before it wraps the body in the region the monitor guards
+            // (`fgAddSyncMethodEnterExit`). No frame is both synchronized and runtime-async, which
+            // frame creation refuses.
+            match SynchronizedMethodMonitor.beforeInstruction loggerFactory baseClassTypes thread state with
+            | Some result -> result
+            | None ->
+
             match state.ThreadState.[thread].MethodState.PendingTypeInit with
             | None -> afterPrologue state
             | Some ty ->

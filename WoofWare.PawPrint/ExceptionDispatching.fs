@@ -1293,9 +1293,8 @@ module ExceptionDispatching =
         | Some SynchronizedFrame.AwaitingEnter
         | Some SynchronizedFrame.Exited
         | None ->
-        // `AwaitingEnter`: the exception came from the frame's type-initialisation check, which
-        // the JIT puts before the region its fault handler guards, so no monitor helper runs.
-        // `Exited`: the frame has called its exit helper already.
+        // `AwaitingEnter`: nothing of the frame has run, so the region its fault handler guards
+        // has not begun. `Exited`: the frame has called its exit helper already.
 
         match frame.AsyncFrame with
         | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured contexts)) ->
