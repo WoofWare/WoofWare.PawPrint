@@ -1275,17 +1275,14 @@ module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemb
   MemberRef rows are only `object` and `object..ctor`.
 * Each mutant of the handlers is caught: a TypeRef added for the module's own type (by the AssemblyRef's
   record, which finds no static assembly of that name); the name not divided; the method's or field's
-  token taken from the parent; and an AssemblyRef added for the module itself. The name left
-  unescaped is not a mutant any guest can catch yet; see below.
+  token taken from the parent; an AssemblyRef added for the module itself; and the name left
+  unescaped, which the guest's `Odd+One` and `Back\+Slash` catch, since `FullName` escapes their
+  reserved characters as `TypeNameBuilder::EscapeName` does.
 
 ### 5j: left to later stages
 
 * A nested type of the module, once `DefineNestedType` adds `NestedClass` rows, and a field of an
   instantiation of a created generic type, once the scope has `GenericParam` rows.
-* `TypeString`, which renders `RuntimeType.FullName`, does not escape a name's reserved characters as
-  `TypeNameBuilder::EscapeName` does: a created type named `Odd+One` is `Odd\+One` on .NET 10 and
-  `Odd+One` under PawPrint. So no guest yet asks `GetTypeRef` for an escaped name of its own module; the
-  host oracle covers the unescaping.
 
 ### 5k: a reference to a member of another module's builder
 
