@@ -1255,7 +1255,17 @@ module ExceptionDispatching =
             |> ExceptionDispatchResult.Dispatched
         | None ->
 
-        if atTarget then
+        // Whether the exception leaves the frame. A catch, or the filter abandoned, in this frame
+        // keeps it; a wrapping boundary on it (`RaisedAgainAt`) removes it as surely as unwinding
+        // past it does, so the fault handlers the JIT puts round its body run first.
+        let leavesFrame =
+            match unwind.Target with
+            | ExceptionSearchOutcome.CaughtAt _
+            | ExceptionSearchOutcome.AbandonedAtFilter _ -> not atTarget
+            | ExceptionSearchOutcome.RaisedAgainAt _
+            | ExceptionSearchOutcome.NoHandler -> true
+
+        if not leavesFrame then
             deliverToTarget loggerFactory corelib state currentThread frame threadState unwind
         else
 
@@ -1312,6 +1322,10 @@ module ExceptionDispatching =
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
         | Some (AsyncFrame.Transparent _)
         | None ->
+
+        if atTarget then
+            deliverToTarget loggerFactory corelib state currentThread frame threadState unwind
+        else
 
         match frame.ReturnState with
         | None ->

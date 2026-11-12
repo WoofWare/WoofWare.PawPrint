@@ -1231,28 +1231,6 @@ module IlMachineStateExecution =
 
         let methodToCall = body.Method
 
-        // CoreCLR's JIT holds a synchronized method's monitor round its whole body
-        // (`fgAddSyncMethodEnterExit`, jit/flowgraph.cpp), which the frame does by calling the same
-        // helpers at the same points (`SynchronizedMethodMonitor`).
-        let synchronized =
-            match methodToCall with
-            | MethodInfo.Metadata (_, facts, _) when facts.ImplAttributes.HasFlag MethodImplAttributes.Synchronized ->
-                let declaringType =
-                    (state.LoadedAssembly methodToCall.DeclaringAssemblyFullName |> Option.get)
-                        .TypeDefs.[methodToCall.RequiredDeclaringType.Definition.Get]
-
-                if LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies declaringType then
-                    failwith
-                        $"TODO: %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name} is a synchronized method of a value type; CoreCLR refuses to load such a type (BFA_SYNC_METHOD_IN_VT, a TypeLoadException), which PawPrint does not model"
-
-                match methodToCall.Body, body.VmStub, body.AsyncFrame with
-                | MethodBody.Il _, None, None -> Some SynchronizedFrame.AwaitingEnter
-                | methodBody, vmStub, asyncFrame ->
-                    failwith
-                        $"TODO: %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name} is synchronized, but its frame runs %A{methodBody} (a VM stub: %b{vmStub.IsSome}; runtime async's calling convention: %b{asyncFrame.IsSome}); PawPrint holds a synchronized method's monitor only round a method's own IL body with the ordinary calling convention, and what CoreCLR does with the others is unmeasured"
-            | MethodInfo.Metadata _
-            | MethodInfo.Synthesised _ -> None
-
         // Decision 7 of docs/plans/2026-11-11-runtime-async.md: the caller reads the hidden
         // continuation of its last runtime-async call before it calls anything else.
         match activeMethodState.AsyncCallContinuation with
@@ -1429,11 +1407,17 @@ module IlMachineStateExecution =
                     returnInfo
             with
             | Ok frame ->
+                match frame.Synchronized, body.VmStub, body.AsyncFrame with
+                | Some _, Some _, _
+                | Some _, _, Some _ ->
+                    failwith
+                        $"TODO: %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name} is synchronized, but its frame runs a VM stub (%b{body.VmStub.IsSome}) or has runtime async's calling convention (%b{body.AsyncFrame.IsSome}); PawPrint holds a synchronized method's monitor only round a method's own IL body with the ordinary calling convention, and what CoreCLR does with the others is unmeasured"
+                | _ -> ()
+
                 state,
                 { frame with
                     VmStub = body.VmStub
                     AsyncFrame = body.AsyncFrame
-                    Synchronized = synchronized
                 }
             | Error toLoad ->
                 let state' =

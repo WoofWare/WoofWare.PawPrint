@@ -752,6 +752,30 @@ and MethodState =
 
             CatchClauseRefusal.check baseClassTypes loadedAssemblies containingAssembly method
 
+        // CoreCLR's JIT holds a synchronized method's monitor round its whole body
+        // (`fgAddSyncMethodEnterExit`, jit/flowgraph.cpp), which the frame does by calling the same
+        // helpers at the same points (`SynchronizedMethodMonitor`). Decided here because every frame
+        // of a method, however the interpreter enters it, is made here.
+        let synchronized =
+            match method with
+            | MethodInfo.Metadata (_, facts, _) when
+                facts.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.Synchronized
+                ->
+                let declaringType =
+                    containingAssembly.TypeDefs.[method.RequiredDeclaringType.Definition.Get]
+
+                if LoadedTypeInfo.isValueType baseClassTypes loadedAssemblies declaringType then
+                    failwith
+                        $"TODO: %O{method} is a synchronized method of a value type; CoreCLR refuses to load such a type (BFA_SYNC_METHOD_IN_VT, a TypeLoadException), which PawPrint does not model"
+
+                match method.Body with
+                | MethodBody.Il _ -> Some SynchronizedFrame.AwaitingEnter
+                | body ->
+                    failwith
+                        $"TODO: %O{method} is synchronized, but its body is %A{body}; CoreCLR's JIT holds the monitor only round an IL body, and the VM refuses a synchronized P/Invoke with TypeLoadException (IDS_EE_NOSYNCHRONIZED), which PawPrint does not model"
+            | MethodInfo.Metadata _
+            | MethodInfo.Synthesised _ -> None
+
         let declaredLocals =
             match MethodInfo.tryIlBody method |> Option.bind _.LocalVars with
             | None -> 0
@@ -800,7 +824,7 @@ and MethodState =
             NativeLocals = None
             VmStub = None
             AsyncFrame = None
-            Synchronized = None
+            Synchronized = synchronized
             AsyncCallContinuation = None
         }
         |> Ok
