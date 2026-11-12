@@ -20,8 +20,12 @@ using System.Threading.Tasks;
 // offset of its `call Await`, which the JIT gives the whole pattern. Were the await of the task
 // the ordinary variant returns, the awaiter's `GetResult` would come between the two frames.
 //
-// Which of the awaiter's frames come before `ReadBufferAsync` depends on what the JIT inlined, so
-// the guest checks the trace from the awaiter's last visible frame onward.
+// Which of the awaiter's frames come before `ReadBufferAsync` depends on what the JIT inlined:
+// .NET 11's inlines `RuntimeAsyncTaskContinuation.GetResult(ref byte)` into the dispatcher's resume
+// function, so its formatted trace shows the generic `GetResult<T>(Task, ref byte)` last, and PawPrint,
+// inlining nothing, shows the former. So the guest checks that a frame of
+// `RuntimeAsyncTaskContinuation.GetResult` comes last before `ReadBufferAsync`, and the trace from
+// there onward.
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
@@ -103,9 +107,10 @@ public class Program
         + "System.IO.StreamReader::ReadToEndAsyncInternal\n"
         + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
 
+    private const string FormattedAwaiterNet11 = "   at System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation.GetResult";
+
     private const string FormattedNet11 =
-        "   at System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation.GetResult[T](Task task, Byte& result)\n"
-        + "   at System.IO.StreamReader.ReadBufferAsync(CancellationToken cancellationToken)\n"
+        "   at System.IO.StreamReader.ReadBufferAsync(CancellationToken cancellationToken)\n"
         + "   at System.IO.StreamReader.ReadToEndAsyncInternal(CancellationToken cancellationToken)\n"
         + "   at System.Runtime.CompilerServices.AsyncHelpers.RuntimeAsyncTask`1.DispatchContinuations()";
 
@@ -142,15 +147,22 @@ public class Program
             // The frame of `ReadToEndAsyncInternal` is at its `call Await`.
             if (frames[frames.Length - 2].GetILOffset () != 0x53) return 10;
 
+            string newLine = Environment.NewLine;
             string formatted = new StackTrace (failure, false).ToString ().TrimEnd ();
-            if (!formatted.EndsWith (FormattedNet11.Replace ("\n", Environment.NewLine), StringComparison.Ordinal)) return 11;
+            string ending = newLine + FormattedNet11.Replace ("\n", newLine);
+            if (!formatted.EndsWith (ending, StringComparison.Ordinal)) return 11;
+
+            string beforeEnding = formatted.Substring (0, formatted.Length - ending.Length);
+            int lastLine = beforeEnding.LastIndexOf (newLine, StringComparison.Ordinal);
+            string awaiter = lastLine < 0 ? beforeEnding : beforeEnding.Substring (lastLine + newLine.Length);
+            if (!awaiter.StartsWith (FormattedAwaiterNet11, StringComparison.Ordinal)) return 12;
         }
 
         // The faulted read left the reader free, so another may start.
         reading = reader.ReadToEndAsync ();
-        if (reading.IsCompleted) return 12;
+        if (reading.IsCompleted) return 13;
         stream.Deliver ("");
-        if (reading.Result != "") return 13;
+        if (reading.Result != "") return 14;
 
         return 0;
     }

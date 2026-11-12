@@ -81,6 +81,42 @@ type AwaitSiteBinding =
 [<RequireQualifiedAccess>]
 module AwaitSiteBinding =
 
-    /// What a matched await site in a user's runtime-async body binds, from `facts`.
+    /// What a matched await site in a user's runtime-async body binds, from `facts`. Where the site
+    /// is not yet bound for more than one reason, the first of these is named: an unmodelled
+    /// variant, the captured context, the `constrained.` prefix, dispatch, an async version.
+    ///
+    /// The named method may be abstract only where the call dispatches, or a `constrained.` prefix
+    /// resolves it; CoreCLR's JIT refuses to compile a call naming one otherwise
+    /// (`CallSiteBinding` raises that before asking).
     let classify (facts : AwaitSiteFacts) : AwaitSiteBinding =
-        failwith $"TODO: classify the await site %A{facts}"
+        let dispatches =
+            match facts.Opcode with
+            | AwaitedCall.Callvirt -> facts.NamedDispatchesVirtually
+            | AwaitedCall.Call -> false
+
+        match facts.NamedVariant with
+        | Ok AsyncVariantBody.Abstract when not dispatches && not facts.Constrained ->
+            invalidArg
+                (nameof facts)
+                $"%A{facts} names an abstract method through a call that neither dispatches nor has a constrained. prefix"
+        | Error (AsyncVariantRefusal.UnmodelledBody body) ->
+            AwaitSiteBinding.NotYetBound (AwaitNotYetBound.UnmodelledVariant body)
+        | Error refusal -> AwaitSiteBinding.NoVariant refusal
+        | Ok body ->
+
+        if facts.ContinuesOnCapturedContext then
+            AwaitSiteBinding.NotYetBound AwaitNotYetBound.ContinuesOnCapturedContext
+        elif facts.Constrained then
+            AwaitSiteBinding.NotYetBound AwaitNotYetBound.Constrained
+        elif dispatches then
+            AwaitSiteBinding.NotYetBound AwaitNotYetBound.CalleeDispatches
+        else
+
+        match body with
+        | AsyncVariantBody.RuntimeAsyncIl ->
+            // `ConfigureAwait(false)` (`PREFIX_TASK_AWAIT_CONTINUE_ON_CAPTURED_CONTEXT` unset,
+            // `impSetupAsyncCall`, importercalls.cpp).
+            AwaitSiteBinding.BindsVariant ContinuationContextHandling.ContinueOnThreadPool
+        | AsyncVariantBody.AsyncVersion -> AwaitSiteBinding.NotYetBound AwaitNotYetBound.CalleeIsAsyncVersion
+        | AsyncVariantBody.Abstract ->
+            failwith "logic error: an abstract method named by a call that does not dispatch was refused above"

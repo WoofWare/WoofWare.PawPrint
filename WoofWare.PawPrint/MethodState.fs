@@ -167,15 +167,14 @@ type AsyncContextHandling =
 /// Whether a frame of runtime async's own machinery has asked, through `AsyncHelpers.TailAwait()`,
 /// that its next call with runtime async's calling convention be a tail await: one that, if the
 /// callee suspends, returns the callee's continuation as the frame's own, with no continuation of
-/// the frame's (`m_nextAwaitIsTail`, jit/importercalls.cpp).
+/// the frame's (`m_nextAwaitIsTail`, jit/importercalls.cpp). That call's frame records it
+/// (`OnSuspension.TailAwait`).
 [<RequireQualifiedAccess>]
 type TailAwait =
     | NotRequested
     /// `TailAwait()` has run, and the frame has made no call with runtime async's calling convention
     /// since.
     | Requested
-    /// The frame's call in flight is the tail await `TailAwait()` asked for.
-    | InFlight
 
 /// A frame running a method with runtime async's calling convention.
 [<RequireQualifiedAccess>]
@@ -333,6 +332,22 @@ type NativeLocals =
     /// says.
     | ReturnedToUser of ended : WoofWare.PosixKernel.InterruptedCall
 
+/// What happens when a frame with runtime async's calling convention leaves by suspension, which
+/// whatever made the call decided when it made it (decision 18 of
+/// `docs/plans/2026-11-11-runtime-async.md`).
+[<RequireQualifiedAccess>]
+type OnSuspension =
+    /// The caller has the ordinary calling convention and takes the continuation as a value: the
+    /// task-returning thunk through `AsyncHelpers.AsyncCallContinuation()`, or CoreLib's dispatcher
+    /// as its `calli`'s result (`ReturnValueDisposition.ResumedAsync`).
+    | CallerTakesContinuation
+    /// The call is a tail await: the caller, a frame of runtime async's machinery, leaves by
+    /// suspension in turn with the same continuation, and makes none of its own.
+    | TailAwait
+    /// The caller suspends too, making a continuation of its own whose awaiting code continues as
+    /// `handling` says.
+    | CallerSuspends of handling : ContinuationContextHandling
+
 type MethodReturnState =
     {
         /// Handle to the caller's frame
@@ -355,6 +370,9 @@ type MethodReturnState =
         ReturnValueDisposition : ReturnValueDisposition
         /// What happens to an exception that escapes this frame.
         ExceptionEscape : ExceptionEscape
+        /// What happens when this frame leaves by suspension. `None` for a frame with the ordinary
+        /// calling convention, which cannot.
+        OnSuspension : OnSuspension option
     }
 
 and MethodState =

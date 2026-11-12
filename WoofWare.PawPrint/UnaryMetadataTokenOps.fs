@@ -211,6 +211,8 @@ module internal UnaryMetadataTokenOps =
             )
 
             pushFunctionPointer ctx target state
+        | CallSiteBinding.BoundAwait bound ->
+            failwith $"BUG: an ldftn bound %O{bound.Variant}, an async variant only a call at an await site binds"
         | CallSiteBinding.ArrayAccessor accessor ->
             failwith $"BUG: ldftn bound to the multi-dim array accessor %O{accessor.Kind}, which only call names"
         | CallSiteBinding.RaisesWhenExecuted failure ->

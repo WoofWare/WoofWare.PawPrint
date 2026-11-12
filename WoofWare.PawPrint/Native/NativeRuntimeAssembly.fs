@@ -1327,6 +1327,7 @@ module NativeRuntimeAssembly =
                         None
                         ReturnValueDisposition.PushToCaller
                         (ExceptionEscape.UnhandledAtNativeCaller "AssemblySpec::AssemblyNameInit")
+                        None
                         state
 
                 match commitment with

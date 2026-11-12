@@ -1819,6 +1819,7 @@ module internal UnsafeAccessorDispatch =
                 None
                 ReturnValueDisposition.PushToCaller
                 ExceptionEscape.Propagate
+                None
                 state
 
         match commitment with
@@ -2008,6 +2009,7 @@ module internal UnsafeAccessorDispatch =
                     None
                     ReturnValueDisposition.PushToCaller
                     ExceptionEscape.Propagate
+                    None
                     state
 
             match commitment with

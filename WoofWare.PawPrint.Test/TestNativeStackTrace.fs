@@ -181,6 +181,7 @@ public static class Entry
                     CallSiteIlOpIndex = i
                     ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                     ExceptionEscape = ExceptionEscape.Propagate
+                    OnSuspension = None
                 }
 
             let callee =
@@ -282,6 +283,7 @@ public static class Entry
                 CallSiteIlOpIndex = 0
                 ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                 ExceptionEscape = ExceptionEscape.Propagate
+                OnSuspension = None
             }
 
         let frame =
@@ -339,6 +341,7 @@ public static class Entry
                 CallSiteIlOpIndex = 0
                 ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                 ExceptionEscape = ExceptionEscape.Propagate
+                OnSuspension = None
             }
 
         let frame =
@@ -418,6 +421,7 @@ public static class Entry
                 CallSiteIlOpIndex = 0
                 ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                 ExceptionEscape = ExceptionEscape.Propagate
+                OnSuspension = None
             }
 
         let frame =

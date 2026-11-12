@@ -581,6 +581,25 @@ module internal UnaryMetadataCallOps =
         )
         |> fst
 
+    /// Where `awaited` is `Some`, move the active frame's program counter to the `call Await` of the
+    /// matched await site it describes (decision 15 of `docs/plans/2026-11-11-runtime-async.md`),
+    /// where the JIT reports the whole pattern: the call that follows records that offset as its
+    /// call site, and advances the program counter past the `call Await`.
+    let private standAtAwait
+        (ctx : UnaryMetadataIlOpContext)
+        (awaited : BoundAwaitSite option)
+        (state : IlMachineState)
+        : IlMachineState
+        =
+        match awaited with
+        | None -> state
+        | Some site ->
+            IlMachineState.mapFrame
+                ctx.Thread
+                state.ThreadState.[ctx.Thread].ActiveMethodState
+                (MethodState.setProgramCounter site.AwaitOffset)
+                state
+
     /// Push a frame for the method `concretizedMethod`, having already resolved it however this
     /// opcode's operand demanded. Shared by the metadata and `DynamicScope` paths of `executeCall`
     /// so that the two cannot drift on how the callee is entered.
@@ -589,12 +608,18 @@ module internal UnaryMetadataCallOps =
     /// dispatch loop runs it as that frame's prologue, which is where the CLR puts it. This call
     /// therefore always commits, and the opcode never re-executes, so nothing needs to reinstall
     /// the `constrained.` prefix.
+    ///
+    /// `awaited` is `Some` where the call is of the async variant a matched await site binds, whose
+    /// whole pattern is the call's step: the caller then stands at the pattern's `call Await`.
     let private enterCallee
         (ctx : UnaryMetadataIlOpContext)
         (concretizedMethod : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (awaited : BoundAwaitSite option)
         (state : IlMachineState)
         : IlMachineState * WhatWeDid
         =
+        let state = standAtAwait ctx awaited state
+
         let state =
             refuseUnverifiableArguments
                 ctx.LoggerFactory
@@ -624,6 +649,7 @@ module internal UnaryMetadataCallOps =
                 None
                 ReturnValueDisposition.PushToCaller
                 ExceptionEscape.Propagate
+                (awaited |> Option.map _.Handling)
                 state
 
         match commitment with
@@ -676,7 +702,7 @@ module internal UnaryMetadataCallOps =
         | MethodBody.MissingIl
         | MethodBody.InternalCall
         | MethodBody.PInvoke
-        | MethodBody.RuntimeProvided _ -> enterCallee ctx concretizedMethod state
+        | MethodBody.RuntimeProvided _ -> enterCallee ctx concretizedMethod None state
 
     /// Raise what CoreCLR raises where it refuses to compile the method holding the executing
     /// instruction over that instruction's token. The program counter is left on the instruction,
@@ -765,7 +791,7 @@ module internal UnaryMetadataCallOps =
                     state
 
             match concretizedMethod with
-            | Ok concretizedMethod -> enterCallee ctx concretizedMethod state
+            | Ok concretizedMethod -> enterCallee ctx concretizedMethod None state
             | Error (exceptionType, why) ->
                 // The callee could not be compiled. Real .NET raises this from the *caller's* call
                 // site, because that is where the callee's first JIT happens, so the caller's own
@@ -787,7 +813,7 @@ module internal UnaryMetadataCallOps =
         | ResolvedMetadataOperand.StubMethod method ->
             // The runtime resolved the callee when it emitted the stub, which has no `constrained.`
             // prefix, and calls it directly (`EmitCALL`).
-            enterCallee ctx method state
+            enterCallee ctx method None state
         | ResolvedMetadataOperand.FromMetadata _
         | ResolvedMetadataOperand.ScopeType _
         | ResolvedMetadataOperand.ScopeField _
@@ -810,7 +836,8 @@ module internal UnaryMetadataCallOps =
                 state
 
         match binding with
-        | CallSiteBinding.Method method -> enterCallee ctx method state
+        | CallSiteBinding.Method method -> enterCallee ctx method None state
+        | CallSiteBinding.BoundAwait bound -> enterCallee ctx bound.Variant (Some bound.Site) state
         | CallSiteBinding.ArrayAccessor accessor ->
             match accessor.Kind with
             | ArrayAccessorKind.Set ->
@@ -886,10 +913,14 @@ module internal UnaryMetadataCallOps =
     /// `constrained.` prefix has already chosen the implementation. Shared by the metadata operand
     /// and a method named by a `DynamicScope` entry, so that the two cannot drift on how a callee is
     /// dispatched.
+    ///
+    /// `awaited` is `Some` where the call is of the async variant a matched await site binds, as for
+    /// `enterCallee`; the null check comes first, at the `callvirt`.
     let private enterVirtualCallee
         (ctx : UnaryMetadataIlOpContext)
         (concretizedMethod : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
         (dispatchesOnReceiver : bool)
+        (awaited : BoundAwaitSite option)
         (state : IlMachineState)
         : IlMachineState * WhatWeDid
         =
@@ -930,6 +961,8 @@ module internal UnaryMetadataCallOps =
                     receiver
             | _ -> IlMachineStateExecution.CallDispatch.Direct
 
+        let state = standAtAwait ctx awaited state
+
         let state =
             refuseUnverifiableArguments
                 ctx.LoggerFactory
@@ -959,6 +992,7 @@ module internal UnaryMetadataCallOps =
                 None
                 ReturnValueDisposition.PushToCaller
                 ExceptionEscape.Propagate
+                (awaited |> Option.map _.Handling)
                 state
 
         match commitment with
@@ -1010,7 +1044,7 @@ module internal UnaryMetadataCallOps =
         if concretizedMethod.IsStatic then
             raiseStaticCallee state
         else
-            enterVirtualCallee ctx concretizedMethod true state
+            enterVirtualCallee ctx concretizedMethod true None state
 
     let executeCallvirt (ctx : UnaryMetadataIlOpContext) (state : IlMachineState) : IlMachineState * WhatWeDid =
         // Split on the operand first, for the reason `executeCall` gives: `ctx.ActiveAssembly` and
@@ -1304,6 +1338,28 @@ module internal UnaryMetadataCallOps =
                         )
 
                 cur, cleared
+
+        // A `callvirt` of a static method is invalid IL, which begins no await site.
+        let state, awaitSite =
+            if concretizedMethod.IsStatic then
+                state, AwaitSiteOutcome.NotAnAwaitSite
+            else
+                CallSiteBinding.awaitSite
+                    loggerFactory
+                    baseClassTypes
+                    thread
+                    activeAssy
+                    AwaitedCall.Callvirt
+                    pendingConstrained.IsSome
+                    concretizedMethod
+                    state
+
+        match awaitSite with
+        | AwaitSiteOutcome.Binds bound ->
+            // The variant of a method that does not dispatch, with no `constrained.` prefix.
+            enterVirtualCallee ctx bound.Variant false (Some bound.Site) state
+        | AwaitSiteOutcome.NotAnAwaitSite
+        | AwaitSiteOutcome.DoesNotBind _ ->
 
         // No class-initialisation check here. It could not be right at this point even in
         // principle: it would have to name the type at the call site, and the callee is not
@@ -1682,7 +1738,7 @@ module internal UnaryMetadataCallOps =
                 state
         | ConstrainedReceiver.Ready (state, concretizedMethod, dispatchesOnReceiver) ->
 
-        enterVirtualCallee ctx concretizedMethod dispatchesOnReceiver state
+        enterVirtualCallee ctx concretizedMethod dispatchesOnReceiver None state
 
     /// The first instruction at or after `offset` that is not itself a prefix — PawPrint's
     /// counterpart to CoreCLR's `impGetNonPrefixOpcode` (`importer.cpp`), which skips exactly
@@ -2201,6 +2257,7 @@ module internal UnaryMetadataCallOps =
                 None
                 ReturnValueDisposition.PushToCaller
                 ExceptionEscape.Propagate
+                None
                 state
 
         // This `calli` commits exactly once, so the function pointer popped above is simply gone
@@ -2263,6 +2320,7 @@ module internal UnaryMetadataCallOps =
                             CallSiteIlOpIndex = caller.IlOpIndex
                             ReturnValueDisposition = ReturnValueDisposition.ResumedAsync resultLocation
                             ExceptionEscape = ExceptionEscape.Propagate
+                            OnSuspension = Some OnSuspension.CallerTakesContinuation
                         }
                 AsyncFrame =
                     match suspended.Frame.AsyncFrame with

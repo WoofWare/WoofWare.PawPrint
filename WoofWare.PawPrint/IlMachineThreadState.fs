@@ -275,25 +275,17 @@ module IlMachineThreadState =
             |> ThreadState.removeFrame returningFrameId
 
         // A method with runtime async's calling convention that returns has completed, so its
-        // hidden continuation, which the caller reads, is null, and a tail await the caller made of
-        // the call is over.
+        // hidden continuation, which the caller reads, is null.
         let threadState =
             match returningMethodState.AsyncFrame with
             | None -> threadState
             | Some _ ->
                 let caller = ThreadState.getFrame returnState.JumpTo threadState
 
-                let asyncFrame =
-                    match caller.AsyncFrame with
-                    | Some (AsyncFrame.Transparent TailAwait.InFlight) ->
-                        Some (AsyncFrame.Transparent TailAwait.NotRequested)
-                    | other -> other
-
                 ThreadState.setFrame
                     returnState.JumpTo
                     { caller with
                         AsyncCallContinuation = None
-                        AsyncFrame = asyncFrame
                     }
                     threadState
 

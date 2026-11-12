@@ -121,6 +121,7 @@ module AssemblyLoadEvent =
                 None
                 ReturnValueDisposition.Discard
                 (ExceptionEscape.SwallowedByRuntime "AppDomain::RaiseLoadingAssemblyEvent")
+                None
                 state
 
         match commitment with

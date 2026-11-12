@@ -148,6 +148,7 @@ module TestPrologueExceptionScope =
                 CallSiteIlOpIndex = 0
                 ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                 ExceptionEscape = ExceptionEscape.Propagate
+                OnSuspension = None
             }
 
         let calleeFrame =

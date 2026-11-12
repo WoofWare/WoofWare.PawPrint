@@ -262,6 +262,7 @@ module MulticastDelegateStub =
                     None
                     ReturnValueDisposition.PushToCaller
                     ExceptionEscape.Propagate
+                    None
                     state
 
             match commitment with
