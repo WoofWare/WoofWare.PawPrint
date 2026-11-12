@@ -24,6 +24,8 @@ module TestPureCases =
     /// was verified to behave on real .NET. `onRuntime` folds these into every runtime's parks.
     let parkedEverywhere : Map<string, string> =
         [
+            "SynchronizedMainWithTypeInitialiser.cs",
+            """A synchronized `Main` whose type has a static constructor. CoreCLR runs the entry type's initialiser from `Main`'s prologue, inside the region the type's monitor guards, so the initialiser sees the monitor held; PawPrint runs it in a startup phase of its own before `Main` is installed, and refuses the combination rather than run it without the monitor: "TODO: the entry point ... is synchronized and its type has a type initialiser". Un-park when the entry type's initialiser runs from `Main`'s frame. Verified to exit 0 on real .NET 10 and 11."""
             "UnsafeAccessorTypeByrefArgument.cs",
             """An `[UnsafeAccessorType("Hidden&")]` on a `ref object` (and an `out object`) parameter. CoreCLR's stub (`EmitTypeCheck`, unsafeaccessors.cpp) type-checks what the caller's byref holds, copies it into a local of the named type, passes the target a byref to that local, and writes the local back through the caller's byref once the target returns, unless the parameter is `in`. The name resolves and the lookup binds; dispatch then refuses rather than pass the caller's byref straight through: "TODO: [UnsafeAccessor] .TestUnsafeAccessorTypeByrefArgument::Replace retypes its byref parameter 1 to Hidden&". The only such declaration in the shared framework is COM licensing's `out License` (`ComActivator`). Un-park when the accessor's frame can hold the typed local and write it back after the target returns. Verified to exit 0 on real .NET 10 and 11."""
             "UnsafeAccessorTypeGenericParameter.cs",
@@ -797,16 +799,14 @@ module TestPureCases =
     /// `DifferentialOracle.alongsideInterpreted` for why overlapping them is sound. It is
     /// worth doing because the oracle is the larger half of an ordinary case's cost, and
     /// nearly all of that is spent blocked on the child process rather than computing.
-    let runPawPrintSourceAgainstOracle
+    let runPawPrintImageAgainstOracle
         (sourceName : string)
-        (source : string)
+        (image : byte array)
         (kernelConfig : KernelConfig)
         (oracle : byte array -> RealRuntimeResult)
         (assertResult : RealRuntimeResult -> RunEnd -> unit)
         : unit
         =
-        let image = Roslyn.compile [ source ]
-
         withGuestLog
             sourceName
             (fun loggerFactory ->
@@ -817,6 +817,17 @@ module TestPureCases =
 
                 assertResult realResult pawPrintResult
             )
+
+    /// As `runPawPrintImageAgainstOracle`, over `source` compiled as `Roslyn.compile` compiles it.
+    let runPawPrintSourceAgainstOracle
+        (sourceName : string)
+        (source : string)
+        (kernelConfig : KernelConfig)
+        (oracle : byte array -> RealRuntimeResult)
+        (assertResult : RealRuntimeResult -> RunEnd -> unit)
+        : unit
+        =
+        runPawPrintImageAgainstOracle sourceName (Roslyn.compile [ source ]) kernelConfig oracle assertResult
 
     /// The run's terminal tasks against its threads: a task for every thread with an OS
     /// thread, which is one that has been started and has not terminated, and for no other.
@@ -867,6 +878,96 @@ module TestPureCases =
 
                 assertTasksMatchThreads pawPrintResult
             )
+
+    /// A synchronized static method of a type whose initialiser failed, whose `finally` round the
+    /// whole body begins at the method's first instruction. Its type-initialisation check runs
+    /// inside the region the monitor guards, so the unwind leaving it calls the monitor exit
+    /// helper, after which none of the body's cleanup clauses may run, though the check raised
+    /// at the instruction the `try` begins at. Compiled optimised, because a Debug build begins
+    /// the method with a `nop` outside the `try`. Real .NET 10 and 11 exit 0.
+    [<Test>]
+    let ``A synchronized method whose type failed to initialise runs none of its body`` () =
+        let source =
+            """
+using System;
+using System.Runtime.CompilerServices;
+using System.Threading;
+
+// A synchronized static method of a type whose initialiser failed runs none of its body: neither
+// on the call that runs the initialiser nor on a later one, which raises the cached failure. In
+// particular a `finally` round the whole body, which starts at the method's first instruction,
+// does not run.
+static class Flags
+{
+    public static bool BodyRan;
+    public static bool FinallyRan;
+}
+
+class FailsToInitialise
+{
+    public static readonly int Never;
+
+    static FailsToInitialise()
+    {
+        throw new InvalidOperationException("from a type initialiser");
+    }
+
+    [MethodImpl(MethodImplOptions.Synchronized)]
+    public static void Body()
+    {
+        try
+        {
+            Flags.BodyRan = true;
+        }
+        finally
+        {
+            Flags.FinallyRan = true;
+        }
+    }
+}
+
+class Program
+{
+    static int Main(string[] args)
+    {
+        for (int call = 0; call < 2; call++)
+        {
+            try
+            {
+                FailsToInitialise.Body();
+                return 1;
+            }
+            catch (TypeInitializationException)
+            {
+            }
+
+            if (Flags.BodyRan || Flags.FinallyRan)
+            {
+                return 2 + call;
+            }
+
+            if (Monitor.IsEntered(typeof(FailsToInitialise)))
+            {
+                return 4 + call;
+            }
+        }
+
+        return 0;
+    }
+}
+"""
+
+        let name = "SynchronizedFailedTypeInitialiser.cs"
+
+        runPawPrintImageAgainstOracle
+            name
+            (Roslyn.compileOptimizedAssembly
+                "SynchronizedFailedTypeInitialiser"
+                Microsoft.CodeAnalysis.OutputKind.ConsoleApplication
+                [ source ])
+            KernelConfig.Default
+            (RealRuntime.executeWithRealRuntime [||])
+            (fun realResult pawPrintResult -> DifferentialOracle.compareOutcomes name 0 false realResult pawPrintResult)
 
     /// `calli` through a null function pointer. This cannot be a comparison test in
     /// `sourcesPure`: the real runtime does not raise a catchable NullReferenceException
