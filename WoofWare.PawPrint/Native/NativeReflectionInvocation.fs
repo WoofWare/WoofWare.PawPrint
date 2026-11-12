@@ -553,10 +553,21 @@ module internal NativeReflectionInvocation =
                 // prologue has run the `.cctor` (`CEEInfo::initClass` asks for it in any static
                 // method of a type without `beforefieldinit`). The thunk's locals name only CoreLib's
                 // types and the method's result type, which the signature has already loaded.
+                //
+                // A method whose row names no body has no locals to load. Virtual dispatch, which
+                // `callMethodWithCommitment` performs below, may yet run an override, as
+                // `sourcesPure/ReflectionInvokeOverrideOfBodylessVirtual.cs` does; the call refuses
+                // a missing body only once it has chosen the method that runs.
                 let state =
-                    if isConstructor then
-                        state
-                    else
+                    match isConstructor, target.Method.Body with
+                    | true, _
+                    | false, MethodBody.MissingIl -> state
+                    | false, MethodBody.Il _
+                    | false, MethodBody.AsyncIl _
+                    | false, MethodBody.InternalCall
+                    | false, MethodBody.PInvoke
+                    | false, MethodBody.RuntimeProvided _
+                    | false, MethodBody.Abstract ->
                         let declaringAssy =
                             match state.LoadedAssembly target.Method.DeclaringAssemblyFullName with
                             | Some assy -> assy
