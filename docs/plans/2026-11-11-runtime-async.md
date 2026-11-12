@@ -434,18 +434,34 @@ it means by a distinction that only `frameBody` needs.
   (`Tier0OptimizationEnabled`, which `Debuggable.allowsJitOptimisation` and `NoOptimization` decide),
   the callee's unwrapped return type is the method's, and `canTailCall` agrees (the caller is not
   the entry point and not `NoInlining`; a callee named exactly does not require a security object,
-  `vm/jitinterface.cpp:8293`); never for the `AsTask` shape, whose continuation carries
-  `ValueTaskAdaptedToTask`. An await that is not a tail await suspends the frame as a frame of
-  runtime async's machinery suspends (`CaptureExecutionContext`, no continuation flags). Measured:
+  `vm/jitinterface.cpp:8293`); never for the `AsTask` shape. There the frame calls the variant of
+  the `ValueTask`-returning callee, and if that suspends, the frame suspends with a continuation of
+  its own flagged `ValueTaskAdaptedToTask` (`jit/async.cpp:2809-2812`), so it appears in traces at
+  its call's offset. The flag is what `AsTask()` means to a value-task source: CoreLib's walk from
+  the source's continuation to the first one with a continuation flag stops at it
+  (`AsyncHelpers.CoreCLR.cs:860-878`), so the source is not told to use the scheduling context and
+  no later continuation has its flags cleared. Measured with a source of the probe's own under a
+  captured context: `OnCompleted` gets `None` and the context one post through the shape, as
+  through the ordinary variant; through `ValueTask<int> M() => Make()` it gets
+  `UseSchedulingContext` and the context no post. RC1 has 99 `AsTask` shapes (74 in
+  `Microsoft.NETCore.App`, 25 in `Microsoft.AspNetCore.App`), 22 of them calling a method that is
+  not virtual. An await that is not a tail await suspends the frame as a frame of runtime async's
+  machinery suspends (`CaptureExecutionContext`, and no continuation flags but the `AsTask`
+  shape's). Measured:
   a trace crossing `Task<int> M() => Leaf()` has no frame of `M`, nor has one crossing
   `new ValueTask<int>(Leaf())` or a wrapped `ret`; one crossing `Task M() => Leaf()` (a `Task<int>`
   as a `Task`), a `NoInlining` `M`, or `LeafVT().AsTask()` has `M` at its call's offset; and the
   same assembly compiled without optimisation has `M` in the first two cases as well, and still
   not for the wrapped `ret`.
 
-  Refused by name: an async version of a synchronized method, which releases its monitor before
-  the await and matches no tail shape (22 in RC1); `jmp`; and the `AsTask` shape until a guest
-  needs it (99 in RC1, decision 13).
+  The async version of a synchronized method runs like any other async version, except that it
+  matches no tail shape (`AwaitPattern.tailShapeAfter` says so) and every `ret` wraps. Its monitor
+  is whatever the ordinary variant's is. When PawPrint models the monitor, the exit goes
+  immediately before the wrapped `ret`'s call of `TransparentAwait` (`jit/importer.cpp:11901-11914`).
+  RC1 has 22, all returning already-completed promises (`Task.CompletedTask`, `FromResult` or
+  `FromCanceled` after synchronous work), so none can suspend.
+
+  Refused by name: `jmp`.
 
 ### 18. Where a caller keeps what it does if its call suspends
 
@@ -911,9 +927,26 @@ Each stage is one pull request, with its tests first.
     its call's offset. The tail-await rule's property test is against a table measured on real
     .NET 11 from methods of each shape, compiled with and without optimisation.
 
+    A third guest, for the `AsTask` shape (`sourcesImpure`, since it reads a directory):
+    `TarFile.CreateFromDirectoryAsync` of a directory holding one file, into a stream of the
+    guest's whose write pends and then faults. `CreateFromDirectoryInternalAsync` awaits
+    `TarWriter.WriteEntryAsync(string, string, CancellationToken)` directly, which ends
+    `call ReadFileFromDiskAndWriteToArchiveStreamAsEntryCoreAsync; stloc; ldloca; call AsTask; ret`.
+    Real .NET 11's trace has `ReadFileFromDiskAndWriteToArchiveStreamAsEntryCoreAsync`,
+    `TarWriter.WriteEntryAsync` and `CreateFromDirectoryInternalAsync` adjacent; before the stage it
+    has a `GetResult` frame and no `WriteEntryAsync`. No guest reaches a value-task source of its
+    own through the shape at this stage, so `TestRuntimeAsyncSuspension` checks that the
+    continuation's `Flags` carry `ValueTaskAdaptedToTask` (bit 3), and stage 4f's guest gains the
+    measured `OnCompleted` check once a captured-context caller can reach one. The frames beneath
+    `WriteEntryCoreAsync` come from a `constrained.` site unbound until 4e, so the guest checks only
+    the three adjacent frames; real .NET 11 reports `WriteEntryAsync` at IL_002E.
+
+    The async version of a synchronized method is no longer refused; its guest lands in 4d, since
+    all 22 in RC1 are virtual overrides.
+
     Not yet bound: a tail shape whose callee dispatches, which wraps instead, as it does where the
-    callee has no variant. Refused by name: the async version of a synchronized method; `jmp`; the
-    `AsTask` shape; a variant of a method with no IL, or one PawPrint implements itself.
+    callee has no variant. Refused by name: `jmp`; a variant of a method with no IL, or one
+    PawPrint implements itself.
 
 11. **(4d) Dispatch of a variant.** A matched site or tail shape whose `callvirt` names a virtual or
     interface method binds the named method's variant, and `ConcreteVirtualDispatch` finds its
@@ -930,6 +963,16 @@ Each stage is one pull request, with its tests first.
     over a pending, then faulting, writer of the guest's, which awaits its own virtual
     `OutputTabsAsync`. Real .NET 11's trace is `GetResult(Task, Byte&)`, `OutputTabsAsync`,
     `WriteAsync`.
+
+    A guest for the async version of a synchronized method (all 22 in RC1 are virtual overrides):
+    `TextWriter.CreateBroadcasting(TextWriter.Synchronized(writer), TextWriter.Null)`, then
+    `WriteAsync` and `FlushAsync`, both over a guest writer that completes and over a `StreamWriter`
+    on a stream whose synchronous `Write` throws. Real .NET 11's trace is `SyncTextWriter.Flush`,
+    `SyncTextWriter.FlushAsync`, `BroadcastingTextWriter.FlushAsync`. It behaves the same bound or
+    not, so it cannot fail first; the stage shows a mutant failing it. A second guest, which does
+    fail first: an unsynchronized `CreateBroadcasting(streamWriter).FlushAsync()`, whose real trace
+    is `GetResult`, `<FlushAsyncInternal>g__Core|82_0`, `FlushAsyncInternalWithGuard`,
+    `BroadcastingTextWriter.FlushAsync`.
 
     Refused by name: an implementation whose unwrapped return type is not its declaration's (the
     return-dropping thunk, and an override returning a subclass of `Task`). Not yet bound: a
@@ -967,7 +1010,10 @@ Each stage is one pull request, with its tests first.
     .NET 11 queues the continuation to the guest's scheduler from a pool thread; before the stage
     PawPrint queues it from the completing thread (decision 13). The guest also checks that the
     loop's body runs on its scheduler, which holds before the stage too, where `Await` captures
-    the scheduler: a mutant that calls the helper for no continuation context must fail it.
+    the scheduler: a mutant that calls the helper for no continuation context must fail it. It
+    also checks, through an `AsTask` shape a captured-context caller reaches, that a value-task
+    source of the guest's gets `None` in `OnCompleted` and its context one post, as measured for
+    decision 17.
 
 14. **(4g) Whole traces.** The guests that compare traces (`RuntimeAsyncTraceCrossesSuspension.cs`,
     `StreamWriter.DisposeAsync`'s in `RuntimeAsyncFinallyAfterSuspension.cs`, and the guests of
