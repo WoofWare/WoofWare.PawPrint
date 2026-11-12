@@ -5430,6 +5430,25 @@ module TestImpureCases =
                 AssertTerminalState = Some assertDefinedTypeRows
             }
             {
+                // `RuntimeTypeHandle_ConstructName` and `RuntimeMethodHandle_ConstructInstantiation`
+                // over created types whose names hold characters a type name reserves, which
+                // `TypeNameBuilder::EscapeName` escapes. Dynamic-code switch overridden to true like
+                // its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "TypeNameReservedCharacters.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `RuntimeModule_GetFullyQualifiedName` on a Reflection.Emit module, through
                 // `ModuleBuilder.Name`: `<In Memory Module>`. Dynamic-code switch overridden to
                 // true like its siblings; verified by hand to exit 0 on real .NET 10.
