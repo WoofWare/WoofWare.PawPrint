@@ -8,10 +8,11 @@ using System.Threading.Tasks;
 // Runtime-async methods that suspend at awaits inside `try` regions, and run the `finally` after
 // resuming, whether the awaited call completed or faulted. On .NET 11, `StreamWriter.DisposeAsync`
 // returns the task-returning thunk of `DisposeAsyncCore`, which awaits `FlushAsync()` in
-// `try { ... } finally { CloseStreamFromDispose(...) }`, and that flush comes down through
-// `FlushAsyncInternalWithGuard`, which awaits inside a `using`, to the local function
-// `FlushAsyncInternal.Core`, which awaits the guest's `WriteAsync` outside any `try`. The guest
-// leaves the write pending, so all three suspend, and later completes or faults it.
+// `try { ... } finally { CloseStreamFromDispose(...) }`, and that flush comes down to the local
+// function `FlushAsyncInternal.Core`, which awaits the guest's `WriteAsync` outside any `try`.
+// (Real .NET 11's await binds the async version of `FlushAsync`, which goes through
+// `FlushAsyncInternalWithGuard`, awaiting inside a `using`, on the way.) The guest leaves the write
+// pending, so the methods suspend, and later completes or faults it.
 //
 // Completed, the writer has written its bytes and closed the stream. Faulted, the exception crosses
 // `Core`'s continuation, which has no handler, and the `finally` of each method awaiting it; the
