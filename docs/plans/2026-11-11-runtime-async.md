@@ -437,7 +437,8 @@ Each stage is one pull request, with its tests first.
      reflection emits from a method's second invocation.
    * The one that did not was a method's first reflective invocation. `RuntimeMethodHandle.InvokeMethod`
      concretises the method's locals before its `.cctor` runs, since CoreCLR compiles the method
-     first, and it asked for the async IL's. It now asks `frameBody`, and loads the thunk's: CoreCLR
+     first, and it asked for the async IL's. It now asks `frameBody` (except of a declaration with
+     no body, which the call may yet dispatch to an override), and loads the thunk's: CoreCLR
      compiles the thunk, runs the `.cctor` in the thunk's prologue (`CEEInfo::initClass` asks for it
      in a static method of a type without `beforefieldinit`), and compiles the async variant only
      when the thunk calls it. This was read from the source, not measured: the thunk's locals name
