@@ -197,10 +197,12 @@ type PendingSuspension =
         Layout : ContinuationLayout
         /// The native block holding the `ResumeInfo` that `Continuation.ResumeInfo` points at.
         ResumeInfo : NativeMemoryBlockId
+        /// The IL offset of the call the frame awaits.
+        CallSite : int
     }
 
-/// What the runtime does once a CoreLib helper it called for a user-written runtime-async body's
-/// contexts (`AsyncFrame.SavesContexts`) has returned to that body's frame.
+/// What the runtime does once a CoreLib helper it called for a runtime-async frame's contexts has
+/// returned to that frame.
 [<RequireQualifiedAccess>]
 type AsyncContextStep =
     /// `AsyncHelpers.CaptureContexts` returned, having stored what it captured in these cells.
@@ -215,6 +217,10 @@ type AsyncContextStep =
     /// `AsyncHelpers.FinishSuspensionNoContinuationContext` returned to the body, which is
     /// suspending at an await with `suspension`; it leaves next.
     | AfterFinishSuspension of suspension : PendingSuspension
+    /// `AsyncHelpers.CaptureExecutionContext` returned its result to a frame of runtime async's own
+    /// machinery, which is suspending at an await with `suspension`; the result goes into the
+    /// continuation's `ExecutionContext` slot, and the frame leaves next.
+    | AfterCaptureExecutionContext of suspension : PendingSuspension
 
 /// What `returnStackFrame` should do with a frame's product — the object it was constructing if
 /// `Constructing`, otherwise the value its signature says it returns — once it returns.
@@ -246,8 +252,8 @@ type ReturnValueDisposition =
     /// from the caller, and does `step` next (see `IlMachineStateExecution.resumeVmRaise`). The
     /// helpers return nothing.
     | ResumeVmRaise of step : VmRaiseStep
-    /// The runtime called this CoreLib helper for the contexts of the user-written runtime-async
-    /// body it returns to, and does `step` next. The helpers return nothing.
+    /// The runtime called this CoreLib helper for the contexts of the runtime-async frame it returns
+    /// to, and does `step` next, with what the helper returned.
     | ResumeAsyncContexts of step : AsyncContextStep
     /// The frame is a suspended runtime-async frame that CoreLib's dispatcher resumed through
     /// `FunctionPointerTarget.AsyncResume`, whose return is a continuation. If the frame returns,
@@ -295,9 +301,9 @@ type ExceptionEscape =
     /// reaching such a frame's boundary rather than let the exception unwind into a caller the
     /// runtime would never have shown it to.
     | UnhandledAtNativeCaller of runtimeCaller : string
-    /// The runtime calls this CoreLib helper for the contexts of the user-written runtime-async body
-    /// beneath it (`AsyncContextStep`), where CoreCLR's JIT puts the call outside every handler of
-    /// the body. Nothing the helpers do raises, so PawPrint does not model an exception escaping
+    /// The runtime calls this CoreLib helper for the contexts of the runtime-async frame beneath it
+    /// (`AsyncContextStep`), where CoreCLR's JIT puts the call outside every handler of the frame's
+    /// method. Nothing the helpers do raises, so PawPrint does not model an exception escaping
     /// one: exception dispatch ends the run on reaching such a frame's boundary.
     | AsyncContextHelper
 

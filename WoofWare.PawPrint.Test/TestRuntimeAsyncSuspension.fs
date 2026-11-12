@@ -441,6 +441,7 @@ module TestRuntimeAsyncSuspension =
                         Result = None
                     }
                 ResumeInfo = NativeMemoryBlockId.NativeMemoryBlockId continuation
+                CallSite = continuation
             }
 
         ignore<IlMachineState> state

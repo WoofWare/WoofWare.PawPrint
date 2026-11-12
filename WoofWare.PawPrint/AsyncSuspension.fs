@@ -17,17 +17,16 @@ open Microsoft.Extensions.Logging
 [<RequireQualifiedAccess>]
 module AsyncSuspension =
 
-    /// The continuation a user-written runtime-async body makes when it suspends at an await of a
-    /// call returning `awaited`: an `ExecutionContext` slot, which the JIT always gives one, and a
-    /// slot for the call's result. PawPrint binds no async variant at an await (decision 6), so
-    /// every await is a call of an `AsyncHelpers.Await` overload, which the JIT gives no
-    /// continuation context of the frame's own; and a suspension at an await in a `try` region,
-    /// which alone gives one an exception slot, is refused (decision 11).
-    let layoutAwaiting (awaited : MethodReturnType<ConcreteTypeHandle>) : ContinuationLayout =
+    /// The continuation a runtime-async frame makes when it suspends at an await of a call
+    /// returning `awaited`: an `ExecutionContext` slot, which the JIT always gives one, an exception
+    /// slot if the await lies in a `try` region (`inTry`), and a slot for the call's result.
+    /// PawPrint binds no async variant at an await (decision 6), so every await is a call of one of
+    /// runtime async's own methods, which the JIT gives no continuation context of the frame's own.
+    let layoutAwaiting (inTry : bool) (awaited : MethodReturnType<ConcreteTypeHandle>) : ContinuationLayout =
         {
             ExecutionContext = true
             ContinuationContext = false
-            Exception = false
+            Exception = inTry
             Result =
                 match awaited with
                 | MethodReturnType.Void -> None
@@ -232,6 +231,26 @@ module AsyncSuspension =
     let link (continuation : ManagedHeapAddress) (next : ManagedHeapAddress) (state : IlMachineState) : IlMachineState =
         setField continuation "Next" (EvalStackValue.ObjectRef next) state
 
+    /// Store `executionContext` in the `ExecutionContext` slot of `continuation`, as the JIT stores
+    /// what `AsyncHelpers.CaptureExecutionContext()` returned for a frame that saves no contexts.
+    let writeExecutionContext
+        (continuation : ManagedHeapAddress)
+        (executionContext : EvalStackValue)
+        (state : IlMachineState)
+        : IlMachineState
+        =
+        let field = FieldId.ContinuationSlot ContinuationSlot.ExecutionContext
+
+        let existing =
+            ManagedHeap.get continuation state.ManagedHeap
+            |> AllocatedNonArrayObject.DereferenceFieldById field
+
+        IlMachineState.setInstanceFieldById
+            continuation
+            field
+            (EvalStackValue.toCliTypeCoerced existing executionContext)
+            state
+
     /// A pointer to `slot` of `continuation`, for CoreLib's suspension helpers, which write it.
     let slotPointer (continuation : ManagedHeapAddress) (slot : ContinuationSlot) : ManagedPointerSource =
         ManagedPointerSource.Byref
@@ -239,6 +258,31 @@ module AsyncSuspension =
                 Root = ByrefRoot.HeapObjectField (continuation, FieldId.ContinuationSlot slot)
                 Projections = []
             }
+
+    /// The exception in the exception slot of `continuation`, which CoreLib's dispatcher wrote when
+    /// an exception unwound to it, with the slot cleared, as the JIT's resumption clears it before
+    /// it rethrows (`RethrowExceptionOnResumption`); `None`, and the state unchanged, if the slot
+    /// holds null or `layout` has none.
+    let takeException
+        (continuation : ManagedHeapAddress)
+        (layout : ContinuationLayout)
+        (state : IlMachineState)
+        : ManagedHeapAddress option * IlMachineState
+        =
+        if not layout.Exception then
+            None, state
+        else
+
+        let field = FieldId.ContinuationSlot ContinuationSlot.Exception
+
+        match
+            ManagedHeap.get continuation state.ManagedHeap
+            |> AllocatedNonArrayObject.DereferenceFieldById field
+        with
+        | CliType.ObjectRef None -> None, state
+        | CliType.ObjectRef (Some exn) ->
+            Some exn, IlMachineState.setInstanceFieldById continuation field (CliType.ObjectRef None) state
+        | other -> failwith $"BUG: the exception slot of the continuation at %O{continuation} holds %O{other}"
 
     /// The value in the result slot of `continuation`, which the continuation before it wrote when
     /// the call its frame awaits completed; `None` if the call returns nothing.
@@ -255,30 +299,44 @@ module AsyncSuspension =
             |> AllocatedNonArrayObject.DereferenceFieldById (FieldId.ContinuationSlot ContinuationSlot.Result)
             |> Some
 
-    /// The IL offset range of every `try`, filter and handler of `method`'s body that `callSite`
-    /// lies in, as `(start, end)` with `end` exclusive.
-    let protectedRegionsAround (method : MethodInfo<_, _, _>) (callSite : int) : (int * int) list =
+    /// The IL offset ranges of `method`'s body that `callSite` lies in, as `(start, end)` with `end`
+    /// exclusive: those of the `try` regions, and those of the filters and handlers.
+    let private regionsAround (method : MethodInfo<_, _, _>) (callSite : int) : (int * int) list * (int * int) list =
         match MethodInfo.tryIlBody method with
-        | None -> []
+        | None -> [], []
         | Some body ->
-            body.ExceptionRegions
-            |> Seq.collect (fun region ->
-                let offsets, filter =
-                    match region with
-                    | ExceptionRegion.Filter (filterOffset, offsets) ->
-                        offsets, [ filterOffset, offsets.HandlerOffset ]
-                    | ExceptionRegion.Catch (_, offsets)
-                    | ExceptionRegion.Finally offsets
-                    | ExceptionRegion.Fault offsets -> offsets, []
+            let covers (start : int, finish : int) = start <= callSite && callSite < finish
 
-                [
-                    offsets.TryOffset, offsets.TryOffset + offsets.TryLength
-                    offsets.HandlerOffset, offsets.HandlerOffset + offsets.HandlerLength
-                ]
-                @ filter
-            )
-            |> Seq.filter (fun (start, finish) -> start <= callSite && callSite < finish)
-            |> Seq.toList
+            let tries, handlers =
+                body.ExceptionRegions
+                |> Seq.map (fun region ->
+                    let offsets, filter =
+                        match region with
+                        | ExceptionRegion.Filter (filterOffset, offsets) ->
+                            offsets, [ filterOffset, offsets.HandlerOffset ]
+                        | ExceptionRegion.Catch (_, offsets)
+                        | ExceptionRegion.Finally offsets
+                        | ExceptionRegion.Fault offsets -> offsets, []
+
+                    (offsets.TryOffset, offsets.TryOffset + offsets.TryLength),
+                    (offsets.HandlerOffset, offsets.HandlerOffset + offsets.HandlerLength) :: filter
+                )
+                |> Seq.toList
+                |> List.unzip
+
+            tries |> List.filter covers |> List.distinct, List.concat handlers |> List.filter covers
+
+    /// The IL offset range of every `try` region of `method`'s body that `callSite` lies in, as
+    /// `(start, end)` with `end` exclusive. An await there gets an exception slot, as the JIT gives
+    /// one to an await in any `try` region but its own round the whole body
+    /// (`ehIsInsideNonAsyncContextRestoreRegion`), which PawPrint does not add to the IL.
+    let tryRegionsAround (method : MethodInfo<_, _, _>) (callSite : int) : (int * int) list =
+        fst (regionsAround method callSite)
+
+    /// The IL offset range of every filter and handler of `method`'s body that `callSite` lies in,
+    /// as `(start, end)` with `end` exclusive.
+    let handlersAround (method : MethodInfo<_, _, _>) (callSite : int) : (int * int) list =
+        snd (regionsAround method callSite)
 
     /// `values`, typed by `types`, with each value whose type `zeroed` names replaced by its zero.
     let zeroValues

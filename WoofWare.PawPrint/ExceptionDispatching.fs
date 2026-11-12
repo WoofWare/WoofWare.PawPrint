@@ -1642,6 +1642,97 @@ module ExceptionDispatching =
 
         dispatchException loggerFactory corelib state currentThread cliException exceptionType
 
+    /// Raise `exceptionAddr` again from the active frame of `currentThread`, as from the instruction
+    /// at IL offset `pc`, keeping the trace it already has, as CoreCLR's `IL_ThrowExact`
+    /// (`CORINFO_HELP_THROWEXACT`) does. The raise appends no frame for the frame it begins in, as a
+    /// `rethrow` appends none; the frames it leaves after that are appended as for any raise.
+    let throwExactAt
+        (loggerFactory : ILoggerFactory)
+        (corelib : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (currentThread : ThreadId)
+        (pc : int)
+        (exceptionAddr : ManagedHeapAddress)
+        : ExceptionDispatchResult
+        =
+        // `IL_ThrowExact` neither clears the trace nor sets the foreign-raise flag, and dispatches
+        // with `ExKind.RethrowFlag`, which skips the first frame's append
+        // (`RH_EH_FIRST_RETHROW_FRAME`); as for `rethrow`, the trace comes from the token, origin
+        // included.
+        let trace =
+            IlMachineState.frozenStackTrace corelib exceptionAddr state
+            |> Option.defaultValue
+                {
+                    Frames = []
+                    HeadOrigin = TraceHeadOrigin.IlThrow
+                }
+
+        let frameId = state.ThreadState.[currentThread].ActiveMethodState
+
+        runFirstPass
+            loggerFactory
+            corelib
+            state
+            currentThread
+            {
+                Exception =
+                    {
+                        ExceptionObject = exceptionAddr
+                        Trace = trace
+                    }
+                ExceptionType = exceptionObjectType state exceptionAddr
+                StartFrame = frameId
+                StartPC = pc
+                Frame = frameId
+                SearchPC = pc
+                SkippedFilters = []
+            }
+
+    /// Append a frame of `method` at IL offset `ilOffset` to the trace of `exceptionAddr`, an
+    /// exception that has been thrown, as CoreCLR's `AsyncHelpers_AddContinuationToExInternal`
+    /// appends the frame a continuation's `DiagnosticIP` names (`StackTraceInfo::AppendElement`,
+    /// excep.cpp), consuming any pending foreign-raise flag as every append does.
+    let appendContinuationFrame
+        (loggerFactory : ILoggerFactory)
+        (corelib : BaseClassTypes<DumpedAssembly>)
+        (currentThread : ThreadId)
+        (method : MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (ilOffset : int)
+        (exceptionAddr : ManagedHeapAddress)
+        (state : IlMachineState)
+        : IlMachineState
+        =
+        let trace =
+            match IlMachineState.frozenStackTrace corelib exceptionAddr state with
+            | Some trace -> trace
+            | None ->
+                failwith
+                    $"BUG: an exception at %O{exceptionAddr} unwinding through the continuation of %O{method} has never been thrown, but only an exception CoreLib's dispatcher caught reaches the continuations it unwinds through"
+
+        let state, restored =
+            state |> consumeForeignExceptionRaise currentThread (fun () -> Some trace)
+
+        let trace = restored |> Option.defaultValue trace
+
+        let frame : ExceptionStackFrame<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> =
+            {
+                Method = method
+                IlOffset = ilOffset
+                IsLastFrameFromForeignExceptionStackTrace = false
+            }
+
+        projectStackTrace
+            loggerFactory
+            corelib
+            {
+                ExceptionObject = exceptionAddr
+                Trace =
+                    { trace with
+                        Frames = trace.Frames @ [ frame ]
+                    }
+            }
+            state
+
     /// Return the HResult that the real CLR would set for a runtime-synthesised exception of the
     /// given type.  The real CLR calls the default constructor (which sets the subclass-specific
     /// HResult) and then overwrites it with the mapped value from EEException::GetHR(); for the

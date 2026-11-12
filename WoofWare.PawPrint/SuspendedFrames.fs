@@ -13,6 +13,9 @@ type SuspendedFrame =
         /// The native block holding the `ResumeInfo` the continuation points at, which lives as long
         /// as the suspension does.
         ResumeInfo : NativeMemoryBlockId
+        /// The IL offset of the call the frame awaits, at which it rethrows an exception it resumes
+        /// with.
+        CallSite : int
     }
 
 /// The runtime-async frames that have suspended and not yet resumed, each keyed by the continuation
