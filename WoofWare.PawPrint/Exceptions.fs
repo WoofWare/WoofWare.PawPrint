@@ -43,6 +43,10 @@ type RuntimeRaiseSite =
     /// `TargetInvocationException`, as `Activator.CreateInstance<T>()` and the reflective field
     /// accessors do.
     | TargetInvocationWrap
+    /// A native method's runtime code threw an exception object it already held, having preserved
+    /// its trace (`COMPlusThrow(OBJECTREF)`), as .NET 11's VM does with what an
+    /// `[UnmanagedCallersOnly]` CoreLib helper it called handed back.
+    | ThrownAgainByVm
 
 /// How the first frame of an exception's trace came to be there, which decides whether it is the
 /// frame CoreCLR's own trace of the exception begins with.

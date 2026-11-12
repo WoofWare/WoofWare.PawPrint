@@ -163,7 +163,7 @@ module IlMachineThreadState =
                 | ReturnValueDisposition.DispatchAsException _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly requested exception dispatch on return"
-                | ReturnValueDisposition.ResumeNonExceptionWrap _ ->
+                | ReturnValueDisposition.ResumeVmRaise _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of the runtime's wrapping of a thrown non-exception"
                 | ReturnValueDisposition.Discard ->
@@ -276,7 +276,7 @@ module IlMachineThreadState =
                 // dispatch should occur.
                 let constructed = ManagedHeap.get constructing state.ManagedHeap
                 ReturnFrameResult.DispatchException (state, constructing, constructed.ConcreteType, making)
-            | ReturnValueDisposition.ResumeNonExceptionWrap _ ->
+            | ReturnValueDisposition.ResumeVmRaise _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"
             | ReturnValueDisposition.Discard ->
@@ -316,9 +316,9 @@ module IlMachineThreadState =
             // throw the runtime had decided on.
             failwith
                 $"logic error: %s{returningMethodState.ExecutingMethod.Name} was not constructing an object, but its frame asked for its product to be dispatched as an exception"
-        | ReturnValueDisposition.ResumeNonExceptionWrap step ->
+        | ReturnValueDisposition.ResumeVmRaise step ->
             match returned with
-            | None -> ReturnFrameResult.ResumeNonExceptionWrap (state, step)
+            | None -> ReturnFrameResult.ResumeVmRaise (state, step)
             | Some _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} returned a value, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"

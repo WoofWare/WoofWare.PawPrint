@@ -1372,10 +1372,11 @@ module NativeRuntimeAssembly =
             EvalStackValue.ObjectRef array ] ->
             match readReference caught state with
             | Some exn ->
-                // `InvokeThrowing` rethrows it from the QCall. Only `new CultureInfo` of a culture
-                // the row names and the runtime does not know can throw here.
-                failwith
-                    $"TODO: %s{operation}: AssemblyName.CreateAssemblyName caught %O{exn} making the AssemblyName of %s{assemblyFullName}'s reference to %s{rows.[index].Name}; rethrowing it from the QCall is not modelled"
+                // `InvokeThrowing` throws it again from the QCall, leaving
+                // `retReferencedAssemblies` unwritten. Only `new CultureInfo` of a culture the row
+                // names and the runtime does not know can throw here.
+                NativeHandlerResult.ThrowExisting (popMarkers 4 state, exn, StepEffect.NoEffect)
+                |> Some
             | None ->
 
             match readReference result state with
