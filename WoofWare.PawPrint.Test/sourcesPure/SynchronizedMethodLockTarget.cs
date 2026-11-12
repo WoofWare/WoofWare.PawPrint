@@ -7,7 +7,9 @@ using System.Threading;
 // RuntimeType's, for an exact generic instantiation however its code is shared. The monitor is
 // taken again by a recursive call and stays held when that call returns; it is still held while
 // the method's own finally runs and while a caller's filter runs during the first pass over an
-// exception leaving the method, and is released by the time the caller's catch runs.
+// exception leaving the method, and is released by the time the caller's catch runs, including
+// when the runtime wraps that exception as it leaves a constructor. Constructors, delegate,
+// virtual and reflection calls hold it as any other call does.
 class Holder
 {
     public bool HeldInBody;
@@ -107,8 +109,37 @@ class Generic<T>
     }
 }
 
+class Constructed
+{
+    public static Constructed Published;
+    public bool HeldInConstructor;
+
+    [MethodImpl(MethodImplOptions.Synchronized)]
+    public Constructed()
+    {
+        HeldInConstructor = Monitor.IsEntered(this);
+    }
+}
+
+class ThrowingConstructed
+{
+    public static ThrowingConstructed Published;
+
+    [MethodImpl(MethodImplOptions.Synchronized)]
+    public ThrowingConstructed()
+    {
+        Published = this;
+        throw new InvalidOperationException("from a synchronized constructor");
+    }
+}
+
 class Program
 {
+    static T Create<T>() where T : new()
+    {
+        return new T();
+    }
+
     static bool HeldWhenFiltering(Holder h, Exception e)
     {
         return e is InvalidOperationException && Monitor.IsEntered(h);
@@ -216,6 +247,35 @@ class Program
         if (viaDelegate(1) != 2 || Monitor.IsEntered(h))
         {
             return 17;
+        }
+
+        var constructed = new Constructed();
+        if (!constructed.HeldInConstructor || Monitor.IsEntered(constructed))
+        {
+            return 19;
+        }
+
+        // `new T()` is `Activator.CreateInstance<T>()`, which wraps what the constructor throws in
+        // a TargetInvocationException as it leaves the constructor.
+        bool wrapped = false;
+        try
+        {
+            Create<ThrowingConstructed>();
+        }
+        catch (System.Reflection.TargetInvocationException e) when (e.InnerException is InvalidOperationException)
+        {
+            wrapped = true;
+        }
+
+        if (!wrapped || ThrowingConstructed.Published == null || Monitor.IsEntered(ThrowingConstructed.Published))
+        {
+            return 20;
+        }
+
+        var viaReflection = (int)typeof(Holder).GetMethod("WithResult").Invoke(h, new object[] { 5 });
+        if (viaReflection != 6 || Monitor.IsEntered(h))
+        {
+            return 21;
         }
 
         // Another thread can take the monitor once every synchronized call above has returned:

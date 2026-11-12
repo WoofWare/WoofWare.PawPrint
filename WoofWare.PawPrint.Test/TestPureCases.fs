@@ -84,6 +84,7 @@ module TestPureCases =
     let endingsEverywhere : Map<string, GuestEnding> =
         [
             "UnhandledException.cs", GuestEnding.UnhandledException
+            "SynchronizedMethodUnhandledException.cs", GuestEnding.UnhandledException
             "EnumHasFlagMismatchUnhandled.cs", GuestEnding.UnhandledException
             "EnumHasFlagNullFlagUnhandled.cs", GuestEnding.UnhandledException
             "ArrayGetLengthOutOfRangeUnhandled.cs", GuestEnding.UnhandledException
