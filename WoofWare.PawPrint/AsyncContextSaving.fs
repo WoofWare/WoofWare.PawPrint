@@ -196,9 +196,7 @@ module AsyncContextSaving =
           Some (AsyncFrame.SavesContexts (AsyncContextHandling.RestoringOnUnwind (_, unwind))) ->
             let state = setHandling AsyncContextHandling.Restored state
 
-            match
-                ExceptionDispatching.resumeParkedUnwind loggerFactory baseClassTypes state thread unwind
-            with
+            match ExceptionDispatching.resumeParkedUnwind loggerFactory baseClassTypes state thread unwind with
             | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
             | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
                 ExecutionResult.UnhandledException (state, thread, exn)

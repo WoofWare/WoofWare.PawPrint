@@ -42,4 +42,5 @@ module NativeFlagCell =
         pool
 
     /// Release `cell`, as the JIT's local dies when its frame does. Any later read of it fails.
-    let free (cell : NativeFlagCell) (pool : NativeMemoryPool) : NativeMemoryPool = NativeMemoryPool.free cell.Block pool
+    let free (cell : NativeFlagCell) (pool : NativeMemoryPool) : NativeMemoryPool =
+        NativeMemoryPool.free cell.Block pool

@@ -1238,10 +1238,8 @@ module IlMachineStateExecution =
             match methodToCall with
             | MethodInfo.Metadata (_, facts, _) when facts.ImplAttributes.HasFlag MethodImplAttributes.Synchronized ->
                 let declaringType =
-                    (state.LoadedAssembly methodToCall.DeclaringAssemblyFullName |> Option.get).TypeDefs.[methodToCall
-                                                                                                             .RequiredDeclaringType
-                                                                                                             .Definition
-                                                                                                             .Get]
+                    (state.LoadedAssembly methodToCall.DeclaringAssemblyFullName |> Option.get)
+                        .TypeDefs.[methodToCall.RequiredDeclaringType.Definition.Get]
 
                 if LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies declaringType then
                     failwith

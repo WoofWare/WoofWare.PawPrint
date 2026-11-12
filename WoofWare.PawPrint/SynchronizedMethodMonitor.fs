@@ -106,7 +106,8 @@ module SynchronizedMethodMonitor =
         | Some SynchronizedFrame.AwaitingEnter ->
             let lockAddress, state = lockObject loggerFactory baseClassTypes thread state
 
-            let lockTaken, pool = NativeFlagCell.allocate (IlMachineState.getNativeMemoryPool state)
+            let lockTaken, pool =
+                NativeFlagCell.allocate (IlMachineState.getNativeMemoryPool state)
 
             let monitor =
                 {
@@ -189,7 +190,9 @@ module SynchronizedMethodMonitor =
             // The frame's `ret`, whose program counter did not move, runs again and returns.
             ExecutionResult.stepped (leave monitor state, WhatWeDid.Executed)
         | SynchronizedMethodStep.AfterExitOnUnwind, Some (SynchronizedFrame.ExitingOnUnwind (monitor, unwind)) ->
-            match ExceptionDispatching.resumeParkedUnwind loggerFactory baseClassTypes (leave monitor state) thread unwind with
+            match
+                ExceptionDispatching.resumeParkedUnwind loggerFactory baseClassTypes (leave monitor state) thread unwind
+            with
             | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
             | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
                 ExecutionResult.UnhandledException (state, thread, exn)
