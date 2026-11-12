@@ -2026,6 +2026,67 @@ module TestImpureCases =
                 objectRef, "ToString", [ 0x20uy ; 0x00uy ; 0x0Euy ]
             ]
 
+    /// `ModuleBuilderMemberRefOfBuilder.cs` has named `DynLib`'s `Lib.Thing` and four of its members from
+    /// `DynUser`: one TypeRef scoped by an AssemblyRef for `DynLib`, and one MemberRef per member, each
+    /// under that TypeRef with the signature translated from `DynLib`, `Instance`'s naming `Thing` by the
+    /// same TypeRef. The created type's members found the same rows, and `string`'s TypeRef came next.
+    /// Last, `Box<int>`'s field and constructor were named under its TypeSpec, which names `Box` by a TypeRef
+    /// scoped by the same AssemblyRef, all as .NET 10 numbers them.
+    let private assertMemberRefOfBuilderRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "DynUser, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly DynUser is not loaded")
+
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "System.Private.CoreLib" ; "DynLib" ]
+
+        let corelib =
+            ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid 1 scope).Value
+
+        let dynLib = ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid 2 scope).Value
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            row.ResolutionScope, EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                corelib, "System", "Object"
+                dynLib, "Lib", "Thing"
+                corelib, "System", "String"
+                dynLib, "Lib", "Box"
+            ]
+
+        // GENERICINST CLASS, TypeRef 4 as a TypeDefOrRef coded index, one argument, I4.
+        EmitScope.typeSpecs scope
+        |> Seq.map (fun row -> EmitScope.blobAt row.Signature scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual [ [ 0x15uy ; 0x12uy ; 0x11uy ; 0x01uy ; 0x08uy ] ]
+
+        let thingRef = MemberRefParent.TypeRef (EmitScope.tryTypeRefRid 2 scope).Value
+        let boxOfInt = MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid 1 scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                thingRef, "Value", [ 0x06uy ; 0x08uy ]
+                // CLASS, then TypeRef 2 as a TypeDefOrRef coded index.
+                thingRef, "Instance", [ 0x06uy ; 0x12uy ; 0x09uy ]
+                thingRef, "Add", [ 0x00uy ; 0x01uy ; 0x08uy ; 0x08uy ]
+                thingRef, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                // VAR 0, as `DynLib` wrote it.
+                boxOfInt, "Content", [ 0x06uy ; 0x13uy ; 0x00uy ]
+                boxOfInt, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5694,6 +5755,27 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertOwnTypeRefRows
+            }
+            {
+                // One dynamic module's references to another's FieldBuilders, MethodBuilder and
+                // ConstructorBuilder (`ModuleBuilder_GetMemberRef`), which the created type's members find
+                // again and through which a method of the referring module then runs, and to members of an
+                // instantiation of the other's generic TypeBuilder; `assertMemberRefOfBuilderRows` reads
+                // the rows. Dynamic-code switch overridden to true like its siblings; verified by hand
+                // to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderMemberRefOfBuilder.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMemberRefOfBuilderRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
