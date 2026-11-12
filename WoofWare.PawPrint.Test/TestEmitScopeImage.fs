@@ -454,12 +454,15 @@ module TestEmitScopeImage =
         |> Seq.length
         |> shouldBeGreaterThan 20
 
+    /// How a method row with no body read back.
+    [<RequireQualifiedAccess>]
+    type private BodilessMethod =
+        | Abstract
+        | MissingIl
+
     [<Test>]
     let ``Assembly.read lists each type's methods and fields as the scope defines them`` () : unit =
-        let mutable missing = 0
-        let mutable abstractBodies = 0
-
-        let property (scope : EmitScope) : unit =
+        let property (cover : BodilessMethod -> unit) (scope : EmitScope) : unit =
             use stream = new MemoryStream (EmitScopeImage.write scope)
             use assy = Assembly.read NullLoggerFactory.Instance None stream
             let typeDefs = EmitScope.typeDefs scope
@@ -486,9 +489,9 @@ module TestEmitScopeImage =
                     match row.Body, m.Body with
                     | Some _, MethodBody.Il _ -> ()
                     | None, MethodBody.Abstract when row.Flags.HasFlag MethodAttributes.Abstract ->
-                        abstractBodies <- abstractBodies + 1
+                        cover BodilessMethod.Abstract
                     | None, MethodBody.MissingIl when not (row.Flags.HasFlag MethodAttributes.Abstract) ->
-                        missing <- missing + 1
+                        cover BodilessMethod.MissingIl
                     | expected, actual ->
                         failwith
                             $"%s{m.Name}: the row's body %A{expected} (flags %O{row.Flags}) read back as %A{actual}"
@@ -499,10 +502,11 @@ module TestEmitScopeImage =
                 )
                 |> shouldEqual (ridsOwnedBy i (EmitScope.fields scope |> Seq.map _.Owner.Rid))
 
-        Check.One (Config.QuickThrowOnFailure.WithMaxTest 100, Prop.forAll (Arb.fromGen genScope) property)
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 100) (Arb.fromGen genScope) property
 
-        missing |> shouldBeGreaterThan 50
-        abstractBodies |> shouldBeGreaterThan 50
+        coverage.Count BodilessMethod.MissingIl |> shouldBeGreaterThan 50
+        coverage.Count BodilessMethod.Abstract |> shouldBeGreaterThan 50
 
     /// A row with no body whose implementation is not managed IL: native code, unmanaged IL, and
     /// optimised IL, none of which the runtime has a body for.

@@ -1,7 +1,6 @@
 namespace WoofWare.PawPrint.Test
 
 open System
-open System.Collections.Generic
 open System.IO
 open System.Reflection
 open System.Reflection.Emit
@@ -462,43 +461,37 @@ module TestStructLayoutFacts =
         decimalTypes.Length
         |> shouldEqual (if Environment.Version.Major >= 11 then 3 else 0)
 
-        let observed = Dictionary<string, int> ()
-
-        let count (key : string) : unit =
-            observed.[key] <- observed.GetValueOrDefault key + 1
-
+        // Numbers each shape's assembly, so that every case's name is distinct.
         let mutable cases = 0
 
-        let property (shape : Shape) : unit =
+        // Each struct's facts are labelled with the fact's name and its value.
+        let property (cover : string * bool -> unit) (shape : Shape) : unit =
             cases <- cases + 1
 
             for facts in check $"StructFacts%d{cases}" shape do
-                count $"layout=%b{facts.HasLayout}"
-                count $"blittable=%b{facts.IsBlittable}"
-                count $"gc=%b{facts.ContainsGcPointers}"
-                count $"auto=%b{facts.IsAutoLayoutOrHasAutoLayoutField}"
-                count $"int128=%b{facts.IsInt128OrHasInt128Fields}"
-                count $"decimal=%b{facts.IsDecimalFloatingPointOrHasDecimalFloatingPointFields}"
+                cover ("layout", facts.HasLayout)
+                cover ("blittable", facts.IsBlittable)
+                cover ("gc", facts.ContainsGcPointers)
+                cover ("auto", facts.IsAutoLayoutOrHasAutoLayoutField)
+                cover ("int128", facts.IsInt128OrHasInt128Fields)
+                cover ("decimal", facts.IsDecimalFloatingPointOrHasDecimalFloatingPointFields)
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 1000,
-            Prop.forAll (Arb.fromGenShrink (genTop, shrinkShape)) property
-        )
+                // A runtime with no decimal floating-point types has no struct holding one.
+                if decimalTypes.IsEmpty then
+                    facts.IsDecimalFloatingPointOrHasDecimalFloatingPointFields |> shouldEqual false
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 1000)
+                (Arb.fromGenShrink (genTop, shrinkShape))
+                property
 
         for flag in [ "layout" ; "blittable" ; "gc" ; "auto" ; "int128" ] do
             for value in [ false ; true ] do
-                let key = $"%s{flag}=%b{value}"
+                coverage.Count (flag, value) |> shouldBeGreaterThan 4
 
-                if observed.GetValueOrDefault key < 5 then
-                    failwith $"Insufficient coverage for %s{key}: %A{observed}"
-
-        if decimalTypes.IsEmpty then
-            observed.GetValueOrDefault "decimal=true" |> shouldEqual 0
-        else
-            observed.GetValueOrDefault "decimal=true" |> shouldBeGreaterThan 5
-
-        TestContext.WriteLine
-            $"%s{RuntimeInformation.FrameworkDescription}: %d{cases} generated shapes, observations %A{Seq.toList observed}"
+        if not decimalTypes.IsEmpty then
+            coverage.Count ("decimal", true) |> shouldBeGreaterThan 5
 
     [<Test>]
     let ``Layout propagation is observed with other refusal reasons absent`` () : unit =

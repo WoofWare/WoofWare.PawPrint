@@ -8,7 +8,6 @@ open System.Reflection
 open System.Reflection.Metadata
 open System.Reflection.Metadata.Ecma335
 open System.Reflection.PortableExecutable
-open System.Runtime.InteropServices
 open System.Runtime.Loader
 open FsCheck
 open FsCheck.FSharp
@@ -695,32 +694,29 @@ module TestEnumBackingType =
 
     [<Test>]
     let ``Generated enum graphs agree with host backing types and refusals`` () : unit =
+        // Numbers each graph's assembly, so that every case's name is distinct.
         let mutable cases = 0
-        let mutable accepted = 0
-        let mutable refused = 0
-        let seen = HashSet<PrimitiveType> ()
 
-        let property (specs : Spec list) : unit =
+        // Each enum is labelled with its backing type, or `None` if it is refused.
+        let property (cover : PrimitiveType option -> unit) (specs : Spec list) : unit =
             cases <- cases + 1
 
             for answer in check $"GeneratedEnums%d{cases}" specs do
-                match answer with
-                | Some primitive ->
-                    accepted <- accepted + 1
-                    seen.Add primitive |> ignore
-                | None -> refused <- refused + 1
+                cover answer
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll (Arb.fromGenShrink (genSpecs, shrinkSpecs)) property
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 300)
+                (Arb.fromGenShrink (genSpecs, shrinkSpecs))
+                property
 
-        accepted |> shouldBeGreaterThan 100
-        refused |> shouldBeGreaterThan 100
-        seen.Count |> shouldEqual primitives.Length
+        let accepted =
+            coverage.Reached
+            |> List.choose (fun (answer, count) -> answer |> Option.map (fun primitive -> primitive, count))
 
-        TestContext.WriteLine
-            $"%s{RuntimeInformation.FrameworkDescription}: %d{cases} graphs, %d{accepted} accepted enums, %d{refused} refused enums, %d{seen.Count} distinct primitive results."
+        accepted |> List.sumBy snd |> shouldBeGreaterThan 100
+        coverage.Count None |> shouldBeGreaterThan 100
+        accepted.Length |> shouldEqual primitives.Length
 
     [<Test>]
     let ``Non-enums return None without manufacturing an underlying type`` () : unit =
