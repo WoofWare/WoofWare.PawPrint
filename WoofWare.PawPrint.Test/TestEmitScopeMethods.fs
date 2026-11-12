@@ -96,9 +96,8 @@ module TestEmitScopeMethods =
         ()
         : unit
         =
-        let mutable special = 0
-
-        let property (ops : Op list) : unit =
+        // `cover` is called for each method defined with a name the emitter marks special.
+        let property (cover : unit -> unit) (ops : Op list) : unit =
             let start = withTypes ()
             let typeCount = (EmitScope.typeDefs start).Count
             let mutable model : ModelMethod list = []
@@ -117,7 +116,7 @@ module TestEmitScopeMethods =
                         || name.StartsWith ("_VtblGap", StringComparison.Ordinal)
 
                     if isSpecial then
-                        special <- special + 1
+                        cover ()
 
                     let expectedFlags =
                         (flags &&& ~~~reserved &&& 0xFFFF)
@@ -185,12 +184,13 @@ module TestEmitScopeMethods =
             EmitScope.typeRefs scope |> shouldEqual (EmitScope.typeRefs start)
             EmitScope.parameters scope |> Seq.isEmpty |> shouldEqual true
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll (Arb.fromGen (Gen.listOf genOp |> Gen.map List.ofSeq)) property
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 300)
+                (Arb.fromGen (Gen.listOf genOp |> Gen.map List.ofSeq))
+                property
 
-        special |> shouldBeGreaterThan 100
+        coverage.Count () |> shouldBeGreaterThan 100
 
     let private thrown (f : unit -> 'a) : string =
         match
@@ -298,6 +298,14 @@ module TestEmitScopeMethods =
         thrown (fun () -> EmitScope.setMethodBody (MethodDefRid 2) body scope)
         |> shouldContainText "MethodDef RID 2"
 
+    /// The formats a method body was written in.
+    [<RequireQualifiedAccess>]
+    type private MethodBodyFormat =
+        | TinyHeader
+        | FatHeader
+        | SmallClauseSection
+        | FatClauseSection
+
     /// The body `TypeBuilder_SetMethodIL` writes, read back from the module's image by SRM's reader:
     /// the code, max stack, local signature, init-locals flag and exception clauses it was given. The
     /// header is tiny exactly when `COR_ILMETHOD::Size` picks one (no flags, no local signature, max
@@ -306,11 +314,6 @@ module TestEmitScopeMethods =
     /// picks one: at most 20 clauses, each with offsets that fit 16 bits and lengths that fit 8.
     [<Test>]
     let ``a method body reads back as SetMethodIL wrote it, in CoreCLR's formats`` () : unit =
-        let tiny = ref 0
-        let fat = ref 0
-        let smallSections = ref 0
-        let fatSections = ref 0
-
         // With `fits`, a clause a small section can hold; otherwise either side of each of its bounds,
         // often.
         let genClause (fits : bool) : Gen<ExceptionClause> =
@@ -353,6 +356,7 @@ module TestEmitScopeMethods =
             }
 
         let property
+            (cover : MethodBodyFormat -> unit)
             (initLocals : bool)
             (maxStack : int)
             (codeLength : int)
@@ -386,15 +390,15 @@ module TestEmitScopeMethods =
                    )
 
             if isTiny then
-                tiny.Value <- tiny.Value + 1
+                cover MethodBodyFormat.TinyHeader
             else
-                fat.Value <- fat.Value + 1
+                cover MethodBodyFormat.FatHeader
 
             if not clauses.IsEmpty then
                 if isSmallSection then
-                    smallSections.Value <- smallSections.Value + 1
+                    cover MethodBodyFormat.SmallClauseSection
                 else
-                    fatSections.Value <- fatSections.Value + 1
+                    cover MethodBodyFormat.FatClauseSection
 
             let scope =
                 EmitScopeGen.apply
@@ -498,9 +502,9 @@ module TestEmitScopeMethods =
                 )
             )
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 1000,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 1000)
                 (Arb.fromGen (
                     gen {
                         let! initLocals = Gen.elements [ true ; false ]
@@ -529,13 +533,12 @@ module TestEmitScopeMethods =
                         return initLocals, maxStack, codeLength, localSig, List.ofSeq clauses
                     }
                 ))
-                (fun (initLocals, maxStack, codeLength, localSig, clauses) ->
-                    property initLocals maxStack codeLength localSig clauses
+                (fun cover (initLocals, maxStack, codeLength, localSig, clauses) ->
+                    property cover initLocals maxStack codeLength localSig clauses
                 )
-        )
 
         // About a twentieth of the samples are tiny, and of those with clauses, some of each format.
-        tiny.Value |> shouldBeGreaterThan 20
-        fat.Value |> shouldBeGreaterThan 500
-        smallSections.Value |> shouldBeGreaterThan 50
-        fatSections.Value |> shouldBeGreaterThan 50
+        coverage.Count MethodBodyFormat.TinyHeader |> shouldBeGreaterThan 20
+        coverage.Count MethodBodyFormat.FatHeader |> shouldBeGreaterThan 500
+        coverage.Count MethodBodyFormat.SmallClauseSection |> shouldBeGreaterThan 50
+        coverage.Count MethodBodyFormat.FatClauseSection |> shouldBeGreaterThan 50

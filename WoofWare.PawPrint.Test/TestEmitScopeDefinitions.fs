@@ -412,9 +412,9 @@ module TestEmitScopeDefinitions =
     let ``every field is a new row with the flags the emitter keeps`` () : unit =
         let names = [ "value__" ; "Value__" ; "value_" ; "x" ; "日本" ; "x" ]
         let signature = ImmutableArray.Create<byte> [| 0x06uy ; 0x08uy |]
-        let special = ref 0
 
-        let property (definitions : (int * int * bool) list) : unit =
+        // `cover` is called for each field named `value__`.
+        let property (cover : unit -> unit) (definitions : (int * int * bool) list) : unit =
             let scope = DynamicAssemblyImage.scope dynamicParts Guid.Empty
             let name, scope = EmitScope.internString "Thing" scope
 
@@ -445,7 +445,7 @@ module TestEmitScopeDefinitions =
                 let isSpecial = (name = "value__")
 
                 if isSpecial then
-                    special.Value <- special.Value + 1
+                    cover ()
 
                 row.Owner |> shouldEqual owner
                 EmitScope.stringAt row.Name next |> shouldEqual name
@@ -459,9 +459,9 @@ module TestEmitScopeDefinitions =
 
                 scope <- next
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 100,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
                 (Arb.fromGen (
                     Gen.listOf (
                         Gen.zip3 (Gen.choose (0, 100)) (Gen.choose (0, 0x1FFFF)) (Gen.elements [ true ; false ])
@@ -469,9 +469,8 @@ module TestEmitScopeDefinitions =
                     |> Gen.map List.ofSeq
                 ))
                 property
-        )
 
-        special.Value |> shouldBeGreaterThan 100
+        coverage.Count () |> shouldBeGreaterThan 100
 
     /// `fdHasFieldRVA` makes `RegMeta::_SetFieldProps` add a `FieldRVA` row, which a scope does not hold.
     [<Test>]
@@ -500,9 +499,8 @@ module TestEmitScopeDefinitions =
     /// the emitter checks for duplicates elsewhere.
     [<Test>]
     let ``an interface implementation is added only if the table lacks it`` () : unit =
-        let found = ref 0
-
-        let property (requests : (int * int) list) : unit =
+        // `cover` is called for each request the table already holds.
+        let property (cover : unit -> unit) (requests : (int * int) list) : unit =
             let scope = DynamicAssemblyImage.scope dynamicParts Guid.Empty
             let mutable scope = scope
 
@@ -529,7 +527,7 @@ module TestEmitScopeDefinitions =
                 let next = EmitScopeDefinitions.addInterfaceImpl cls target scope
 
                 if List.contains (cls, target) model then
-                    found.Value <- found.Value + 1
+                    cover ()
                     Object.ReferenceEquals (next, scope) |> shouldEqual true
                 else
                     model <- model @ [ cls, target ]
@@ -541,14 +539,13 @@ module TestEmitScopeDefinitions =
 
                 scope <- next
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 100,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
                 (Arb.fromGen (
                     Gen.listOf (Gen.zip (Gen.choose (0, 8)) (Gen.choose (0, 8)))
                     |> Gen.map List.ofSeq
                 ))
                 property
-        )
 
-        found.Value |> shouldBeGreaterThan 100
+        coverage.Count () |> shouldBeGreaterThan 100
