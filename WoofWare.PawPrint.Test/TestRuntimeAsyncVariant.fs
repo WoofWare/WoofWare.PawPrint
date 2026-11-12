@@ -853,3 +853,153 @@ public abstract class Holder
             Config.QuickThrowOnFailure.WithMaxTest 500,
             Prop.forAll (Arb.fromGen (genReturnType spellings)) property
         )
+
+    /// A type is a delegate only when its base type is CoreLib's `MulticastDelegate`, not another
+    /// type of that name: one the same assembly defines, or one another assembly does.
+    [<Test>]
+    let ``a type deriving from a MulticastDelegate that is not CoreLib's is no delegate`` () : unit =
+        let frameworkDirectory = FrameworkUnderTest.sharedFrameworkDirectory ()
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let coreLib =
+            Assembly.readFile loggerFactory (Path.Combine (frameworkDirectory, "System.Private.CoreLib.dll"))
+
+        let impostorSource =
+            """
+using System.Threading.Tasks;
+
+namespace System
+{
+    public abstract class MulticastDelegate
+    {
+    }
+}
+
+public class Local : System.MulticastDelegate
+{
+    public Task<int> Run() => Task.FromResult(1);
+}
+"""
+
+        let impostorImage =
+            Roslyn.compileAssembly
+                "MulticastImpostor"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ impostorSource ]
+
+        let foreignSource =
+            """
+extern alias impostor;
+using System.Threading.Tasks;
+
+public class Foreign : impostor::System.MulticastDelegate
+{
+    public Task<int> Run() => Task.FromResult(2);
+}
+"""
+
+        let foreignImage =
+            Roslyn.compileAssembly
+                "MulticastForeign"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                [
+                    Microsoft.CodeAnalysis.MetadataReference
+                        .CreateFromImage(ImmutableArray.CreateRange impostorImage)
+                        .WithAliases
+                        [ "impostor" ]
+                ]
+                [ foreignSource ]
+
+        let impostor =
+            Assembly.read loggerFactory (Some "MulticastImpostor.dll") (new MemoryStream (impostorImage))
+
+        let foreign =
+            Assembly.read loggerFactory (Some "MulticastForeign.dll") (new MemoryStream (foreignImage))
+
+        let assemblies = LoadedAssemblies.ofAssemblies [ coreLib ; impostor ; foreign ]
+
+        let outcome (image : DumpedAssembly) (typeName : string) : string =
+            let method =
+                image.Methods.Values
+                |> Seq.find (fun m -> m.Name = "Run" && m.RequiredDeclaringType.Name = typeName)
+
+            match
+                RuntimeAsyncMethod.asyncVariantOf loggerFactory [ frameworkDirectory ] coreLib image method assemblies
+            with
+            | _, Ok variant -> $"variant (%s{bodyKind variant.Body})"
+            | _, Error refusal -> $"%A{refusal}"
+
+        [ outcome impostor "Local" ; outcome foreign "Foreign" ]
+        |> shouldEqual [ "variant (Il)" ; "variant (Il)" ]
+
+    /// No call constructs an async version for a frame to run yet, so `frameBody` refuses one by
+    /// name; it gives the ordinary variant of the same method its own IL.
+    [<Test>]
+    let ``frameBody refuses by name to run an async version`` () : unit =
+        let _, loggerFactory = LoggerFactory.makeTest ()
+        let coreLib = Assembly.readFile loggerFactory HostImage.coreLibPath
+        let baseClassTypes = BaseClassTypes.ofCorelib coreLib
+        let loaded = LoadedAssemblies.ofAssemblies [ coreLib ]
+
+        let initialState = IlMachineState.initial loggerFactory ImmutableArray.Empty coreLib
+
+        let state =
+            { initialState with
+                TypeSystem =
+                    { initialState.TypeSystem with
+                        ConcreteTypes = Corelib.concretizeAll loaded baseClassTypes AllConcreteTypes.Empty
+                    }
+            }
+
+        // `TaskCompletionSource.Task`, a getter with IL returning a `Task`.
+        let ordinary =
+            coreLib.Methods.Values
+            |> Seq.find (fun m ->
+                m.Name = "get_Task"
+                && m.RequiredDeclaringType.Namespace = "System.Threading.Tasks"
+                && m.RequiredDeclaringType.Name = "TaskCompletionSource"
+            )
+
+        let variant =
+            match
+                RuntimeAsyncMethod.asyncVariantOf
+                    loggerFactory
+                    [ Path.GetDirectoryName HostImage.coreLibPath ]
+                    coreLib
+                    coreLib
+                    ordinary
+                    loaded
+            with
+            | _, Ok variant -> variant
+            | _, Error refusal -> failwith $"%O{ordinary} has no async variant: %A{refusal}"
+
+        let concretised (method : MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>) =
+            match
+                ExecutionConcretization.concretizeMethodWithAllGenerics
+                    loggerFactory
+                    baseClassTypes
+                    ImmutableArray.Empty
+                    method
+                    ImmutableArray.Empty
+                    state
+            with
+            | state, Ok (method, _) -> state, method
+            | _, Error failure -> failwith $"concretising %O{method}: %s{TypeBindingFailure.describe failure}"
+
+        let state, ordinary = concretised ordinary
+
+        let _, frame =
+            IlMachineStateExecution.frameBody loggerFactory baseClassTypes coreLib ordinary state
+
+        obj.ReferenceEquals (frame.Method, ordinary) |> shouldEqual true
+
+        let state, variant = concretised variant
+
+        let refusal =
+            Assert.Throws<System.Exception> (fun () ->
+                IlMachineStateExecution.frameBody loggerFactory baseClassTypes coreLib variant state
+                |> ignore
+            )
+
+        refusal.Message |> shouldContainText "an async version"

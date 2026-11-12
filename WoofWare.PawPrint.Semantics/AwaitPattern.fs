@@ -160,12 +160,10 @@ module AwaitPattern =
         requireCall body callOffset
         let starts = BoxPattern.blockStarts body
 
-        // The `ConfigureAwait` call, if any, and the offset of the last instruction before the
-        // await; `None` where the pattern cannot match. Once a `stloc; ldloca` has been read, the JIT
-        // requires a `ConfigureAwait` after it.
-        let configured : (ConfigureAwaitCall<MetadataOperand> option * int) option =
-            let local = storedAndAddressed body starts callOffset
-            let beforeConstant = local |> Option.defaultValue callOffset
+        // The `ConfigureAwait` call, if any, and the offset of the instruction before the await.
+        let configureAwait, beforeAwait =
+            let beforeConstant =
+                storedAndAddressed body starts callOffset |> Option.defaultValue callOffset
 
             let constant =
                 match nextInBlock body starts beforeConstant with
@@ -189,24 +187,23 @@ module AwaitPattern =
                     | _ -> None
                 )
 
-            match configureAwait, local with
-            | Some (call, callOffset), _ -> Some (Some call, callOffset)
-            | None, Some _ -> None
-            | None, None -> Some (None, callOffset)
+            match configureAwait with
+            | Some (call, callOffset) -> Some call, callOffset
+            // Where a `stloc; ldloca` follows the call, the JIT requires a `ConfigureAwait` after it,
+            // and matches nothing here; nor does this, since the instruction after the call is
+            // then that `stloc`.
+            | None -> None, callOffset
 
-        configured
-        |> Option.bind (fun (configureAwait, beforeAwait) ->
-            match nextInBlock body starts beforeAwait with
-            | Some (IlOp.UnaryMetadataToken (UnaryMetadataTokenIlOp.Call, await) as op, awaitOffset) ->
-                Some
-                    {
-                        ConfigureAwait = configureAwait
-                        Await = await
-                        AwaitOffset = awaitOffset
-                        AfterAwait = awaitOffset + IlOp.NumberOfBytes op
-                    }
-            | _ -> None
-        )
+        match nextInBlock body starts beforeAwait with
+        | Some (IlOp.UnaryMetadataToken (UnaryMetadataTokenIlOp.Call, await) as op, awaitOffset) ->
+            Some
+                {
+                    ConfigureAwait = configureAwait
+                    Await = await
+                    AwaitOffset = awaitOffset
+                    AfterAwait = awaitOffset + IlOp.NumberOfBytes op
+                }
+        | _ -> None
 
     /// The tail shape that follows the `call` or `callvirt` at `callOffset` in `body`, if any. The JIT
     /// reads one only in an async version, and not in the async version of a synchronized method.
