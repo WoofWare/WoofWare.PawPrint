@@ -1704,8 +1704,15 @@ module IlMachineStateExecution =
         let leavingId = threadState.ActiveMethodState
         let leaving = threadState.MethodState
 
-        if leaving.AsyncFrame.IsNone then
-            failwith $"BUG: %O{leaving.ExecutingMethod} is suspending, but it has the ordinary calling convention"
+        match leaving.AsyncFrame with
+        | None -> failwith $"BUG: %O{leaving.ExecutingMethod} is suspending, but it has the ordinary calling convention"
+        // `AsyncHelpers.TailAwait()` marks the frame's next call with runtime async's calling
+        // convention, which consumes the mark.
+        | Some (AsyncFrame.Transparent TailAwait.Requested) ->
+            failwith
+                $"BUG: %O{leaving.ExecutingMethod} is suspending after AsyncHelpers.TailAwait(), but has made no call with runtime async's calling convention since"
+        | Some (AsyncFrame.Transparent TailAwait.NotRequested)
+        | Some (AsyncFrame.SavesContexts _) -> ()
 
         let returnState =
             match leaving.ReturnState with
