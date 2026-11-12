@@ -787,6 +787,7 @@ module internal NativeReflectionInvocation =
                         None
                         ReturnValueDisposition.PushToCaller
                         ExceptionEscape.Propagate
+                        None
                         state
 
                 match commitment with

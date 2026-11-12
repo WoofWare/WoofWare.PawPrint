@@ -844,6 +844,56 @@ Each stage is one pull request, with its tests first.
    flag; a callee that dispatches; a `constrained.` call. Refused by name: a matched site in a
    frame of runtime async's machinery.
 
+   As built:
+   * `AwaitSiteBinding.classify` (`WoofWare.PawPrint.Loader`) is decision 13's classification, a
+     pure function of `AwaitSiteFacts`: whether the await continues on the captured context, the
+     opcode, the `constrained.` prefix, whether the named method dispatches, and its variant's body
+     or why it has none. It answers `BindsVariant` (with the `ContinuationContextHandling` the
+     caller's continuation gets), `NoVariant` (the `AsyncVariantRefusal`) or `NotYetBound` (an
+     `AwaitNotYetBound`). A variant whose body PawPrint does not model is not yet bound, and stage
+     4c refuses it. A call naming an abstract method that neither dispatches nor has a
+     `constrained.` prefix is outside its domain, as the JIT refuses to compile one first.
+   * `CallSiteBinding.awaitSite` asks `AwaitPattern.awaitAfter` at a `call` or `callvirt` the
+     interpreter runs in a frame with the async calling convention, binds the pattern's other two
+     operands and confirms they name CoreLib's `[Intrinsic]` `AsyncHelpers.Await` and a promise
+     type's `ConfigureAwait` (where an operand names anything else, no site begins there), and
+     classifies the site. `bindCall` returns `CallSiteBinding.BoundAwait` where it binds, and
+     `callvirt`'s own binding asks before its `constrained.` handling. `UnsafeAwaitAwaiter` has a
+     textual `call; call` that names no `Await`, which a binder skipping the confirmation refuses
+     as a site in runtime async's machinery.
+   * The bound call moves the caller's program counter to the `call Await` before it enters the
+     variant (`UnaryMetadataCallOps.standAtAwait`), so the frame records that offset as its call
+     site and advances past the `call Await` alone; the instructions between run never. A
+     `callvirt`'s null check comes first, at the `callvirt`, since `OpcodeFaults` admits no
+     `NullReferenceException` from a `call`; the JIT reports it at the await's offset (read, not
+     measured), which no guest reaches.
+   * `MethodReturnState.OnSuspension` is decision 18's record, set by `callMethodWithCommitment`
+     for every callee with the async calling convention and `None` for every other:
+     `CallerTakesContinuation` (the thunk, or CoreLib's dispatcher resuming a frame), `TailAwait`,
+     or `CallerSuspends` with the handling. `leaveBySuspension` reads it with the disposition, and
+     fails on a frame made without it. `TailAwait` is `NotRequested | Requested`; the call it
+     marks consumes the mark, and a frame of runtime async's machinery that returns or suspends
+     with the mark unconsumed fails.
+   * `beginSuspension` takes the handling: `ContinuationSlots.handlingFlags` gives
+     `ContinueOnThreadPool` its bit, checked against CoreLib's `ContinuationFlags`, and the helper
+     stays `FinishSuspensionNoContinuationContext`.
+   * An async variant that PawPrint would implement itself (`Intrinsics.call`), or that CoreCLR
+     replaces (an `IntrinsicBody` other than its own IL), is refused by name in
+     `callMethodWithCommitment`. No bound site reaches one.
+
+   Guests, each run on real .NET 10 and 11 first: `RuntimeAsyncAwaitsAsyncMethodDirectly.cs` (the
+   guest above; PawPrint shows `RuntimeAsyncTaskContinuation.GetResult(Byte&)` as the awaiter's
+   last frame where .NET 11 shows the generic `GetResult[T](Task, Byte&)` it calls, which decision
+   20 names, so the guest accepts either), `RuntimeAsyncAwaitsAsyncMethodByCallvirt.cs`
+   (`XDocument.LoadAsync`, whose `LoadAsyncInternal` awaits `ReadContentFromAsync` by a `callvirt`
+   of a method that is not virtual, IL_0054) and `RuntimeAsyncDirectAwaitContinuesOnThreadPool.cs`.
+   The last shows the flag: a guest decoder installs a `SynchronizationContext` on the thread that
+   resumes `ReadBufferAsync`, and CoreLib's dispatcher then queues `ReadToEndAsyncInternal`'s
+   continuation to the thread pool (`QueueContinuationFollowUpActionIfNecessary`), as real .NET 10
+   and 11 and decision 6(a) all do; a continuation without the flag runs inline under the
+   decoder's context. `TestAwaitSiteBinding` checks the classification over generated facts
+   against the rule above.
+
 10. **(4c) Async versions.** `frameBody` runs the variant of a promise-returning IL method without
     the `Async` flag as decision 17 says: the tail shapes, the wrapped `ret`, the tail-await rule,
     and a suspension that is not a tail await. Matched sites with `ConfigureAwait(false)` bind such

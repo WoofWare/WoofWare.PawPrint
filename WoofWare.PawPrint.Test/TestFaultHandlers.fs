@@ -142,6 +142,7 @@ module TestFaultHandlers =
                 CallSiteIlOpIndex = threadState.MethodState.IlOpIndex
                 ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                 ExceptionEscape = ExceptionEscape.Propagate
+                OnSuspension = None
             }
 
         let calleeFrame =

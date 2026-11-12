@@ -20,8 +20,8 @@ module AsyncSuspension =
     /// The continuation a runtime-async frame makes when it suspends at an await of a call
     /// returning `awaited`: an `ExecutionContext` slot, which the JIT always gives one, an exception
     /// slot if the await lies in a `try` region (`inTry`), and a slot for the call's result.
-    /// PawPrint binds no async variant at an await (decision 6), so every await is a call of one of
-    /// runtime async's own methods, which the JIT gives no continuation context of the frame's own.
+    /// PawPrint binds no await that continues on the captured context (decision 13), so no
+    /// continuation has a slot for that context.
     let layoutAwaiting (inTry : bool) (awaited : MethodReturnType<ConcreteTypeHandle>) : ContinuationLayout =
         {
             ExecutionContext = true
@@ -200,12 +200,14 @@ module AsyncSuspension =
     let freeResumeInfo (block : NativeMemoryBlockId) (state : IlMachineState) : IlMachineState =
         IlMachineState.freeNativeMemory block state
 
-    /// Fill in a fresh continuation's own fields: `ResumeInfo`, `Flags` saying where its slots lie,
-    /// and `State`, which only the method's own resumption reads, and which PawPrint sets to the
-    /// IL offset of the await, as no managed code reads it.
+    /// Fill in a fresh continuation's own fields: `ResumeInfo`, `Flags` saying where its slots lie
+    /// and where the awaiting code continues (`handling`), and `State`, which only the method's own
+    /// resumption reads, and which PawPrint sets to the IL offset of the await, as no managed code
+    /// reads it.
     let initialiseContinuation
         (continuation : ManagedHeapAddress)
         (layout : ContinuationLayout)
+        (handling : ContinuationContextHandling)
         (resumeInfo : NativeMemoryBlockId)
         (callSite : int)
         (state : IlMachineState)
@@ -223,7 +225,13 @@ module AsyncSuspension =
 
         state
         |> setField continuation "ResumeInfo" (EvalStackValue.ManagedPointer resumeInfoPointer)
-        |> setField continuation "Flags" (int32 (ContinuationSlots.slotIndexFlags layout))
+        |> setField
+            continuation
+            "Flags"
+            (int32 (
+                ContinuationSlots.slotIndexFlags layout
+                ||| ContinuationSlots.handlingFlags handling
+            ))
         |> setField continuation "State" (int32 callSite)
 
     /// Make `next` the continuation after `continuation` in its chain: the callee's continuation's

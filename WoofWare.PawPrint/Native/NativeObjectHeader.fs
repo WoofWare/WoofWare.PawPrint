@@ -255,6 +255,7 @@ module NativeObjectHeader =
                         None
                         ReturnValueDisposition.PushToCaller
                         (ExceptionEscape.UnhandledAtNativeCaller "SyncBlock::TryUpgradeThinLockToFullLock")
+                        None
                         state
 
                 match commitment with

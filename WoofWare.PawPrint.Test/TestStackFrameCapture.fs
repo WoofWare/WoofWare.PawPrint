@@ -132,6 +132,7 @@ module TestStackFrameCapture =
                     CallSiteIlOpIndex = callSite
                     ReturnValueDisposition = ReturnValueDisposition.PushToCaller
                     ExceptionEscape = ExceptionEscape.Propagate
+                    OnSuspension = None
                 }
 
             let callee =

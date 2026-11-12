@@ -418,6 +418,7 @@
     <Compile Include="TestFabricatedTypeOperandRefusal.fs" />
     <Compile Include="TestBoxPattern.fs" />
     <Compile Include="TestAwaitPattern.fs" />
+    <Compile Include="TestAwaitSiteBinding.fs" />
     <Compile Include="TestMethodAtSlotShapes.fs" />
     <Compile Include="TestFabricatedVtableLayout.fs" />
     <Compile Include="TestFabricatedSlotAliasing.fs" />

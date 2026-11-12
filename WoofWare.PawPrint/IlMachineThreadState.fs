@@ -258,6 +258,16 @@ module IlMachineThreadState =
             failwith
                 $"BUG: %O{returningMethodState.ExecutingMethod} is returning while it holds the continuation %O{continuation} that a runtime-async call returned, which it has not read through AsyncHelpers.AsyncCallContinuation()"
 
+        // `AsyncHelpers.TailAwait()` marks the frame's next call with runtime async's calling
+        // convention, which consumes the mark.
+        match returningMethodState.AsyncFrame with
+        | Some (AsyncFrame.Transparent TailAwait.Requested) ->
+            failwith
+                $"BUG: %O{returningMethodState.ExecutingMethod} is returning after AsyncHelpers.TailAwait(), but has made no call with runtime async's calling convention since"
+        | Some (AsyncFrame.Transparent TailAwait.NotRequested)
+        | Some (AsyncFrame.SavesContexts _)
+        | None -> ()
+
         match returningMethodState.ReturnState with
         | None -> ReturnFrameResult.NoFrameToReturn
         | Some returnState ->
@@ -275,25 +285,17 @@ module IlMachineThreadState =
             |> ThreadState.removeFrame returningFrameId
 
         // A method with runtime async's calling convention that returns has completed, so its
-        // hidden continuation, which the caller reads, is null, and a tail await the caller made of
-        // the call is over.
+        // hidden continuation, which the caller reads, is null.
         let threadState =
             match returningMethodState.AsyncFrame with
             | None -> threadState
             | Some _ ->
                 let caller = ThreadState.getFrame returnState.JumpTo threadState
 
-                let asyncFrame =
-                    match caller.AsyncFrame with
-                    | Some (AsyncFrame.Transparent TailAwait.InFlight) ->
-                        Some (AsyncFrame.Transparent TailAwait.NotRequested)
-                    | other -> other
-
                 ThreadState.setFrame
                     returnState.JumpTo
                     { caller with
                         AsyncCallContinuation = None
-                        AsyncFrame = asyncFrame
                     }
                     threadState
 

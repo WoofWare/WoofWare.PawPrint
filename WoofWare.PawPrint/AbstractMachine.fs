@@ -511,6 +511,7 @@ module AbstractMachine =
                     originalCallSitePC
                     ReturnValueDisposition.PushToCaller
                     ExceptionEscape.Propagate
+                    None
                     state
 
             // A suspension here would be unrecoverable — the delegate's synthetic frame is
