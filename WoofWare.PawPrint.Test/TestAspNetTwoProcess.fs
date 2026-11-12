@@ -349,14 +349,8 @@ module TestAspNetTwoProcess =
         pawPrintClient.Stdout |> shouldEqual clientStdout
         pawPrintServer.Stdout |> shouldEqual serverStdout
 
-    /// Why both tests are parked on .NET 11.
-    let private runtimeAsync : string =
-        "On .NET 11 the server's minimal-API request delegate invokes `RequestDelegateFactory.ExecuteResultWriteResponse`, a runtime-async method returning a promise type, through reflection (`RuntimeMethodHandle.InvokeMethod`), which binds the method's ordinary variant, the task-returning thunk; PawPrint's reflective invocation concretises the async IL's locals as if that IL were the ordinary variant's, and stops: \"BUG: asked for the locals of Microsoft.AspNetCore.Http.Extensions.RequestDelegateFactory.ExecuteResultWriteResponse, whose body is runtime-async IL; a frame runs that IL only once callMethod has given it to the frame as an IL body\" (measured on 11.0.0-rc.1, 2026-11-12). Un-park when a reflective invocation of an `Async` method runs its task-returning thunk (docs/plans/2026-11-11-runtime-async.md, stage 3)."
-
     [<Test>]
     let ``Kestrel and HttpClient as two processes on one machine agree with two real processes`` () : unit =
-        Net11Frontier.park runtimeAsync
-
         agree
             requests
             "server: listening\nserver: stopped after serving both item requests\n"
@@ -374,8 +368,6 @@ module TestAspNetTwoProcess =
     /// the client's next request goes over a new connection; see the module's docstring.
     [<Test>]
     let ``Kestrel closing an idle connection under a live HttpClient agrees with two real processes`` () : unit =
-        Net11Frontier.park runtimeAsync
-
         agree
             idleClose
             "server: listening\nserver: stopped after accepting a second connection once the first had ended\n"
