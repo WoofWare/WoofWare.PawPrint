@@ -136,19 +136,6 @@ module IntrinsicBody =
         MethodInfo.isJITIntrinsic (getMemberRefParentType assembly) assembly.Methods definition
         || MethodInfo.hasIntrinsicAttribute (getMemberRefParentType assembly) assembly.Methods declaringType.Attributes
 
-    /// The full name of the type a TypeRef names, in `TypeInfo.fullName`'s spelling.
-    let rec private typeRefFullName (assembly : DumpedAssembly) (typeRef : TypeRef) : string =
-        match typeRef.ResolutionScope with
-        | TypeRefResolutionScope.TypeRef parent ->
-            $"%s{typeRefFullName assembly assembly.TypeRefs.[parent]}+%s{typeRef.Name}"
-        | TypeRefResolutionScope.Assembly _
-        | TypeRefResolutionScope.ModuleDef _
-        | TypeRefResolutionScope.ModuleRef _ ->
-            if System.String.IsNullOrEmpty typeRef.Namespace then
-                typeRef.Name
-            else
-                $"%s{typeRef.Namespace}.%s{typeRef.Name}"
-
     /// Whether a `call` or `callvirt` token can name `method` itself: the shape CoreCLR's importer
     /// tests with `gtIsRecursiveCall`.
     ///
@@ -173,7 +160,7 @@ module IntrinsicBody =
         let byTypeRef (typeRef : TypeRef) (reference : MemberReference<MetadataToken>) =
             match reference.Signature with
             | MemberSignature.Method signature ->
-                typeRefFullName assembly typeRef = ownTypeName
+                TypeRef.fullName (fun h -> assembly.TypeRefs.[h]) typeRef = ownTypeName
                 && reference.PrettyName = definition.Name
                 && signature.ParameterTypes.Length = definition.Signature.ParameterTypes.Length
                 && signature.GenericParameterCount = definition.Signature.GenericParameterCount

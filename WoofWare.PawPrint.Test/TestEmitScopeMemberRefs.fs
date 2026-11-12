@@ -66,13 +66,23 @@ module TestEmitScopeMemberRefs =
                     (Gen.choose (0, signatures.Length - 1))
             ]
 
+    /// What the translation did with one member-reference request.
+    [<RequireQualifiedAccess>]
+    type private MemberRefRequestOutcome =
+        | Found
+        /// Found a row of which the scope holds two alike.
+        | FoundOfTwo
+        | Added
+
     [<Test>]
     let ``a member reference is the first row with its parent, name and signature, or else a new row`` () : unit =
-        let mutable found = 0
-        let mutable foundOfTwo = 0
-        let mutable added = 0
-
-        let property (generated : EmitScope) (duplicate : int option) (requests : Request list) : unit =
+        let property
+            (cover : MemberRefRequestOutcome -> unit)
+            (generated : EmitScope)
+            (duplicate : int option)
+            (requests : Request list)
+            : unit
+            =
             // The emitter never adds a row it would find, but a scope may hold two alike all the same:
             // the first of them is the one found.
             let start =
@@ -102,10 +112,10 @@ module TestEmitScopeMemberRefs =
 
                 match List.tryFindIndex ((=) key) model with
                 | Some index ->
-                    found <- found + 1
+                    cover MemberRefRequestOutcome.Found
 
                     if List.filter ((=) key) model |> List.length > 1 then
-                        foundOfTwo <- foundOfTwo + 1
+                        cover MemberRefRequestOutcome.FoundOfTwo
 
                     rid |> shouldEqual (MemberRefRid (index + 1))
                     Object.ReferenceEquals (next, scope) |> shouldEqual true
@@ -113,7 +123,7 @@ module TestEmitScopeMemberRefs =
                     EmitScopeReferences.tryFindMemberRef parent name signature scope
                     |> shouldEqual (Some rid)
                 | None ->
-                    added <- added + 1
+                    cover MemberRefRequestOutcome.Added
 
                     EmitScopeReferences.tryFindMemberRef parent name signature scope
                     |> shouldEqual None
@@ -137,14 +147,15 @@ module TestEmitScopeMemberRefs =
             Gen.zip3 EmitScopeGen.genScope (Gen.optionOf EmitScopeGen.choice) (Gen.listOf genRequest)
             |> Arb.fromGen
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll arb (fun (start, duplicate, requests) -> property start duplicate requests)
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 300)
+                arb
+                (fun cover (start, duplicate, requests) -> property cover start duplicate requests)
 
-        found |> shouldBeGreaterThan 100
-        foundOfTwo |> shouldBeGreaterThan 20
-        added |> shouldBeGreaterThan 100
+        coverage.Count MemberRefRequestOutcome.Found |> shouldBeGreaterThan 100
+        coverage.Count MemberRefRequestOutcome.FoundOfTwo |> shouldBeGreaterThan 20
+        coverage.Count MemberRefRequestOutcome.Added |> shouldBeGreaterThan 100
 
     /// A compressed unsigned integer (ECMA-335 II.23.2) and how many bytes it is encoded in: 1 for its
     /// shortest form, or an overlong 2 or 4, which CoreCLR's reader accepts as well.
@@ -691,27 +702,37 @@ module TestEmitScopeMemberRefs =
     /// The emitting assembly's name and version, which a source AssemblyRef may name.
     let private emittingName : string = "Dyn"
 
-    /// AssemblyRefs a source may hold: another assembly by nothing, by token or by full key, in another
-    /// culture or with a hash; a third by a blob that is not a key; and the emitting assembly by nothing,
-    /// by the token of `keyTwo`, or by `keyTwo` itself.
-    let private sourceAssemblyRefs : SourceAssemblyRef list =
-        let reference (name : string) (version : Version) (key : PublicKeyOrToken) : SourceAssemblyRef =
-            {
-                Name = name
-                Version = version
-                Culture = ""
-                Key = key
-                Flags = enum<AssemblyFlags> 0
-                Hash = []
-            }
+    /// A source AssemblyRef in the neutral culture, with no flags and no hash.
+    let private sourceAssemblyRef (name : string) (version : Version) (key : PublicKeyOrToken) : SourceAssemblyRef =
+        {
+            Name = name
+            Version = version
+            Culture = ""
+            Key = key
+            Flags = enum<AssemblyFlags> 0
+            Hash = []
+        }
 
-        let other = reference "Other" (Version (1, 0, 0, 0))
-        let emitting = reference emittingName (Version (0, 0, 0, 0))
+    /// Another assembly, `Other`, by the token of `keyOne`.
+    let private otherByToken : SourceAssemblyRef =
+        sourceAssemblyRef
+            "Other"
+            (Version (1, 0, 0, 0))
+            (PublicKeyOrToken.Token (ImmutableArray.CreateRange (tokenOf keyOne)))
+
+    /// `Other` by `keyOne` itself, which a row made from `otherByToken` matches, and the reverse.
+    let private otherByKey : SourceAssemblyRef =
+        sourceAssemblyRef "Other" (Version (1, 0, 0, 0)) (PublicKeyOrToken.Key (ImmutableArray.CreateRange keyOne))
+
+    /// AssemblyRefs a source may hold besides `otherByToken` and `otherByKey`: `Other` by nothing, in
+    /// another culture or with a hash; a third assembly by a blob that is not a key; and the emitting
+    /// assembly by nothing, by the token of `keyTwo`, or by `keyTwo` itself.
+    let private moreSourceAssemblyRefs : SourceAssemblyRef list =
+        let other = sourceAssemblyRef "Other" (Version (1, 0, 0, 0))
+        let emitting = sourceAssemblyRef emittingName (Version (0, 0, 0, 0))
 
         [
             other PublicKeyOrToken.Absent
-            other (PublicKeyOrToken.Token (ImmutableArray.CreateRange (tokenOf keyOne)))
-            other (PublicKeyOrToken.Key (ImmutableArray.CreateRange keyOne))
             { other PublicKeyOrToken.Absent with
                 Culture = "fr"
             }
@@ -726,6 +747,10 @@ module TestEmitScopeMemberRefs =
             emitting (PublicKeyOrToken.Token (ImmutableArray.CreateRange (tokenOf keyTwo)))
             emitting (PublicKeyOrToken.Key (ImmutableArray.CreateRange keyTwo))
         ]
+
+    /// Every AssemblyRef a source may hold.
+    let private sourceAssemblyRefs : SourceAssemblyRef list =
+        otherByToken :: otherByKey :: moreSourceAssemblyRefs
 
     let private genSource : Gen<SourceAssembly> =
         let genName : Gen<string * string> =
@@ -788,10 +813,25 @@ module TestEmitScopeMemberRefs =
             let! types = Gen.choose (1, 6) |> Gen.bind (fun count -> genList genType count [])
 
             let! assemblyRefs =
-                Gen.shuffle sourceAssemblyRefs
-                |> Gen.bind (fun shuffled ->
-                    Gen.choose (1, 4) |> Gen.map (fun n -> List.truncate n (List.ofArray shuffled))
-                )
+                Gen.frequency
+                    [
+                        3,
+                        Gen.shuffle sourceAssemblyRefs
+                        |> Gen.bind (fun shuffled ->
+                            Gen.choose (1, 4) |> Gen.map (fun n -> List.truncate n (List.ofArray shuffled))
+                        )
+                        // `Other` by both its token and its key, so that a reference in one form often finds
+                        // the row made from the other.
+                        1,
+                        Gen.shuffle moreSourceAssemblyRefs
+                        |> Gen.bind (fun others ->
+                            Gen.choose (0, 2)
+                            |> Gen.bind (fun n ->
+                                Gen.shuffle (otherByToken :: otherByKey :: List.truncate n (List.ofArray others))
+                            )
+                        )
+                        |> Gen.map List.ofArray
+                    ]
 
             let! typeRefs =
                 Gen.choose (1, 6)
@@ -1225,22 +1265,39 @@ module TestEmitScopeMemberRefs =
         else
             scope
 
+    /// What translating one method signature did.
+    [<RequireQualifiedAccess>]
+    type private MethodSignatureOutcome =
+        /// No tokens, and the signature was already in its shortest encoding.
+        | Unchanged
+        /// No tokens, but the signature was re-encoded shorter.
+        | Reencoded
+        /// Tokens, all of whose TypeRefs and AssemblyRefs were already in the scope.
+        | AllFound
+        /// Tokens, some of whose TypeRefs or AssemblyRefs were added.
+        | Added
+        /// A TypeRef chain was found in part and completed.
+        | PartlyFound
+        | AssemblyRefAdded
+        /// An AssemblyRef was added with the public key flag.
+        | KeyCopied
+        /// A source reference by key matched a row by token, or the reverse.
+        | FoundAcrossForms
+        | Refused of kind : string
+
     [<Test>]
     let ``a signature is translated with each TypeDef or TypeRef token rewritten to the TypeRef chain the model finds or adds, and refused at its first other token``
         ()
         : unit
         =
-        let mutable unchanged = 0
-        let mutable reencoded = 0
-        let mutable added = 0
-        let mutable allFound = 0
-        let mutable partlyFound = 0
-        let mutable assemblyRefAdded = 0
-        let mutable keyCopied = 0
-        let mutable foundAcrossForms = 0
-        let refusals = Collections.Generic.Dictionary<string, int> ()
-
-        let property (source : SourceAssembly) (seed : Seed) (signature : MethodShape) (trailing : byte list) : unit =
+        let property
+            (cover : MethodSignatureOutcome -> unit)
+            (source : SourceAssembly)
+            (seed : Seed)
+            (signature : MethodShape)
+            (trailing : byte list)
+            : unit
+            =
             use pe = new PEReader (ImmutableArray.Create<byte> (sourceImage source))
             let reader = pe.GetMetadataReader ()
 
@@ -1273,11 +1330,7 @@ module TestEmitScopeMemberRefs =
                     | SignatureTokenRefusal.NoTable _ -> "NoTable"
                     | SignatureTokenRefusal.UnreferencedUnsignedAssembly _ -> "UnreferencedUnsignedAssembly"
 
-                refusals.[kind] <-
-                    match refusals.TryGetValue kind with
-                    | true, n -> n + 1
-                    | false, _ -> 1
-
+                cover (MethodSignatureOutcome.Refused kind)
                 actual |> shouldEqual refusal
             | Ok (replacements, assemblyRefs, typeRefs, partly), SignatureImport.Imported (written, next) ->
                 let replaced, left = replaceMethodTokens replacements signature
@@ -1305,26 +1358,26 @@ module TestEmitScopeMemberRefs =
 
                 if tokens.IsEmpty then
                     if encodeMethod true signature = input then
-                        unchanged <- unchanged + 1
+                        cover MethodSignatureOutcome.Unchanged
                     else
-                        reencoded <- reencoded + 1
+                        cover MethodSignatureOutcome.Reencoded
                 elif addsNothing then
-                    allFound <- allFound + 1
+                    cover MethodSignatureOutcome.AllFound
                 else
-                    added <- added + 1
+                    cover MethodSignatureOutcome.Added
 
                 if partly then
-                    partlyFound <- partlyFound + 1
+                    cover MethodSignatureOutcome.PartlyFound
 
                 if assemblyRefs.Length > startAssemblyRefs then
-                    assemblyRefAdded <- assemblyRefAdded + 1
+                    cover MethodSignatureOutcome.AssemblyRefAdded
 
                 if
                     assemblyRefs
                     |> List.skip startAssemblyRefs
                     |> List.exists (fun row -> row.Flags.HasFlag AssemblyFlags.PublicKey)
                 then
-                    keyCopied <- keyCopied + 1
+                    cover MethodSignatureOutcome.KeyCopied
 
                 // A source reference by key and a row by token, or the reverse, that the translation used.
                 let usedAcrossForms =
@@ -1354,7 +1407,7 @@ module TestEmitScopeMemberRefs =
                     )
 
                 if usedAcrossForms then
-                    foundAcrossForms <- foundAcrossForms + 1
+                    cover MethodSignatureOutcome.FoundAcrossForms
             | expected, actual -> failwith $"expected %A{expected}, but the translation gave %A{actual}"
 
         let arb =
@@ -1376,19 +1429,23 @@ module TestEmitScopeMemberRefs =
             }
             |> Arb.fromGen
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 3000,
-            Prop.forAll arb (fun (source, seed, signature, trailing) -> property source seed signature trailing)
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 3000)
+                arb
+                (fun cover (source, seed, signature, trailing) -> property cover source seed signature trailing)
 
-        unchanged |> shouldBeGreaterThan 50
-        reencoded |> shouldBeGreaterThan 50
-        added |> shouldBeGreaterThan 200
-        allFound |> shouldBeGreaterThan 30
-        partlyFound |> shouldBeGreaterThan 20
-        assemblyRefAdded |> shouldBeGreaterThan 100
-        keyCopied |> shouldBeGreaterThan 20
-        foundAcrossForms |> shouldBeGreaterThan 20
+        coverage.Count MethodSignatureOutcome.Unchanged |> shouldBeGreaterThan 50
+        coverage.Count MethodSignatureOutcome.Reencoded |> shouldBeGreaterThan 50
+        coverage.Count MethodSignatureOutcome.Added |> shouldBeGreaterThan 200
+        coverage.Count MethodSignatureOutcome.AllFound |> shouldBeGreaterThan 30
+        coverage.Count MethodSignatureOutcome.PartlyFound |> shouldBeGreaterThan 20
+
+        coverage.Count MethodSignatureOutcome.AssemblyRefAdded
+        |> shouldBeGreaterThan 100
+
+        coverage.Count MethodSignatureOutcome.KeyCopied |> shouldBeGreaterThan 20
+        coverage.Count MethodSignatureOutcome.FoundAcrossForms |> shouldBeGreaterThan 20
 
         for kind in
             [
@@ -1401,21 +1458,29 @@ module TestEmitScopeMemberRefs =
                 "NoTable"
                 "UnreferencedUnsignedAssembly"
             ] do
-            (match refusals.TryGetValue kind with
-             | true, n -> n
-             | false, _ -> 0)
-            |> shouldBeGreaterThan 10
+            coverage.Count (MethodSignatureOutcome.Refused kind) |> shouldBeGreaterThan 10
+
+    /// What translating one field signature did.
+    [<RequireQualifiedAccess>]
+    type private FieldSignatureOutcome =
+        | Imported
+        | Refused
+        /// The field's calling convention was given in an overlong encoding.
+        | OverlongHeader
 
     [<Test>]
     let ``a field signature translates as a method signature taking its type does, with the field's calling convention shortest``
         ()
         : unit
         =
-        let mutable imported = 0
-        let mutable refused = 0
-        let mutable overlongHeaders = 0
-
-        let property (source : SourceAssembly) (seed : Seed) (shape : Shape) (headerWidth : int) : unit =
+        let property
+            (cover : FieldSignatureOutcome -> unit)
+            (source : SourceAssembly)
+            (seed : Seed)
+            (shape : Shape)
+            (headerWidth : int)
+            : unit
+            =
             use pe = new PEReader (ImmutableArray.Create<byte> (sourceImage source))
             let reader = pe.GetMetadataReader ()
             let start = seededScope source seed reader
@@ -1435,14 +1500,14 @@ module TestEmitScopeMemberRefs =
                     start
 
             if headerWidth > 1 then
-                overlongHeaders <- overlongHeaders + 1
+                cover FieldSignatureOutcome.OverlongHeader
 
             match asMethod, asField with
             | SignatureImport.Refused fromMethod, SignatureImport.Refused fromField ->
-                refused <- refused + 1
+                cover FieldSignatureOutcome.Refused
                 fromField |> shouldEqual fromMethod
             | SignatureImport.Imported (methodBytes, methodScope), SignatureImport.Imported (fieldBytes, fieldScope) ->
-                imported <- imported + 1
+                cover FieldSignatureOutcome.Imported
 
                 List.ofSeq fieldBytes
                 |> shouldEqual (0x06uy :: List.skip 3 (List.ofSeq methodBytes))
@@ -1464,14 +1529,15 @@ module TestEmitScopeMemberRefs =
             }
             |> Arb.fromGen
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 1000,
-            Prop.forAll arb (fun (source, seed, shape, headerWidth) -> property source seed shape headerWidth)
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 1000)
+                arb
+                (fun cover (source, seed, shape, headerWidth) -> property cover source seed shape headerWidth)
 
-        imported |> shouldBeGreaterThan 200
-        refused |> shouldBeGreaterThan 100
-        overlongHeaders |> shouldBeGreaterThan 200
+        coverage.Count FieldSignatureOutcome.Imported |> shouldBeGreaterThan 200
+        coverage.Count FieldSignatureOutcome.Refused |> shouldBeGreaterThan 100
+        coverage.Count FieldSignatureOutcome.OverlongHeader |> shouldBeGreaterThan 200
 
     /// Every method and constructor `assembly` declares on a type that is neither generic nor nested in
     /// a generic type, so that the parent a dynamic module's reference names is a `TypeRef`.

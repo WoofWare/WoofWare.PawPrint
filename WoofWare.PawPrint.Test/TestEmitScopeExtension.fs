@@ -109,14 +109,28 @@ module TestEmitScopeExtension =
                 (fun (scope, choices) -> property scope choices)
         )
 
+    /// What one extension of a scope did to its created types.
+    [<RequireQualifiedAccess>]
+    type private ExtensionOutcome =
+        /// The extension changed no created type.
+        | Unchanged
+        /// The extension changed some created type.
+        | Changed
+        /// A violation: a row added to a created type.
+        | Added
+        /// A violation: a column of a created type's row filled in.
+        | Filled
+
     [<Test>]
     let ``appending to a scope is refused exactly for the created types it changes`` () : unit =
-        let unchanged = ref 0
-        let changed = ref 0
-        let added = ref 0
-        let filled = ref 0
-
-        let property (mvid : Guid) (ops : Op list) (extra : Op list) (choices : int list) : unit =
+        let property
+            (cover : ExtensionOutcome -> unit)
+            (mvid : Guid)
+            (ops : Op list)
+            (extra : Op list)
+            (choices : int list)
+            : unit
+            =
             let before = apply mvid ops
             let after = apply mvid (ops @ extra)
             let created = created before choices
@@ -144,20 +158,20 @@ module TestEmitScopeExtension =
             |> shouldEqual changedTypes
 
             if changedTypes.IsEmpty then
-                unchanged.Value <- unchanged.Value + 1
+                cover ExtensionOutcome.Unchanged
             else
-                changed.Value <- changed.Value + 1
+                cover ExtensionOutcome.Changed
 
             for violation in violations do
                 match violation with
-                | EmitScopeExtensionViolation.AddedToCreatedType _ -> added.Value <- added.Value + 1
-                | EmitScopeExtensionViolation.FilledInCreatedType _ -> filled.Value <- filled.Value + 1
+                | EmitScopeExtensionViolation.AddedToCreatedType _ -> cover ExtensionOutcome.Added
+                | EmitScopeExtensionViolation.FilledInCreatedType _ -> cover ExtensionOutcome.Filled
                 | EmitScopeExtensionViolation.RowChanged _
                 | EmitScopeExtensionViolation.HeapEntryChanged _ -> ()
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 300)
                 (Arb.fromGen (
                     gen {
                         let! mvid = genGuid
@@ -168,23 +182,21 @@ module TestEmitScopeExtension =
                         return mvid, ops, extra, List.ofSeq choices
                     }
                 ))
-                (fun (mvid, ops, extra, choices) -> property mvid ops extra choices)
-        )
+                (fun cover (mvid, ops, extra, choices) -> property cover mvid ops extra choices)
 
         // Both answers, and every reason for refusing, must be common enough to be tested.
-        unchanged.Value |> shouldBeGreaterThan 30
-        changed.Value |> shouldBeGreaterThan 30
-        added.Value |> shouldBeGreaterThan 30
-        filled.Value |> shouldBeGreaterThan 10
+        coverage.Count ExtensionOutcome.Unchanged |> shouldBeGreaterThan 30
+        coverage.Count ExtensionOutcome.Changed |> shouldBeGreaterThan 30
+        coverage.Count ExtensionOutcome.Added |> shouldBeGreaterThan 30
+        coverage.Count ExtensionOutcome.Filled |> shouldBeGreaterThan 10
 
     /// Rows appended for `<Module>`, the lowest TypeDef, sort before every other type's rows in
     /// `InterfaceImpl` and `MethodImpl`, so they move every created type's rows of those tables in the
     /// image while changing nothing about the type.
     [<Test>]
     let ``a created type's rows of a sorted table may move`` () : unit =
-        let moved = ref 0
-
-        let property (mvid : Guid) (ops : Op list) (choices : int list) : unit =
+        // `cover` is called for a sample that moves a created type's rows.
+        let property (cover : unit -> unit) (mvid : Guid) (ops : Op list) (choices : int list) : unit =
             let before = apply mvid ops
             let created = (created before choices).Remove (TypeDefRid 1)
 
@@ -239,11 +251,11 @@ module TestEmitScopeExtension =
                     (EmitScopeImage.methodImplRids before)
                     (EmitScopeImage.methodImplRids after)
             then
-                moved.Value <- moved.Value + 1
+                cover ()
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 300)
                 (Arb.fromGen (
                     gen {
                         let! mvid = genGuid
@@ -252,11 +264,10 @@ module TestEmitScopeExtension =
                         return mvid, ops, List.ofSeq choices
                     }
                 ))
-                (fun (mvid, ops, choices) -> property mvid ops choices)
-        )
+                (fun cover (mvid, ops, choices) -> property cover mvid ops choices)
 
         // Most samples must move a created type's rows, or the property barely tests the admission.
-        moved.Value |> shouldBeGreaterThan 100
+        coverage.Count () |> shouldBeGreaterThan 100
 
     /// What reading `after`'s image where `before`'s was read shows to have changed, each as a
     /// requirement on the violations reported: a category, for counting, and whether the violations
