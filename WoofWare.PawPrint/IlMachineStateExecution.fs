@@ -1692,9 +1692,10 @@ module IlMachineStateExecution =
 
     /// The active frame of `thread`, a runtime-async frame whose call at `callSite`, which returns
     /// `awaited`, has just suspended with `calleeContinuation`, suspends too
-    /// (`AsyncTransformation::CreateSuspension`): it makes a continuation of its own, links it after
-    /// the callee's, and calls CoreLib's helper that captures the thread's `ExecutionContext` into
-    /// it and puts back the contexts the frame found on entry. Once that returns,
+    /// (`AsyncTransformation::CreateSuspension`): it makes a continuation of its own, with an
+    /// exception slot if the call lies in a `try` region, links it after the callee's, and calls the
+    /// CoreLib helper that captures the thread's `ExecutionContext` into it (and, for a frame that
+    /// saves contexts, puts back the ones the frame found on entry). Once that returns,
     /// `completeSuspension` saves the frame and leaves.
     and beginSuspension
         (loggerFactory : ILoggerFactory)
@@ -1709,32 +1710,46 @@ module IlMachineStateExecution =
         let frame = state.ThreadState.[thread].MethodState
         let method = frame.ExecutingMethod
 
-        // Decision 11 of docs/plans/2026-11-11-runtime-async.md: such a continuation needs an
-        // exception slot, through which CoreLib's dispatcher would hand the frame an exception to
-        // rethrow at its await; without one, the dispatcher would skip the frame's handlers.
-        match AsyncSuspension.protectedRegionsAround method callSite with
+        // Roslyn moves an await out of a handler, and neither CoreCLR's JIT nor its interpreter
+        // can suspend in one, so no IL CoreCLR runs suspends here.
+        match AsyncSuspension.handlersAround method callSite with
         | [] -> ()
         | (start, finish) :: _ ->
             failwith
-                $"TODO: %O{method} suspends at its await at IL_%04X{callSite}, which lies in a try region or handler (IL_%04X{start} to IL_%04X{finish}); suspending there needs a continuation with an exception slot, which PawPrint does not yet give one (docs/plans/2026-11-11-runtime-async.md, decision 11 and stage 3)"
+                $"TODO: %O{method} suspends at its await at IL_%04X{callSite}, which lies in a filter or handler (IL_%04X{start} to IL_%04X{finish}); CoreCLR cannot suspend there, and PawPrint refuses to"
+
+        match frame.AsyncFrame with
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _))
+        | Some (AsyncFrame.Transparent _) -> ()
+        | other -> failwith $"BUG: %O{method} is suspending at IL_%04X{callSite}, but its frame is %A{other}"
+
+        let layout =
+            AsyncSuspension.layoutAwaiting (not (AsyncSuspension.tryRegionsAround method callSite).IsEmpty) awaited
+
+        let continuation, state =
+            AsyncSuspension.allocateContinuation loggerFactory baseClassTypes layout state
+
+        let resumeInfo, state = AsyncSuspension.allocateResumeInfo method callSite state
+
+        let state =
+            state
+            |> AsyncSuspension.initialiseContinuation continuation layout resumeInfo callSite
+            |> AsyncSuspension.link calleeContinuation continuation
+
+        let suspension : PendingSuspension =
+            {
+                Continuation = continuation
+                Layout = layout
+                ResumeInfo = resumeInfo
+                CallSite = callSite
+            }
 
         match frame.AsyncFrame with
         | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured contexts)) ->
-            let layout = AsyncSuspension.layoutAwaiting awaited
-
-            let continuation, state =
-                AsyncSuspension.allocateContinuation loggerFactory baseClassTypes layout state
-
-            let resumeInfo, state = AsyncSuspension.allocateResumeInfo method callSite state
-
-            let state =
-                state
-                |> AsyncSuspension.initialiseContinuation continuation layout resumeInfo callSite
-                |> AsyncSuspension.link calleeContinuation continuation
-
             // `FinishSuspensionNoContinuationContext(ref execCtx, resumed, previousExecCtx,
             // previousSyncCtx)`, the helper for an await of no continuation context
-            // (`GetSuspensionContextHelper`).
+            // (`GetSuspensionContextHelper`), which captures the thread's `ExecutionContext` into the
+            // continuation and puts back the contexts the frame found on entry.
             callAsyncHelper
                 loggerFactory
                 baseClassTypes
@@ -1749,19 +1764,23 @@ module IlMachineStateExecution =
                     CliType.ObjectRef contexts.ExecutionContext
                     CliType.ObjectRef contexts.SynchronizationContext
                 ]
-                (AsyncContextStep.AfterFinishSuspension
-                    {
-                        Continuation = continuation
-                        Layout = layout
-                        ResumeInfo = resumeInfo
-                    })
+                (AsyncContextStep.AfterFinishSuspension suspension)
                 thread
                 state
         | Some (AsyncFrame.Transparent _) ->
-            // CoreLib's only such await is `AwaitTaskWithRareOptions`'s, of `UnsafeAwaitAwaiter`,
-            // reached by an await of a task configured with `ConfigureAwaitOptions.SuppressThrowing`.
-            failwith
-                $"TODO: %O{method}, a method of runtime async's own machinery, suspends at IL_%04X{callSite} without a tail await; its continuation's ExecutionContext comes from AsyncHelpers.CaptureExecutionContext, which PawPrint does not yet call"
+            // A method of runtime async's own machinery saves no contexts, so its suspension
+            // captures the `ExecutionContext` itself, from a call of `CaptureExecutionContext()`
+            // (`FinishContextHandlingAndSuspension`). CoreLib's only such await is
+            // `AwaitTaskWithRareOptions`'s, of `UnsafeAwaitAwaiter`, reached by an await of a task
+            // configured with `ConfigureAwaitOptions.SuppressThrowing`.
+            callAsyncHelper
+                loggerFactory
+                baseClassTypes
+                "CaptureExecutionContext"
+                []
+                (AsyncContextStep.AfterCaptureExecutionContext suspension)
+                thread
+                state
         | other -> failwith $"BUG: %O{method} is suspending at IL_%04X{callSite}, but its frame is %A{other}"
 
     /// The active frame of `thread`, which has made `suspension` for itself and finished its
@@ -1787,6 +1806,7 @@ module IlMachineStateExecution =
                             Frame = frame
                             Layout = suspension.Layout
                             ResumeInfo = suspension.ResumeInfo
+                            CallSite = suspension.CallSite
                         }
                         state.SuspendedAsyncFrames
             }

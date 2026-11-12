@@ -3,24 +3,53 @@ namespace WoofWare.PawPrint
 [<RequireQualifiedAccess>]
 module NativeQCall =
     /// `AsyncHelpers_AddContinuationToExInternal(diagnosticIP, ex)`, which CoreLib's dispatcher calls
-    /// for each continuation with a `DiagnosticIP` that an exception unwinds through, so that the
-    /// runtime appends the frame `diagnosticIP` names to the exception's stack trace
-    /// (`UnwindToPossibleHandler`, debugdebugger.cpp). Refused, naming that frame, until stage 3 of
-    /// `docs/plans/2026-11-11-runtime-async.md` appends it (decision 5).
-    let private refuseAddContinuationToEx (ctx : NativeCallContext) : NativeHandlerResult option =
-        let suspended =
-            match ctx.Instruction.Arguments |> Seq.tryHead with
-            | Some (CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.FunctionPointer (FunctionPointerTarget.SuspensionPoint (method,
-                                                                                                                                       ilOffset))))) ->
-                $"%O{method}, suspended at its await at IL_%04X{ilOffset}"
-            | other -> $"the frame whose DiagnosticIP is %O{other}"
+    /// for each continuation with a `DiagnosticIP` that an exception unwinds through
+    /// (`UnwindToPossibleHandler`): the runtime appends the frame `diagnosticIP` names to the
+    /// exception's stack trace (debugdebugger.cpp). A continuation PawPrint made names its frame's
+    /// method and await (`FunctionPointerTarget.SuspensionPoint`).
+    let private addContinuationToEx (ctx : NativeCallContext) : NativeHandlerResult option =
+        let operation = "AsyncHelpers_AddContinuationToExInternal"
+        let arguments = ctx.Instruction.Arguments
 
-        failwith
-            $"TODO: AsyncHelpers_AddContinuationToExInternal: an exception is unwinding through the continuation of %s{suspended}, and CoreLib asks the runtime to append that frame to the exception's stack trace, which PawPrint does not yet do (docs/plans/2026-11-11-runtime-async.md, decision 5 and stage 3)"
+        if arguments.Length <> 2 then
+            failwith $"%s{operation}: expected two native arguments, got %d{arguments.Length}"
+
+        let method, ilOffset =
+            match arguments.[0] with
+            | CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.FunctionPointer (FunctionPointerTarget.SuspensionPoint (method,
+                                                                                                                                 ilOffset)))) ->
+                method, ilOffset
+            | other ->
+                failwith
+                    $"TODO: %s{operation}: the DiagnosticIP %O{other} names no suspension point of a continuation PawPrint made; CoreLib's own continuations have none"
+
+        let exceptionPointer =
+            NativeCall.objectHandleOnStackTarget operation ctx.State "ex" arguments.[1]
+
+        let exceptionAddr =
+            match
+                IlMachineState.readManagedByref
+                    ctx.BaseClassTypes
+                    ctx.State
+                    (ManagedPointerSource.requireAddressed exceptionPointer)
+            with
+            | CliType.ObjectRef (Some addr) -> addr
+            | other -> failwith $"BUG: %s{operation}: the ObjectHandleOnStack for the exception held %O{other}"
+
+        ctx.State
+        |> ExceptionDispatching.appendContinuationFrame
+            ctx.LoggerFactory
+            ctx.BaseClassTypes
+            ctx.Thread
+            method
+            ilOffset
+            exceptionAddr
+        |> NativeHandlerResult.completed
+        |> Some
 
     let private handlers : Map<string, NativeCallContext -> NativeHandlerResult option> =
         [
-            "AsyncHelpers_AddContinuationToExInternal", refuseAddContinuationToEx
+            "AsyncHelpers_AddContinuationToExInternal", addContinuationToEx
             "ReflectionInvocation_RunClassConstructor",
             NativeRuntimeHelpers.tryExecuteQCall "ReflectionInvocation_RunClassConstructor"
             "RuntimeFieldHandle_GetRVAFieldInfo",

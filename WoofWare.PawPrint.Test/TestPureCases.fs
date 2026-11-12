@@ -108,6 +108,8 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 10.
     let parkedOnNet10 : Map<string, string> =
         [
+            "RuntimeAsyncCatchWrapsAfterSuspension.cs",
+            """On .NET 10 `LoadIntoBufferAsyncCore` is a state machine, and the `HttpRequestException` its `catch` makes goes through `ExceptionDispatchInfo.SetCurrentStackTrace`, which formats the current stack; formatting the state machine's `MoveNext` looks up the method it belongs to, by type name (`StackTrace.TryResolveStateMachineMethod`), which stops in `RuntimeAssembly.GetTypeCore` (measured): "MemoryBlock.readBytes: byte at offset 0 in <stack memory block #0> is uninitialised", as `RuntimeAsyncTraceHidesThunk.cs` does. .NET 11's runtime-async methods are no state machines. Un-park when `RuntimeAssembly.GetTypeCore` runs on .NET 10. Verified to exit 0 on real .NET 10."""
             "RuntimeAsyncTraceHidesThunk.cs",
             """On .NET 10 the guest's methods are state machines, and formatting a trace that names one looks up the method its `MoveNext` belongs to, by type name (`StackTrace.TryResolveStateMachineMethod`), which stops in `RuntimeAssembly.GetTypeCore` (measured): "MemoryBlock.readBytes: byte at offset 0 in <stack memory block #0> is uninitialised". .NET 11's runtime-async methods are no state machines, and the guest passes there. Un-park when `RuntimeAssembly.GetTypeCore` runs on .NET 10. Verified to exit 0 on real .NET 10."""
             "MarshalDestroyStructurePointerOrEmpty.cs",

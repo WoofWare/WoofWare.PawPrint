@@ -2214,9 +2214,10 @@ module internal UnaryMetadataCallOps =
     /// `calli` through `FunctionPointerTarget.AsyncResume`, as CoreLib's dispatcher resumes a
     /// continuation PawPrint made: `ResumeInfo->Resume(continuation, ref resultLocation)`. The frame
     /// that suspended with `continuation` leaves `IlMachineState.SuspendedAsyncFrames` and becomes the
-    /// callee, carrying on past the call it awaited with that call's result, from the
-    /// continuation's result slot, pushed. Its return is the `calli`'s
-    /// (`ReturnValueDisposition.ResumedAsync`).
+    /// callee. If the dispatcher handed it an exception, through the continuation's exception slot,
+    /// it raises that exception again at the call it awaited, where its own handlers see it;
+    /// otherwise it carries on past that call with the call's result, from the continuation's
+    /// result slot, pushed. Its return is the `calli`'s (`ReturnValueDisposition.ResumedAsync`).
     let private executeAsyncResumeCalli
         (ctx : UnaryMetadataIlOpContext)
         (state : IlMachineState)
@@ -2282,22 +2283,45 @@ module internal UnaryMetadataCallOps =
                             $"BUG: %O{suspended.Frame.ExecutingMethod} suspended as %A{other}, which no suspension leaves a frame in"
             }
 
+        let rethrowing, state =
+            AsyncSuspension.takeException continuation suspended.Layout state
+
         // The awaited call's result, which the continuation before this one wrote into the slot.
         let frame =
-            match AsyncSuspension.readResult continuation suspended.Layout state with
-            | None -> frame
-            | Some result -> MethodState.pushToEvalStack result frame
+            match rethrowing with
+            | Some _ -> frame
+            | None ->
+                match AsyncSuspension.readResult continuation suspended.Layout state with
+                | None -> frame
+                | Some result -> MethodState.pushToEvalStack result frame
 
         let state = IlMachineState.advanceProgramCounter thread state
         let threadState = state.ThreadState.[thread]
         let frameId, threadState = ThreadState.appendFrame frame threadState
 
-        { state with
-            ThreadState =
-                state.ThreadState
-                |> Map.add thread (ThreadState.setActiveFrame frameId threadState)
-        },
-        WhatWeDid.Executed
+        let state =
+            { state with
+                ThreadState =
+                    state.ThreadState
+                    |> Map.add thread (ThreadState.setActiveFrame frameId threadState)
+            }
+
+        match rethrowing with
+        | None -> state, WhatWeDid.Executed
+        | Some exn ->
+            // The JIT's resumption rethrows with `CORINFO_HELP_THROWEXACT` from a block in the
+            // await's own `try` regions (`RethrowExceptionOnResumption`).
+            match
+                ExceptionDispatching.throwExactAt
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    state
+                    thread
+                    suspended.CallSite
+                    exn
+            with
+            | ExceptionDispatchResult.Dispatched state -> state, WhatWeDid.Executed
+            | ExceptionDispatchResult.ExceptionUnhandled (state, exn) -> state, WhatWeDid.UnhandledException exn
 
     /// `calli` (ECMA-335 III.3.20). The function pointer sits on top of the eval stack,
     /// above the arguments; the metadata token is a StandaloneSignature describing the

@@ -6945,10 +6945,6 @@ module TestImpureCases =
 
     [<Test>]
     let ``FileSystemWatcher on the pinned linux-x64 CoreLib raises an event for each change, and ends`` () : unit =
-        Net11Frontier.park (
-            "On .NET 11's linux-x64 CoreLib, `Watcher.Start` calls `Watcher.DequeueEvents`, a runtime-async method returning a promise type, whose await of the inotify read finds it pending and so suspends the method, at an await that lies in a `try` region, which PawPrint refuses: \"TODO: System.IO.FileSystem.Watcher.Watcher.DequeueEvents suspends at its await at IL_0059, which lies in a try region or handler (IL_0036 to IL_0062); suspending there needs a continuation with an exception slot, which PawPrint does not yet give one\" (measured on 11.0.0-rc.1, 2026-11-11). Un-park when a suspension in a `try` region gives its continuation an exception slot (docs/plans/2026-11-11-runtime-async.md, decision 11 and stage 3)."
-        )
-
         // On a macOS host the framework under test is a Darwin CoreLib, whose
         // FileSystemWatcher is FSEvents; production and CI run the Linux one, over inotify.
         let frameworkDir = FrameworkUnderTest.requireLinuxFrameworkDirectory ()

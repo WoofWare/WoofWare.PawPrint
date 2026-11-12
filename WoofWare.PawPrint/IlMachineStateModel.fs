@@ -734,9 +734,12 @@ type ReturnFrameResult =
     /// caller.
     | ResumeVmRaise of IlMachineState * step : VmRaiseStep
     /// The frame that returned was a CoreLib helper the runtime called for the contexts of the
-    /// user-written runtime-async body it returned to, and the runtime does `step` next; state is
-    /// positioned at that body's frame.
-    | ResumeAsyncContexts of IlMachineState * step : AsyncContextStep
+    /// runtime-async frame it returned to, and the runtime does `step` next with what the helper
+    /// returned; state is positioned at that frame.
+    | ResumeAsyncContexts of
+        IlMachineState *
+        step : AsyncContextStep *
+        returned : (EvalStackValue * ConcreteTypeHandle) option
     /// The frame that returned was a suspended runtime-async frame CoreLib's dispatcher resumed
     /// (`ReturnValueDisposition.ResumedAsync`), so the frame's value, if it returned one, goes
     /// through `resultLocation`, and the dispatcher's `calli` gets null; state is positioned at the

@@ -14,6 +14,10 @@ open Microsoft.Extensions.Logging
 /// Each call is a managed call the frame makes in place of an instruction of its own, whose return
 /// does the frame's next step (<c>AsyncContextStep</c>). The body's IL is not rewritten, which would
 /// move the offsets its stack traces report.
+///
+/// A frame of runtime async's own machinery (<c>AsyncFrame.Transparent</c>) saves no contexts, but
+/// one that suspends other than by a tail await calls <c>AsyncHelpers.CaptureExecutionContext</c>
+/// the same way, and <c>resume</c> does its next step too.
 /// </remarks>
 [<RequireQualifiedAccess>]
 module AsyncContextSaving =
@@ -126,12 +130,13 @@ module AsyncContextSaving =
         | Some (AsyncFrame.SavesContexts handling) ->
             failwith $"BUG: %O{frame.ExecutingMethod} reached a ret while its contexts were %A{handling}"
 
-    /// Do what the frame of the user-written runtime-async body that a context helper has just
-    /// returned to, which is active, does next.
+    /// Do what the runtime-async frame that a context helper has just returned `returned` to, which
+    /// is active, does next.
     let resume
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (step : AsyncContextStep)
+        (returned : (EvalStackValue * ConcreteTypeHandle) option)
         (thread : ThreadId)
         (state : IlMachineState)
         : ExecutionResult
@@ -141,6 +146,25 @@ module AsyncContextSaving =
 
         let setHandling (handling : AsyncContextHandling) (state : IlMachineState) : IlMachineState =
             IlMachineState.mapFrame thread frameId (MethodState.withAsyncContextHandling handling) state
+
+        // Only `CaptureExecutionContext` returns a value.
+        match step, returned with
+        | AsyncContextStep.AfterCaptureExecutionContext _, Some _
+        | AsyncContextStep.AfterCapture _, None
+        | AsyncContextStep.AfterRestoreOnReturn, None
+        | AsyncContextStep.AfterRestoreOnUnwind, None
+        | AsyncContextStep.AfterFinishSuspension _, None -> ()
+        | step, returned ->
+            failwith
+                $"BUG: AsyncHelpers returned %O{returned} to %O{frame.ExecutingMethod} for the step %A{step}, but of the helpers the runtime calls for a frame's contexts, CaptureExecutionContext alone returns a value"
+
+        let complete (suspension : PendingSuspension) (state : IlMachineState) : ExecutionResult =
+            match IlMachineStateExecution.completeSuspension loggerFactory baseClassTypes thread suspension state with
+            | state, IlMachineStateExecution.CallCommitment.Committed
+            | state, IlMachineStateExecution.CallCommitment.Raised ->
+                ExecutionResult.stepped (state, WhatWeDid.Executed)
+            | state, IlMachineStateExecution.CallCommitment.Aborted fatal ->
+                ExecutionResult.Aborted (state, thread, fatal)
 
         match step, frame.AsyncFrame with
         | AsyncContextStep.AfterCapture (threadCell, executionContext, synchronizationContext),
@@ -179,13 +203,14 @@ module AsyncContextSaving =
             | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
                 ExecutionResult.UnhandledException (state, thread, exn)
         | AsyncContextStep.AfterFinishSuspension suspension,
-          Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)) ->
-            match IlMachineStateExecution.completeSuspension loggerFactory baseClassTypes thread suspension state with
-            | state, IlMachineStateExecution.CallCommitment.Committed
-            | state, IlMachineStateExecution.CallCommitment.Raised ->
-                ExecutionResult.stepped (state, WhatWeDid.Executed)
-            | state, IlMachineStateExecution.CallCommitment.Aborted fatal ->
-                ExecutionResult.Aborted (state, thread, fatal)
+          Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)) -> complete suspension state
+        | AsyncContextStep.AfterCaptureExecutionContext suspension, Some (AsyncFrame.Transparent _) ->
+            match returned with
+            | Some (executionContext, _) ->
+                state
+                |> AsyncSuspension.writeExecutionContext suspension.Continuation executionContext
+                |> complete suspension
+            | None -> failwith "BUG: AsyncHelpers.CaptureExecutionContext returned no value"
         | step, asyncFrame ->
             failwith
                 $"BUG: AsyncHelpers returned to %O{frame.ExecutingMethod} for the step %A{step}, but the frame is %A{asyncFrame}"

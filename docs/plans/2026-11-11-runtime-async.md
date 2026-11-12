@@ -6,10 +6,8 @@
 *runtime-async* method (`System.Private.CoreLib.csproj` sets `Features=runtime-async=on`;
 `libraries/Directory.Build.targets` does the same for the shared framework). Since stage 1b
 PawPrint runs such a method whose awaits all find completed tasks; since stage 2b it suspends one
-at an await of a pending task and resumes it, unless the await lies in a `try` region, which it
-refuses by name (decision 11). Three .NET 11 tests are parked on that refusal: the Linux-CoreLib
-`FileSystemWatcher` test and the two ASP.NET two-process tests (all three in
-`Watcher.DequeueEvents`, whose await of the inotify read lies in a `try`).
+at an await of a pending task and resumes it; since stage 3 it carries an exception across a
+suspension, into a resumed frame's own handlers and out through further continuations.
 
 .NET 10's CoreLib declares runtime async's infrastructure too (`AsyncHelpers.Await` and the like,
 flagged `Async` and returning no promise).
@@ -248,6 +246,8 @@ Suspending in a frame whose await lies in a `try` region (a `using` counts) is r
 3 gives continuations exception slots. Without one, the dispatcher would skip that frame's handlers
 silently.
 
+Lifted in stage 3. A suspension in a filter or handler stays refused by name.
+
 ### 12. Virtual slots
 
 .NET 11 gives every `Task`-returning virtual method two vtable slots, one per variant
@@ -361,6 +361,67 @@ Each stage is one pull request, with its tests first.
    (`ExceptionEscape.Propagate`); only its unwinding through further continuations reaches the
    QCall. The non-tail suspension of `AwaitTaskWithRareOptions` still needs
    `AsyncHelpers.CaptureExecutionContext`, whose result a context helper's step must carry.
+
+   As built:
+   * `AsyncSuspension.layoutAwaiting` gives a continuation an exception slot when its await lies in
+     a `try` region (`tryRegionsAround`), as the JIT does for any `try` but its own round the body.
+     A suspension in a filter or handler stays refused by name (`handlersAround`). Measured on RC1:
+     the shared framework's two packs and ASP.NET Core's hold 2604 `Async` methods with 5484 awaits
+     (calls of `AsyncHelpers.Await*` and `*AwaitAwaiter`), 1733 of them in a `try` region and none
+     in a filter or handler.
+   * Resuming (`executeAsyncResumeCalli`) takes the exception from the slot and clears it
+     (`AsyncSuspension.takeException`), as `RethrowExceptionOnResumption` does, and then raises it
+     at the awaited call (`SuspendedFrame.CallSite`) without pushing a result. The JIT rethrows with
+     `CORINFO_HELP_THROWEXACT`, which keeps the trace and, dispatching with `ExKind.RethrowFlag`,
+     appends no frame for the frame it begins in (`RH_EH_FIRST_RETHROW_FRAME`): a `rethrow`'s
+     behaviour, from an offset PawPrint names rather than the frame's program counter
+     (`ExceptionDispatching.throwExactAt`). The frame's own handlers, found by offset, see it.
+   * `AsyncHelpers_AddContinuationToExInternal` appends a frame of the `SuspensionPoint`'s method
+     at its IL offset to the exception's trace, consuming a pending foreign-raise flag as every
+     `AppendElement` does, and projects it as a dispatch's conclusion does
+     (`ExceptionDispatching.appendContinuationFrame`): a fresh token, as CoreCLR's append copies a
+     frozen trace rather than change it.
+   * `AwaitTaskWithRareOptions`, a frame of runtime async's machinery suspending other than by a
+     tail await, makes its continuation the same way and calls `CaptureExecutionContext()` in place
+     of a suspension helper; that helper's result, which `ReturnFrameResult.ResumeAsyncContexts`
+     now carries, goes into the continuation's `ExecutionContext` slot
+     (`AsyncContextStep.AfterCaptureExecutionContext`). `SemaphoreSlim.WaitAsync` with a token or
+     a timeout reaches it.
+
+   Guests reach each path through library methods whose awaits lie in `try` regions:
+   `HttpContent.LoadIntoBufferAsync` (a `catch` in the resumed frame, which rethrows, or wraps an
+   `IOException`), `StreamWriter.DisposeAsync` and `StreamReader.ReadToEndAsync` (`finally` blocks
+   after resuming, on both paths, and an exception crossing a continuation with no slot first),
+   `RuntimeAsyncTraceCrossesSuspension.cs` (the trace against real .NET 11's) and
+   `SemaphoreSlim.WaitAsync` (`AwaitTaskWithRareOptions`).
+
+   Two things the guests cannot see. Nothing reads a continuation's exception slot after its
+   frame resumes, since PawPrint never reuses a continuation; `TestRuntimeAsyncSuspension` checks
+   that resuming clears it. And `AwaitTaskWithRareOptions`'s `ExecutionContext` slot is restored only
+   for that frame's own resumption, which reads no context before the continuation after it
+   restores its own: an `AsyncLocal` change handler on real .NET 11 logs the same switches whether
+   the slot holds the captured context or null.
+
+   PawPrint's traces of an exception crossing a suspension differ from real .NET 11's in two ways
+   that are not stage 3's. The awaiter's frames differ by what the JIT inlined (.NET 11's inlines
+   `RuntimeAsyncTaskContinuation.GetResult(ref byte)`; PawPrint shows it). And under decision 6 each
+   await is its own task, so an exception crossing several awaits is thrown again from each task's
+   awaiter, adding its frames once per task, where real .NET 11 unwinds one chain of continuations
+   and shows them once; the formatter hides the `ExceptionDispatchInfo` boundaries between them,
+   because the frame before each is an `Async` method. `StreamWriter.DisposeAsync`'s trace shows
+   it, and lacks `FlushAsyncInternalWithGuard` too: `StreamWriter.FlushAsync` calls that only when
+   `RuntimeHelpers.IsRuntimeAsync()` answers true, as it does in the async version of `FlushAsync`
+   that real .NET 11's await binds.
+
+   Parks, re-measured on 11.0.0-rc.1 (2026-11-12): the Linux-CoreLib `FileSystemWatcher` test
+   passes and is un-parked. The two ASP.NET two-process tests get past `Watcher.DequeueEvents` and
+   stop where the server's minimal-API request delegate invokes
+   `RequestDelegateFactory.ExecuteResultWriteResponse`, an `Async` method, through reflection:
+   `RuntimeMethodHandle.InvokeMethod` binds the ordinary variant, the task-returning thunk, but
+   `NativeReflectionInvocation` concretises the async IL's locals before the call, which refuses
+   (`MethodBody.AsyncIl`). Lifting it means a reflective invocation of an `Async` method running
+   its thunk as a `call` does, with a guest that invokes one reflectively; which locals a `.cctor`
+   it triggers sees loaded (the thunk's, or the IL's) wants measuring first.
 6. **(4) The await pattern.** Binding async variants at `await` sites and in async versions'
    tail-call patterns; async versions of plain `Task`-returning methods; the second vtable slot.
 
@@ -370,3 +431,10 @@ Each stage is one pull request, with its tests first.
    `ExecutionContext` slot and the result's and calls the helper for no continuation context,
    which is right only under decision 6. The JIT also reuses a resumed frame's continuation when
    it suspends again; PawPrint makes a fresh one, which nothing managed can tell apart.
+
+   What stage 3 leaves for it: binding variants makes one chain of the continuations an exception
+   crosses, so its trace loses the awaiter frames each task added under decision 6, and the guests
+   that compare traces (`RuntimeAsyncTraceCrossesSuspension.cs`, `StreamWriter.DisposeAsync`'s in
+   `RuntimeAsyncFinallyAfterSuspension.cs`) can then check whole traces against real .NET 11's.
+   A reused continuation must have its exception slot cleared on resumption, which
+   `AsyncSuspension.takeException` already does.
