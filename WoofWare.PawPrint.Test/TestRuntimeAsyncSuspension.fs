@@ -12,9 +12,9 @@ open WoofWare.PawPrint
 
 /// The pieces of suspending a .NET 11 runtime-async frame that the guests in `sourcesPure`
 /// (`RuntimeAsyncResumesWith*.cs`) reach only through their effects: where a continuation's slots
-/// lie against what its `Flags` tell CoreLib, what a suspended frame keeps of its byrefs, and that
-/// each suspended frame resumes exactly once (decisions 2 and 3 of
-/// `docs/plans/2026-11-11-runtime-async.md`).
+/// lie against what its `Flags` tell CoreLib, what a suspended frame keeps of its byrefs, that
+/// each suspended frame resumes exactly once, and that resuming takes the exception the dispatcher
+/// left (decisions 2 and 3, and stage 3, of `docs/plans/2026-11-11-runtime-async.md`).
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestRuntimeAsyncSuspension =
@@ -483,3 +483,78 @@ module TestRuntimeAsyncSuspension =
                 |> shouldEqual model
 
         Check.One (Config.QuickThrowOnFailure.WithMaxTest 300, Prop.forAll (Arb.fromGen gen) property)
+
+    /// Resuming a continuation takes the exception CoreLib's dispatcher left in its exception slot
+    /// and clears the slot, as the JIT's resumption does, so that a continuation used again cannot
+    /// hand its frame the same exception twice; with nothing there, or no such slot, it takes
+    /// nothing and changes nothing.
+    [<Test>]
+    let ``Taking a continuation's exception clears its slot and leaves the others alone`` () : unit =
+        let gen =
+            gen {
+                let! exn = Gen.elements [ true ; false ]
+                let! stored = Gen.elements [ true ; false ]
+                let! result = Gen.elements (None :: (resultTypes |> List.map Some))
+                return exn, stored, result
+            }
+
+        let property (exn : bool, stored : bool, result) : unit =
+            let state = initialState ()
+            let _, loggerFactory = LoggerFactory.makeTest ()
+
+            let state, result =
+                match result with
+                | None -> state, None
+                | Some (ns, name) ->
+                    let state, handle = concretizeCorelibType state ns name
+                    state, Some handle
+
+            let layout : ContinuationLayout =
+                {
+                    ExecutionContext = true
+                    ContinuationContext = false
+                    Exception = exn
+                    Result = result
+                }
+
+            let continuation, state =
+                AsyncSuspension.allocateContinuation loggerFactory (bct ()) layout state
+
+            // Nothing reads the slot's type, so any object stands for the exception.
+            let thrown, state =
+                AsyncSuspension.allocateContinuation loggerFactory (bct ()) layout state
+
+            let slot = FieldId.ContinuationSlot ContinuationSlot.Exception
+
+            let state =
+                if exn && stored then
+                    IlMachineState.setInstanceFieldById continuation slot (CliType.ObjectRef (Some thrown)) state
+                else
+                    state
+
+            let contents (state : IlMachineState) =
+                (ManagedHeap.get continuation state.ManagedHeap).Contents
+
+            let otherSlots (state : IlMachineState) =
+                ContinuationSlots.present layout
+                |> List.filter (fun present -> present <> ContinuationSlot.Exception)
+                |> List.map (fun present ->
+                    CliValueType.DereferenceFieldById (FieldId.ContinuationSlot present) (contents state)
+                )
+
+            let taken, after = AsyncSuspension.takeException continuation layout state
+            otherSlots after |> shouldEqual (otherSlots state)
+
+            if exn && stored then
+                taken |> shouldEqual (Some thrown)
+
+                CliValueType.DereferenceFieldById slot (contents after)
+                |> shouldEqual (CliType.ObjectRef None)
+
+                let takenAgain, _ = AsyncSuspension.takeException continuation layout after
+                takenAgain |> shouldEqual None
+            else
+                taken |> shouldEqual None
+                obj.ReferenceEquals (after, state) |> shouldEqual true
+
+        Check.One (Config.QuickThrowOnFailure.WithMaxTest 40, Prop.forAll (Arb.fromGen gen) property)
