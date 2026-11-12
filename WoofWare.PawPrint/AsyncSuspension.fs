@@ -201,13 +201,13 @@ module AsyncSuspension =
         IlMachineState.freeNativeMemory block state
 
     /// Fill in a fresh continuation's own fields: `ResumeInfo`, `Flags` saying where its slots lie
-    /// and where the awaiting code continues (`handling`), and `State`, which only the method's own
+    /// and what the frame was awaiting (`flags`), and `State`, which only the method's own
     /// resumption reads, and which PawPrint sets to the IL offset of the await, as no managed code
     /// reads it.
     let initialiseContinuation
         (continuation : ManagedHeapAddress)
         (layout : ContinuationLayout)
-        (handling : ContinuationContextHandling)
+        (flags : SuspendedCallFlags)
         (resumeInfo : NativeMemoryBlockId)
         (callSite : int)
         (state : IlMachineState)
@@ -228,10 +228,7 @@ module AsyncSuspension =
         |> setField
             continuation
             "Flags"
-            (int32 (
-                ContinuationSlots.slotIndexFlags layout
-                ||| ContinuationSlots.handlingFlags handling
-            ))
+            (int32 (ContinuationSlots.slotIndexFlags layout ||| ContinuationSlots.callFlags flags))
         |> setField continuation "State" (int32 callSite)
 
     /// Make `next` the continuation after `continuation` in its chain: the callee's continuation's

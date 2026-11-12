@@ -447,6 +447,16 @@ module TestImpureCases =
     /// parks.
     let parkedEverywhere : (EndToEndTestCase * string) list =
         [
+            {
+                FileName = "RuntimeAsyncAsyncVersionAsTask.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext = AppContextProperties.empty
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An await of an async version whose IL ends in the `AsTask` tail shape (stage 4c of `docs/plans/2026-11-11-runtime-async.md`), reached through `TarFile.CreateFromDirectoryAsync` of a directory the guest makes, which is why it is impure. It stops before any await, on both runtimes: `TarWriter.ConstructEntryForWriting` names a file entry's owner from the passwd database whatever the entry's format, and "Unimplemented native method (PInvokeImpl libSystem.Native!SystemNative_GetPwUidR)" (measured). Un-park when `SystemNative_GetPwUidR`, and the group lookup after it, are implemented. Verified to exit 0 on real .NET 10 and 11."""
             currentDirectoryCase "/héllo/中文/🐶",
             """A *short* non-ASCII directory, parked for an unrelated reason: it fits the stackalloc, so `SystemNative_GetCwd` succeeds and ERANGE never enters into it, but decoding the bytes back with `Marshal.PtrToStringUTF8` takes CoreLib's non-ASCII UTF-8 path, which stops in `Utf8Utility.GetPointerToFirstInvalidByte` at a `cgt.un` between two byrefs into one stackalloc block ("refusing cgt.un: no structural order between byrefs"). The ASCII siblings in `cases` cover the same handler; what is missing is byref ordering, not anything about the current directory. `TestAbsoluteUnixPath` covers the UTF-8 encoding of such a path directly in the meantime."""
             {

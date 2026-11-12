@@ -7,9 +7,11 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// `AwaitSiteBinding.classify`, decision 13's classification of a matched await site, against the
-/// rule of stage 4b of `docs/plans/2026-11-11-runtime-async.md`: a site binds the callee's async
-/// variant exactly when it has `ConfigureAwait(false)`, has no `constrained.` prefix, does not
-/// dispatch, and names a method flagged `Async`.
+/// rule of stage 4c of `docs/plans/2026-11-11-runtime-async.md`: a site binds the callee's async
+/// variant exactly when it is a tail shape or an await with `ConfigureAwait(false)`, has no
+/// `constrained.` prefix, does not dispatch, and names a method whose variant runs IL, an `Async`
+/// method's or an async version's. An await continues on the thread pool, and a tail shape with no
+/// preference.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestAwaitSiteBinding =
@@ -39,7 +41,14 @@ module TestAwaitSiteBinding =
 
     let private genFacts : Gen<AwaitSiteFacts> =
         gen {
-            let! continues = Gen.elements [ true ; false ]
+            let! pattern =
+                Gen.elements
+                    [
+                        MatchedPattern.Await true
+                        MatchedPattern.Await false
+                        MatchedPattern.TailShape
+                    ]
+
             let! opcode = Gen.elements [ AwaitedCall.Call ; AwaitedCall.Callvirt ]
             let! constrained = Gen.elements [ true ; false ]
             let! dispatches = Gen.elements [ true ; false ]
@@ -60,7 +69,7 @@ module TestAwaitSiteBinding =
 
             return
                 {
-                    ContinuesOnCapturedContext = continues
+                    Pattern = pattern
                     Opcode = opcode
                     Constrained = constrained
                     NamedDispatchesVirtually = dispatches
@@ -69,7 +78,7 @@ module TestAwaitSiteBinding =
         }
         |> Gen.filter (callsAbstractDirectly >> not)
 
-    /// Whether the site dispatches, as stage 4b reads it: a `callvirt` of a method that is virtual
+    /// Whether the site dispatches, as stage 4c reads it: a `callvirt` of a method that is virtual
     /// and not final.
     let private dispatches (facts : AwaitSiteFacts) : bool =
         facts.Opcode = AwaitedCall.Callvirt && facts.NamedDispatchesVirtually
@@ -77,28 +86,35 @@ module TestAwaitSiteBinding =
     /// Whether `reason` holds of `facts`.
     let private holds (facts : AwaitSiteFacts) (reason : AwaitNotYetBound) : bool =
         match reason with
-        | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.ContinuesOnCapturedContext
+        | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.Pattern = MatchedPattern.Await true
         | AwaitNotYetBound.Constrained -> facts.Constrained
         | AwaitNotYetBound.CalleeDispatches -> dispatches facts
-        | AwaitNotYetBound.CalleeIsAsyncVersion -> facts.NamedVariant = Ok AsyncVariantBody.AsyncVersion
-        | AwaitNotYetBound.UnmodelledVariant body ->
-            facts.NamedVariant = Error (AsyncVariantRefusal.UnmodelledBody body)
+        | AwaitNotYetBound.CalleeIsAsyncVersion -> false
+        | AwaitNotYetBound.UnmodelledVariant _ -> false
 
     [<Test>]
-    let ``A site binds exactly when stage 4b's four conditions hold, and continues on the thread pool`` () : unit =
+    let ``A site binds exactly when stage 4c's four conditions hold, and continues as its pattern says`` () : unit =
         let property (facts : AwaitSiteFacts) : unit =
-            let binds =
+            let runsIl =
                 facts.NamedVariant = Ok AsyncVariantBody.RuntimeAsyncIl
-                && not facts.ContinuesOnCapturedContext
+                || facts.NamedVariant = Ok AsyncVariantBody.AsyncVersion
+
+            let binds =
+                runsIl
+                && facts.Pattern <> MatchedPattern.Await true
                 && not facts.Constrained
                 && not (dispatches facts)
 
             match AwaitSiteBinding.classify facts with
             | AwaitSiteBinding.BindsVariant handling ->
                 binds |> shouldEqual true
-                handling |> shouldEqual ContinuationContextHandling.ContinueOnThreadPool
+
+                match facts.Pattern with
+                | MatchedPattern.Await _ -> handling |> shouldEqual ContinuationContextHandling.ContinueOnThreadPool
+                | MatchedPattern.TailShape -> handling |> shouldEqual ContinuationContextHandling.NoPreference
             | AwaitSiteBinding.NoVariant _
-            | AwaitSiteBinding.NotYetBound _ -> binds |> shouldEqual false
+            | AwaitSiteBinding.NotYetBound _
+            | AwaitSiteBinding.Unmodelled _ -> binds |> shouldEqual false
 
         Check.One (Config.QuickThrowOnFailure.WithMaxTest 2000, Prop.forAll (Arb.fromGen genFacts) property)
 
@@ -114,7 +130,8 @@ module TestAwaitSiteBinding =
             match AwaitSiteBinding.classify facts with
             | AwaitSiteBinding.NoVariant refusal -> Some refusal |> shouldEqual expected
             | AwaitSiteBinding.BindsVariant _
-            | AwaitSiteBinding.NotYetBound _ -> expected |> shouldEqual None
+            | AwaitSiteBinding.NotYetBound _
+            | AwaitSiteBinding.Unmodelled _ -> expected |> shouldEqual None
 
         Check.One (Config.QuickThrowOnFailure.WithMaxTest 2000, Prop.forAll (Arb.fromGen genFacts) property)
 
@@ -124,7 +141,27 @@ module TestAwaitSiteBinding =
             match AwaitSiteBinding.classify facts with
             | AwaitSiteBinding.NotYetBound reason -> holds facts reason |> shouldEqual true
             | AwaitSiteBinding.BindsVariant _
-            | AwaitSiteBinding.NoVariant _ -> ()
+            | AwaitSiteBinding.NoVariant _
+            | AwaitSiteBinding.Unmodelled _ -> ()
+
+        Check.One (Config.QuickThrowOnFailure.WithMaxTest 2000, Prop.forAll (Arb.fromGen genFacts) property)
+
+    /// CoreCLR binds the variant of a method whose body PawPrint does not model, so such a site is
+    /// refused rather than awaiting the promise of the ordinary variant.
+    [<Test>]
+    let ``A site is unmodelled exactly when the named method's variant has a body PawPrint does not model`` () : unit =
+        let property (facts : AwaitSiteFacts) : unit =
+            let expected =
+                match facts.NamedVariant with
+                | Error (AsyncVariantRefusal.UnmodelledBody body) -> Some body
+                | Error _
+                | Ok _ -> None
+
+            match AwaitSiteBinding.classify facts with
+            | AwaitSiteBinding.Unmodelled body -> Some body |> shouldEqual expected
+            | AwaitSiteBinding.BindsVariant _
+            | AwaitSiteBinding.NoVariant _
+            | AwaitSiteBinding.NotYetBound _ -> expected |> shouldEqual None
 
         Check.One (Config.QuickThrowOnFailure.WithMaxTest 2000, Prop.forAll (Arb.fromGen genFacts) property)
 
@@ -135,32 +172,21 @@ module TestAwaitSiteBinding =
             Gen.sample 2000 genFacts
             |> Seq.choose (fun facts ->
                 match AwaitSiteBinding.classify facts with
-                | AwaitSiteBinding.NotYetBound reason ->
-                    match reason with
-                    | AwaitNotYetBound.UnmodelledVariant _ -> Some "UnmodelledVariant"
-                    | reason -> Some (string<AwaitNotYetBound> reason)
+                | AwaitSiteBinding.NotYetBound reason -> Some (string<AwaitNotYetBound> reason)
                 | AwaitSiteBinding.BindsVariant _
-                | AwaitSiteBinding.NoVariant _ -> None
+                | AwaitSiteBinding.NoVariant _
+                | AwaitSiteBinding.Unmodelled _ -> None
             )
             |> Set.ofSeq
 
         reasons
-        |> shouldEqual (
-            Set.ofList
-                [
-                    "ContinuesOnCapturedContext"
-                    "Constrained"
-                    "CalleeDispatches"
-                    "CalleeIsAsyncVersion"
-                    "UnmodelledVariant"
-                ]
-        )
+        |> shouldEqual (Set.ofList [ "ContinuesOnCapturedContext" ; "Constrained" ; "CalleeDispatches" ])
 
     [<Test>]
     let ``A call naming an abstract method directly is refused as a precondition`` () : unit =
         let facts : AwaitSiteFacts =
             {
-                ContinuesOnCapturedContext = false
+                Pattern = MatchedPattern.Await false
                 Opcode = AwaitedCall.Call
                 Constrained = false
                 NamedDispatchesVirtually = true

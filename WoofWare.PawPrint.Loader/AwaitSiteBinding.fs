@@ -12,6 +12,19 @@ type ContinuationContextHandling =
     /// carries `ContinuationFlags.ContinueOnThreadPool`.
     | ContinueOnThreadPool
 
+/// What the continuation of a frame suspending at an async call says of that call, besides where
+/// its slots lie: the flags CoreCLR's JIT sets from the call's `AsyncCallInfo`
+/// (`AsyncTransformation::CreateSuspension`, jit/async.cpp).
+[<RequireQualifiedAccess>]
+type SuspendedCallFlags =
+    /// The awaiting code continues as `handling` says.
+    | Continues of handling : ContinuationContextHandling
+    /// The call is an async version's `AsTask` tail shape (`IsValueTaskAsTask`): the awaiting code
+    /// has no preference where it continues, and the continuation is flagged
+    /// `ContinuationFlags.ValueTaskAdaptedToTask`, at which CoreLib stops its search for the flags
+    /// it gives a value-task source.
+    | ValueTaskAdaptedToTask
+
 /// What the async variant of a method runs, by the body `RuntimeAsyncMethod.asyncVariantOf` gives
 /// it.
 [<RequireQualifiedAccess>]
@@ -29,15 +42,24 @@ type AwaitedCall =
     | Call
     | Callvirt
 
-/// What CoreCLR's JIT reads of a matched await site (`impMatchTaskAwaitPattern`, importer.cpp) in a
-/// user's runtime-async body when it decides whether the site binds an async variant: the pattern's
-/// shape, the opcode and its `constrained.` prefix, and the row of the method the call names. It
-/// never reads the receiver, so a site binds the same way on every execution.
+/// Which of the JIT's patterns a matched await site is.
+[<RequireQualifiedAccess>]
+type MatchedPattern =
+    /// The await pattern in a user's runtime-async body (`impMatchTaskAwaitPattern`, importer.cpp).
+    /// `continuesOnCapturedContext` says whether the await continues on the captured context: the
+    /// pattern has no `ConfigureAwait` call, or its constant is `ldc.i4.1`.
+    | Await of continuesOnCapturedContext : bool
+    /// One of the tail shapes of an async version (`impMatchAsyncVersionTailCall`, importer.cpp).
+    | TailShape
+
+/// What CoreCLR's JIT reads of a matched await site when it decides whether the site binds an async
+/// variant: the pattern and its shape, the opcode and its `constrained.` prefix, and the row of the
+/// method the call names. It never reads the receiver, so a site binds the same way on every
+/// execution.
 type AwaitSiteFacts =
     {
-        /// Whether the await continues on the captured context: the pattern has no `ConfigureAwait`
-        /// call, or its constant is `ldc.i4.1`.
-        ContinuesOnCapturedContext : bool
+        /// Which pattern the site matches.
+        Pattern : MatchedPattern
         /// The instruction that calls the named method.
         Opcode : AwaitedCall
         /// Whether a `constrained.` prefix precedes the call.
@@ -77,6 +99,9 @@ type AwaitSiteBinding =
     | NoVariant of AsyncVariantRefusal
     /// CoreCLR binds the variant, and PawPrint does not yet.
     | NotYetBound of AwaitNotYetBound
+    /// CoreCLR binds the variant, whose body PawPrint does not model, so the site is refused by
+    /// name where it runs.
+    | Unmodelled of UnmodelledVariantBody
 
 [<RequireQualifiedAccess>]
 module AwaitSiteBinding =
@@ -104,7 +129,12 @@ module AwaitSiteBinding =
         | Error refusal -> AwaitSiteBinding.NoVariant refusal
         | Ok body ->
 
-        if facts.ContinuesOnCapturedContext then
+        let continuesOnCapturedContext =
+            match facts.Pattern with
+            | MatchedPattern.Await continues -> continues
+            | MatchedPattern.TailShape -> false
+
+        if continuesOnCapturedContext then
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.ContinuesOnCapturedContext
         elif facts.Constrained then
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.Constrained

@@ -398,9 +398,8 @@ type OnSuspension =
     /// The call is a tail await: the caller, a frame of runtime async's machinery, leaves by
     /// suspension in turn with the same continuation, and makes none of its own.
     | TailAwait
-    /// The caller suspends too, making a continuation of its own whose awaiting code continues as
-    /// `handling` says.
-    | CallerSuspends of handling : ContinuationContextHandling
+    /// The caller suspends too, making a continuation of its own, which `flags` describe.
+    | CallerSuspends of flags : SuspendedCallFlags
 
 type MethodReturnState =
     {

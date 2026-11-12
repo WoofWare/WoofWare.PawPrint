@@ -105,13 +105,30 @@ module TestRuntimeAsyncSuspension =
             "System.Threading.Tasks", "VoidTaskResult"
         ]
 
-    [<Test>]
-    let ``A continuation that continues on the thread pool says so in its Flags as CoreLib reads them`` () : unit =
-        ContinuationSlots.handlingFlags ContinuationContextHandling.ContinueOnThreadPool
-        |> shouldEqual (corelibConstant "ContinuationFlags" "ContinueOnThreadPool")
+    /// The flags of `ContinuationFlags` that say what a continuation's frame awaited, as CoreLib's
+    /// dispatcher and its value-task source continuation read them.
+    let private expectedCallFlags (flags : SuspendedCallFlags) : int =
+        match flags with
+        | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference -> 0
+        | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool ->
+            corelibConstant "ContinuationFlags" "ContinueOnThreadPool"
+        | SuspendedCallFlags.ValueTaskAdaptedToTask -> corelibConstant "ContinuationFlags" "ValueTaskAdaptedToTask"
 
-        ContinuationSlots.handlingFlags ContinuationContextHandling.NoPreference
-        |> shouldEqual 0
+    let private everyCallFlags : SuspendedCallFlags list =
+        [
+            SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+            SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool
+            SuspendedCallFlags.ValueTaskAdaptedToTask
+        ]
+
+    [<Test>]
+    let ``A continuation says what its frame awaited in its Flags as CoreLib reads them`` () : unit =
+        everyCallFlags
+        |> List.map (fun flags -> flags, ContinuationSlots.callFlags flags)
+        |> shouldEqual (everyCallFlags |> List.map (fun flags -> flags, expectedCallFlags flags))
+
+        // `ValueTaskAdaptedToTask` is bit 3, apart from every slot's index.
+        expectedCallFlags SuspendedCallFlags.ValueTaskAdaptedToTask |> shouldEqual 8
 
     [<Test>]
     let ``Each slot of a continuation lies where its Flags tell CoreLib's accessors to look`` () : unit =
@@ -256,6 +273,58 @@ module TestRuntimeAsyncSuspension =
         with
         | Ok frame -> state, frame
         | Error missing -> failwith $"unexpected missing assemblies making a test frame: %O{missing}"
+
+    /// A fresh continuation's `Flags`, as `initialiseContinuation` writes them, say where its slots
+    /// lie and what its frame awaited, and nothing else.
+    [<Test>]
+    let ``A fresh continuation's Flags hold its slots' indices and what its frame awaited`` () : unit =
+        let gen =
+            gen {
+                let! exn = Gen.elements [ true ; false ]
+                let! result = Gen.elements (None :: (resultTypes |> List.map Some))
+                let! flags = Gen.elements everyCallFlags
+                return exn, result, flags
+            }
+
+        let property (exn : bool, result, flags : SuspendedCallFlags) : unit =
+            let state = initialState ()
+            let _, loggerFactory = LoggerFactory.makeTest ()
+
+            let state, result =
+                match result with
+                | None -> state, None
+                | Some (ns, name) ->
+                    let state, handle = concretizeCorelibType state ns name
+                    state, Some handle
+
+            let layout : ContinuationLayout =
+                {
+                    ExecutionContext = true
+                    ContinuationContext = false
+                    Exception = exn
+                    Result = result
+                }
+
+            let continuation, state =
+                AsyncSuspension.allocateContinuation loggerFactory (bct ()) layout state
+
+            let state, frame = frame state
+
+            let resumeInfo, state =
+                AsyncSuspension.allocateResumeInfo frame.ExecutingMethod 0 state
+
+            let state =
+                AsyncSuspension.initialiseContinuation continuation layout flags resumeInfo 0 state
+
+            ManagedHeap.get continuation state.ManagedHeap
+            |> AllocatedNonArrayObject.DereferenceFieldById (FieldId.named "Flags")
+            |> shouldEqual (
+                CliType.Numeric (
+                    CliNumericType.Int32 (ContinuationSlots.slotIndexFlags layout ||| expectedCallFlags flags)
+                )
+            )
+
+        Check.One (Config.QuickThrowOnFailure.WithMaxTest 40, Prop.forAll (Arb.fromGen gen) property)
 
     /// What a local of a test frame holds.
     [<RequireQualifiedAccess>]

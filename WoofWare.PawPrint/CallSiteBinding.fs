@@ -406,9 +406,10 @@ module internal CallSiteBinding =
         let classified =
             AwaitSiteBinding.classify
                 {
-                    ContinuesOnCapturedContext =
+                    Pattern =
                         follower.ConfigureAwait
                         |> Option.forall (fun configureAwait -> configureAwait.ContinueOnCapturedContext)
+                        |> MatchedPattern.Await
                     Opcode = opcode
                     Constrained = constrained
                     NamedDispatchesVirtually = named.DispatchesVirtually
@@ -456,7 +457,8 @@ module internal CallSiteBinding =
             failwith
                 $"awaiting %O{named} at IL_%04X{follower.AwaitOffset} of %O{frame.ExecutingMethod}: deciding whether it has an async variant needs a type PawPrint cannot bind: %s{TypeBindingFailure.describe failure}"
         | AwaitSiteBinding.NoVariant _, _
-        | AwaitSiteBinding.NotYetBound _, _ -> state, AwaitSiteOutcome.DoesNotBind classified
+        | AwaitSiteBinding.NotYetBound _, _
+        | AwaitSiteBinding.Unmodelled _, _ -> state, AwaitSiteOutcome.DoesNotBind classified
 
     /// What a `call` or `ldftn` (`opName`, used as `use'`) of method token `token` does, where its
     /// `constrained.` prefix names `constrained`; `constrainedOpName` names the instruction under

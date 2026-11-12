@@ -1371,8 +1371,11 @@ module IlMachineStateExecution =
             | Some _, Some (AsyncFrame.Transparent TailAwait.Requested), None -> Some OnSuspension.TailAwait
             | Some _, Some (AsyncFrame.Transparent TailAwait.NotRequested), None
             | Some _, Some (AsyncFrame.SavesContexts _), None ->
-                Some (OnSuspension.CallerSuspends ContinuationContextHandling.NoPreference)
-            | Some _, Some (AsyncFrame.SavesContexts _), Some handling -> Some (OnSuspension.CallerSuspends handling)
+                Some (
+                    OnSuspension.CallerSuspends (SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference)
+                )
+            | Some _, Some (AsyncFrame.SavesContexts _), Some handling ->
+                Some (OnSuspension.CallerSuspends (SuspendedCallFlags.Continues handling))
             | Some _, caller, Some _ ->
                 failwith
                     $"BUG: %O{activeMethodState.ExecutingMethod}, whose frame is %A{caller}, binds an await to %O{methodToCall}; only a user's runtime-async body binds one"
@@ -1841,14 +1844,14 @@ module IlMachineStateExecution =
             state, CallCommitment.Committed
         | Some OnSuspension.TailAwait, ReturnValueDisposition.PushToCaller ->
             leaveBySuspension loggerFactory baseClassTypes thread continuation state
-        | Some (OnSuspension.CallerSuspends handling), ReturnValueDisposition.PushToCaller ->
+        | Some (OnSuspension.CallerSuspends flags), ReturnValueDisposition.PushToCaller ->
             beginSuspension
                 loggerFactory
                 baseClassTypes
                 thread
                 returnState.CallSiteIlOpIndex
                 leaving.ExecutingMethod.Signature.ReturnType
-                handling
+                flags
                 continuation
                 state
         | None, _ ->
@@ -1861,7 +1864,7 @@ module IlMachineStateExecution =
     /// The active frame of `thread`, a runtime-async frame whose call at `callSite`, which returns
     /// `awaited`, has just suspended with `calleeContinuation`, suspends too
     /// (`AsyncTransformation::CreateSuspension`): it makes a continuation of its own, with an
-    /// exception slot if the call lies in a `try` region and with the flags `handling` gives, links
+    /// exception slot if the call lies in a `try` region and with the flags `flags` give, links
     /// it after the callee's, and calls the CoreLib helper that captures the thread's
     /// `ExecutionContext` into it (and, for a frame that saves contexts, puts back the ones the frame
     /// found on entry). Once that returns, `completeSuspension` saves the frame and leaves.
@@ -1871,7 +1874,7 @@ module IlMachineStateExecution =
         (thread : ThreadId)
         (callSite : int)
         (awaited : MethodReturnType<ConcreteTypeHandle>)
-        (handling : ContinuationContextHandling)
+        (flags : SuspendedCallFlags)
         (calleeContinuation : ManagedHeapAddress)
         (state : IlMachineState)
         : IlMachineState * CallCommitment
@@ -1887,12 +1890,12 @@ module IlMachineStateExecution =
             failwith
                 $"TODO: %O{method} suspends at its await at IL_%04X{callSite}, which lies in a filter or handler (IL_%04X{start} to IL_%04X{finish}); CoreCLR cannot suspend there, and PawPrint refuses to"
 
-        match frame.AsyncFrame, handling with
-        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)), _
-        | Some (AsyncFrame.Transparent _), ContinuationContextHandling.NoPreference -> ()
-        | other, handling ->
+        match frame.AsyncFrame, flags with
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)), SuspendedCallFlags.Continues _
+        | Some (AsyncFrame.Transparent _), SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference -> ()
+        | other, flags ->
             failwith
-                $"BUG: %O{method} is suspending at IL_%04X{callSite}, its continuation continuing as %O{handling}, but its frame is %A{other}"
+                $"BUG: %O{method} is suspending at IL_%04X{callSite}, its continuation flagged %O{flags}, but its frame is %A{other}"
 
         let layout =
             AsyncSuspension.layoutAwaiting (not (AsyncSuspension.tryRegionsAround method callSite).IsEmpty) awaited
@@ -1904,7 +1907,7 @@ module IlMachineStateExecution =
 
         let state =
             state
-            |> AsyncSuspension.initialiseContinuation continuation layout handling resumeInfo callSite
+            |> AsyncSuspension.initialiseContinuation continuation layout flags resumeInfo callSite
             |> AsyncSuspension.link calleeContinuation continuation
 
         let suspension : PendingSuspension =

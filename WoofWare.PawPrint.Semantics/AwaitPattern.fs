@@ -90,6 +90,23 @@ module AwaitFollower =
         }
 
 [<RequireQualifiedAccess>]
+module TailCallFacts =
+
+    /// What the JIT knows, when it compiles the async version of `caller`, a method of
+    /// `callerAssembly`, of its call in a tail shape: `exactCallee` is the callee where the call
+    /// names it exactly, dispatching to nothing (`canTailCall`'s exact callee, jitinterface.cpp),
+    /// and `returnTypesAgree` says whether the callee's async variant returns what the async
+    /// version's does.
+    let ofCall
+        (callerAssembly : DumpedAssembly)
+        (caller : MetadataMethodFacts)
+        (exactCallee : MetadataMethodFacts option)
+        (returnTypesAgree : bool)
+        : TailCallFacts
+        =
+        failwith "TODO: stage 4c"
+
+[<RequireQualifiedAccess>]
 module TailShape =
 
     let map (f : 'a -> 'b) (shape : TailShape<'a>) : TailShape<'b> =
