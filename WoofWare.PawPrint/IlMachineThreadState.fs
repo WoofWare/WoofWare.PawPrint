@@ -258,6 +258,16 @@ module IlMachineThreadState =
             failwith
                 $"BUG: %O{returningMethodState.ExecutingMethod} is returning while it holds the continuation %O{continuation} that a runtime-async call returned, which it has not read through AsyncHelpers.AsyncCallContinuation()"
 
+        // `AsyncHelpers.TailAwait()` marks the frame's next call with runtime async's calling
+        // convention, which consumes the mark.
+        match returningMethodState.AsyncFrame with
+        | Some (AsyncFrame.Transparent TailAwait.Requested) ->
+            failwith
+                $"BUG: %O{returningMethodState.ExecutingMethod} is returning after AsyncHelpers.TailAwait(), but has made no call with runtime async's calling convention since"
+        | Some (AsyncFrame.Transparent TailAwait.NotRequested)
+        | Some (AsyncFrame.SavesContexts _)
+        | None -> ()
+
         match returningMethodState.ReturnState with
         | None -> ReturnFrameResult.NoFrameToReturn
         | Some returnState ->
