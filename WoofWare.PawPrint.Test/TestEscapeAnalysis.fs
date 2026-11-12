@@ -1811,21 +1811,20 @@ public static class SR
             |> Seq.map (fun (KeyValue (handle, _)) -> MethodKey.make fixture handle)
             |> List.ofSeq
 
-        // Allowed no assumption, the places may be deep in CoreLib, past its own handlers and rethrows.
-        for assumptions in [ Assumption.all ; Set.empty ] do
-            let analysis =
-                analysisOf
-                    corelib
-                    (FrameworkUnderTest.runtimeDirs ())
-                    (hostTarget ())
-                    HardwareIntrinsicsProfile.ScalarOnly
-                    assumptions
-                    [ fixture ]
-                    id
+        // `allowed no assumption, ...` checks the same of an analysis allowed none.
+        let analysis =
+            analysisOf
+                corelib
+                (FrameworkUnderTest.runtimeDirs ())
+                (hostTarget ())
+                HardwareIntrinsicsProfile.ScalarOnly
+                Assumption.all
+                [ fixture ]
+                id
 
-            match sourcesDisagree analysis [ fixture ; corelib ] methods with
-            | [] -> ()
-            | failures -> failures |> String.concat Environment.NewLine |> failwith
+        match sourcesDisagree analysis [ fixture ; corelib ] methods with
+        | [] -> ()
+        | failures -> failures |> String.concat Environment.NewLine |> failwith
 
     [<Test>]
     let ``a CoreLib method has a place the analysis cannot see through exactly when its answer is unknown`` () : unit =
@@ -2060,7 +2059,10 @@ public static class SR
             context.Unload ()
 
     [<Test>]
-    let ``allowed no assumption, no answer assumes anything, and one that relied on none is unchanged`` () : unit =
+    let ``allowed no assumption, no answer assumes anything, one that relied on none is unchanged, and a fixture method has a place the analysis cannot see through exactly when its answer is unknown``
+        ()
+        : unit
+        =
         let _, loggerFactory = LoggerFactory.makeTest ()
 
         let image =
@@ -2069,9 +2071,11 @@ public static class SR
         let fixture =
             Assembly.read loggerFactory (Some "EscapeFixture.dll") (new MemoryStream (image))
 
+        let corelib = hostCoreLib ()
+
         let analysis =
             analysisOf
-                (hostCoreLib ())
+                corelib
                 (FrameworkUnderTest.runtimeDirs ())
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
@@ -2092,9 +2096,17 @@ public static class SR
                     }
             )
 
-        match unmet analysis fixture assumingNothing with
-        | _, [] -> ()
-        | _, failures -> failures |> String.concat Environment.NewLine |> failwith
+        let analysis, unmetFailures = unmet analysis fixture assumingNothing
+
+        let methods =
+            fixture.Methods
+            |> Seq.map (fun (KeyValue (handle, _)) -> MethodKey.make fixture handle)
+            |> List.ofSeq
+
+        // The places may be deep in CoreLib, past its own handlers and rethrows.
+        match unmetFailures @ sourcesDisagree analysis [ fixture ; corelib ] methods with
+        | [] -> ()
+        | failures -> failures |> String.concat Environment.NewLine |> failwith
 
     /// Not allowed to assume an access CoreCLR may refuse, the analysis cannot see past it.
     [<Test>]
@@ -2188,6 +2200,14 @@ public static class SR
 
         let mutable assuming = analysis Assumption.all
 
+        // The constructors of the exceptions each assumption's methods make are known allowed only
+        // the assumptions about what constructing a CoreLib exception runs: its message's lookup
+        // runs `SR`'s type initializer, and may throw a type initializer's own exception again.
+        let constructing =
+            Set.ofList [ Assumption.StackTracePreserved ; Assumption.CoreLibTypeInitializers ]
+
+        let mutable allowedConstructing = analysis constructing
+
         for KeyValue (assumption, keys) in summarised do
             // Running out of memory or stack is something no assumption rules out.
             let contract =
@@ -2238,13 +2258,8 @@ public static class SR
                     |> Set.add Assumption.NoThreadAborts
                 )
 
-            // Those constructors are known allowed only the assumptions about what constructing a
-            // CoreLib exception runs: its message's lookup runs `SR`'s type initializer, and may
-            // throw a type initializer's own exception again.
-            let constructing =
-                Set.ofList [ Assumption.StackTracePreserved ; Assumption.CoreLibTypeInitializers ]
-
-            let _, made = constructed (analysis constructing)
+            let next, made = constructed allowedConstructing
+            allowedConstructing <- next
 
             for answer in made do
                 answer.Unknown |> shouldEqual false
@@ -6116,15 +6131,123 @@ public static class Cases
         if not failures.IsEmpty then
             failures |> String.concat Environment.NewLine |> failwith
 
+    /// Whether the test host is a linux-x64 machine, whose own CoreLib is then the pinned linux-x64
+    /// one (`on a linux-x64 host, the host's CoreLib is the pinned linux-x64 one` checks it).
+    let private hostIsLinuxX64 : bool =
+        Runtime.InteropServices.RuntimeInformation.IsOSPlatform Runtime.InteropServices.OSPlatform.Linux
+        && Runtime.InteropServices.RuntimeInformation.ProcessArchitecture = Runtime.InteropServices.Architecture.X64
+
     /// The CoreLibs the CoreLib-wide tests read, the host's and the pinned linux-x64 one, each with
     /// the CPUs they answer for: one with no instruction sets, and one with every instruction set
-    /// whose class in that CoreLib is a placeholder.
+    /// whose class in that CoreLib is a placeholder. On a linux-x64 host the two CoreLibs are one,
+    /// so the host's alone is read.
     let coreLibsAndProfiles : TestCaseData list =
         [
-            for coreLib in [ "host" ; "linux-x64" ] do
+            for coreLib in
+                (if hostIsLinuxX64 then
+                     [ "host" ]
+                 else
+                     [ "host" ; "linux-x64" ]) do
                 for profile in [ "scalar-only" ; "every instruction set" ] do
                     TestCaseData(coreLib, profile).SetArgDisplayNames ($"%s{coreLib} CoreLib", $"%s{profile} CPU")
         ]
+
+    /// Everything the analysis can read of the CoreLib image at `path`: its metadata, each method's
+    /// body, and each field's initial data. The metadata has its MVID and every RVA zeroed, since two
+    /// builds of one CoreLib place their bodies and data differently.
+    let private coreLibContent (path : string) : byte[] * byte[] list * byte[] list =
+        use pe = new PEReader (File.OpenRead path)
+        let metadata = pe.GetMetadataReader ()
+        let block = pe.GetMetadata().GetContent().AsSpan().ToArray ()
+
+        let mvid = metadata.GetGuid(metadata.GetModuleDefinition().Mvid).ToByteArray ()
+
+        let mvidAt = block.AsSpan().IndexOf (ReadOnlySpan<byte> mvid)
+
+        if mvidAt < 0 then
+            failwith $"%s{path}'s metadata does not hold its own MVID"
+
+        Array.fill block mvidAt mvid.Length 0uy
+
+        // The RVA is the first column of both tables.
+        for table in [ TableIndex.MethodDef ; TableIndex.FieldRva ] do
+            let offset = metadata.GetTableMetadataOffset table
+            let rowSize = metadata.GetTableRowSize table
+
+            for row in 0 .. metadata.GetTableRowCount table - 1 do
+                Array.fill block (offset + row * rowSize) 4 0uy
+
+        let bytesAt (rva : int) (length : int) : byte[] =
+            pe.GetSectionData(rva).GetContent(0, length).AsSpan().ToArray ()
+
+        let bodies =
+            [
+                for handle in metadata.MethodDefinitions do
+                    let rva = metadata.GetMethodDefinition(handle).RelativeVirtualAddress
+
+                    if rva <> 0 then
+                        yield bytesAt rva (pe.GetMethodBody rva).Size
+            ]
+
+        // A field with initial data is of a primitive type or of a struct with an explicit size.
+        let dataSize (field : FieldDefinition) : int =
+            let mutable signature = metadata.GetBlobReader field.Signature
+            signature.ReadSignatureHeader () |> ignore<SignatureHeader>
+
+            match signature.ReadSignatureTypeCode () with
+            | SignatureTypeCode.Boolean
+            | SignatureTypeCode.SByte
+            | SignatureTypeCode.Byte -> 1
+            | SignatureTypeCode.Char
+            | SignatureTypeCode.Int16
+            | SignatureTypeCode.UInt16 -> 2
+            | SignatureTypeCode.Int32
+            | SignatureTypeCode.UInt32
+            | SignatureTypeCode.Single -> 4
+            | SignatureTypeCode.Int64
+            | SignatureTypeCode.UInt64
+            | SignatureTypeCode.Double -> 8
+            | SignatureTypeCode.TypeHandle ->
+                match signature.ReadTypeHandle () with
+                | handle when handle.Kind = HandleKind.TypeDefinition ->
+                    metadata.GetTypeDefinition(TypeDefinitionHandle.op_Explicit handle).GetLayout().Size
+                | handle -> failwith $"%s{path}: a field with initial data is of %A{handle.Kind}, not a TypeDef"
+            | other -> failwith $"%s{path}: a field with initial data is of %A{other}"
+
+        let data =
+            [
+                for handle in metadata.FieldDefinitions do
+                    let field = metadata.GetFieldDefinition handle
+                    let rva = field.GetRelativeVirtualAddress ()
+
+                    if rva <> 0 then
+                        yield bytesAt rva (dataSize field)
+            ]
+
+        block, bodies, data
+
+    /// What lets `coreLibsAndProfiles` read the host's CoreLib alone on a linux-x64 host.
+    [<Test>]
+    let ``on a linux-x64 host, the host's CoreLib is the pinned linux-x64 one`` () : unit =
+        if not hostIsLinuxX64 then
+            Assert.Ignore "The host is not linux-x64, so the CoreLib-wide tests read both CoreLibs."
+
+        let linux =
+            Path.Combine (FrameworkUnderTest.requireLinuxFrameworkDirectory (), "System.Private.CoreLib.dll")
+
+        let host =
+            Path.Combine (FrameworkUnderTest.sharedFrameworkDirectory (), "System.Private.CoreLib.dll")
+
+        let hostMetadata, hostBodies, hostData = coreLibContent host
+        let linuxMetadata, linuxBodies, linuxData = coreLibContent linux
+
+        // Not vacuous: CoreLib has tens of thousands of bodies, and some initial data.
+        hostBodies.Length |> shouldBeGreaterThan 10000
+        hostData.Length |> shouldBeGreaterThan 0
+
+        (hostMetadata = linuxMetadata) |> shouldEqual true
+        (hostBodies = linuxBodies) |> shouldEqual true
+        (hostData = linuxData) |> shouldEqual true
 
     /// A CoreLib the CoreLib-wide tests read, where to load the rest of its framework from, and the
     /// JIT target it was built for.
