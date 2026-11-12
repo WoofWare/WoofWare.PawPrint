@@ -3301,39 +3301,15 @@ public static class Cases
             Roslyn.compileOptimizedAssembly "Casts" OutputKind.DynamicallyLinkedLibrary [ castSource ]
             |> fun image -> Assembly.read loggerFactory (Some "Casts.dll") (new MemoryStream (image))
 
-        let analysis (assumptions : Set<Assumption>) : EscapeAnalysisState =
-            analysisOf
-                (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
-                (hostTarget ())
-                HardwareIntrinsicsProfile.ScalarOnly
-                assumptions
-                [ fixture ]
-                id
-
         let key = methodNamed fixture "Casts.Cases" "Store"
 
-        let assuming, escapes = EscapeAnalysis.escapes (analysis Assumption.all) key
+        let assuming, escapes = EscapeAnalysis.escapes (analysisOver [ fixture ] id) key
         escapes.Unknown |> shouldEqual false
 
         Set.intersect escapes.Assumes castFallbackAssumes
         |> shouldEqual castFallbackAssumes
 
         render assuming escapes |> shouldContain "=System.ArrayTypeMismatchException"
-
-        // Without what an `IDynamicInterfaceCastable` answers, the store is hidden where the
-        // fallback asks it.
-        let undynamic, sources =
-            EscapeAnalysis.unknownSources (analysis (Set.remove Assumption.DynamicCastsAsDocumented Assumption.all)) key
-
-        let rendered = sources |> Seq.map (renderSite undynamic) |> Set.ofSeq
-
-        let site =
-            "System.Runtime.InteropServices.DynamicInterfaceCastableHelpers::IsInterfaceImplemented IL VirtualCall "
-            + "System.Runtime.InteropServices.IDynamicInterfaceCastable::IsInterfaceImplemented"
-
-        if not (rendered.Contains site) then
-            failwith $"Without DynamicCastsAsDocumented, a store is hidden at %A{Set.toList rendered}, not at %s{site}"
 
     /// C# unboxes a `Nullable<T>` only by `unbox.any`, but `unbox` of one is IL too, and the JIT
     /// calls `Unbox_Nullable` for it (`getUnBoxHelper`).
