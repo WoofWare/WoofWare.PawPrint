@@ -895,3 +895,44 @@ module TestAwaitPattern =
         cases
         |> List.map (fun (name, await, _) -> name, AwaitPattern.isTailAwait await)
         |> shouldEqual (cases |> List.map (fun (name, _, expected) -> name, expected))
+
+    /// The rest of the rule, read from the JIT and the VM rather than measured: a body the JIT does
+    /// not optimise (`Tier0OptimizationEnabled`) makes no tail await of a call, nor does an entry
+    /// point, nor a call of a method that may look for its caller's frame (`CEEInfo::canTailCall`).
+    [<Test>]
+    let ``isTailAwait refuses a tail await wherever canTailCall or Tier0OptimizationEnabled does`` () : unit =
+        let optimised : TailCallFacts =
+            {
+                AssemblyAllowsOptimisation = true
+                CallerNoOptimization = false
+                CallerNoInlining = false
+                CallerIsEntryPoint = false
+                ReturnTypesAgree = true
+                ExactCalleeRequiresSecObject = false
+            }
+
+        let refusing : (string * TailCallFacts) list =
+            [
+                "NoOptimization",
+                { optimised with
+                    CallerNoOptimization = true
+                }
+                "the entry point",
+                { optimised with
+                    CallerIsEntryPoint = true
+                }
+                "a callee requiring a security object",
+                { optimised with
+                    ExactCalleeRequiresSecObject = true
+                }
+            ]
+
+        for shape in [ TailShape.Return ; TailShape.NewValueTask () ] do
+            AwaitPattern.isTailAwait (AsyncVersionAwait.TailCall (shape, optimised))
+            |> shouldEqual true
+
+            refusing
+            |> List.map (fun (name, facts) ->
+                name, AwaitPattern.isTailAwait (AsyncVersionAwait.TailCall (shape, facts))
+            )
+            |> shouldEqual (refusing |> List.map (fun (name, _) -> name, false))
