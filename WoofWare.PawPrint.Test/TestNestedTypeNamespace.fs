@@ -572,3 +572,49 @@ module TestNestedTypeNamespace =
         resolved |> List.length |> shouldEqual (nestedRows.Length + 1)
 
         resolved |> List.map fst |> shouldEqual (resolved |> List.map snd)
+
+    /// `AllConcreteTypes.describe` renders a nested type's chain as `TypeInfo.fullName` does, each
+    /// row with its own namespace, so a diagnostic does not spell three of these rows alike.
+    [<Test>]
+    let ``a concrete-type description spells each nested row's own namespace`` () : unit =
+        let lib = dumpedLib ()
+
+        let corelib =
+            withLoggerFactory (fun loggerFactory -> Assembly.readFile loggerFactory HostImage.coreLibPath)
+
+        let assemblies = LoadedAssemblies.ofAssemblies [ corelib ; lib ]
+        let bct = BaseClassTypes.ofCorelib corelib
+
+        let concreteTypes =
+            Corelib.concretizeAll (LoadedAssemblies.ofAssemblies [ corelib ]) bct AllConcreteTypes.Empty
+
+        let rendered =
+            lib.TypeDefs.Values
+            |> Seq.filter (fun ty -> ty.IsNested)
+            |> Seq.map (fun ty ->
+                let handle, concreteTypes =
+                    ConcreteType.makeFromIdentity ty.Identity ty.Namespace ty.Name ImmutableArray.Empty
+                    |> fun ct -> AllConcreteTypes.add bct assemblies ct concreteTypes
+                    |> function
+                        | Ok added -> added
+                        | Error refusal -> failwith (TypeLoadRefusal.describe refusal)
+
+                let description = AllConcreteTypes.describe assemblies concreteTypes handle
+                // The rendering is `<name>#<id> [<assembly>]`; only the name is under test.
+                description.Substring (0, description.IndexOf '#')
+            )
+            |> Seq.sort
+            |> List.ofSeq
+
+        rendered
+        |> shouldEqual (
+            [
+                "Probe.Outer+Sys"
+                "Probe.Outer+A.Sys"
+                "Probe.Outer+B.Sys"
+                "Probe.Outer+A.B.Deep"
+                "Probe.Outer+A.Only"
+                "Probe.Outer+A.Sys+C.Leaf"
+            ]
+            |> List.sort
+        )
