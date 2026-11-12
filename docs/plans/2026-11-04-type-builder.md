@@ -1339,7 +1339,8 @@ it (vm/commodule.cpp) and its callers in `RuntimeModuleBuilder.cs`:
 * `ModuleBuilderMemberRefOfBuilder.cs`, the measurement above, exits 0 on .NET 10. Its terminal-state
   check reads `DynUser`'s AssemblyRef, TypeRef, TypeSpec and MemberRef rows.
 * Each mutant is caught: the name and signature read from the referring module, a field's read as a
-  method's, the TypeSpec parent read as a TypeRef, and the MemberRef added without the find.
+  method's, the TypeSpec parent read as a TypeRef, the MemberRef added without the find, and the scope
+  the handler extended not kept.
 
 ### 5k: left to later stages
 
