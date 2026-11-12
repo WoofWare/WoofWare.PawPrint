@@ -1259,8 +1259,10 @@ module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemb
   `DefineNestedType`, since an emit scope has no `NestedClass` table); a name no TypeDef has, for which
   CoreCLR raises a `COMException`; and a field of the module declared under a TypeSpec parent, which needs
   a created generic type, and the scope has no `GenericParam` table either.
-* **The FieldDef token is checked against the scope's fields**, though CoreCLR hands it back unread: the
-  managed caller passes a `RuntimeFieldInfo`'s own token, so a token the scope lacks is a PawPrint fault.
+* **The FieldDef token is checked against the scope's fields and the parent**, though CoreCLR hands it
+  back unread: the managed caller passes a `RuntimeFieldInfo`'s own token and its declaring type's
+  TypeDef, so a field the scope lacks, or one the parent does not own, is a PawPrint fault. Likewise the
+  method's MethodDef must be a row of the scope.
 
 ### 5j: the oracle
 
@@ -1271,6 +1273,16 @@ module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemb
   `FullName`.
 * `ModuleBuilderOwnTypeReferences.cs`, with a terminal-state check that the module's TypeRef and
   MemberRef rows are only `object` and `object..ctor`.
-* Each mutant is caught: a TypeRef added for the module's own type; the name not unescaped or not
-  divided; the method's or field's token taken from the parent; and an AssemblyRef recorded for the
-  module itself.
+* Each mutant of the handlers is caught: a TypeRef added for the module's own type (by the AssemblyRef's
+  record, which finds no static assembly of that name); the name not divided; the method's or field's
+  token taken from the parent; and an AssemblyRef added for the module itself. The name left
+  unescaped is not a mutant any guest can catch yet; see below.
+
+### 5j: left to later stages
+
+* A nested type of the module, once `DefineNestedType` adds `NestedClass` rows, and a field of an
+  instantiation of a created generic type, once the scope has `GenericParam` rows.
+* `TypeString`, which renders `RuntimeType.FullName`, does not escape a name's reserved characters as
+  `TypeNameBuilder::EscapeName` does: a created type named `Odd+One` is `Odd\+One` on .NET 10 and
+  `Odd+One` under PawPrint. So no guest yet asks `GetTypeRef` for an escaped name of its own module; the
+  host oracle covers the unescaping.
