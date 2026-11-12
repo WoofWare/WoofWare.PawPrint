@@ -422,7 +422,47 @@ Each stage is one pull request, with its tests first.
    (`MethodBody.AsyncIl`). Lifting it means a reflective invocation of an `Async` method running
    its thunk as a `call` does, with a guest that invokes one reflectively; which locals a `.cctor`
    it triggers sees loaded (the thunk's, or the IL's) wants measuring first.
-6. **(4) The await pattern.** Binding async variants at `await` sites and in async versions'
+6. **(3b) Indirect calls.** Every route that binds an `Async` method's ordinary variant other than
+   a call token runs the task-returning thunk, as the token does.
+
+   As built:
+   * What a frame runs is chosen in one place, `IlMachineStateExecution.frameBody`: the metadata
+     body; runtime-async IL as an IL body, for a method with the async calling convention; or the
+     thunk, with its stub scope. `callMethodWithCommitment` builds from it every frame a guest's
+     call reaches, after virtual dispatch and intrinsics.
+   * Measured before the change, every indirect route already went through
+     `callMethodWithCommitment` and ran the thunk: delegates bound by `ldftn`, `ldvirtftn`,
+     `CreateDelegate` (static, closed and open over a virtual method) and multicast; `calli` through
+     `RuntimeMethodHandle.GetFunctionPointer`; an `[UnsafeAccessor]`; and the `InvokeStub_` that
+     reflection emits from a method's second invocation.
+   * The one that did not was a method's first reflective invocation. `RuntimeMethodHandle.InvokeMethod`
+     concretises the method's locals before its `.cctor` runs, since CoreCLR compiles the method
+     first, and it asked for the async IL's. It now asks `frameBody`, and loads the thunk's: CoreCLR
+     compiles the thunk, runs the `.cctor` in the thunk's prologue (`CEEInfo::initClass` asks for it
+     in a static method of a type without `beforefieldinit`), and compiles the async variant only
+     when the thunk calls it. This was read from the source, not measured: the thunk's locals name
+     only CoreLib's types and the method's result type, which the signature has already loaded, so
+     no guest can tell, and a mutant loading no locals for a thunk passes every guest.
+   * Frames PawPrint builds without a guest's call (the entry point, CoreLib's startup calls, the
+     POSIX signal handler) still take the metadata body. None can be an `Async` method returning a
+     promise: a `Main` returning anything but `void` or `int` is refused first, and the signal
+     handler is `[UnmanagedCallersOnly]`. `concretizeLocals` refuses runtime-async IL as a bug.
+
+   Guests: `RuntimeAsyncReflectionInvoke.cs`, `RuntimeAsyncDelegateInvoke.cs` and
+   `RuntimeAsyncFunctionPointerInvoke.cs`, against the oracle, and
+   `sourcesImpure/RuntimeAsyncReflectionInvokeEmittedStub.cs`, with dynamic code supported so that
+   PawPrint runs the emitted stub (PawPrint's tests otherwise turn it off, so the pure guest's later
+   invocations take `InvokeMethod` under PawPrint and the stub under the oracle); checked to exit 0
+   on real .NET 10 and 11. Their targets are `Stream`'s `FinishReadAsync` (a static local function
+   returning `ValueTask<int>` that awaits a task the guest passes), `Stream.FinishWriteAsync`,
+   `IndentedTextWriter.WriteAsync(string)` and `OutputTabsAsync` (awaiting a writer the guest
+   supplies) and `StreamReader.ReadAsyncInternal`. Each checks synchronous completion, suspension,
+   a fault reaching the task rather than `TargetInvocationException`, and that a live stack shows
+   the method once.
+
+   Parks, re-measured on 11.0.0-rc.1 (2026-11-12): both ASP.NET two-process tests pass and are
+   un-parked.
+7. **(4) The await pattern.** Binding async variants at `await` sites and in async versions'
    tail-call patterns; async versions of plain `Task`-returning methods; the second vtable slot.
 
    What stage 2b leaves for it: once an await binds a variant, chains hold several continuations
