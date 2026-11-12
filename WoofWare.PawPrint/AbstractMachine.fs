@@ -561,7 +561,7 @@ module AbstractMachine =
         | MethodBody.PInvoke -> dispatchNative ()
         | MethodBody.AsyncIl _ ->
             failwith
-                $"BUG: reached executeOneStep for {MethodOwner.describe instruction.ExecutingMethod.Owner}::{instruction.ExecutingMethod.Name}, whose frame carries runtime-async IL; callMethod gives a frame that IL only as an IL body, and refuses a method that does not run it"
+                $"BUG: reached executeOneStep for {MethodOwner.describe instruction.ExecutingMethod.Owner}::{instruction.ExecutingMethod.Name}, whose frame carries runtime-async IL; IlMachineStateExecution.frameBody gives a frame that IL only as an IL body"
         | MethodBody.Il instructions ->
 
         let state = StackShapeOfMethod.beforeInstruction baseClassTypes thread state
