@@ -440,8 +440,7 @@ module IlMachineStateExecution =
                     let asyncFrame =
                         match method.TryVariant with
                         | Some MethodVariant.AsyncVariant ->
-                            // Only a method flagged `Async` has an async variant
-                            // (`RuntimeAsyncMethod.asyncVariantOf`), and its body is
+                            // The async variant of a method flagged `Async`, whose body is
                             // user-written.
                             AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture
                         | Some MethodVariant.Ordinary
@@ -475,12 +474,20 @@ module IlMachineStateExecution =
         | MethodBody.PInvoke
         | MethodBody.RuntimeProvided _
         | MethodBody.Abstract ->
-            state,
-            {
-                Method = method
-                VmStub = None
-                AsyncFrame = None
-            }
+            match method.TryVariant with
+            | Some MethodVariant.AsyncVariant ->
+                // `RuntimeAsyncMethod.asyncVariantOf` gives such a variant IL or no body: an async
+                // version, or a declaration that dispatch replaces before a frame is made.
+                failwith
+                    $"TODO: running %O{method}, the async variant of a method whose body is %O{method.Body} rather than runtime-async IL: an async version, which awaits each promise it returns (decision 17 of docs/plans/2026-11-11-runtime-async.md), and which PawPrint does not run yet"
+            | Some MethodVariant.Ordinary
+            | None ->
+                state,
+                {
+                    Method = method
+                    VmStub = None
+                    AsyncFrame = None
+                }
 
     /// What a call does once `callMethod` has offered it to PawPrint's own intrinsic
     /// implementations.

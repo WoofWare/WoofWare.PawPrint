@@ -215,10 +215,10 @@ module TestAwaitPattern =
             mutable AsTasks : int
             /// Calls the matcher answered for but whose operands name something else.
             mutable Unconfirmed : int
-            /// A `call Await` straight after a call, with a block starting between them.
+            /// Await patterns that would match but for the start of a block within them.
             mutable SplitAwaits : int
-            /// A `ret` straight after a call, with a block starting between them.
-            mutable SplitReturns : int
+            /// Tail shapes that would match but for the start of a block within them.
+            mutable SplitTails : int
         }
 
     let private emptyTally () : Tally =
@@ -232,7 +232,7 @@ module TestAwaitPattern =
             AsTasks = 0
             Unconfirmed = 0
             SplitAwaits = 0
-            SplitReturns = 0
+            SplitTails = 0
         }
 
     /// The matcher answers as the reference does at every call of `body`, and no match it confirms
@@ -249,17 +249,19 @@ module TestAwaitPattern =
         let expected = reference named starts body
         let instructions = List.toArray body.Instructions
 
+        // What the reference would read if no block started within the body.
+        let unsplit = reference named Set.empty body
+
+        for KeyValue (offset, _) in unsplit.Awaits do
+            if not (expected.Awaits.ContainsKey offset) then
+                tally.SplitAwaits <- tally.SplitAwaits + 1
+
+        for KeyValue (offset, _) in unsplit.Tails do
+            if not (expected.Tails.ContainsKey offset) then
+                tally.SplitTails <- tally.SplitTails + 1
+
         instructions
         |> Array.iteri (fun index (op, offset) ->
-            if index > 0 && starts.Contains offset then
-                match fst instructions.[index - 1], op with
-                | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt), _),
-                  IlOp.UnaryMetadataToken (UnaryMetadataTokenIlOp.Call, operand) when named operand = Named.Await ->
-                    tally.SplitAwaits <- tally.SplitAwaits + 1
-                | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt), _),
-                  IlOp.Nullary NullaryIlOp.Ret -> tally.SplitReturns <- tally.SplitReturns + 1
-                | _ -> ()
-
             match isCall op with
             | None -> ()
             | Some _ ->
@@ -649,7 +651,7 @@ module TestAwaitPattern =
         tally.AsTasks |> shouldBeGreaterThan 200
         tally.Unconfirmed |> shouldBeGreaterThan 500
         tally.SplitAwaits |> shouldBeGreaterThan 50
-        tally.SplitReturns |> shouldBeGreaterThan 50
+        tally.SplitTails |> shouldBeGreaterThan 50
 
     [<Test>]
     let ``the matcher refuses an offset that is not a call`` () : unit =
@@ -772,18 +774,23 @@ module TestAwaitPattern =
                         $"%s{Path.GetFileName path}: %O{method}"
                         body
 
-        tally.Returns |> shouldBeGreaterThan 1000
-        tally.NewValueTasks |> shouldBeGreaterThan 0
+        // Every tail shape comes up in the IL of either runtime, and so do tail shapes that a
+        // block's start splits.
+        tally.Returns |> shouldBeGreaterThan 10000
+        tally.NewValueTasks |> shouldBeGreaterThan 10
+        tally.AsTasks |> shouldBeGreaterThan 10
+        tally.SplitTails |> shouldBeGreaterThan 100
 
         match FrameworkUnderTest.runtime () with
         | EmulatedRuntime.Net10 -> ()
         | EmulatedRuntime.Net11 ->
-            // RC1's runtime-async bodies await thousands of calls, mostly through ConfigureAwait,
-            // which ValueTasks take through a local.
-            runtimeAsyncBodies |> shouldBeGreaterThan 1000
-            tally.AwaitsWithoutConfigure |> shouldBeGreaterThan 50
+            // RC1's runtime-async bodies await nearly two thousand calls, most through
+            // `ConfigureAwait`, which a `ValueTask` takes through a local; four textual awaits are
+            // split by a block's start.
+            runtimeAsyncBodies |> shouldBeGreaterThan 800
             tally.AwaitsWithConfigure |> shouldBeGreaterThan 1000
-            tally.AwaitsThroughLocal |> shouldBeGreaterThan 200
+            tally.AwaitsWithoutConfigure |> shouldBeGreaterThan 1000
+            tally.AwaitsThroughLocal |> shouldBeGreaterThan 300
             tally.SplitAwaits |> shouldBeGreaterThan 0
 
     /// `StreamReader.ReadToEndAsyncInternal`, a runtime-async body of .NET 11's CoreLib, awaits
