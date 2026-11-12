@@ -933,10 +933,11 @@ public class Foreign : impostor::System.MulticastDelegate
         [ outcome impostor "Local" ; outcome foreign "Foreign" ]
         |> shouldEqual [ "variant (Il)" ; "variant (Il)" ]
 
-    /// No call constructs an async version for a frame to run yet, so `frameBody` refuses one by
-    /// name; it gives the ordinary variant of the same method its own IL.
+    /// `frameBody` runs an async version, the async variant of a method with IL and no `Async` flag,
+    /// on the method's own IL, in a frame that knows it is one; it gives the ordinary variant of the
+    /// same method the same IL in a frame of the ordinary calling convention.
     [<Test>]
-    let ``frameBody refuses by name to run an async version`` () : unit =
+    let ``frameBody runs an async version on its method's own IL`` () : unit =
         let _, loggerFactory = LoggerFactory.makeTest ()
         let coreLib = Assembly.readFile loggerFactory HostImage.coreLibPath
         let baseClassTypes = BaseClassTypes.ofCorelib coreLib
@@ -993,13 +994,17 @@ public class Foreign : impostor::System.MulticastDelegate
             IlMachineStateExecution.frameBody loggerFactory baseClassTypes coreLib ordinary state
 
         obj.ReferenceEquals (frame.Method, ordinary) |> shouldEqual true
+        frame.VmStub.IsNone |> shouldEqual true
+        frame.AsyncFrame |> shouldEqual None
 
         let state, variant = concretised variant
 
-        let refusal =
-            Assert.Throws<System.Exception> (fun () ->
-                IlMachineStateExecution.frameBody loggerFactory baseClassTypes coreLib variant state
-                |> ignore
-            )
+        let _, frame =
+            IlMachineStateExecution.frameBody loggerFactory baseClassTypes coreLib variant state
 
-        refusal.Message |> shouldContainText "an async version"
+        obj.ReferenceEquals (frame.Method, variant) |> shouldEqual true
+        obj.ReferenceEquals (frame.Method.Body, ordinary.Body) |> shouldEqual true
+        frame.VmStub.IsNone |> shouldEqual true
+
+        frame.AsyncFrame
+        |> shouldEqual (Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running))
