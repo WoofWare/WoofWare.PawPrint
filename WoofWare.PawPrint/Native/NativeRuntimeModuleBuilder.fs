@@ -19,6 +19,9 @@ module NativeRuntimeModuleBuilder =
     /// `mdtFieldDef`, the table byte of a `FieldDef` token.
     let private fieldDefTable : int = 0x04
 
+    /// `mdtMethodDef`, the table byte of a `MethodDef` token.
+    let private methodDefTable : int = 0x06
+
     /// `mdtMemberRef`, the table byte of a `MemberRef` token.
     let private memberRefTable : int = 0x0A
 
@@ -67,6 +70,59 @@ module NativeRuntimeModuleBuilder =
         | SignatureImport.Refused (SignatureTokenRefusal.UnreferencedUnsignedAssembly assembly) ->
             failwith
                 $"%s{operation}: the signature of %s{described} names a TypeDef of the unsigned assembly %s{assembly}, which %s{moduleName} has no AssemblyRef for, though the managed caller asks for the declaring type's TypeRef, which makes one, first"
+
+    /// The row of <paramref name="moduleName"/>'s scope that the parent token <paramref name="tr"/> names, for
+    /// a TypeRef or TypeSpec token; or `None` for a token of another table, which each handler answers in its
+    /// own way. A TypeRef or TypeSpec token naming no row is PawPrint's fault, since an earlier QCall handed
+    /// it out.
+    let private typeRefOrSpecParent
+        (operation : string)
+        (described : string)
+        (moduleName : string)
+        (held : EmitScope)
+        (tr : int)
+        : MemberRefParent option
+        =
+        match tr >>> 24 with
+        | table when table = typeRefTable ->
+            match EmitScope.tryTypeRefRid (tr &&& 0x00FFFFFF) held with
+            | Some rid -> Some (MemberRefParent.TypeRef rid)
+            | None ->
+                failwith
+                    $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeRef row of %s{moduleName}"
+        | table when table = typeSpecTable ->
+            match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
+            | Some rid -> Some (MemberRefParent.TypeSpec rid)
+            | None ->
+                failwith
+                    $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeSpec row of %s{moduleName}"
+        | _ -> None
+
+    /// The token of the MemberRef named <paramref name="name"/> with the translated signature under
+    /// <paramref name="parent"/>, found or added (`DefineMemberRef` under `MDDupMemberRef`) in the scope the
+    /// translation left; and the state holding the resulting scope of <paramref name="moduleName"/>, whose
+    /// scope was <paramref name="held"/> before the translation.
+    let private memberRefOf
+        (ctx : NativeCallContext)
+        (state : IlMachineState)
+        (moduleName : string)
+        (held : EmitScope)
+        (parent : MemberRefParent)
+        (name : string)
+        (signature : System.Collections.Immutable.ImmutableArray<byte>, translated : EmitScope)
+        : int * IlMachineState
+        =
+        let memberRef, extended =
+            EmitScopeReferences.defineMemberRef parent name signature translated
+
+        let state =
+            // Neither translated nor added, so there is nothing to re-read.
+            if Object.ReferenceEquals (extended, held) then
+                state
+            else
+                state.WithEmitScope ctx.LoggerFactory moduleName extended |> fst
+
+        (memberRefTable <<< 24) ||| memberRef.Rid, state
 
     let tryExecuteQCall (entryPoint : string) (ctx : NativeCallContext) : NativeHandlerResult option =
         let state = ctx.State
@@ -390,6 +446,109 @@ module NativeRuntimeModuleBuilder =
             |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 token)) ctx.Thread
             |> NativeHandlerResult.completed
             |> Some
+        | "ModuleBuilder_GetMemberRef",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeModuleBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", refedGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty && refedGenerics.IsEmpty
+            ->
+            let operation = "ModuleBuilder_GetMemberRef"
+
+            if instruction.Arguments.Length <> 4 then
+                failwith $"%s{operation}: expected four native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held =
+                match state.TypeSystem._LoadedAssemblies.TryDynamicScope moduleName with
+                | Some scope -> scope
+                | None ->
+                    failwith
+                        $"%s{operation}: %s{moduleName} is not a dynamic assembly, and only a RuntimeModuleBuilder's module reaches this QCall"
+
+            let refedName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[1] |> EvalStackValue.ofCliType)
+
+            let tr = NativeCall.int32Argument operation instruction.Arguments.[2]
+            let defToken = NativeCall.int32Argument operation instruction.Arguments.[3]
+
+            if refedName = moduleName then
+                failwith
+                    $"TODO: %s{operation}: member 0x%08x{defToken} is of %s{moduleName} itself, under the parent 0x%08x{tr}, as for a member of an instantiation of one of its own generic TypeBuilders; CoreCLR translates its signature from the module into itself, where ImportTypeDef keeps each TypeDef token, and PawPrint translates only from another module"
+
+            let refed =
+                state.LoadedAssembly refedName
+                |> Option.defaultWith (fun () -> failwith $"%s{operation}: %s{refedName} is not loaded")
+
+            let reader = refed.PeReader.GetMetadataReader ()
+            let rid = defToken &&& 0x00FFFFFF
+
+            // The member's name and signature, as CoreCLR reads them from the defining module: a MethodDef's for
+            // a MethodDef token, and a FieldDef's for any other.
+            let name, declaringTypeHandle, import =
+                if
+                    defToken >>> 24 = methodDefTable
+                    && rid >= 1
+                    && rid <= reader.MethodDefinitions.Count
+                then
+                    let definition =
+                        reader.GetMethodDefinition (MetadataTokens.MethodDefinitionHandle rid)
+
+                    reader.GetString definition.Name,
+                    definition.GetDeclaringType (),
+                    EmitScopeReferences.importMethodSignature reader (reader.GetBlobContent definition.Signature) held
+                elif
+                    defToken >>> 24 = fieldDefTable
+                    && rid >= 1
+                    && rid <= reader.FieldDefinitions.Count
+                then
+                    let definition =
+                        reader.GetFieldDefinition (MetadataTokens.FieldDefinitionHandle rid)
+
+                    reader.GetString definition.Name,
+                    definition.GetDeclaringType (),
+                    EmitScopeReferences.importFieldSignature reader (reader.GetBlobContent definition.Signature) held
+                else
+                    failwith
+                        $"TODO: %s{operation}: 0x%08x{defToken} names no MethodDef or FieldDef row of %s{refedName}; the managed callers pass a builder's own token, so only a user-derived builder passes another, for which CoreCLR's metadata lookup fails and the QCall throws, which PawPrint does not raise"
+
+            let declaringType = reader.GetTypeDefinition declaringTypeHandle
+
+            let described =
+                $"%s{reader.GetString declaringType.Namespace}.%s{reader.GetString declaringType.Name}::%s{name} of %s{refedName}"
+
+            // No assembly PawPrint loads is collectible, so the emitter's collectible-assembly check never
+            // applies.
+            let translated = import |> translatedSignature operation described moduleName
+
+            let parent =
+                match typeRefOrSpecParent operation described moduleName held tr with
+                | Some parent -> parent
+                | None when tr >>> 24 = typeDefTable ->
+                    failwith
+                        $"TODO: %s{operation}: parent token 0x%08x{tr} for %s{described} is a TypeDef of %s{moduleName}, for which CoreCLR first makes a TypeRef (DefineTypeRefHelper); the managed callers pass a TypeRef for a builder of another module, so only a user-derived builder claiming a type of this module passes a TypeDef"
+                | None ->
+                    failwith
+                        $"%s{operation}: parent token 0x%08x{tr} for %s{described} is not a TypeDef, TypeRef or TypeSpec, which are all the managed callers pass"
+
+            let token, state = memberRefOf ctx state moduleName held parent name translated
+
+            state
+            |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 token)) ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
         | "ModuleBuilder_GetMemberRefOfMethodInfo",
           "System.Private.CoreLib",
           "System.Reflection.Emit",
@@ -460,39 +619,18 @@ module NativeRuntimeModuleBuilder =
                     // the emitter's collectible-assembly check never applies.
                     let signature = reader.GetBlobContent definition.Signature
 
-                    let signature, translated =
+                    let translated =
                         EmitScopeReferences.importMethodSignature reader signature held
                         |> translatedSignature operation described moduleName
 
                     let parent =
-                        match tr >>> 24 with
-                        | table when table = typeRefTable ->
-                            match EmitScope.tryTypeRefRid (tr &&& 0x00FFFFFF) held with
-                            | Some rid -> MemberRefParent.TypeRef rid
-                            | None ->
-                                failwith
-                                    $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeRef row of %s{moduleName}"
-                        | table when table = typeSpecTable ->
-                            match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
-                            | Some rid -> MemberRefParent.TypeSpec rid
-                            | None ->
-                                failwith
-                                    $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeSpec row of %s{moduleName}"
-                        | _ ->
+                        match typeRefOrSpecParent operation described moduleName held tr with
+                        | Some parent -> parent
+                        | None ->
                             failwith
                                 $"%s{operation}: parent token 0x%08x{tr} for %s{described} is neither a TypeRef nor a TypeSpec; the managed caller passes its declaring type's token, which is a TypeDef only for a type of this module"
 
-                    let memberRef, extended =
-                        EmitScopeReferences.defineMemberRef parent name signature translated
-
-                    let state =
-                        // Found rather than added, so there is nothing to re-read.
-                        if Object.ReferenceEquals (extended, held) then
-                            state
-                        else
-                            state.WithEmitScope ctx.LoggerFactory moduleName extended |> fst
-
-                    (memberRefTable <<< 24) ||| memberRef.Rid, state
+                    memberRefOf ctx state moduleName held parent name translated
 
             state
             |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 token)) ctx.Thread
@@ -592,7 +730,7 @@ module NativeRuntimeModuleBuilder =
 
                     // No assembly PawPrint loads is collectible, so the emitter's collectible-assembly check
                     // never applies.
-                    let signature, translated =
+                    let translated =
                         EmitScopeReferences.importFieldSignature
                             reader
                             (reader.GetBlobContent definition.Signature)
@@ -600,34 +738,13 @@ module NativeRuntimeModuleBuilder =
                         |> translatedSignature operation described moduleName
 
                     let parent =
-                        match tr >>> 24 with
-                        | table when table = typeRefTable ->
-                            match EmitScope.tryTypeRefRid (tr &&& 0x00FFFFFF) held with
-                            | Some rid -> MemberRefParent.TypeRef rid
-                            | None ->
-                                failwith
-                                    $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeRef row of %s{moduleName}"
-                        | table when table = typeSpecTable ->
-                            match EmitScope.tryTypeSpecRid (tr &&& 0x00FFFFFF) held with
-                            | Some rid -> MemberRefParent.TypeSpec rid
-                            | None ->
-                                failwith
-                                    $"%s{operation}: parent token 0x%08x{tr} for %s{described} names no TypeSpec row of %s{moduleName}"
-                        | _ ->
+                        match typeRefOrSpecParent operation described moduleName held tr with
+                        | Some parent -> parent
+                        | None ->
                             failwith
                                 $"%s{operation}: parent token 0x%08x{tr} for %s{described} is not a TypeDef, TypeRef or TypeSpec, which are all the managed caller passes"
 
-                    let memberRef, extended =
-                        EmitScopeReferences.defineMemberRef parent name signature translated
-
-                    let state =
-                        // Found rather than added, so there is nothing to re-read.
-                        if Object.ReferenceEquals (extended, held) then
-                            state
-                        else
-                            state.WithEmitScope ctx.LoggerFactory moduleName extended |> fst
-
-                    (memberRefTable <<< 24) ||| memberRef.Rid, state
+                    memberRefOf ctx state moduleName held parent name translated
 
             state
             |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 token)) ctx.Thread

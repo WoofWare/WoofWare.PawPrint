@@ -210,6 +210,7 @@ module NativeQCall =
             NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetTokenFromTypeSpec"
             "ModuleBuilder_GetMemberRefFromSignature",
             NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetMemberRefFromSignature"
+            "ModuleBuilder_GetMemberRef", NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetMemberRef"
             "ModuleBuilder_GetMemberRefOfMethodInfo",
             NativeRuntimeModuleBuilder.tryExecuteQCall "ModuleBuilder_GetMemberRefOfMethodInfo"
             "ModuleBuilder_GetMemberRefOfFieldInfo",
