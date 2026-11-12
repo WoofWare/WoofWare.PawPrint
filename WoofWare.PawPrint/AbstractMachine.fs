@@ -325,6 +325,8 @@ module AbstractMachine =
                 failwith "unexpected step of a thrown non-exception's wrapping from delegate frame pop"
             | ReturnFrameResult.ResumeAsyncContexts _ ->
                 failwith "unexpected step of a runtime-async body's context handling from delegate frame pop"
+            | ReturnFrameResult.ResumeSynchronizedMethod _ ->
+                failwith "unexpected step of a synchronized method's monitor handling from delegate frame pop"
             | ReturnFrameResult.ResumedAsyncReturned _ ->
                 failwith "unexpected return of a resumed runtime-async frame from delegate frame pop"
             | ReturnFrameResult.NormalReturn state ->
@@ -695,9 +697,14 @@ module AbstractMachine =
         =
         let logger = logger loggerFactory
 
-        // A user-written runtime-async body's call of a context helper is a step of its own: CoreCLR's
-        // JIT emits it into the body, after the type-initialisation check.
+        // A synchronized method's call of a monitor helper, and a user-written runtime-async body's
+        // call of a context helper, is a step of its own: CoreCLR's JIT emits it into the body,
+        // after the type-initialisation check. No frame does both, which frame creation refuses.
         let afterPrologue (state : IlMachineState) : ExecutionResult =
+            match SynchronizedMethodMonitor.beforeInstruction loggerFactory baseClassTypes thread state with
+            | Some result -> result
+            | None ->
+
             match AsyncContextSaving.beforeInstruction loggerFactory baseClassTypes thread state with
             | Some result -> result
             | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger

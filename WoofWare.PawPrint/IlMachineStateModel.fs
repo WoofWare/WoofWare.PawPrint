@@ -740,6 +740,10 @@ type ReturnFrameResult =
         IlMachineState *
         step : AsyncContextStep *
         returned : (EvalStackValue * ConcreteTypeHandle) option
+    /// The frame that returned was a monitor helper the runtime called for the synchronized
+    /// method's frame it returned to, and the runtime does `step` next; state is positioned at that
+    /// frame.
+    | ResumeSynchronizedMethod of IlMachineState * step : SynchronizedMethodStep
     /// The frame that returned was a suspended runtime-async frame CoreLib's dispatcher resumed
     /// (`ReturnValueDisposition.ResumedAsync`), so the frame's value, if it returned one, goes
     /// through `resultLocation`, and the dispatcher's `calli` gets null; state is positioned at the

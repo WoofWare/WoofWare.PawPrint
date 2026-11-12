@@ -108,6 +108,8 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 10.
     let parkedOnNet10 : Map<string, string> =
         [
+            "SynchronizedMethodReleasedByBody.cs",
+            """A synchronized method whose body calls `Monitor.Exit(this)`, so the runtime's exit helper before its `ret` (`Monitor.ExitIfLockTaken` on .NET 10) finds the monitor free and raises `SynchronizationLockException`, which the JIT's fault handler round the body raises again by calling the helper a second time, and the caller catches. PawPrint's `Monitor.Exit_FastPath` stops first (measured): "TODO: Monitor.Exit_FastPath on a Free SyncBlock should throw SynchronizationLockException". Un-park when that raises, and when an exception escaping a synchronized method's monitor helper unwinds through its frame as the JIT's code does, rather than ending the run (`ExceptionEscape.SynchronizedMethodHelper`). Verified to exit 0 on real .NET 10."""
             "RuntimeAsyncCatchWrapsAfterSuspension.cs",
             """On .NET 10 `LoadIntoBufferAsyncCore` is a state machine, and the `HttpRequestException` its `catch` makes goes through `ExceptionDispatchInfo.SetCurrentStackTrace`, which formats the current stack; formatting the state machine's `MoveNext` looks up the method it belongs to, by type name (`StackTrace.TryResolveStateMachineMethod`), which stops in `RuntimeAssembly.GetTypeCore` (measured): "MemoryBlock.readBytes: byte at offset 0 in <stack memory block #0> is uninitialised", as `RuntimeAsyncTraceHidesThunk.cs` does. .NET 11's runtime-async methods are no state machines. Un-park when `RuntimeAssembly.GetTypeCore` runs on .NET 10. Verified to exit 0 on real .NET 10."""
             "RuntimeAsyncTraceHidesThunk.cs",
@@ -125,6 +127,8 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 11.
     let parkedOnNet11 : Map<string, string> =
         [
+            "SynchronizedMethodReleasedByBody.cs",
+            """A synchronized method whose body calls `Monitor.Exit(this)`, so the runtime's exit helper before its `ret` (`Monitor.SynchronizedMethodExit` on .NET 11) finds the monitor free and raises `SynchronizationLockException`, which the JIT's fault handler round the body raises again by calling the helper a second time, and the caller catches. PawPrint ends the run when an exception escapes a synchronized method's monitor helper (measured): "TODO: an exception escaped SynchronizedMethodExit, which the runtime called for the monitor of the synchronized method beneath it". Un-park when such an exception unwinds through the method's frame as the JIT's code does, searching none of the method's own clauses (`ExceptionEscape.SynchronizedMethodHelper`). Verified to exit 0 on real .NET 11 RC1."""
             "ProcessStartRootedSeeded.cs",
             """On .NET 11, `Process.Start` creates its redirections' pipes in managed code and then calls `SystemNative_ForkAndExecProcess`, whose .NET 11 argument list PawPrint does not recognise, so it stops there (measured): "Unimplemented native method (PInvokeImpl libSystem.Native!SystemNative_ForkAndExecProcess)". That shim makes no `access` check before it forks: a rooted path naming nothing executable forks a child, whose failed `execve` sends its errno back over a pipe. Un-park when PawPrint models that child. Verified to exit 0 on real .NET 11 RC1, which skips the guest's direct calls of .NET 10's shim."""
         ]
