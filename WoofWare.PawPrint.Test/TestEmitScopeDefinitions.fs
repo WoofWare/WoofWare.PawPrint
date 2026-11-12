@@ -549,3 +549,77 @@ module TestEmitScopeDefinitions =
                 property
 
         coverage.Count () |> shouldBeGreaterThan 100
+
+    /// `ModuleBuilder_GetTypeRef` for a created type of the emitting module unescapes the type's
+    /// `FullName`, which the managed caller passes, and finds its TypeDef (`FindTypeDefByName`) rather
+    /// than adding a TypeRef. Real .NET's emitter, over the names it accepts, gives each created type the
+    /// TypeDef that `tryFindTopLevelTypeDef` finds for that name, divided as `splitTypeName` divides it.
+    [<Test>]
+    let ``real .NET finds a created type of its own module as the TypeDef the lookup finds by its full name``
+        ()
+        : unit
+        =
+        let genName : Gen<string> =
+            Gen.elements [ 'a' ; 'b' ; '.' ; ' ' ; ',' ; '[' ; ']' ; '&' ; '*' ; '+' ; '\\' ]
+            |> Gen.listOf
+            |> Gen.map (fun cs -> System.String (Array.ofSeq cs |> Array.truncate 6))
+            |> Gen.filter (fun s -> s.Length > 0)
+
+        let genNames : Gen<string list> =
+            Gen.listOf genName |> Gen.map (List.ofSeq >> List.truncate 8)
+
+        // `cover escaped` is called for each name real .NET accepts and the model defines, found in its
+        // module and in the scope, with whether its `FullName` escapes a reserved character.
+        let property (cover : bool -> unit) (names : string list) : unit =
+            let assembly =
+                System.Reflection.Emit.AssemblyBuilder.DefineDynamicAssembly (
+                    AssemblyName "OwnTypeOracle",
+                    System.Reflection.Emit.AssemblyBuilderAccess.RunAndCollect
+                )
+
+            let module' = assembly.DefineDynamicModule "OwnTypeOracle"
+            let mutable scope = DynamicAssemblyImage.scope dynamicParts Guid.Empty
+            let builders = ResizeArray<System.Reflection.Emit.TypeBuilder> ()
+
+            let flags =
+                TypeAttributes.Public ||| TypeAttributes.Interface ||| TypeAttributes.Abstract
+
+            for name in names do
+                let real =
+                    try
+                        Some (module'.DefineType (name, flags))
+                    with :? ArgumentException ->
+                        None
+
+                match real with
+                | None -> ()
+                | Some builder ->
+                    match EmitScopeDefinitions.defineTopLevelTypeDef name flags None [] scope with
+                    | TypeDefDefinition.Duplicate existing ->
+                        failwith
+                            $"real .NET defined %s{name} as 0x%08x{builder.MetadataToken}, but the scope already has it as TypeDef %d{existing.Rid}"
+                    | TypeDefDefinition.Defined (rid, next) ->
+                        builder.MetadataToken |> shouldEqual (0x02000000 ||| rid.Rid)
+                        scope <- next
+                        builders.Add builder
+
+            for builder in builders do
+                let created = builder.CreateType ()
+                let token = module'.GetTypeMetadataToken created
+                token |> shouldEqual builder.MetadataToken
+
+                let unescaped = EmitScopeReferences.unescapeTypeName created.FullName
+                let ns, name = EmitScopeReferences.splitTypeName unescaped
+
+                EmitScopeDefinitions.tryFindTopLevelTypeDef ns name scope
+                |> shouldEqual (Some (TypeDefRid (token &&& 0x00FFFFFF)))
+
+                cover (unescaped <> created.FullName)
+
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 300) (Arb.fromGen genNames) property
+
+        // The generator reaches names real .NET accepts, and among them names whose `FullName` escapes a
+        // reserved character.
+        coverage.Count false + coverage.Count true |> shouldBeGreaterThan 300
+        coverage.Count true |> shouldBeGreaterThan 30
