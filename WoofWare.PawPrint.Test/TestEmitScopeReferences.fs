@@ -465,6 +465,14 @@ module TestEmitScopeReferences =
         EmitScopeReferences.isAssemblyRefFor request first scope |> shouldEqual true
         EmitScopeReferences.isAssemblyRefFor request second scope |> shouldEqual true
 
+    /// What a request for a row did: found it among the rows already there, or added it.
+    [<RequireQualifiedAccess>]
+    type private RowRequestOutcome =
+        | Found
+        /// Found a row of which the scope holds two alike.
+        | FoundOfTwo
+        | Added
+
     /// `RegMeta::GetTokenFromSig`, which `TypeBuilder_SetMethodIL` calls for a body's local signature:
     /// in a dynamic module, whose emitter checks for duplicate signatures, the first `StandAloneSig`
     /// row with the same bytes (`ImportHelper::FindStandAloneSig`), or a new one. Real .NET's
@@ -483,10 +491,7 @@ module TestEmitScopeReferences =
                 [ typeof<int> ; typeof<int> ]
             ]
 
-        let found = ref 0
-        let added = ref 0
-
-        let property (choices : int list) : unit =
+        let property (cover : RowRequestOutcome -> unit) (choices : int list) : unit =
             let assembly =
                 System.Reflection.Emit.AssemblyBuilder.DefineDynamicAssembly (
                     AssemblyName "StandAloneSigOracle",
@@ -515,10 +520,10 @@ module TestEmitScopeReferences =
                 0x11000000 ||| rid.Rid |> shouldEqual expected
 
                 if (EmitScope.standAloneSigs next).Count = before then
-                    found.Value <- found.Value + 1
+                    cover RowRequestOutcome.Found
                     Object.ReferenceEquals (next, scope) |> shouldEqual true
                 else
-                    added.Value <- added.Value + 1
+                    cover RowRequestOutcome.Added
                     (EmitScope.standAloneSigs next).Count |> shouldEqual (before + 1)
 
                     EmitScope.blobAt (EmitScope.standAloneSigs next).[rid.Rid - 1].Signature next
@@ -527,13 +532,14 @@ module TestEmitScopeReferences =
 
                 scope <- next
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 100,
-            Prop.forAll (Arb.fromGen (Gen.listOf (Gen.choose (0, 100)) |> Gen.map List.ofSeq)) property
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
+                (Arb.fromGen (Gen.listOf (Gen.choose (0, 100)) |> Gen.map List.ofSeq))
+                property
 
-        found.Value |> shouldBeGreaterThan 100
-        added.Value |> shouldBeGreaterThan 100
+        coverage.Count RowRequestOutcome.Found |> shouldBeGreaterThan 100
+        coverage.Count RowRequestOutcome.Added |> shouldBeGreaterThan 100
 
     /// `RegMeta::GetTokenFromTypeSpec`, which `ModuleBuilder_GetTokenFromTypeSpec` calls: in a dynamic
     /// module, whose emitter checks for duplicate TypeSpecs (`MDDupTypeSpec`), the first TypeSpec row
@@ -550,10 +556,7 @@ module TestEmitScopeReferences =
                 typeof<string[,]>
             ]
 
-        let found = ref 0
-        let added = ref 0
-
-        let property (choices : int list) : unit =
+        let property (cover : RowRequestOutcome -> unit) (choices : int list) : unit =
             let assembly =
                 System.Reflection.Emit.AssemblyBuilder.DefineDynamicAssembly (
                     AssemblyName "TypeSpecOracle",
@@ -573,10 +576,10 @@ module TestEmitScopeReferences =
                 0x1B000000 ||| rid.Rid |> shouldEqual expected
 
                 if (EmitScope.typeSpecs next).Count = before then
-                    found.Value <- found.Value + 1
+                    cover RowRequestOutcome.Found
                     Object.ReferenceEquals (next, scope) |> shouldEqual true
                 else
-                    added.Value <- added.Value + 1
+                    cover RowRequestOutcome.Added
 
                     EmitScope.blobAt (EmitScope.typeSpecs next).[rid.Rid - 1].Signature next
                     |> List.ofSeq
@@ -584,13 +587,14 @@ module TestEmitScopeReferences =
 
                 scope <- next
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 100,
-            Prop.forAll (Arb.fromGen (Gen.listOf (Gen.choose (0, 100)) |> Gen.map List.ofSeq)) property
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
+                (Arb.fromGen (Gen.listOf (Gen.choose (0, 100)) |> Gen.map List.ofSeq))
+                property
 
-        found.Value |> shouldBeGreaterThan 100
-        added.Value |> shouldBeGreaterThan 100
+        coverage.Count RowRequestOutcome.Found |> shouldBeGreaterThan 100
+        coverage.Count RowRequestOutcome.Added |> shouldBeGreaterThan 100
 
     /// Instantiations a request may give besides those already in the scope, some of them alike but for
     /// their length or one byte.
@@ -613,14 +617,16 @@ module TestEmitScopeReferences =
     /// method and the same instantiation bytes, or a new one.
     [<Test>]
     let ``a method instantiation is the first row with its method and instantiation, or else a new row`` () : unit =
-        let mutable found = 0
-        let mutable foundOfTwo = 0
-        let mutable added = 0
-
         let held (scope : EmitScope) (row : MethodSpecRow) : MethodDefOrRef * byte list =
             row.Method, List.ofSeq (EmitScope.blobAt row.Instantiation scope)
 
-        let property (generated : EmitScope) (duplicate : int option) (requests : MethodSpecRequest list) : unit =
+        let property
+            (cover : RowRequestOutcome -> unit)
+            (generated : EmitScope)
+            (duplicate : int option)
+            (requests : MethodSpecRequest list)
+            : unit
+            =
             // The emitter never adds a row it would find, but a scope may hold two alike all the same:
             // the first of them is the one found.
             let start =
@@ -660,15 +666,15 @@ module TestEmitScopeReferences =
 
                     match List.tryFindIndex ((=) key) model with
                     | Some index ->
-                        found <- found + 1
+                        cover RowRequestOutcome.Found
 
                         if List.filter ((=) key) model |> List.length > 1 then
-                            foundOfTwo <- foundOfTwo + 1
+                            cover RowRequestOutcome.FoundOfTwo
 
                         rid |> shouldEqual (MethodSpecRid (index + 1))
                         Object.ReferenceEquals (next, scope) |> shouldEqual true
                     | None ->
-                        added <- added + 1
+                        cover RowRequestOutcome.Added
                         rid |> shouldEqual (MethodSpecRid (model.Length + 1))
                         model <- model @ [ key ]
 
@@ -699,14 +705,15 @@ module TestEmitScopeReferences =
             Gen.zip3 EmitScopeGen.genScope (Gen.optionOf EmitScopeGen.choice) (Gen.listOf genRequest)
             |> Arb.fromGen
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll arb (fun (start, duplicate, requests) -> property start duplicate requests)
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 300)
+                arb
+                (fun cover (start, duplicate, requests) -> property cover start duplicate requests)
 
-        found |> shouldBeGreaterThan 100
-        foundOfTwo |> shouldBeGreaterThan 20
-        added |> shouldBeGreaterThan 100
+        coverage.Count RowRequestOutcome.Found |> shouldBeGreaterThan 100
+        coverage.Count RowRequestOutcome.FoundOfTwo |> shouldBeGreaterThan 20
+        coverage.Count RowRequestOutcome.Added |> shouldBeGreaterThan 100
 
     [<Test>]
     let ``an empty instantiation, and a method the scope does not have, are refused`` () : unit =

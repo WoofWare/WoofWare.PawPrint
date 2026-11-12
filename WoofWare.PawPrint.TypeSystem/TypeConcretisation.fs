@@ -179,8 +179,15 @@ module AllConcreteTypes =
         // This walks the same chain iteratively, refusing to revisit a row, so corrupt metadata
         // costs a marker rather than the process.
         let nestedName (assembly : DumpedAssembly) (typeDef : TypeInfo<GenericParamFromMetadata, TypeDefn>) : string =
+            // Each row of the chain is its own Namespace column and Name, as in `TypeInfo.fullName`.
+            let own (row : TypeInfo<GenericParamFromMetadata, TypeDefn>) : string =
+                if String.IsNullOrEmpty row.Namespace then
+                    row.Name
+                else
+                    $"%s{row.Namespace}.%s{row.Name}"
+
             let mutable current = typeDef
-            let mutable parts = [ typeDef.Name ]
+            let mutable parts = [ own typeDef ]
             let mutable seen = Set.singleton typeDef.Identity.TypeDefinition
             let mutable truncated = false
             let mutable walking = true
@@ -203,17 +210,10 @@ module AllConcreteTypes =
                         walking <- false
                     else
                         seen <- seen.Add parent.Identity.TypeDefinition
-                        parts <- parent.Name :: parts
+                        parts <- own parent :: parts
                         current <- parent
 
-            let joined = String.Join ("+", parts)
-
-            // The namespace belongs to the outermost type of the chain.
-            let qualified =
-                if String.IsNullOrEmpty current.Namespace then
-                    joined
-                else
-                    $"%s{current.Namespace}.%s{joined}"
+            let qualified = String.Join ("+", parts)
 
             if truncated then "..+" + qualified else qualified
 

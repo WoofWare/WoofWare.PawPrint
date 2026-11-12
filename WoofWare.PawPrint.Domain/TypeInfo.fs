@@ -477,18 +477,23 @@ type BaseClassTypes<'corelib> =
 
 [<RequireQualifiedAccess>]
 module TypeInfo =
-    /// The nesting chain is joined with `+`, not `.`, matching CoreCLR's
-    /// `TypeNameBuilder::AddNestedName` (`vm/typestring.cpp`) and hence `Type.FullName` /
-    /// `Type.ToString()`: `typeof(Enclosing.Inner).FullName` is `Enclosing+Inner`. A `.` would
-    /// be ambiguous with a namespace separator, which is exactly why the CLR does not use one.
-    let rec fullName (get : TypeDefinitionHandle -> TypeInfo<_, _>) (ty : TypeInfo<'a, 'b>) =
+    /// The type's name as `Type.FullName` and `Type.ToString()` render it for a non-generic type,
+    /// following CoreCLR's `TypeString::AppendNestedTypeDef` (`vm/typestring.cpp`): each row of the
+    /// nesting chain, outermost first, is its own Namespace column and Name joined with `.`, and the
+    /// rows are joined with `+`. So `typeof(Enclosing.Inner).FullName` is `Enclosing+Inner`, and a
+    /// row with namespace `A` and name `Sys` nested in `Probe.Outer` is `Probe.Outer+A.Sys`.
+    let rec fullName (get : TypeDefinitionHandle -> TypeInfo<_, _>) (ty : TypeInfo<'a, 'b>) : string =
+        let own =
+            if String.IsNullOrEmpty ty.Namespace then
+                ty.Name
+            else
+                $"%s{ty.Namespace}.%s{ty.Name}"
+
         if ty.IsNested then
             let parent = get ty.DeclaringType |> fullName get
-            $"%s{parent}+{ty.Name}"
-        else if not (String.IsNullOrEmpty ty.Namespace) then
-            $"{ty.Namespace}.{ty.Name}"
+            $"%s{parent}+%s{own}"
         else
-            ty.Name
+            own
 
     let withGenerics<'a, 'b, 'field> (gen : 'b ImmutableArray) (t : TypeInfo<'a, 'field>) : TypeInfo<'b, 'field> =
         {

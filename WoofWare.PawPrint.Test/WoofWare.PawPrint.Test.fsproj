@@ -15,6 +15,7 @@
     <Compile Include="PreparedGuest.fs" />
     <Compile Include="SynthesisedLayoutKind.fs" />
     <Compile Include="TestGcHeapHardLimit.fs" />
+    <Compile Include="TestCoverageSample.fs" />
     <Compile Include="TestJitSwitchLowering.fs" />
     <Compile Include="TestNoMissedInterpolation.fs" />
     <Compile Include="TestFixturesDeclareParallelism.fs" />

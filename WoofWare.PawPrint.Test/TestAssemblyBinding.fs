@@ -128,22 +128,17 @@ module TestAssemblyBinding =
                 return requested rm rn rb rr, Version (int fm, int fn, int fb, int fr)
             }
 
-        let mutable compatible = 0
-        let mutable incompatible = 0
-
-        let property (req : RequestedAssemblyVersion, found : Version) : unit =
+        // Each case is labelled with whether the versions are compatible.
+        let property (cover : bool -> unit) (req : RequestedAssemblyVersion, found : Version) : unit =
             let expected = lexicographic req found
-
-            if expected then
-                compatible <- compatible + 1
-            else
-                incompatible <- incompatible + 1
-
+            cover expected
             AssemblyBinding.isCompatibleVersion req found |> shouldEqual expected
 
-        Check.One (Config.QuickThrowOnFailure.WithMaxTest 2000, Prop.forAll (Arb.fromGen gen) property)
-        compatible |> shouldBeGreaterThan 200
-        incompatible |> shouldBeGreaterThan 200
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 2000) (Arb.fromGen gen) property
+
+        coverage.Count true |> shouldBeGreaterThan 200
+        coverage.Count false |> shouldBeGreaterThan 200
 
     /// The image the tests copy about: a small one, because `Assembly.readFile` keeps every parse
     /// it makes, keyed by full path, for the life of the process, and each test here reads a

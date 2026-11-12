@@ -374,6 +374,20 @@ module internal UnaryMetadataFieldOps =
             | EvalStackValue.NativeInt (NativeIntSource.MethodTableAuxiliaryDataPtr methodTableFor) ->
                 failwith
                     $"TODO: stfld {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name} through MethodTableAuxiliaryDataPtr %O{methodTableFor}; synthetic MethodTableAuxiliaryData cache writes are not modelled"
+            // ECMA-335 III.4.28 admits an unmanaged pointer as the receiver. One that addresses
+            // storage reaches the field exactly as the managed pointer to that storage does.
+            | EvalStackValue.ManagedPointer (ManagedPointerSource.Byref addressed)
+            | EvalStackValue.NativeInt (NativeIntSource.ManagedPointer addressed) ->
+                let relationship, state =
+                    classifyFieldThroughByref baseClassTypes fieldId (ManagedPointerSource.Byref addressed) state
+
+                let dest =
+                    match relationship with
+                    | FieldThroughByref.Projected ->
+                        AddressedByref.appendProjection (ByrefProjection.Field fieldId) addressed
+                    | FieldThroughByref.IsContainer _ -> addressed
+
+                IlMachineState.writeManagedByrefWithBase baseClassTypes state dest valueToStore
             | EvalStackValue.NativeInt _ -> failwith "unexpectedly setting field on a nativeint"
             | EvalStackValue.Float _ -> failwith "unexpectedly setting field on a float"
             | EvalStackValue.NullObjectRef -> failwith "unreachable: NullObjectRef handled above"
@@ -394,16 +408,6 @@ module internal UnaryMetadataFieldOps =
             | EvalStackValue.ManagedPointer (ManagedPointerSource.NativeIntPlaceholder bits) ->
                 failwith
                     $"stfld: cannot write through fake non-null byref @ 0x%x{bits}; the placeholder must never be dereferenced"
-            | EvalStackValue.ManagedPointer (ManagedPointerSource.Byref addressed as src) ->
-                let relationship, state = classifyFieldThroughByref baseClassTypes fieldId src state
-
-                let dest =
-                    match relationship with
-                    | FieldThroughByref.Projected ->
-                        AddressedByref.appendProjection (ByrefProjection.Field fieldId) addressed
-                    | FieldThroughByref.IsContainer _ -> addressed
-
-                IlMachineState.writeManagedByrefWithBase baseClassTypes state dest valueToStore
             | EvalStackValue.UserDefinedValueType _ -> failwith "todo"
 
         state
@@ -624,6 +628,21 @@ module internal UnaryMetadataFieldOps =
                 | None ->
                     failwith
                         $"TODO: ldfld {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name} through TypeDescPtr %O{typeDescFor}"
+            // ECMA-335 III.4.10 admits an unmanaged pointer as the receiver. One that addresses
+            // storage reaches the field exactly as the managed pointer to that storage does.
+            | EvalStackValue.ManagedPointer (ManagedPointerSource.Byref addressed)
+            | EvalStackValue.NativeInt (NativeIntSource.ManagedPointer addressed) ->
+                let relationship, state =
+                    classifyFieldThroughByref baseClassTypes fieldId (ManagedPointerSource.Byref addressed) state
+
+                let currentValue =
+                    match relationship with
+                    | FieldThroughByref.Projected ->
+                        IlMachineState.readManagedByrefField baseClassTypes state addressed fieldId
+                    | FieldThroughByref.IsContainer fieldZero ->
+                        IlMachineState.readManagedByrefAs baseClassTypes state fieldZero addressed
+
+                IlMachineState.pushToEvalStack currentValue thread state
             | EvalStackValue.NativeInt nativeIntSource -> failwith $"todo: nativeint {nativeIntSource}"
             | EvalStackValue.Float f -> failwith "todo: float"
             | EvalStackValue.NullObjectRef -> failwith "unreachable: NullObjectRef handled above"
@@ -647,17 +666,6 @@ module internal UnaryMetadataFieldOps =
             | EvalStackValue.ManagedPointer (ManagedPointerSource.NativeIntPlaceholder bits) ->
                 failwith
                     $"ldfld: cannot read through fake non-null byref @ 0x%x{bits}; the placeholder must never be dereferenced"
-            | EvalStackValue.ManagedPointer (ManagedPointerSource.Byref addressed as src) ->
-                let relationship, state = classifyFieldThroughByref baseClassTypes fieldId src state
-
-                let currentValue =
-                    match relationship with
-                    | FieldThroughByref.Projected ->
-                        IlMachineState.readManagedByrefField baseClassTypes state addressed fieldId
-                    | FieldThroughByref.IsContainer fieldZero ->
-                        IlMachineState.readManagedByrefAs baseClassTypes state fieldZero addressed
-
-                IlMachineState.pushToEvalStack currentValue thread state
             | EvalStackValue.UserDefinedValueType vt ->
                 let result = vt |> CliValueType.DereferenceFieldById fieldId
 
@@ -717,19 +725,24 @@ module internal UnaryMetadataFieldOps =
             | None ->
                 failwith
                     $"TODO: %s{opName} {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name} through TypeDescPtr %O{typeDescFor}; this TypeDesc field has no synthetic address modelled"
-        | NativeInt nativeIntSource ->
-            failwith
-                $"TODO: %s{opName} {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name} through native pointer %O{nativeIntSource}"
-        | ManagedPointer (ManagedPointerSource.NativeIntPlaceholder bits) ->
-            failwith
-                $"%s{opName} {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name}: cannot project from fake non-null byref @ 0x%x{bits}; the placeholder must never be dereferenced"
-        | ManagedPointer (ManagedPointerSource.Byref addressed as src) ->
+        // ECMA-335 III.4.11 admits an unmanaged pointer as the receiver. One that addresses
+        // storage reaches the field exactly as the managed pointer to that storage does.
+        | ManagedPointer (ManagedPointerSource.Byref addressed)
+        | NativeInt (NativeIntSource.ManagedPointer addressed) ->
+            let src = ManagedPointerSource.Byref addressed
+
             match classifyFieldThroughByref baseClassTypes fieldId src state with
             | FieldThroughByref.Projected, state ->
                 state,
                 AddressedByref.appendProjection (ByrefProjection.Field fieldId) addressed
                 |> ManagedPointerSource.Byref
             | FieldThroughByref.IsContainer _, state -> state, src
+        | NativeInt nativeIntSource ->
+            failwith
+                $"TODO: %s{opName} {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name} through native pointer %O{nativeIntSource}"
+        | ManagedPointer (ManagedPointerSource.NativeIntPlaceholder bits) ->
+            failwith
+                $"%s{opName} {field.DeclaringType.Namespace}.{field.DeclaringType.Name}::{field.Name}: cannot project from fake non-null byref @ 0x%x{bits}; the placeholder must never be dereferenced"
         | NullObjectRef
         | ManagedPointer ManagedPointerSource.Null ->
             failwith
@@ -786,6 +799,9 @@ module internal UnaryMetadataFieldOps =
         let state, projection =
             instanceFieldAddress loggerFactory baseClassTypes "ldflda" field fieldId ptr state
 
+        // ECMA-335 III.4.11 makes the address an unmanaged pointer when the receiver is one. Pushing
+        // a managed pointer instead is not observable to the guest, and every consumer of an address
+        // (`ldind`, `call` with a byref parameter, the `Interlocked` intrinsics) accepts one.
         let result = EvalStackValue.ManagedPointer projection
 
         state

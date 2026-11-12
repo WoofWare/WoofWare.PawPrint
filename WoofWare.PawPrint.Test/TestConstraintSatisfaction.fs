@@ -422,17 +422,19 @@ public static class Outer<U>
         | Some index, ConstraintVerdict.Undecided (parameter, _) when parameter <= index -> None
         | _ -> Some $"the host's verdict is %A{host}, TypeSystem's %A{verdict}"
 
-    /// Counts of what the host decided, so that a run that only ever admits, or only ever rejects,
-    /// fails instead of passing vacuously.
-    type private Tally =
-        {
-            mutable Admitted : int
-            mutable Rejected : int
-            mutable Undecided : int
-        }
+    /// What was decided about one instantiation, counted so that a run that only ever admits, or only
+    /// ever rejects, fails instead of passing vacuously.
+    [<RequireQualifiedAccess>]
+    type private Decision =
+        /// TypeSystem decided, and the host admitted the instantiation.
+        | Admitted
+        /// TypeSystem decided, and the host rejected the instantiation.
+        | Rejected
+        /// TypeSystem left the instantiation undecided.
+        | Undecided
 
     let private check
-        (tally : Tally)
+        (cover : Decision -> unit)
         (state : TypeSystemState ref)
         (name : string)
         (host : int option)
@@ -443,11 +445,11 @@ public static class Outer<U>
         state.Value <- next
 
         match verdict with
-        | ConstraintVerdict.Undecided _ -> tally.Undecided <- tally.Undecided + 1
+        | ConstraintVerdict.Undecided _ -> cover Decision.Undecided
         | _ ->
             match host with
-            | None -> tally.Admitted <- tally.Admitted + 1
-            | Some _ -> tally.Rejected <- tally.Rejected + 1
+            | None -> cover Decision.Admitted
+            | Some _ -> cover Decision.Rejected
 
         match disagreement host verdict with
         | None -> ()
@@ -455,10 +457,15 @@ public static class Outer<U>
 
     /// Every holder, over one argument (each of two arguments, for the two-parameter holders), and
     /// every method of `Outer<U>` over a pair: the host and TypeSystem agree on each.
-    let private property (tally : Tally) (state : TypeSystemState ref) (argument : Argument, other : Argument) =
+    let private property
+        (cover : Decision -> unit)
+        (state : TypeSystemState ref)
+        (argument : Argument, other : Argument)
+        : unit
+        =
         for holder in singleHolders do
             check
-                tally
+                cover
                 state
                 $"%s{holder}<%s{describe argument}>"
                 (hostVerdict (fun () -> box ((hostType holder).MakeGenericType (toHost argument))))
@@ -468,7 +475,7 @@ public static class Outer<U>
         if not (isByRefLike argument || isByRefLike other) then
             for holder in pairHolders do
                 check
-                    tally
+                    cover
                     state
                     $"%s{holder}<%s{describe argument}, %s{describe other}>"
                     (hostVerdict (fun () -> box ((hostType holder).MakeGenericType (toHost argument, toHost other))))
@@ -476,7 +483,7 @@ public static class Outer<U>
 
             for method in outerMethods do
                 check
-                    tally
+                    cover
                     state
                     $"Outer<%s{describe other}>.%s{method}<%s{describe argument}>"
                     (hostVerdict (fun () ->
@@ -489,45 +496,33 @@ public static class Outer<U>
 
     [<Test>]
     let ``every leaf argument, under every holder, agrees with the host`` () : unit =
-        let tally =
-            {
-                Admitted = 0
-                Rejected = 0
-                Undecided = 0
-            }
-
+        let decisions = Coverage<Decision> ()
         let state = ref initialState
         let leafArguments = leaves |> List.map (fun (name, _, _, _, _) -> Leaf name)
 
         for argument in leafArguments do
             for other in leafArguments do
-                property tally state (argument, other)
+                property decisions.Hit state (argument, other)
 
         // The abstract arguments against the interface with a static abstract method are the
         // undecided ones.
-        Assert.That (tally.Admitted, Is.GreaterThan 100)
-        Assert.That (tally.Rejected, Is.GreaterThan 100)
-        Assert.That (tally.Undecided, Is.GreaterThan 0)
+        Assert.That (decisions.Count Decision.Admitted, Is.GreaterThan 100)
+        Assert.That (decisions.Count Decision.Rejected, Is.GreaterThan 100)
+        Assert.That (decisions.Count Decision.Undecided, Is.GreaterThan 0)
 
     [<Test>]
     let ``generated instantiations, under every holder, agree with the host`` () : unit =
-        let tally =
-            {
-                Admitted = 0
-                Rejected = 0
-                Undecided = 0
-            }
-
         let state = ref initialState
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 200,
-            Prop.forAll (Arb.fromGen (Gen.zip genArgument genArgument)) (property tally state)
-        )
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 200)
+                (Arb.fromGen (Gen.zip genArgument genArgument))
+                (fun cover pair -> property cover state pair)
 
-        let decided = tally.Admitted + tally.Rejected
-        Assert.That (tally.Admitted, Is.GreaterThan (decided / 10))
-        Assert.That (tally.Rejected, Is.GreaterThan (decided / 10))
+        let decided = coverage.Count Decision.Admitted + coverage.Count Decision.Rejected
+        Assert.That (coverage.Count Decision.Admitted, Is.GreaterThan (decided / 10))
+        Assert.That (coverage.Count Decision.Rejected, Is.GreaterThan (decided / 10))
 
     /// A type parameter carrying both the `class` and the `struct` flag, which metadata can spell
     /// and C# cannot: CoreCLR rejects every argument, which the host's `MakeGenericType` confirms.
