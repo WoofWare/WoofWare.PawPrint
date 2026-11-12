@@ -6,7 +6,8 @@ namespace WoofWare.PawPrint
 [<RequireQualifiedAccess>]
 type ContinuationContextHandling =
     /// Wherever the awaited call completes. CoreCLR's JIT gives this to every async call that is not
-    /// an await of a promise: in PawPrint, so far, each call of runtime async's own machinery.
+    /// an await of a promise: each call of runtime async's own machinery, and an async version's
+    /// calls in its tail shapes and of `AsyncHelpers.TransparentAwait`.
     | NoPreference
     /// On the thread pool: an await of a promise with `ConfigureAwait(false)`, whose continuation
     /// carries `ContinuationFlags.ContinueOnThreadPool`.
@@ -83,16 +84,14 @@ type AwaitNotYetBound =
     | Constrained
     /// The call is a `callvirt` of a method that dispatches.
     | CalleeDispatches
-    /// The named method is not flagged `Async`, so its variant is an async version.
-    | CalleeIsAsyncVersion
-    /// CoreCLR gives the named method an async variant whose body PawPrint does not model.
-    | UnmodelledVariant of UnmodelledVariantBody
 
-/// Decision 13's classification of a matched await site in a user's runtime-async body.
+/// Decision 13's classification of a matched await site: an await in a user's runtime-async body,
+/// or a tail shape in an async version.
 [<RequireQualifiedAccess>]
 type AwaitSiteBinding =
     /// The call calls the named method's async variant, and the whole pattern is its step: if the
-    /// variant suspends, the caller's continuation continues as `handling` says.
+    /// variant suspends and the caller makes a continuation of its own, that continuation continues
+    /// as `handling` says.
     | BindsVariant of handling : ContinuationContextHandling
     /// CoreCLR's VM supplies no async variant of the named method, so the JIT calls the method and
     /// awaits the promise it returns.
@@ -106,9 +105,9 @@ type AwaitSiteBinding =
 [<RequireQualifiedAccess>]
 module AwaitSiteBinding =
 
-    /// What a matched await site in a user's runtime-async body binds, from `facts`. Where the site
-    /// is not yet bound for more than one reason, the first of these is named: an unmodelled
-    /// variant, the captured context, the `constrained.` prefix, dispatch, an async version.
+    /// What a matched await site binds, from `facts`. An unmodelled variant is named before any
+    /// reason the site is not yet bound; of those, the first of these is named: the captured
+    /// context, the `constrained.` prefix, dispatch.
     ///
     /// The named method may be abstract only where the call dispatches, or a `constrained.` prefix
     /// resolves it; CoreCLR's JIT refuses to compile a call naming one otherwise
@@ -124,8 +123,7 @@ module AwaitSiteBinding =
             invalidArg
                 (nameof facts)
                 $"%A{facts} names an abstract method through a call that neither dispatches nor has a constrained. prefix"
-        | Error (AsyncVariantRefusal.UnmodelledBody body) ->
-            AwaitSiteBinding.NotYetBound (AwaitNotYetBound.UnmodelledVariant body)
+        | Error (AsyncVariantRefusal.UnmodelledBody body) -> AwaitSiteBinding.Unmodelled body
         | Error refusal -> AwaitSiteBinding.NoVariant refusal
         | Ok body ->
 
@@ -142,11 +140,17 @@ module AwaitSiteBinding =
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.CalleeDispatches
         else
 
-        match body with
-        | AsyncVariantBody.RuntimeAsyncIl ->
+        match body, facts.Pattern with
+        | AsyncVariantBody.Abstract, MatchedPattern.Await _
+        | AsyncVariantBody.Abstract, MatchedPattern.TailShape ->
+            failwith "logic error: an abstract method named by a call that does not dispatch was refused above"
+        | AsyncVariantBody.RuntimeAsyncIl, MatchedPattern.Await _
+        | AsyncVariantBody.AsyncVersion, MatchedPattern.Await _ ->
             // `ConfigureAwait(false)` (`PREFIX_TASK_AWAIT_CONTINUE_ON_CAPTURED_CONTEXT` unset,
             // `impSetupAsyncCall`, importercalls.cpp).
             AwaitSiteBinding.BindsVariant ContinuationContextHandling.ContinueOnThreadPool
-        | AsyncVariantBody.AsyncVersion -> AwaitSiteBinding.NotYetBound AwaitNotYetBound.CalleeIsAsyncVersion
-        | AsyncVariantBody.Abstract ->
-            failwith "logic error: an abstract method named by a call that does not dispatch was refused above"
+        | AsyncVariantBody.RuntimeAsyncIl, MatchedPattern.TailShape
+        | AsyncVariantBody.AsyncVersion, MatchedPattern.TailShape ->
+            // A tail shape is no task await (`PREFIX_IS_TASK_AWAIT` unset), so its call's handling
+            // stays `None`.
+            AwaitSiteBinding.BindsVariant ContinuationContextHandling.NoPreference

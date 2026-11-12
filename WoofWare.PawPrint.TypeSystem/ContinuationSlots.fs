@@ -86,7 +86,7 @@ module ContinuationSlots =
         match flags with
         | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference -> 0
         | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool -> 1
-        | SuspendedCallFlags.ValueTaskAdaptedToTask -> failwith "TODO: stage 4c"
+        | SuspendedCallFlags.ValueTaskAdaptedToTask -> 1 <<< 3
 
 /// What can be asked of a continuation type itself, rather than of its slots.
 [<RequireQualifiedAccess>]

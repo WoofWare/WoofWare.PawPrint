@@ -138,6 +138,7 @@
     <Compile Include="IlMachineStateExecution.fs" />
     <Compile Include="AsyncContextSaving.fs" />
     <Compile Include="SynchronizedMethodMonitor.fs" />
+    <Compile Include="AsyncVersionReturn.fs" />
     <Compile Include="StructMarshalStub.fs" />
     <Compile Include="DelegateInvocations.fs" />
     <Compile Include="MulticastDelegateStub.fs" />

@@ -318,6 +318,7 @@ module TestRuntimeAsyncSuspension =
 
             ManagedHeap.get continuation state.ManagedHeap
             |> AllocatedNonArrayObject.DereferenceFieldById (FieldId.named "Flags")
+            |> CliType.unwrapPrimitiveLike
             |> shouldEqual (
                 CliType.Numeric (
                     CliNumericType.Int32 (ContinuationSlots.slotIndexFlags layout ||| expectedCallFlags flags)

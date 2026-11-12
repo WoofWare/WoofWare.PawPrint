@@ -135,15 +135,22 @@ module StackShapeOfMethod =
         let tokens =
             StackShapeTokens.ofBody assembly binding (StackFlow.reachable body) body
 
-        // An async variant's IL is written for its own signature, which unwraps the promise the
-        // definition's returns; the frame's concretised signature is that one.
+        // The runtime-async IL of an `Async` method is written for its async variant's signature,
+        // which unwraps the promise the definition's returns; the frame's concretised signature is
+        // that one. An async version runs the ordinary variant's IL, which returns the promise.
         let returnsValue =
-            match variant with
-            | MethodVariant.Ordinary -> returnsValueOf assembly binding definition.Signature
-            | MethodVariant.AsyncVariant ->
+            match variant, definition.Body with
+            | MethodVariant.AsyncVariant, MethodBody.AsyncIl _ ->
                 match method.Signature.ReturnType with
                 | MethodReturnType.Void -> false
                 | MethodReturnType.Returns _ -> true
+            | MethodVariant.Ordinary, _
+            | MethodVariant.AsyncVariant, MethodBody.Il _
+            | MethodVariant.AsyncVariant, MethodBody.InternalCall
+            | MethodVariant.AsyncVariant, MethodBody.PInvoke
+            | MethodVariant.AsyncVariant, MethodBody.RuntimeProvided _
+            | MethodVariant.AsyncVariant, MethodBody.Abstract
+            | MethodVariant.AsyncVariant, MethodBody.MissingIl -> returnsValueOf assembly binding definition.Signature
 
         StackShape.analyse
             (inputsOf assembly binding definition.IsStatic definition.Signature.ParameterTypes returnsValue body tokens)

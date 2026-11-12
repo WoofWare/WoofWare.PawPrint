@@ -38,16 +38,34 @@ type internal ArrayAccessor =
 
 /// Where the caller of an async variant that a matched await site binds stands, and what it does if
 /// the variant suspends.
+[<RequireQualifiedAccess>]
 type internal BoundAwaitSite =
-    {
-        /// The offset of the pattern's `call Await`. The whole pattern is the call's step (decision 15
-        /// of `docs/plans/2026-11-11-runtime-async.md`): the caller stands here while the variant
-        /// runs, for suspension, `DiagnosticIP`, exception dispatch and stack walks, as the JIT reports
-        /// the call at this offset, and continues after this instruction.
-        AwaitOffset : int
-        /// Where the caller's continuation continues if the variant suspends.
-        Handling : ContinuationContextHandling
-    }
+    /// The await pattern in a user's runtime-async body, whose whole pattern is the call's step
+    /// (decision 15 of `docs/plans/2026-11-11-runtime-async.md`). The caller stands at the pattern's
+    /// `call Await`, at `awaitOffset`, while the variant runs, for suspension, `DiagnosticIP`,
+    /// exception dispatch and stack walks, as the JIT reports the call at that offset, and continues
+    /// after that instruction. If the variant suspends, the caller does too, with a continuation that
+    /// continues as `handling` says.
+    | Await of awaitOffset : int * handling : ContinuationContextHandling
+    /// A tail shape in an async version (decision 17), whose call is the last thing the async
+    /// version does: it stands at the call while the variant runs, and returns the variant's result.
+    /// If the variant suspends, the caller does what `onSuspension` says.
+    | TailShape of onSuspension : OnSuspension
+
+[<RequireQualifiedAccess>]
+module internal BoundAwaitSite =
+
+    /// The offset the caller moves its program counter to before it calls the variant, if any.
+    let awaitOffset (site : BoundAwaitSite) : int option =
+        match site with
+        | BoundAwaitSite.Await (awaitOffset, _) -> Some awaitOffset
+        | BoundAwaitSite.TailShape _ -> None
+
+    /// What the caller does if the variant suspends.
+    let onSuspension (site : BoundAwaitSite) : OnSuspension =
+        match site with
+        | BoundAwaitSite.Await (_, handling) -> OnSuspension.CallerSuspends (SuspendedCallFlags.Continues handling)
+        | BoundAwaitSite.TailShape onSuspension -> onSuspension
 
 /// A call at a matched await site that binds the named method's async variant.
 [<NoEquality ; NoComparison>]
@@ -58,7 +76,8 @@ type internal BoundAwait =
         Site : BoundAwaitSite
     }
 
-/// What CoreCLR's JIT makes of a `call` or `callvirt` as the start of an await site.
+/// What CoreCLR's JIT makes of a `call` or `callvirt` as the start of an await site: an await in a
+/// user's runtime-async body, or a tail shape in an async version.
 [<RequireQualifiedAccess>]
 [<NoEquality ; NoComparison>]
 type internal AwaitSiteOutcome =
@@ -241,14 +260,14 @@ module internal CallSiteBinding =
                 state, CallSiteBinding.RaisesWhenExecuted failure
 
     /// Whether the call whose operand is `operand`, read in `assembly`, names a JIT intrinsic of
-    /// CoreLib that `accept` takes, by its declaring type's namespace and name and its own name
-    /// (`eeIsIntrinsic` and `lookupNamedIntrinsic`, importercalls.cpp).
+    /// CoreLib that `accept` takes, by its declaring type's namespace and name, its own name and its
+    /// row (`eeIsIntrinsic` and `lookupNamedIntrinsic`, importercalls.cpp).
     let private namesIntrinsic
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (thread : ThreadId)
         (assembly : DumpedAssembly)
-        (accept : string -> string -> string -> bool)
+        (accept : string -> string -> string -> MetadataMethodFacts -> bool)
         (operand : MetadataOperand)
         (state : IlMachineState)
         : IlMachineState * bool
@@ -278,7 +297,7 @@ module internal CallSiteBinding =
             let declaring = method.RequiredDeclaringType
 
             state,
-            accept declaring.Namespace declaring.Name method.Name
+            accept declaring.Namespace declaring.Name method.Name facts
             && IntrinsicBody.isIntrinsic baseClassTypes.Corelib facts.Handle
         // Not one of CoreLib's methods, or a token the JIT cannot resolve; the instruction meets the
         // latter when it runs.
@@ -287,129 +306,74 @@ module internal CallSiteBinding =
         | state, MethodTokenBinding.ViolatesConstraints _
         | state, MethodTokenBinding.Unbound _ -> state, false
 
-    /// The await site the `call` or `callvirt` (`opcode`) at the active frame's program counter of
-    /// `thread` begins, as CoreCLR's JIT reads it when it compiles the frame's method
-    /// (`impMatchTaskAwaitPattern`, importer.cpp), and what decision 13 of
-    /// `docs/plans/2026-11-11-runtime-async.md` binds there. `assembly` holds the frame's IL; the
-    /// call's token binds `named`; `constrained` says whether a `constrained.` prefix precedes it.
-    ///
-    /// Asked only of a call that runs: the JIT never imports a call inside a longer match that binds.
-    /// A matched site in a frame of runtime async's own machinery is refused.
-    let awaitSite
+    /// The async variant CoreCLR's VM supplies for a call naming `named` at a matched await site
+    /// (`CORINFO_TOKENKIND_Await`, jitinterface.cpp), or why it supplies none.
+    let private variantOfNamed
+        (loggerFactory : ILoggerFactory)
+        (named : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        : IlMachineState *
+          Result<
+              WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>,
+              AsyncVariantRefusal
+           >
+        =
+        match named with
+        | MethodInfo.Synthesised _ -> state, Error AsyncVariantRefusal.Synthesised
+        | MethodInfo.Metadata (_, facts, _) ->
+            let declaringAssembly =
+                state.LoadedAssembly named.DeclaringAssemblyFullName
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"BUG: a call binds %O{named}, but its declaring assembly %s{named.DeclaringAssemblyFullName} is not loaded"
+                )
+
+            match
+                RuntimeAsyncMethod.asyncVariantOf
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    baseClassTypes.Corelib
+                    declaringAssembly
+                    declaringAssembly.Methods.[facts.Handle]
+                    state.TypeSystem._LoadedAssemblies
+            with
+            | assemblies, variant ->
+                let state =
+                    { state with
+                        TypeSystem =
+                            { state.TypeSystem with
+                                _LoadedAssemblies = assemblies
+                            }
+                    }
+
+                state, variant
+
+    /// Decision 13's classification of a matched await site whose pattern is `pattern`, and, where
+    /// it binds, the variant concretised as `named` is, with the continuation handling the
+    /// classification gives.
+    let private classifySite
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (thread : ThreadId)
-        (assembly : DumpedAssembly)
+        (pattern : MatchedPattern)
         (opcode : AwaitedCall)
         (constrained : bool)
         (named : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (site : string)
         (state : IlMachineState)
-        : IlMachineState * AwaitSiteOutcome
+        : IlMachineState *
+          Result<
+              WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> *
+              ContinuationContextHandling,
+              AwaitSiteBinding
+           >
         =
-        let frame = state.ThreadState.[thread].MethodState
-
-        // The JIT reads the pattern in a method with runtime async's calling convention
-        // (`compIsAsync`); an async version, which reads tail shapes instead, PawPrint does not run.
-        match frame.AsyncFrame with
-        | None -> state, AwaitSiteOutcome.NotAnAwaitSite
-        | Some asyncFrame ->
-
-        let body =
-            match frame.ExecutingMethod.Body with
-            | MethodBody.Il body -> body
-            | other ->
-                failwith
-                    $"BUG: %O{frame.ExecutingMethod} has runtime async's calling convention and is calling, but runs %O{other} rather than IL"
-
-        match AwaitPattern.awaitAfter body frame.IlOpIndex with
-        | None -> state, AwaitSiteOutcome.NotAnAwaitSite
-        | Some follower ->
-
-        let state, awaits =
-            namesIntrinsic
-                loggerFactory
-                baseClassTypes
-                thread
-                assembly
-                (fun ns typeName name ->
-                    ns = "System.Runtime.CompilerServices"
-                    && typeName = "AsyncHelpers"
-                    && name = "Await"
-                )
-                follower.Await
-                state
-
-        let state, configures =
-            match follower.ConfigureAwait with
-            | None -> state, true
-            | Some configureAwait ->
-                namesIntrinsic
-                    loggerFactory
-                    baseClassTypes
-                    thread
-                    assembly
-                    (fun ns typeName name ->
-                        ns = "System.Threading.Tasks"
-                        && (typeName = "Task"
-                            || typeName = "Task`1"
-                            || typeName = "ValueTask"
-                            || typeName = "ValueTask`1")
-                        && name = "ConfigureAwait"
-                    )
-                    configureAwait.Method
-                    state
-
-        // Where an operand names something else, nothing shorter the JIT would read can match.
-        if not (awaits && configures) then
-            state, AwaitSiteOutcome.NotAnAwaitSite
-        else
-
-        match asyncFrame with
-        | AsyncFrame.Transparent _ ->
-            failwith
-                $"TODO: %O{frame.ExecutingMethod}, a method of runtime async's own machinery, awaits its call at IL_%04X{frame.IlOpIndex} through the JIT's await pattern (to IL_%04X{follower.AwaitOffset}), which binds an async variant there; PawPrint binds none in such a frame (decision 15 of docs/plans/2026-11-11-runtime-async.md)"
-        | AsyncFrame.SavesContexts _ ->
-
-        // The named method's async variant, as the VM supplies one for the token
-        // (`CORINFO_TOKENKIND_Await`, jitinterface.cpp).
-        let state, variant =
-            match named with
-            | MethodInfo.Synthesised _ -> state, Error AsyncVariantRefusal.Synthesised
-            | MethodInfo.Metadata (_, facts, _) ->
-                let declaringAssembly =
-                    state.LoadedAssembly named.DeclaringAssemblyFullName
-                    |> Option.defaultWith (fun () ->
-                        failwith
-                            $"BUG: a call binds %O{named}, but its declaring assembly %s{named.DeclaringAssemblyFullName} is not loaded"
-                    )
-
-                match
-                    RuntimeAsyncMethod.asyncVariantOf
-                        loggerFactory
-                        state.DotnetRuntimeDirs
-                        baseClassTypes.Corelib
-                        declaringAssembly
-                        declaringAssembly.Methods.[facts.Handle]
-                        state.TypeSystem._LoadedAssemblies
-                with
-                | assemblies, variant ->
-                    let state =
-                        { state with
-                            TypeSystem =
-                                { state.TypeSystem with
-                                    _LoadedAssemblies = assemblies
-                                }
-                        }
-
-                    state, variant
+        let state, variant = variantOfNamed loggerFactory named baseClassTypes state
 
         let classified =
             AwaitSiteBinding.classify
                 {
-                    Pattern =
-                        follower.ConfigureAwait
-                        |> Option.forall (fun configureAwait -> configureAwait.ContinueOnCapturedContext)
-                        |> MatchedPattern.Await
+                    Pattern = pattern
                     Opcode = opcode
                     Constrained = constrained
                     NamedDispatchesVirtually = named.DispatchesVirtually
@@ -438,27 +402,249 @@ module internal CallSiteBinding =
                     state
 
             let variant, _ = BindingStop.bound variant
-
-            state,
-            AwaitSiteOutcome.Binds
-                {
-                    Variant = variant
-                    Site =
-                        {
-                            AwaitOffset = follower.AwaitOffset
-                            Handling = handling
-                        }
-                }
+            state, Ok (variant, handling)
         | AwaitSiteBinding.BindsVariant _, Error refusal ->
-            failwith $"BUG: an await site of %O{named} binds its async variant, which it has none of: %A{refusal}"
+            failwith $"BUG: %s{site} of %O{named} binds its async variant, which it has none of: %A{refusal}"
         // PawPrint cannot tell whether CoreCLR supplies a variant, though CoreCLR loaded the method.
         | AwaitSiteBinding.NoVariant (AsyncVariantRefusal.ReturnTypeUnbound failure), _
         | AwaitSiteBinding.NoVariant (AsyncVariantRefusal.BaseTypeUnbound failure), _ ->
             failwith
-                $"awaiting %O{named} at IL_%04X{follower.AwaitOffset} of %O{frame.ExecutingMethod}: deciding whether it has an async variant needs a type PawPrint cannot bind: %s{TypeBindingFailure.describe failure}"
+                $"%s{site} of %O{named}: deciding whether it has an async variant needs a type PawPrint cannot bind: %s{TypeBindingFailure.describe failure}"
+        | AwaitSiteBinding.Unmodelled body, _ ->
+            failwith
+                $"TODO: %s{site} of %O{named} binds its async variant, whose body is %A{body}; CoreCLR runs that variant, which PawPrint does not model (decision 16 of docs/plans/2026-11-11-runtime-async.md)"
         | AwaitSiteBinding.NoVariant _, _
-        | AwaitSiteBinding.NotYetBound _, _
-        | AwaitSiteBinding.Unmodelled _, _ -> state, AwaitSiteOutcome.DoesNotBind classified
+        | AwaitSiteBinding.NotYetBound _, _ -> state, Error classified
+
+    /// The tail shape the `call` or `callvirt` at the active frame of `thread`, an async version,
+    /// begins (`impMatchAsyncVersionTailCall`, importer.cpp), and what decision 13 binds there; where
+    /// it binds, whether its await is a tail await (decision 17).
+    let private tailShapeSite
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (assembly : DumpedAssembly)
+        (opcode : AwaitedCall)
+        (constrained : bool)
+        (named : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (body : MethodInstructions)
+        (state : IlMachineState)
+        : IlMachineState * AwaitSiteOutcome
+        =
+        let frame = state.ThreadState.[thread].MethodState
+        let caller = MethodInfo.requireMetadata "an async version" frame.ExecutingMethod
+
+        // The JIT reads no tail shape in the async version of a synchronized method
+        // (`CORINFO_FLG_SYNCH`), whose every `ret` wraps.
+        if caller.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.Synchronized then
+            state, AwaitSiteOutcome.NotAnAwaitSite
+        else
+
+        match AwaitPattern.tailShapeAfter body frame.IlOpIndex with
+        | None -> state, AwaitSiteOutcome.NotAnAwaitSite
+        | Some shape ->
+
+        let state, confirmed =
+            match shape with
+            | TailShape.Return -> state, true
+            | TailShape.NewValueTask constructor ->
+                namesIntrinsic
+                    loggerFactory
+                    baseClassTypes
+                    thread
+                    assembly
+                    (fun ns typeName name facts ->
+                        ns = "System.Threading.Tasks"
+                        && (typeName = "ValueTask" || typeName = "ValueTask`1")
+                        && name = ".ctor"
+                        // One argument, and not the `T` of `ValueTask<T>(T)`, which
+                        // `impFoldAwaitedTopOfStack` folds instead.
+                        && (
+                            match facts.RawSignature.ParameterTypes with
+                            | [ TypeDefn.GenericTypeParameter 0 ] -> false
+                            | [ _ ] -> true
+                            | _ -> false
+                        )
+                    )
+                    constructor
+                    state
+            | TailShape.AsTask asTask ->
+                namesIntrinsic
+                    loggerFactory
+                    baseClassTypes
+                    thread
+                    assembly
+                    (fun ns typeName name _ ->
+                        ns = "System.Threading.Tasks"
+                        && (typeName = "ValueTask" || typeName = "ValueTask`1")
+                        && name = "AsTask"
+                    )
+                    asTask
+                    state
+
+        // Where an operand names something else, nothing shorter the JIT would read can match.
+        if not confirmed then
+            state, AwaitSiteOutcome.NotAnAwaitSite
+        else
+
+        let site =
+            $"the tail shape at IL_%04X{frame.IlOpIndex} of %O{frame.ExecutingMethod}"
+
+        match
+            classifySite loggerFactory baseClassTypes MatchedPattern.TailShape opcode constrained named site state
+        with
+        | state, Error classified -> state, AwaitSiteOutcome.DoesNotBind classified
+        | state, Ok (variant, handling) ->
+
+        let returnTypesAgree =
+            match frame.ExecutingMethod.Signature.ReturnType, variant.Signature.ReturnType with
+            | MethodReturnType.Void, MethodReturnType.Void -> true
+            | MethodReturnType.Returns returned, MethodReturnType.Returns result when returned = result -> true
+            // A `Task<T>` returned as a `Task`.
+            | MethodReturnType.Void, MethodReturnType.Returns _ -> false
+            | returned, result ->
+                failwith
+                    $"TODO: %s{site} returns what %O{variant} returns, %O{result}, as %O{returned}; only unverifiable IL returns one promise type as another that is not `Task`, and the JIT compares the two as its own types (`gtReturnType`), which PawPrint does not model"
+
+        let await =
+            AsyncVersionAwait.TailCall (
+                shape,
+                TailCallFacts.ofCall
+                    assembly
+                    caller
+                    // The call names its callee exactly, as one that dispatches binds nothing yet.
+                    (Some (MethodInfo.requireMetadata "the callee of a tail shape" named))
+                    returnTypesAgree
+            )
+
+        let flags =
+            match shape, handling with
+            | TailShape.AsTask _, ContinuationContextHandling.NoPreference -> SuspendedCallFlags.ValueTaskAdaptedToTask
+            | TailShape.Return, handling
+            | TailShape.NewValueTask _, handling
+            | TailShape.AsTask _, handling -> SuspendedCallFlags.Continues handling
+
+        let onSuspension =
+            if AwaitPattern.isTailAwait await then
+                OnSuspension.TailAwait
+            else
+                OnSuspension.CallerSuspends flags
+
+        state,
+        AwaitSiteOutcome.Binds
+            {
+                Variant = variant
+                Site = BoundAwaitSite.TailShape onSuspension
+            }
+
+    /// The await site the `call` or `callvirt` (`opcode`) at the active frame's program counter of
+    /// `thread` begins, as CoreCLR's JIT reads it when it compiles the frame's method, and what
+    /// decision 13 of `docs/plans/2026-11-11-runtime-async.md` binds there: an await
+    /// (`impMatchTaskAwaitPattern`, importer.cpp) in a frame with runtime async's calling convention
+    /// that is not an async version, or a tail shape (`impMatchAsyncVersionTailCall`) in an async
+    /// version. `assembly` holds the frame's IL; the call's token binds `named`; `constrained` says
+    /// whether a `constrained.` prefix precedes it.
+    ///
+    /// Asked only of a call that runs: the JIT never imports a call inside a longer match that binds.
+    /// A matched await in a frame of runtime async's own machinery is refused.
+    let awaitSite
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (assembly : DumpedAssembly)
+        (opcode : AwaitedCall)
+        (constrained : bool)
+        (named : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (state : IlMachineState)
+        : IlMachineState * AwaitSiteOutcome
+        =
+        let frame = state.ThreadState.[thread].MethodState
+
+        // The JIT reads the patterns only in a method with runtime async's calling convention
+        // (`compIsAsync`).
+        match frame.AsyncFrame with
+        | None -> state, AwaitSiteOutcome.NotAnAwaitSite
+        | Some asyncFrame ->
+
+        let body =
+            match frame.ExecutingMethod.Body with
+            | MethodBody.Il body -> body
+            | other ->
+                failwith
+                    $"BUG: %O{frame.ExecutingMethod} has runtime async's calling convention and is calling, but runs %O{other} rather than IL"
+
+        match asyncFrame with
+        | AsyncFrame.AsyncVersion _ ->
+            tailShapeSite loggerFactory baseClassTypes thread assembly opcode constrained named body state
+        | AsyncFrame.Transparent _
+        | AsyncFrame.SavesContexts _ ->
+
+        match AwaitPattern.awaitAfter body frame.IlOpIndex with
+        | None -> state, AwaitSiteOutcome.NotAnAwaitSite
+        | Some follower ->
+
+        let state, awaits =
+            namesIntrinsic
+                loggerFactory
+                baseClassTypes
+                thread
+                assembly
+                (fun ns typeName name _ ->
+                    ns = "System.Runtime.CompilerServices"
+                    && typeName = "AsyncHelpers"
+                    && name = "Await"
+                )
+                follower.Await
+                state
+
+        let state, configures =
+            match follower.ConfigureAwait with
+            | None -> state, true
+            | Some configureAwait ->
+                namesIntrinsic
+                    loggerFactory
+                    baseClassTypes
+                    thread
+                    assembly
+                    (fun ns typeName name _ ->
+                        ns = "System.Threading.Tasks"
+                        && (typeName = "Task"
+                            || typeName = "Task`1"
+                            || typeName = "ValueTask"
+                            || typeName = "ValueTask`1")
+                        && name = "ConfigureAwait"
+                    )
+                    configureAwait.Method
+                    state
+
+        // Where an operand names something else, nothing shorter the JIT would read can match.
+        if not (awaits && configures) then
+            state, AwaitSiteOutcome.NotAnAwaitSite
+        else
+
+        match asyncFrame with
+        | AsyncFrame.Transparent _ ->
+            failwith
+                $"TODO: %O{frame.ExecutingMethod}, a method of runtime async's own machinery, awaits its call at IL_%04X{frame.IlOpIndex} through the JIT's await pattern (to IL_%04X{follower.AwaitOffset}), which binds an async variant there; PawPrint binds none in such a frame (decision 15 of docs/plans/2026-11-11-runtime-async.md)"
+        | AsyncFrame.AsyncVersion _ -> failwith "logic error: an async version reads tail shapes, as matched above"
+        | AsyncFrame.SavesContexts _ ->
+
+        let pattern =
+            follower.ConfigureAwait
+            |> Option.forall (fun configureAwait -> configureAwait.ContinueOnCapturedContext)
+            |> MatchedPattern.Await
+
+        let site = $"awaiting at IL_%04X{follower.AwaitOffset} of %O{frame.ExecutingMethod}"
+
+        match classifySite loggerFactory baseClassTypes pattern opcode constrained named site state with
+        | state, Error classified -> state, AwaitSiteOutcome.DoesNotBind classified
+        | state, Ok (variant, handling) ->
+            state,
+            AwaitSiteOutcome.Binds
+                {
+                    Variant = variant
+                    Site = BoundAwaitSite.Await (follower.AwaitOffset, handling)
+                }
 
     /// What a `call` or `ldftn` (`opName`, used as `use'`) of method token `token` does, where its
     /// `constrained.` prefix names `constrained`; `constrainedOpName` names the instruction under

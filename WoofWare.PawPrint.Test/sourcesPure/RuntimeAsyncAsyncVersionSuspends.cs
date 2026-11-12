@@ -20,7 +20,7 @@ using System.Xml;
 // next read pending. Completed, the document parses. Faulted, the exception crosses
 // `ReadDataAsync`'s continuation, then `SwitchEncodingAsync`'s, then `ParseXmlDeclarationAsync`'s,
 // all in one chain: the trace has the three adjacent, with `SwitchEncodingAsync` at the offset of
-// its call and `ParseXmlDeclarationAsync` at that of its `call Await`. Were the await of the task
+// its call. Were the await of the task
 // the ordinary variant returns, `SwitchEncodingAsync` would have returned before anything
 // suspended, leaving no frame, and an awaiter's `GetResult` would come between the other two.
 //
@@ -176,21 +176,23 @@ public class Program
             StackFrame[] frames = new StackTrace (failure, false).GetFrames ();
             if (!Describe (frames).Contains (ResumedNet11, StringComparison.Ordinal)) return 12;
 
-            // `SwitchEncodingAsync` is at its call, `ParseXmlDeclarationAsync` at its `call Await`.
+            // `SwitchEncodingAsync` is at its call. Real .NET 11 reports `ParseXmlDeclarationAsync`
+            // at IL_024F, where a statement begins, rather than at its `call Await` at IL_026F,
+            // which is the offset the JIT's first tier reports and PawPrint does (decision 20), so
+            // the guest does not check it.
             int switching = IndexOfFrame (frames, "SwitchEncodingAsync");
             if (frames[switching].GetILOffset () != 0x51) return 13;
-            if (frames[switching + 1].GetILOffset () != 0x24F) return 14;
 
             string newLine = Environment.NewLine;
             string formatted = new StackTrace (failure, false).ToString ();
             string middle = FormattedNet11.Replace ("\n", newLine);
             int at = formatted.IndexOf (middle, StringComparison.Ordinal);
-            if (at < 0) return 15;
+            if (at < 0) return 14;
 
             string before = formatted.Substring (0, at).TrimEnd ();
             int lastLine = before.LastIndexOf (newLine, StringComparison.Ordinal);
             string awaiter = lastLine < 0 ? before : before.Substring (lastLine + newLine.Length);
-            if (!awaiter.StartsWith (FormattedAwaiterNet11, StringComparison.Ordinal)) return 16;
+            if (!awaiter.StartsWith (FormattedAwaiterNet11, StringComparison.Ordinal)) return 15;
         }
 
         return 0;

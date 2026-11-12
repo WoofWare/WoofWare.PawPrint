@@ -1320,6 +1320,7 @@ module ExceptionDispatching =
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture)
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
         | Some (AsyncFrame.Transparent _)
+        | Some (AsyncFrame.AsyncVersion _)
         | None ->
 
         if atTarget then

@@ -176,15 +176,33 @@ type TailAwait =
     /// since.
     | Requested
 
+/// How far an async version, the async variant of a promise-returning method with IL and no
+/// `MethodImplAttributes.Async` flag, has got towards returning (decision 17 of
+/// `docs/plans/2026-11-11-runtime-async.md`).
+[<RequireQualifiedAccess>]
+type AsyncVersionStep =
+    /// The frame runs its IL, whose `ret` awaits the promise it returns.
+    | Running
+    /// The frame has called, in place of the rest of its IL, a method with runtime async's calling
+    /// convention whose result is the frame's own: in a tail shape, its callee's async variant, or
+    /// at a `ret`, `AsyncHelpers.TransparentAwait`. Once that call has completed, by returning or by
+    /// the frame's resuming, the frame returns the result on its evaluation stack before running
+    /// another instruction, dropping it first if `dropsResult` (the callee's `Task<T>` returned as a
+    /// `Task`).
+    | Returning of dropsResult : bool
+
 /// A frame running a method with runtime async's calling convention.
 [<RequireQualifiedAccess>]
 type AsyncFrame =
     /// Runtime async's own machinery (`AsyncHelpers.Await` and the like), which handles no contexts,
-    /// and alone may tail-await.
+    /// and alone may call `AsyncHelpers.TailAwait()`.
     | Transparent of TailAwait
     /// The async variant of a method flagged `MethodImplAttributes.Async`, which saves and restores
     /// the thread's contexts (`MethodDesc::RequiresAsyncContextSaveAndRestore`).
     | SavesContexts of AsyncContextHandling
+    /// An async version: the async variant of a promise-returning method with IL and no `Async`
+    /// flag, which runs the method's own IL and saves no contexts.
+    | AsyncVersion of AsyncVersionStep
 
 /// What a frame suspending at an await has made, which it records once its last CoreLib helper has
 /// returned to it and it leaves.
@@ -217,8 +235,8 @@ type AsyncContextStep =
     /// suspending at an await with `suspension`; it leaves next.
     | AfterFinishSuspension of suspension : PendingSuspension
     /// `AsyncHelpers.CaptureExecutionContext` returned its result to a frame of runtime async's own
-    /// machinery, which is suspending at an await with `suspension`; the result goes into the
-    /// continuation's `ExecutionContext` slot, and the frame leaves next.
+    /// machinery or an async version, which is suspending at an await with `suspension`; the result
+    /// goes into the continuation's `ExecutionContext` slot, and the frame leaves next.
     | AfterCaptureExecutionContext of suspension : PendingSuspension
 
 /// The monitor a frame running a synchronized method has called the runtime's enter helper for:

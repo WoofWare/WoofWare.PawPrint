@@ -581,23 +581,23 @@ module internal UnaryMetadataCallOps =
         )
         |> fst
 
-    /// Where `awaited` is `Some`, move the active frame's program counter to the `call Await` of the
-    /// matched await site it describes (decision 15 of `docs/plans/2026-11-11-runtime-async.md`),
-    /// where the JIT reports the whole pattern: the call that follows records that offset as its
-    /// call site, and advances the program counter past the `call Await`.
+    /// Where `awaited` is an await pattern, move the active frame's program counter to its
+    /// `call Await` (decision 15 of `docs/plans/2026-11-11-runtime-async.md`), where the JIT reports
+    /// the whole pattern: the call that follows records that offset as its call site, and advances
+    /// the program counter past the `call Await`. A tail shape's call stands where it is.
     let private standAtAwait
         (ctx : UnaryMetadataIlOpContext)
         (awaited : BoundAwaitSite option)
         (state : IlMachineState)
         : IlMachineState
         =
-        match awaited with
+        match awaited |> Option.bind BoundAwaitSite.awaitOffset with
         | None -> state
-        | Some site ->
+        | Some awaitOffset ->
             IlMachineState.mapFrame
                 ctx.Thread
                 state.ThreadState.[ctx.Thread].ActiveMethodState
-                (MethodState.setProgramCounter site.AwaitOffset)
+                (MethodState.setProgramCounter awaitOffset)
                 state
 
     /// Push a frame for the method `concretizedMethod`, having already resolved it however this
@@ -610,7 +610,8 @@ module internal UnaryMetadataCallOps =
     /// the `constrained.` prefix.
     ///
     /// `awaited` is `Some` where the call is of the async variant a matched await site binds, whose
-    /// whole pattern is the call's step: the caller then stands at the pattern's `call Await`.
+    /// whole pattern is the call's step: the caller then stands at an await pattern's `call Await`,
+    /// or at a tail shape's call.
     let private enterCallee
         (ctx : UnaryMetadataIlOpContext)
         (concretizedMethod : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
@@ -649,7 +650,7 @@ module internal UnaryMetadataCallOps =
                 None
                 ReturnValueDisposition.PushToCaller
                 ExceptionEscape.Propagate
-                (awaited |> Option.map _.Handling)
+                (awaited |> Option.map BoundAwaitSite.onSuspension)
                 state
 
         match commitment with
@@ -992,7 +993,7 @@ module internal UnaryMetadataCallOps =
                 None
                 ReturnValueDisposition.PushToCaller
                 ExceptionEscape.Propagate
-                (awaited |> Option.map _.Handling)
+                (awaited |> Option.map BoundAwaitSite.onSuspension)
                 state
 
         match commitment with
@@ -2336,6 +2337,9 @@ module internal UnaryMetadataCallOps =
                             )
                         )
                     | Some (AsyncFrame.Transparent TailAwait.NotRequested) as transparent -> transparent
+                    // An async version suspends only at the call that ends its IL, and returns its
+                    // result when it resumes.
+                    | Some (AsyncFrame.AsyncVersion (AsyncVersionStep.Returning _)) as asyncVersion -> asyncVersion
                     | other ->
                         failwith
                             $"BUG: %O{suspended.Frame.ExecutingMethod} suspended as %A{other}, which no suspension leaves a frame in"

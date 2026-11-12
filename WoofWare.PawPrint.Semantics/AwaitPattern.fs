@@ -104,7 +104,25 @@ module TailCallFacts =
         (returnTypesAgree : bool)
         : TailCallFacts
         =
-        failwith "TODO: stage 4c"
+        let assemblyAllowsOptimisation =
+            match Debuggable.allowsJitOptimisation callerAssembly with
+            | Some allows -> allows
+            | None ->
+                failwith
+                    $"TODO: %s{callerAssembly.DefinitionFullName}'s DebuggableAttribute is malformed, over which CoreCLR refuses to load it at all"
+
+        {
+            AssemblyAllowsOptimisation = assemblyAllowsOptimisation
+            CallerNoOptimization = caller.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.NoOptimization
+            CallerNoInlining = caller.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.NoInlining
+            CallerIsEntryPoint = callerAssembly.MainMethod = Some caller.Handle
+            ReturnTypesAgree = returnTypesAgree
+            ExactCalleeRequiresSecObject =
+                exactCallee
+                |> Option.exists (fun callee ->
+                    callee.MethodAttributes.HasFlag System.Reflection.MethodAttributes.RequireSecObject
+                )
+        }
 
 [<RequireQualifiedAccess>]
 module TailShape =

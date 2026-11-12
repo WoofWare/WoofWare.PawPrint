@@ -89,8 +89,6 @@ module TestAwaitSiteBinding =
         | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.Pattern = MatchedPattern.Await true
         | AwaitNotYetBound.Constrained -> facts.Constrained
         | AwaitNotYetBound.CalleeDispatches -> dispatches facts
-        | AwaitNotYetBound.CalleeIsAsyncVersion -> false
-        | AwaitNotYetBound.UnmodelledVariant _ -> false
 
     [<Test>]
     let ``A site binds exactly when stage 4c's four conditions hold, and continues as its pattern says`` () : unit =
