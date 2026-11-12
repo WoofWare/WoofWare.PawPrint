@@ -729,6 +729,10 @@ type ReturnFrameResult =
     /// exception from its caller, and the runtime does `step` next; state is positioned at that
     /// caller.
     | ResumeVmRaise of IlMachineState * step : VmRaiseStep
+    /// The frame that returned was a CoreLib helper the runtime called for the contexts of the
+    /// user-written runtime-async body it returned to, and the runtime does `step` next; state is
+    /// positioned at that body's frame.
+    | ResumeAsyncContexts of IlMachineState * step : AsyncContextStep
 
 /// How a run of the simulated process ended: the process itself ended, and each case
 /// carries the machine as it stood when it did, and how the kernel says it ended

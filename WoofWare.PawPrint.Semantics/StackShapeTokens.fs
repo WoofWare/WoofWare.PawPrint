@@ -466,6 +466,9 @@ module StackShapeTokens =
             | IlOp.UnaryMetadataToken (op, MetadataOperand.FromDynamicScope index) ->
                 failwith
                     $"stack shape: %O{op} at offset %d{offset} names DynamicScope entry %d{index}, which metadata alone cannot read"
+            | IlOp.UnaryMetadataToken (op, MetadataOperand.FromStubScope index) ->
+                failwith
+                    $"stack shape: %O{op} at offset %d{offset} names operand %d{index} of a stub the runtime emits, which metadata alone cannot read; `VmStub.tokenShapes` reads it"
             | IlOp.Nullary _
             | IlOp.UnaryConst _
             | IlOp.UnaryStringToken _

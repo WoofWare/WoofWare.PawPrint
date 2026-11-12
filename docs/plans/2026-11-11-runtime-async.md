@@ -4,11 +4,11 @@
 
 .NET 11 compiles every async method in CoreLib, and in every shared-framework library, as a
 *runtime-async* method (`System.Private.CoreLib.csproj` sets `Features=runtime-async=on`;
-`libraries/Directory.Build.targets` does the same for the shared framework). PawPrint runs none
-of them. Since stage 1a it refuses, by name, to call such a method's ordinary variant, which runs
-the task-returning thunk (below). Four .NET 11 tests are parked on this: `StringContentRoundTrip.cs`
-(at `HttpContent.LoadIntoBufferAsyncCore`), and the Linux-CoreLib `FileSystemWatcher` test and the
-two ASP.NET two-process tests (all three at `Watcher.DequeueEvents`).
+`libraries/Directory.Build.targets` does the same for the shared framework). Since stage 1b
+PawPrint runs such a method whose awaits all find completed tasks, and refuses, by name, to
+suspend one at an await of a pending task. Three .NET 11 tests are parked on that refusal: the
+Linux-CoreLib `FileSystemWatcher` test and the two ASP.NET two-process tests (all three in
+`Watcher.DequeueEvents`).
 
 .NET 10's CoreLib declares runtime async's infrastructure too (`AsyncHelpers.Await` and the like,
 flagged `Async` and returning no promise).
@@ -213,6 +213,14 @@ values (`thread`, `ec`, `sc`, `resumed`) live in an `AsyncFrame option` on `Meth
 `CaptureContexts` writes them through `out` parameters. The IL is not rewritten, as CoreCLR's
 interpreter rewrites it, because that would shift the IL offsets stack traces expose.
 
+As built in stage 1b: `AsyncFrame` is `Transparent` for runtime async's own machinery and
+`SavesContexts` for a user body, the latter tracking how far the body has got
+(`AsyncContextHandling`). The capture is the frame's prologue, after its type-initialisation
+check, as the JIT orders them. On the exception path, the second pass of exception dispatch parks
+the unwind on the frame instead of popping it; the frame's next step calls `RestoreContexts`, and
+that call's return resumes the second pass, which then pops the frame. An exception escaping a
+helper ends the run (`ExceptionEscape.AsyncContextHelper`): nothing the helpers do raises.
+
 ### 9. How the thunk's IL names its callees
 
 `IlStub` has no locals or exception regions, and an IL operand is a metadata token or a dynamic
@@ -223,10 +231,15 @@ CoreCLR's `TokenLookupMap`, with the thunk's IL kept as data in `WoofWare.PawPri
 Rejected: a thunk written as an F# step machine, which would transcribe exception handling, and
 whose `Push(&stackState)` needs a real frame local anyway.
 
+As built in stage 1b: the frame running a stub holds it (`MethodState.VmStub`), and an operand
+(`MetadataOperand.FromStubScope`, `ExceptionCatchType.FromStubScope`) indexes its scope. An entry
+naming a CoreLib member resolves to that member's CoreLib token; the async variant and the
+instantiations over the method's `T` resolve to concretised methods when the instruction runs.
+
 ### 10. Stack traces
 
 The thunk's frame, and the resume entry, are left out of stack traces, as IL stubs are on real
-.NET.
+.NET (`MethodDesc::IsDiagnosticsHidden`), and out of stack-crawl walks, which skip them too.
 
 ### 11. An await in a `try` region before stage 3
 
@@ -258,6 +271,8 @@ Each stage is one pull request, with its tests first.
    thunk; `AsyncCallContinuation`; `IsRuntimeAsync()` answering true in every async-convention
    body; context capture and restore; `AsyncSuspend` and `TailAwait` still refused. An `Async`
    method whose awaits all find completed tasks runs; a pending await stops at the refusal.
+   No `Async` method of .NET 11 RC1's shared framework calls `IsRuntimeAsync()`, so its `true`
+   answer waits for stage 4's async versions (`StreamReader.ReadAsync`) to be observable.
 3. **(2a) The primitives suspension needs**, each testable without runtime async:
    `[FixedAddressValueType]` statics and `Unsafe.AsPointer` of them, `calli` through a function
    pointer read from native memory, and writes of a struct holding references through

@@ -321,6 +321,8 @@ module AbstractMachine =
             | ReturnFrameResult.DispatchException _ -> failwith "unexpected exception dispatch from delegate frame pop"
             | ReturnFrameResult.ResumeVmRaise _ ->
                 failwith "unexpected step of a thrown non-exception's wrapping from delegate frame pop"
+            | ReturnFrameResult.ResumeAsyncContexts _ ->
+                failwith "unexpected step of a runtime-async body's context handling from delegate frame pop"
             | ReturnFrameResult.NormalReturn state ->
 
             // Every failure below happens *after* the delegate's synthetic `Invoke` frame is
@@ -688,13 +690,20 @@ module AbstractMachine =
         =
         let logger = logger loggerFactory
 
+        // A user-written runtime-async body's call of a context helper is a step of its own: CoreCLR's
+        // JIT emits it into the body, after the type-initialisation check.
+        let afterPrologue (state : IlMachineState) : ExecutionResult =
+            match AsyncContextSaving.beforeInstruction loggerFactory baseClassTypes thread state with
+            | Some result -> result
+            | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
+
         let ran =
             match state.ThreadState.[thread].MethodState.PendingTypeInit with
-            | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
+            | None -> afterPrologue state
             | Some ty ->
                 match runPendingTypeInit loggerFactory baseClassTypes state thread ty with
                 | Choice1Of2 result -> result
-                | Choice2Of2 state -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
+                | Choice2Of2 state -> afterPrologue state
 
         ran
         |> AssemblyLoadEvent.announceBeforeStep loggerFactory baseClassTypes thread state

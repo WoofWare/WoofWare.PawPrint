@@ -68,9 +68,11 @@ type IntrinsicBody =
     /// A CoreLib method the JIT replaces at every call to it, whatever it is optimising for: one of
     /// the named intrinsics `impIntrinsic` (importercalls.cpp) expands before it tests whether to
     /// optimise. What replaces the call is not the method's IL, which throws
-    /// `UnreachableException`. Code the runtime generates calls these (IL stubs, the async
-    /// resumption stub), as do runtime-async methods and the reflection invoke stubs CoreLib emits
-    /// (`InvokerEmitUtil`), which call `StubHelpers.NextCallReturnAddress`.
+    /// `UnreachableException` (or, for `RuntimeHelpers.IsRuntimeAsync`, answers for a method without
+    /// runtime async's calling convention). Code the runtime generates calls these (IL stubs, the
+    /// async resumption stub), as do runtime-async methods, the reflection invoke stubs CoreLib emits
+    /// (`InvokerEmitUtil`), which call `StubHelpers.NextCallReturnAddress`, and any CoreLib method
+    /// whose IL differs between its variants, which calls `RuntimeHelpers.IsRuntimeAsync`.
     | CallSiteExpansion
     /// A method of CoreLib's `System.StubHelpers.StructureMarshaler<T>`, whose body CoreCLR's VM
     /// replaces with a stub that performs the operation on T field by field when T is a value type
@@ -99,10 +101,10 @@ module IntrinsicBody =
 
     /// The methods `IntrinsicBody.CallSiteExpansion` names, by namespace, class and name, in every
     /// runtime PawPrint supports: .NET 10's `StubHelpers.AsyncCallContinuation` is .NET 11's
-    /// `AsyncHelpers.AsyncCallContinuation`. Of the other named intrinsics `impIntrinsic` handles
-    /// before its optimisation test, `RuntimeHelpers.IsRuntimeAsync` becomes whether the method
-    /// calling it is runtime-async, as its IL answers for a method that is not, and the JIT
-    /// declines to expand the rest (`AsyncHelpers.Await` and the like), so a call runs their IL.
+    /// `AsyncHelpers.AsyncCallContinuation`. `RuntimeHelpers.IsRuntimeAsync` becomes whether the
+    /// method calling it has runtime async's calling convention (`compIsAsync`). The JIT declines to
+    /// expand the other named intrinsics `impIntrinsic` handles before its optimisation test
+    /// (`AsyncHelpers.Await` and the like), so a call runs their IL.
     let private callSiteExpansions : Set<string * string * string> =
         Set.ofList
             [
@@ -114,6 +116,7 @@ module IntrinsicBody =
                 "System.Runtime.CompilerServices", "AsyncHelpers", "TailAwait"
                 "System.Runtime.CompilerServices", "RuntimeHelpers", "SetNextCallGenericContext"
                 "System.Runtime.CompilerServices", "RuntimeHelpers", "SetNextCallAsyncContinuation"
+                "System.Runtime.CompilerServices", "RuntimeHelpers", "IsRuntimeAsync"
             ]
 
     let private getMemberRefParentType (assembly : DumpedAssembly) (handle : MemberReferenceHandle) : TypeRef =

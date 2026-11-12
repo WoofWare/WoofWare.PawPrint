@@ -379,8 +379,7 @@ module TestIntrinsicBody =
             EveryCallSite.Replaced
             "NI_System_Runtime_CompilerServices_RuntimeHelpers_IsRuntimeAsync",
             runtimeHelpers "IsRuntimeAsync",
-            EveryCallSite.RunsIl
-                "the JIT replaces the call with whether the method being compiled is runtime-async (`compIsAsync`), and PawPrint runs no method as runtime-async, which is what the IL's `false` answers"
+            EveryCallSite.Replaced
             "NI_System_Runtime_CompilerServices_AsyncHelpers_Await", asyncHelpers "Await", declined
             "NI_System_Runtime_CompilerServices_AsyncHelpers_AwaitAwaiter", asyncHelpers "AwaitAwaiter", declined
             "NI_System_Runtime_CompilerServices_AsyncHelpers_UnsafeAwaitAwaiter",

@@ -351,7 +351,7 @@ module TestAspNetTwoProcess =
 
     /// Why both tests are parked on .NET 11.
     let private runtimeAsync : string =
-        "On .NET 11 the guests run the Linux CoreLib, and starting a `FileSystemWatcher` calls `Watcher.DequeueEvents`, a runtime-async method returning a promise type, whose task-returning thunk PawPrint does not yet emit: \"TODO: calling the ordinary variant of System.IO.FileSystem.Watcher.Watcher.DequeueEvents, a runtime-async method (MethodImplAttributes.Async) returning a promise type\" (measured on 11.0.0-rc.1 on 2026-11-11). Un-park when runtime-async methods run."
+        "On .NET 11 the guests run the Linux CoreLib, and starting a `FileSystemWatcher` calls `Watcher.DequeueEvents`, a runtime-async method returning a promise type, whose await of the inotify read finds it pending and asks CoreLib's await helper to suspend, which PawPrint does not yet do: \"TODO: System.Private.CoreLib.AsyncHelpers.Await calls AsyncHelpers.TailAwait, which suspends the runtime-async methods on the stack until the task an await found pending completes. PawPrint does not yet suspend a runtime-async method\" (measured on 11.0.0-rc.1, 2026-11-11). Un-park when runtime-async methods suspend and resume (docs/plans/2026-11-11-runtime-async.md, stages 2b and 3)."
 
     [<Test>]
     let ``Kestrel and HttpClient as two processes on one machine agree with two real processes`` () : unit =

@@ -222,8 +222,13 @@ module StackCrawlMark =
             // so counting one would count a frame that does not exist. A single-cast `Invoke`
             // frame is popped before its target runs, but the multicast stub's frame is live under
             // every element, so a caller-sensitive method reached through a multicast delegate
-            // walks past it here.
-            if isReflectionInvocation caller || StackFrameCapture.isDelegateInvokeStub caller then
+            // walks past it here. A stub the runtime emits, such as a task-returning thunk, is
+            // hidden from the walk too (`StackFrameCapture.isVmStub`).
+            if
+                isReflectionInvocation caller
+                || StackFrameCapture.isDelegateInvokeStub caller
+                || StackFrameCapture.isVmStub caller
+            then
                 walk (remaining - 1) found passed caller
             elif passed + 1 >= wanted then
                 refuseIfFiltering caller
@@ -298,7 +303,11 @@ module StackCrawlMark =
             // Real .NET has no frame for a delegate's `Invoke`, and its walk hides the multicast
             // invoke stub, so `GetCurrentMethod` reached through either names whoever invoked the
             // delegate (measured for a multicast delegate). See `StackFrameCapture.isDelegateInvokeStub`.
-            if StackFrameCapture.isDelegateInvokeStub caller then
+            // The walk hides a stub the runtime emits as well (`StackFrameCapture.isVmStub`).
+            if
+                StackFrameCapture.isDelegateInvokeStub caller
+                || StackFrameCapture.isVmStub caller
+            then
                 walk (remaining - 1) caller
             else
                 caller

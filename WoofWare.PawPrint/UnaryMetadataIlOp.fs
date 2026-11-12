@@ -62,8 +62,13 @@ module internal UnaryMetadataIlOp =
         // the method — i.e. before any of its instructions execute. Nothing observable turns on the
         // ordering here in any case: a scope type is already resolved, so reading it loads no type
         // and runs no `.cctor`, unlike the metadata path each op still performs for itself.
-        let resolved =
+        let state, resolved =
             match operand with
+            | MetadataOperand.FromStubScope index ->
+                let state, resolved =
+                    VmStubOperand.resolve loggerFactory baseClassTypes op index thread state
+
+                state, OperandResolution.Ready resolved
             | MetadataOperand.FromMetadata sourced ->
                 let activeAssy =
                     state.LoadedAssembly sourced.SourceAssembly.FullName
@@ -75,6 +80,7 @@ module internal UnaryMetadataIlOp =
                             $"Metadata token source assembly %O{sourced.SourceAssembly} is not loaded; available assemblies: {available}"
                     )
 
+                state,
                 ResolvedMetadataOperand.FromMetadata (activeAssy, sourced.Token)
                 |> OperandResolution.Ready
             | MetadataOperand.FromDynamicScope scopeIndex ->
@@ -84,6 +90,7 @@ module internal UnaryMetadataIlOp =
                 // executing: an operand is only ever read as its own instruction runs.
                 let scope = DynamicScopeOperand.executingScope operation state thread
 
+                state,
                 match IlDecoding.scopeOperandKind op with
                 | IlDecoding.ScopeOperandKind.Type ->
                     match DynamicScopeOperand.closedType baseClassTypes operation scopeIndex state scope with
