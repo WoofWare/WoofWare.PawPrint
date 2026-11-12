@@ -208,6 +208,22 @@ type FunctionPointerTarget =
     /// for the same constructor, and only the latter equals `RuntimeMethodHandle.GetFunctionPointer`.
     | UnboxingStub of method : MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
 
+    /// The one function through which CoreLib's dispatcher resumes every continuation PawPrint
+    /// makes for a suspended runtime-async frame, which a continuation's `ResumeInfo.Resume` holds:
+    /// managed signature `(Continuation, ref byte) -> Continuation?`. Calling it takes the frame the
+    /// continuation names out of `IlMachineState.SuspendedAsyncFrames` and runs it on from its
+    /// await, as CoreCLR's interpreter resumes all its continuations through one FCall
+    /// (`AsyncHelpers.ResumeInterpreterContinuation`). Decision 4 of
+    /// `docs/plans/2026-11-11-runtime-async.md`.
+    | AsyncResume
+
+    /// The code address of the await at IL offset `ilOffset` in `method`, at which a frame of
+    /// `method` suspended: what a continuation's `ResumeInfo.DiagnosticIP` holds, for CoreLib to
+    /// map back to `method` when an exception unwinds through the continuation. Not callable.
+    | SuspensionPoint of
+        method : MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> *
+        ilOffset : int
+
     override this.ToString () : string =
         match this with
         | FunctionPointerTarget.Managed methodDefinition ->
@@ -219,6 +235,9 @@ type FunctionPointerTarget =
             $"the virtual call stub for {method.Name} in {AssemblyDefinitionName.simpleName method.DeclaringAssemblyFullName}"
         | FunctionPointerTarget.UnboxingStub method ->
             $"the unboxing stub for {method.Name} in {AssemblyDefinitionName.simpleName method.DeclaringAssemblyFullName}"
+        | FunctionPointerTarget.AsyncResume -> "the runtime's resumption of a suspended runtime-async frame"
+        | FunctionPointerTarget.SuspensionPoint (method, ilOffset) ->
+            $"the suspension point at IL_%04X{ilOffset} of {method.Name} in {AssemblyDefinitionName.simpleName method.DeclaringAssemblyFullName}"
 
     override this.Equals (other : obj) : bool =
         match other with
@@ -233,12 +252,18 @@ type FunctionPointerTarget =
                 left = right
             | FunctionPointerTarget.UnboxingStub left, FunctionPointerTarget.UnboxingStub right ->
                 MethodInfo.NominallyEqual left right
+            | FunctionPointerTarget.AsyncResume, FunctionPointerTarget.AsyncResume -> true
+            | FunctionPointerTarget.SuspensionPoint (leftMethod, leftOffset),
+              FunctionPointerTarget.SuspensionPoint (rightMethod, rightOffset) ->
+                leftOffset = rightOffset && MethodInfo.NominallyEqual leftMethod rightMethod
             | FunctionPointerTarget.Managed _, _
             | FunctionPointerTarget.RuntimeAllocator, _
             | FunctionPointerTarget.Dynamic _, _
             | FunctionPointerTarget.OpenDelegateShuffleThunk, _
             | FunctionPointerTarget.VirtualCallStub _, _
-            | FunctionPointerTarget.UnboxingStub _, _ -> false
+            | FunctionPointerTarget.UnboxingStub _, _
+            | FunctionPointerTarget.AsyncResume, _
+            | FunctionPointerTarget.SuspensionPoint _, _ -> false
         | _ -> false
 
     override this.GetHashCode () : int =
@@ -261,6 +286,10 @@ type FunctionPointerTarget =
         | FunctionPointerTarget.VirtualCallStub (token, _) -> hash (4, token)
         // Structural `hash` for the same reason as the `Managed` case.
         | FunctionPointerTarget.UnboxingStub method -> hash (5, method.Owner, method.IdentityKey, method.Generics)
+        | FunctionPointerTarget.AsyncResume -> HashCode.Combine 6
+        // Structural `hash` for the same reason as the `Managed` case.
+        | FunctionPointerTarget.SuspensionPoint (method, ilOffset) ->
+            hash (7, method.Owner, method.IdentityKey, method.Generics, ilOffset)
 
 [<RequireQualifiedAccess>]
 module FunctionPointerTarget =
@@ -298,6 +327,12 @@ module FunctionPointerTarget =
             // translation, which a caller asking for a bare method would skip.
             failwith
                 $"%s{operation}: expected a pointer to a managed method, got a pointer to %O{target}, whose receiver must be translated from a box to a byref before the method can run"
+        | FunctionPointerTarget.AsyncResume ->
+            failwith
+                $"%s{operation}: expected a pointer to a managed method, got a pointer to %O{target}, which only CoreLib's dispatcher calls, through a continuation's ResumeInfo"
+        | FunctionPointerTarget.SuspensionPoint _ ->
+            failwith
+                $"%s{operation}: expected a pointer to a managed method, got %O{target}, an address within a method's code, which nothing calls"
 
 [<RequireQualifiedAccess>]
 [<CustomEquality>]
@@ -596,6 +631,7 @@ module TypeHandleTag =
         | RuntimeTypeHandleTarget.FunctionPointer _ -> 2L
         | RuntimeTypeHandleTarget.Closed typeHandle ->
             match typeHandle with
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "TypeHandle tag bits" layout
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _ -> 2L

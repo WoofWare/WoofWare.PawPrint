@@ -176,6 +176,7 @@ module internal NativeReflectionInvocation =
                 $"argumentStorageOf: %O{ty} is a byref, which never occupies argument storage of its own; classify its element instead"
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> ArgumentStorage.IntPtrPayload
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "argumentStorageOf" layout
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ ->

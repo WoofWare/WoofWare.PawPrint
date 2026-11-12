@@ -536,6 +536,7 @@ type CliType =
                 // An inline array's later slots are storage, not fields: its one
                 // declared field is slot 0, which is `FieldId.Metadata`.
                 | FieldId.InlineArrayElement _
+                | FieldId.ContinuationSlot _
                 | FieldId.Named _ -> false
             )
 
@@ -2025,6 +2026,7 @@ and CliValueType =
             match id with
             | FieldId.InlineArrayElement _ -> true
             | FieldId.Metadata _
+            | FieldId.ContinuationSlot _
             | FieldId.Named _ -> false
         )
 
@@ -3537,6 +3539,7 @@ and CliValueType =
         | [] ->
             match field with
             | FieldId.Metadata _
+            | FieldId.ContinuationSlot _
             | FieldId.InlineArrayElement _ ->
                 failwith (CliValueType.DescribeMissingField "CliValueType.FindFieldById" field fields cvt)
             | FieldId.Named name ->
@@ -3923,6 +3926,7 @@ and CliValueType =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.FunctionPointer _ -> false
 
     /// True iff `handle` names a CLR enum: CoreCLR's `MethodTable::IsEnum`, decided nominally
@@ -3948,6 +3952,7 @@ and CliValueType =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.FunctionPointer _ -> false
 
     /// The primitive type of the enum `handle`'s single instance field, `value__` (ECMA-335
@@ -4079,6 +4084,8 @@ and CliValueType =
             |> Result.Error
         | ConcreteTypeHandle.Byref _ ->
             failwith $"CliValueType.FixedArrayElementMarshalSize: %O{elementType} is a byref, which no array can hold"
+        | ConcreteTypeHandle.Continuation layout ->
+            ContinuationType.unasked "CliValueType.FixedArrayElementMarshalSize" layout
         | ConcreteTypeHandle.Concrete _ ->
 
         match primitiveWidths |> List.tryFind (fun (target, _) -> isCorelib target) with
@@ -4315,6 +4322,7 @@ and CliValueType =
                 | ConcreteTypeHandle.Concrete _
                 | ConcreteTypeHandle.Byref _
                 | ConcreteTypeHandle.Pointer _
+                | ConcreteTypeHandle.Continuation _
                 | ConcreteTypeHandle.FunctionPointer _ ->
                     MarshalSizeError.NotMarshalable
                         "[MarshalAs(UnmanagedType.ByValArray)] is only valid on array-typed fields"
@@ -5396,6 +5404,7 @@ module CliType =
             // Pointer types are unmanaged pointers - the zero value is a null pointer
             CliType.RuntimePointer (CliRuntimePointer.Managed ManagedPointerSource.Null), concreteTypes, assemblies
 
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ ->
             // Array types are reference types - the zero value is null

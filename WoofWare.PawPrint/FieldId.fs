@@ -25,12 +25,17 @@ type FieldId =
         field : ComparableFieldDefinitionHandle *
         name : string *
         index : int
+    /// A slot of a continuation the runtime makes for a suspended runtime-async frame
+    /// (`ConcreteTypeHandle.Continuation`), which has no metadata: CoreLib reaches the slot only by
+    /// its byte offset (`ContinuationSlots.offsetOf`).
+    | ContinuationSlot of ContinuationSlot
 
     member this.Name : string =
         match this with
         | FieldId.Metadata (name = name) -> name
         | FieldId.Named name -> name
         | FieldId.InlineArrayElement (name = name) -> name
+        | FieldId.ContinuationSlot slot -> $"<continuation %O{slot}>"
 
     override this.ToString () : string =
         match this with
@@ -38,6 +43,7 @@ type FieldId =
         | FieldId.Named name -> name
         | FieldId.InlineArrayElement (declaringType, field, name, index) ->
             $"%O{declaringType}::%s{name} (inline-array slot %d{index} of %O{field})"
+        | FieldId.ContinuationSlot slot -> $"<continuation %O{slot}>"
 
 [<RequireQualifiedAccess>]
 module FieldId =
@@ -76,14 +82,16 @@ module FieldId =
         match field with
         | FieldId.Metadata (field = handle)
         | FieldId.InlineArrayElement (field = handle) -> Some handle
-        | FieldId.Named _ -> None
+        | FieldId.Named _
+        | FieldId.ContinuationSlot _ -> None
 
     /// The declaring type this identity is keyed to, for the two cases that have one.
     let tryDeclaringType (field : FieldId) : ConcreteTypeHandle option =
         match field with
         | FieldId.Metadata (declaringType = declaringType)
         | FieldId.InlineArrayElement (declaringType = declaringType) -> Some declaringType
-        | FieldId.Named _ -> None
+        | FieldId.Named _
+        | FieldId.ContinuationSlot _ -> None
 
     let exactlyEqual (left : FieldId) (right : FieldId) : bool =
         match left, right with
@@ -93,9 +101,11 @@ module FieldId =
         | FieldId.InlineArrayElement (leftType, leftField, _, leftIndex),
           FieldId.InlineArrayElement (rightType, rightField, _, rightIndex) ->
             leftType = rightType && leftField = rightField && leftIndex = rightIndex
+        | FieldId.ContinuationSlot left, FieldId.ContinuationSlot right -> left = right
         // A slot-`k` repeat is never the declared field: slot 0 is emitted as `Metadata`, so an
         // `InlineArrayElement` always has `index >= 1` and addresses storage the declared field
         // does not.
-        | FieldId.Metadata _, (FieldId.Named _ | FieldId.InlineArrayElement _)
-        | FieldId.Named _, (FieldId.Metadata _ | FieldId.InlineArrayElement _)
-        | FieldId.InlineArrayElement _, (FieldId.Metadata _ | FieldId.Named _) -> false
+        | FieldId.Metadata _, (FieldId.Named _ | FieldId.InlineArrayElement _ | FieldId.ContinuationSlot _)
+        | FieldId.Named _, (FieldId.Metadata _ | FieldId.InlineArrayElement _ | FieldId.ContinuationSlot _)
+        | FieldId.InlineArrayElement _, (FieldId.Metadata _ | FieldId.Named _ | FieldId.ContinuationSlot _)
+        | FieldId.ContinuationSlot _, (FieldId.Metadata _ | FieldId.Named _ | FieldId.InlineArrayElement _) -> false

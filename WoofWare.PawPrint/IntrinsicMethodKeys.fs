@@ -46,6 +46,7 @@ module IntrinsicMethodKeys =
                     else
                         $"%s{ct.Namespace}.%s{ct.Name}"
                 | None -> failwith $"Intrinsic method key requested for unknown concrete type handle: %O{handle}"
+            | ConcreteTypeHandle.Continuation _ -> "continuation"
             | ConcreteTypeHandle.Byref _ -> "&"
             | ConcreteTypeHandle.Pointer _ -> "*"
             | ConcreteTypeHandle.FunctionPointer _ -> "fnptr"

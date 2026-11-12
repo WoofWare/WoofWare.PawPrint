@@ -2677,6 +2677,7 @@ module Intrinsics =
                 | ConcreteTypeHandle.Pointer _
                 | ConcreteTypeHandle.FunctionPointer _
                 | ConcreteTypeHandle.OneDimArrayZero _
+                | ConcreteTypeHandle.Continuation _
                 | ConcreteTypeHandle.Array _ -> state, false
                 | ConcreteTypeHandle.Concrete _ ->
                     match IlMachineState.tryGetConcreteTypeInfo state elementHandle with

@@ -18,6 +18,12 @@ type ConcreteTypeHandle =
     /// A function pointer type (e.g. `delegate*<int, int>` in C#). Distinct fnptr types
     /// have distinct signatures, so the signature is the type identity.
     | FunctionPointer of TypeMethodSignature<ConcreteTypeHandle>
+    /// A subclass of CoreLib's `System.Runtime.CompilerServices.Continuation` that the runtime
+    /// makes, with no metadata, to hold a suspended runtime-async frame
+    /// (`AsyncContinuationsManager`, vm/asynccontinuations.cpp). Its identity is which of the
+    /// slots CoreLib addresses it has, and the type of its result: never the method or the
+    /// suspension point. See `ContinuationLayout`.
+    | Continuation of ContinuationLayout
 
     override this.ToString () =
         match this with
@@ -41,6 +47,41 @@ type ConcreteTypeHandle =
                 | MethodReturnType.Returns ty -> ty.ToString ()
 
             $"*({args} -> {returnStr})"
+        | ConcreteTypeHandle.Continuation layout -> layout.ToString ()
+
+/// Which of the slots CoreLib reads and writes by byte offset (`Continuation.GetResultStorageOrNull`
+/// and its siblings) a runtime-made continuation has, beyond `Continuation`'s own fields. The saved
+/// frame is not among them: PawPrint keeps it on the side, keyed by the continuation.
+and ContinuationLayout =
+    {
+        /// The `ExecutionContext` the suspending frame captured, which CoreLib's dispatcher restores
+        /// before resuming it.
+        ExecutionContext : bool
+        /// The `SynchronizationContext` or `TaskScheduler` the frame resumes on.
+        ContinuationContext : bool
+        /// The exception that resuming the frame rethrows at its await.
+        Exception : bool
+        /// The type of the result of the call the frame awaits, which the continuation before it in
+        /// the chain writes when it completes; `None` for a call returning nothing.
+        Result : ConcreteTypeHandle option
+    }
+
+    override this.ToString () =
+        let slots =
+            [
+                if this.ExecutionContext then
+                    "ExecutionContext"
+                if this.ContinuationContext then
+                    "ContinuationContext"
+                if this.Exception then
+                    "Exception"
+                match this.Result with
+                | None -> ()
+                | Some result -> $"Result: {result}"
+            ]
+
+        let joined = String.Join (", ", slots)
+        $"Continuation{{%s{joined}}}"
 
 type AllConcreteTypes =
     private
@@ -68,6 +109,7 @@ module AllConcreteTypes =
         | ConcreteTypeHandle.OneDimArrayZero _ -> None // Array types are structural wrappers
         | ConcreteTypeHandle.Array _ -> None // Array types are structural wrappers
         | ConcreteTypeHandle.FunctionPointer _ -> None // FunctionPointer types are structural wrappers
+        | ConcreteTypeHandle.Continuation _ -> None // Continuation types have no metadata
 
     /// The metadata behind a handle: `lookup`, then the row's assembly, then its TypeDef. This
     /// is the chain every nominal-type question starts with, and it is spelled out at some
@@ -168,7 +210,8 @@ module AllConcreteTypes =
 
                     current <- inner
                 | ConcreteTypeHandle.Concrete _
-                | ConcreteTypeHandle.FunctionPointer _ -> peeling <- false
+                | ConcreteTypeHandle.FunctionPointer _
+                | ConcreteTypeHandle.Continuation _ -> peeling <- false
 
             // The innermost wrapper binds tightest, so decorations apply in reverse of peel order.
             decorations.Reverse ()
@@ -224,6 +267,7 @@ module AllConcreteTypes =
                 if depth > describeDepthBudget then
                     match leaf with
                     | ConcreteTypeHandle.Concrete id -> $"<#%d{id} nested deeper than %d{describeDepthBudget}>"
+                    | ConcreteTypeHandle.Continuation _ -> $"<continuation nested deeper than %d{describeDepthBudget}>"
                     | _ -> $"<function pointer nested deeper than %d{describeDepthBudget}>"
                 else
 
@@ -266,6 +310,21 @@ module AllConcreteTypes =
                             $"<%d{signature.GenericParameterCount}>"
 
                     $"%O{header.CallingConvention}%s{attributes} %s{ret}%s{arity}(%s{args})*"
+                | ConcreteTypeHandle.Continuation layout ->
+                    let slot (present : bool) (name : string) = if present then [ name ] else []
+
+                    let result =
+                        match layout.Result with
+                        | None -> []
+                        | Some result -> [ "Result: " + go false (depth + 1) result ]
+
+                    let slots =
+                        slot layout.ExecutionContext "ExecutionContext"
+                        @ slot layout.ContinuationContext "ContinuationContext"
+                        @ slot layout.Exception "Exception"
+                        @ result
+
+                    "<continuation " + String.Join (", ", slots) + ">"
                 | ConcreteTypeHandle.Concrete id ->
                     match lookup leaf concreteTypes with
                     | None -> $"<unregistered concrete type #%d{id}>"
@@ -294,7 +353,7 @@ module AllConcreteTypes =
                             $"%s{name}%s{generics}#%d{id}"
                     | false, _ -> $"<missing TypeDef %O{concrete.Definition.Get} in %s{assembly.Name.Name}> (#%d{id})"
                 | other ->
-                    // `peelStructure` returns only `Concrete` or `FunctionPointer`. Rendering rather
+                    // `peelStructure` returns only `Concrete`, `FunctionPointer` or `Continuation`. Rendering rather
                     // than failing keeps the never-throws contract if that ever stops being true.
                     ignore other
                     "<unexpected structural handle>"
@@ -379,7 +438,8 @@ module AllConcreteTypes =
             | ConcreteTypeHandle.Pointer _ -> Some (index, MalformedArgument.Pointer)
             | ConcreteTypeHandle.FunctionPointer _ -> Some (index, MalformedArgument.FunctionPointer)
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ -> None
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ -> None
             | ConcreteTypeHandle.Concrete id ->
                 match this.Mapping |> Map.tryFind id with
                 | None -> failwith $"BUG: the argument %O{argument} of an instantiation is not interned"
@@ -549,7 +609,8 @@ module ConcreteActivePatterns =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> None
 
     /// Matches an array type whose element type is the given handle.
     let (|ConcreteGenericArray|_|)
@@ -2380,7 +2441,8 @@ module Concretization =
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.OneDimArrayZero _
             | ConcreteTypeHandle.Array _
-            | ConcreteTypeHandle.FunctionPointer _ ->
+            | ConcreteTypeHandle.FunctionPointer _
+            | ConcreteTypeHandle.Continuation _ ->
                 // Terminal in zeroOf — see the doc comment above.
                 assemblies, concreteTypes, None
             | ConcreteTypeHandle.Concrete _ ->
@@ -2856,6 +2918,10 @@ module Concretization =
                     signature
 
             TypeDefn.FunctionPointer mapped
+        | ConcreteTypeHandle.Continuation layout ->
+            // A continuation type has no metadata, so no signature can name it.
+            failwith
+                $"BUG: asked for the TypeDefn of %O{layout}, a continuation type the runtime makes with no metadata"
         | ConcreteTypeHandle.Concrete _ ->
             match AllConcreteTypes.tryTypeInfo assemblies concreteTypes handle with
             | None -> failwith "Logic error: handle not found"

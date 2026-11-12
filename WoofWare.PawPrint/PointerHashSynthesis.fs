@@ -134,6 +134,8 @@ module PointerHashSynthesis =
                 $"PointerHashSynthesis.canonicalKey: MethodTablePtr(%O{target}) has no MethodTable identity (generic parameters, byrefs, pointers and function pointers are TypeDescs in CoreCLR)"
         | NativeIntSource.TypeHandlePtr (RuntimeTypeHandleTarget.Closed handle as target) ->
             match handle with
+            | ConcreteTypeHandle.Continuation layout ->
+                ContinuationType.unasked "PointerHashSynthesis.canonicalKey" layout
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.OneDimArrayZero _
             | ConcreteTypeHandle.Array _ -> CanonicalPointerKey.MethodTable handle
@@ -194,6 +196,12 @@ module PointerHashSynthesis =
             // compares the result against null and calls through it.
             failwith
                 $"PointerHashSynthesis.canonicalKey: %O{target} has no synthesised address bits; nothing hashes or does arithmetic on an unboxing stub's address today"
+        | NativeIntSource.FunctionPointer (FunctionPointerTarget.AsyncResume as target)
+        | NativeIntSource.FunctionPointer (FunctionPointerTarget.SuspensionPoint _ as target) ->
+            // A continuation's `ResumeInfo` holds these, and CoreLib only calls through the one and
+            // compares the other against null.
+            failwith
+                $"PointerHashSynthesis.canonicalKey: %O{target} has no synthesised address bits; nothing hashes or does arithmetic on a runtime-async resumption address today"
         | NativeIntSource.MethodHandlePtr id -> CanonicalPointerKey.MethodHandle id
         | NativeIntSource.FieldHandlePtr id -> CanonicalPointerKey.FieldHandle id
         // The canonical key is the handle's *identity*; its tag bits are a view

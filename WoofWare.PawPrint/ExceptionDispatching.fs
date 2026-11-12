@@ -1276,7 +1276,7 @@ module ExceptionDispatching =
                 $"BUG: the second pass of exception dispatch reached %O{frame.ExecutingMethod} again while its contexts were still to be restored for an earlier unwind"
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture)
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
-        | Some AsyncFrame.Transparent
+        | Some (AsyncFrame.Transparent _)
         | None ->
 
         match frame.ReturnState with

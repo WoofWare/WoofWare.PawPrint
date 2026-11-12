@@ -57,6 +57,8 @@ module InternalSignatureTypeResolution =
                         $"BUG: %s{operation}: %O{handle} is registered with no generic arguments, but its definition %O{concrete.Identity} has %d{definition.Generics.Length} generic parameter(s)"
 
                 InternalSignatureType.NonGeneric (concrete.Identity, kindOf definition)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                ContinuationType.unasked operation layout
             | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity ->
                 let definition = definitionOf identity
 

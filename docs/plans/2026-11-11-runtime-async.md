@@ -5,10 +5,11 @@
 .NET 11 compiles every async method in CoreLib, and in every shared-framework library, as a
 *runtime-async* method (`System.Private.CoreLib.csproj` sets `Features=runtime-async=on`;
 `libraries/Directory.Build.targets` does the same for the shared framework). Since stage 1b
-PawPrint runs such a method whose awaits all find completed tasks, and refuses, by name, to
-suspend one at an await of a pending task. Three .NET 11 tests are parked on that refusal: the
-Linux-CoreLib `FileSystemWatcher` test and the two ASP.NET two-process tests (all three in
-`Watcher.DequeueEvents`).
+PawPrint runs such a method whose awaits all find completed tasks; since stage 2b it suspends one
+at an await of a pending task and resumes it, unless the await lies in a `try` region, which it
+refuses by name (decision 11). Three .NET 11 tests are parked on that refusal: the Linux-CoreLib
+`FileSystemWatcher` test and the two ASP.NET two-process tests (all three in
+`Watcher.DequeueEvents`, whose await of the inotify read lies in a `try`).
 
 .NET 10's CoreLib declares runtime async's infrastructure too (`AsyncHelpers.Await` and the like,
 flagged `Async` and returning no promise).
@@ -294,8 +295,78 @@ Each stage is one pull request, with its tests first.
 4. **(2b) Suspension and resumption.** The continuation type; `AsyncSuspend`; suspending callers;
    `TailAwait`; the suspended-frame map; `ResumeInfo` and `AsyncResume`; delivering a result;
    `DiagnosticIP`, with its QCall refused.
+
+   As built:
+   * The continuation type is `ConcreteTypeHandle.Continuation of ContinuationLayout`, the slots
+     it has and its result's type. Its fields are CoreLib's `Continuation`'s, then one per slot,
+     named `FieldId.ContinuationSlot` (no metadata names them), placed where
+     `ContinuationSlots.offsetOf` says and encoded in `Flags` by
+     `ContinuationSlots.slotIndexFlags`. `TestRuntimeAsyncSuspension` checks both against the
+     constants of .NET 11's CoreLib (`DataOffset`, `ContinuationFlags.*IndexFirstBit`) for
+     arbitrary layouts. Type-system questions only a token or a `RuntimeType` could ask of one fail
+     through `ContinuationType.unasked`.
+   * `AsyncSuspend` makes its frame leave with its argument as its hidden continuation
+     (`IlMachineStateExecution.leaveBySuspension`). What happens next is the caller's: the thunk
+     reads it through `AsyncCallContinuation` and gets a zero for the formal result; a frame of
+     runtime async's machinery whose call was a tail await passes it on (`TailAwait` is a state
+     of `AsyncFrame.Transparent`: requested, then in flight on the next async call); any other
+     runtime-async frame suspends (`beginSuspension`), and CoreLib's dispatcher gets it from its
+     `calli`. Under decision 6 every await is a call of an `Await` overload, so a chain has one
+     continuation of a user body after CoreLib's own, and the user body's layout is always an
+     `ExecutionContext` slot and the result's.
+   * A suspending user body allocates its continuation, links it as the callee's `Next`, gives it a
+     `ResumeInfo` in a native block of its own, and calls `FinishSuspensionNoContinuationContext`
+     (the helper for an await of no continuation context) with a byref to the `ExecutionContext`
+     slot. When that returns (`AsyncContextStep.AfterFinishSuspension`) the frame, its byrefs and
+     byref-like values zeroed and its `stackalloc` memory dropped
+     (`AsyncSuspension.suspendedFrame`), goes into `IlMachineState.SuspendedAsyncFrames` under its
+     continuation, and leaves. No handler runs.
+   * `ResumeInfo.Resume` is `FunctionPointerTarget.AsyncResume`. A `calli` through it takes the
+     frame out of the map, frees its `ResumeInfo`, sets `resumed`, pushes the awaited call's
+     result from the result slot, and makes the frame the dispatcher's callee
+     (`ReturnValueDisposition.ResumedAsync`): its return writes its value through the result
+     location and returns null; its suspension returns its new continuation. The map's entry is
+     linear (`SuspendedFrames`).
+   * `ResumeInfo.DiagnosticIP` is `FunctionPointerTarget.SuspensionPoint (method, ilOffset)`. CoreLib
+     reads it through a `void*` field of native memory, which needed the read of a pointer slot
+     holding a function pointer to return it as `toCliTypeCoerced` stored it. The
+     `AsyncHelpers_AddContinuationToExInternal` QCall is refused, naming the method and its await.
+   * Refused by name: a suspension at an await in a `try` region or handler (decision 11), and one
+     in runtime async's machinery without a tail await, which only `AwaitTaskWithRareOptions` (an
+     await with `ConfigureAwaitOptions.SuppressThrowing`) makes: its continuation's
+     `ExecutionContext` comes from `AsyncHelpers.CaptureExecutionContext`, a helper with a result,
+     which `ReturnValueDisposition.ResumeAsyncContexts` cannot yet deliver.
+
+   Guests (`RuntimeAsyncResumesWith*.cs`) reach a result of each kind through library methods
+   whose awaits lie outside `try` regions: `StreamReader.ReadAsync` (`int`, two suspensions in one
+   frame, and an `AsyncLocal` that must flow through the `ExecutionContext` slot),
+   `TextWriter.WriteLineAsync(StringBuilder)` (`void`, one suspension per write),
+   `TcpListener.AcceptTcpClientAsync` (a reference, through an `IValueTaskSource`) and
+   `ZipArchiveEntry.OpenAsync` (`bool`, `int`, `long`, `(bool, string)` and `Stream`). Most of
+   CoreLib's own `Async` methods await inside a `try`: `ReadToEndAsync`, `ReadLineAsync`,
+   `Stream.CopyToAsync`, `BufferedStream` and `File.*Async` stay refused until stage 3.
+
 5. **(3) Exceptions across suspension.** Exception slots for awaits in `try` regions; the
    dispatcher's unwinding; the QCall that appends async frames. Probably un-parks the
-   `FileSystemWatcher` and ASP.NET tests.
+   `FileSystemWatcher` and ASP.NET tests, which stage 2b measured stopping at the refusal of
+   decision 11 in `Watcher.DequeueEvents`.
+
+   What stage 2b leaves for it: `ContinuationSlots` already encodes an exception slot, so
+   `layoutAwaiting` gives one for an await in a `try`, and resumption (`executeAsyncResumeCalli`)
+   reads it, clears it and rethrows what it holds at the await before pushing the result. A
+   resumed frame's program counter puts it back inside its `try` regions as it stands, since
+   PawPrint finds handlers by offset; a suspension in a handler stays refused, as Roslyn moves
+   awaits out of them. The QCall gets its frame from the `SuspensionPoint` in `DiagnosticIP`.
+   An exception escaping a resumed frame already reaches the dispatcher's `catch`
+   (`ExceptionEscape.Propagate`); only its unwinding through further continuations reaches the
+   QCall. The non-tail suspension of `AwaitTaskWithRareOptions` still needs
+   `AsyncHelpers.CaptureExecutionContext`, whose result a context helper's step must carry.
 6. **(4) The await pattern.** Binding async variants at `await` sites and in async versions'
    tail-call patterns; async versions of plain `Task`-returning methods; the second vtable slot.
+
+   What stage 2b leaves for it: once an await binds a variant, chains hold several continuations
+   of user bodies, and an await without `ConfigureAwait(false)` gets a continuation-context slot
+   and calls `FinishSuspensionWithContinuationContext`; `beginSuspension` now always lays out an
+   `ExecutionContext` slot and the result's and calls the helper for no continuation context,
+   which is right only under decision 6. The JIT also reuses a resumed frame's continuation when
+   it suspends again; PawPrint makes a fresh one, which nothing managed can tell apart.

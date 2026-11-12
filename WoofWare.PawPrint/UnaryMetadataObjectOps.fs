@@ -729,6 +729,7 @@ module internal UnaryMetadataObjectOps =
             |> IlMachineState.pushToEvalStack' toBox thread
             |> IlMachineState.advanceProgramCounter thread
             |> Tuple.withRight WhatWeDid.Executed
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "Box" layout
         | ConcreteTypeHandle.Byref _ ->
             failwith $"unreachable: Box's byref type operand %O{typeHandle} is refused above"
         | ConcreteTypeHandle.Pointer _ ->
@@ -921,6 +922,7 @@ module internal UnaryMetadataObjectOps =
                 targetConcreteTypeHandle
                 actualObj
                 state
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "Unbox_Any" layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ ->

@@ -588,6 +588,7 @@ module NativeRuntimeFieldHandle =
         | ConcreteTypeHandle.Byref _ ->
             failwith
                 $"BUG: %s{operation} on a field of byref type %O{fieldTypeHandle}; only a ref struct declares one, and a ref struct instance cannot be handed to reflection"
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Concrete _ ->
@@ -666,6 +667,7 @@ module NativeRuntimeFieldHandle =
             // reach `FieldInfo.GetValue` with one.
             failwith
                 $"BUG: %s{operation} on a field of byref type %O{fieldTypeHandle}; only a ref struct declares one, and a ref struct instance cannot be handed to reflection"
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Concrete _ ->

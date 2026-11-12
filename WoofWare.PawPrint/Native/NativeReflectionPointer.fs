@@ -81,6 +81,7 @@ module internal NativeReflectionPointer =
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ ->
             failwith
                 $"NativeReflectionPointer.toObject: %O{ty} is neither an unmanaged pointer nor a function pointer type"

@@ -81,6 +81,7 @@ module NativeValueType =
         match fieldType with
         | ConcretePrimitive state.TypeSystem.ConcreteTypes primitive -> state, ofPrimitive primitive
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ -> state, FieldClass.ObjectReference
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> state, FieldClass.Bits

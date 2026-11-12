@@ -164,14 +164,40 @@ type AsyncContextHandling =
     /// `AsyncHelpers.RestoreContexts` has returned, so the frame leaves next.
     | Restored
 
+/// Whether a frame of runtime async's own machinery has asked, through `AsyncHelpers.TailAwait()`,
+/// that its next call with runtime async's calling convention be a tail await: one that, if the
+/// callee suspends, returns the callee's continuation as the frame's own, with no continuation of
+/// the frame's (`m_nextAwaitIsTail`, jit/importercalls.cpp).
+[<RequireQualifiedAccess>]
+type TailAwait =
+    | NotRequested
+    /// `TailAwait()` has run, and the frame has made no call with runtime async's calling convention
+    /// since.
+    | Requested
+    /// The frame's call in flight is the tail await `TailAwait()` asked for.
+    | InFlight
+
 /// A frame running a method with runtime async's calling convention.
 [<RequireQualifiedAccess>]
 type AsyncFrame =
-    /// Runtime async's own machinery (`AsyncHelpers.Await` and the like), which handles no contexts.
-    | Transparent
+    /// Runtime async's own machinery (`AsyncHelpers.Await` and the like), which handles no contexts,
+    /// and alone may tail-await.
+    | Transparent of TailAwait
     /// The async variant of a method flagged `MethodImplAttributes.Async`, which saves and restores
     /// the thread's contexts (`MethodDesc::RequiresAsyncContextSaveAndRestore`).
     | SavesContexts of AsyncContextHandling
+
+/// What a frame suspending at an await has made, which it records once its last CoreLib helper has
+/// returned to it and it leaves.
+type PendingSuspension =
+    {
+        /// The continuation the frame made for itself, which it returns as its hidden continuation.
+        Continuation : ManagedHeapAddress
+        /// The type of `Continuation`.
+        Layout : ContinuationLayout
+        /// The native block holding the `ResumeInfo` that `Continuation.ResumeInfo` points at.
+        ResumeInfo : NativeMemoryBlockId
+    }
 
 /// What the runtime does once a CoreLib helper it called for a user-written runtime-async body's
 /// contexts (`AsyncFrame.SavesContexts`) has returned to that body's frame.
@@ -186,6 +212,9 @@ type AsyncContextStep =
     | AfterRestoreOnReturn
     /// `AsyncHelpers.RestoreContexts` returned while an exception was leaving the body.
     | AfterRestoreOnUnwind
+    /// `AsyncHelpers.FinishSuspensionNoContinuationContext` returned to the body, which is
+    /// suspending at an await with `suspension`; it leaves next.
+    | AfterFinishSuspension of suspension : PendingSuspension
 
 /// What `returnStackFrame` should do with a frame's product — the object it was constructing if
 /// `Constructing`, otherwise the value its signature says it returns — once it returns.
@@ -220,6 +249,11 @@ type ReturnValueDisposition =
     /// The runtime called this CoreLib helper for the contexts of the user-written runtime-async
     /// body it returns to, and does `step` next. The helpers return nothing.
     | ResumeAsyncContexts of step : AsyncContextStep
+    /// The frame is a suspended runtime-async frame that CoreLib's dispatcher resumed through
+    /// `FunctionPointerTarget.AsyncResume`, whose return is a continuation. If the frame returns,
+    /// its value goes through `resultLocation`, the result slot of the continuation after it, and
+    /// the caller gets null; if it suspends again, the caller gets its new continuation.
+    | ResumedAsync of resultLocation : ManagedPointerSource
 
 /// What happens to an exception that escapes a frame, decided by whatever pushed the frame rather
 /// than by the frame's own method: the runtime code that calls a method can catch what it throws.

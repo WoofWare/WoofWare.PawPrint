@@ -225,6 +225,7 @@ module NativeRuntimeTypeHelpers =
         : IlMachineState * int64 list
         =
         match typeHandle with
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _
@@ -304,6 +305,7 @@ module NativeRuntimeTypeHelpers =
             match typeHandle with
             | ConcreteVoid state.TypeSystem.ConcreteTypes -> 0x01
             | ConcretePrimitive state.TypeSystem.ConcreteTypes primitive -> primitiveCorElementType primitive
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
             | ConcreteTypeHandle.Byref _ -> 0x10
             | ConcreteTypeHandle.Pointer _ -> 0x0F
             | ConcreteTypeHandle.FunctionPointer _ -> 0x1B
@@ -370,6 +372,7 @@ module NativeRuntimeTypeHelpers =
             | None ->
                 failwith
                     $"%s{operation}: expected primitive or enum MethodTable, got %s{typeInfo.Namespace}.%s{typeInfo.Name}"
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _
@@ -589,6 +592,8 @@ module NativeRuntimeTypeHelpers =
                         field
                         state
             )
+        | ConcreteTypeHandle.Continuation layout ->
+            ContinuationType.unasked "MethodTable_CanCompareBitsOrUseFastGetHashCode" layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _
@@ -690,6 +695,7 @@ module NativeRuntimeTypeHelpers =
                     )
 
                 typeDefinitionToken concreteType.Definition.Get
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _
@@ -872,6 +878,8 @@ module NativeRuntimeTypeHelpers =
                 Some addr, state
         | RuntimeTypeHandleTarget.Closed typeHandle ->
             match typeHandle with
+            | ConcreteTypeHandle.Continuation layout ->
+                ContinuationType.unasked "RuntimeTypeHandle.GetDeclaringType" layout
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _
@@ -941,6 +949,8 @@ module NativeRuntimeTypeHelpers =
                     Some baseHandle, state
             | RuntimeTypeHandleTarget.Closed typeHandle ->
                 match typeHandle with
+                | ConcreteTypeHandle.Continuation layout ->
+                    ContinuationType.unasked "RuntimeTypeHandle.GetBaseType" layout
                 | ConcreteTypeHandle.Byref _
                 | ConcreteTypeHandle.Pointer _
                 | ConcreteTypeHandle.FunctionPointer _ -> None, state
@@ -1017,6 +1027,7 @@ module NativeRuntimeTypeHelpers =
                 Some element
             | RuntimeTypeHandleTarget.Closed typeHandle ->
                 match typeHandle with
+                | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "RuntimeType.GetElementType" layout
                 | ConcreteTypeHandle.Concrete _ -> None
                 // Function pointers expose no element type: there's no single referenced
                 // element type to surface (they're parametrised by a whole signature),
@@ -1231,6 +1242,8 @@ module NativeRuntimeTypeHelpers =
                 state
                 concreteType.Identity
                 genericArguments
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+            ContinuationType.unasked operation layout
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer _)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _)
@@ -1277,6 +1290,8 @@ module NativeRuntimeTypeHelpers =
             match AllConcreteTypes.lookup handle state.TypeSystem.ConcreteTypes with
             | None -> None
             | Some concreteType -> lookupFromIdentity concreteType.Identity
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+            ContinuationType.unasked "RuntimeTypeHandle.openGenericTypeInfoForValidation" layout
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer _)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _)
@@ -1314,6 +1329,7 @@ module NativeRuntimeTypeHelpers =
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ -> None
 
     /// True iff `arg` resolves to a value type (i.e., a struct or enum).
@@ -1951,6 +1967,7 @@ module NativeRuntimeTypeHelpers =
                 + assemblySuffix format embedded (fun () -> assemblyOf (RuntimeTypeHandleTarget.Closed element))
 
             match typeHandle with
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "RuntimeType name" layout
             | ConcreteTypeHandle.Byref inner -> overElement CompositeShape.Byref inner
             | ConcreteTypeHandle.Pointer inner -> overElement CompositeShape.Pointer inner
             | ConcreteTypeHandle.OneDimArrayZero inner -> overElement CompositeShape.OneDimArrayZero inner
@@ -2252,6 +2269,7 @@ module NativeRuntimeTypeHelpers =
                 $"TODO: %s{operation}: TypeHandle::GetName of an open constructed instantiation of %O{definition.TypeDefinition.Get} is not modelled; its instantiation contains type variables whose rendering in this position is unverified"
         | RuntimeTypeHandleTarget.Closed handle ->
             match handle with
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "TypeHandle::GetName" layout
             | ConcreteTypeHandle.Byref inner -> $"%s{getNameOfHandle inner}&"
             | ConcreteTypeHandle.Pointer inner -> $"%s{getNameOfHandle inner}*"
             // `ConstructName` emits this literal for ELEMENT_TYPE_FNPTR, with no signature.
@@ -2578,6 +2596,7 @@ module ActivationInfo =
                     $"%s{operation}: reached for %O{target}, which contains generic variables; RuntimeType.CreateInstanceCheckThis should have thrown ArgumentException (Acc_CreateGenericEx) before the QCall"
 
         match handle with
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
@@ -2736,6 +2755,7 @@ module BoxInfo =
                     $"%s{operation}: reached for %O{target}, which contains generic variables; RuntimeType.BoxCache's constructor should have thrown ArgumentException (Arg_TypeNotSupported) before the QCall"
 
         match handle with
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ ->
@@ -2983,6 +3003,7 @@ module UninitializedObjectInfo =
         | RuntimeTypeHandleTarget.Closed handle ->
 
         match handle with
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _

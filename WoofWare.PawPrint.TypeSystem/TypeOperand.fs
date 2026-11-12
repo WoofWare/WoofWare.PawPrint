@@ -85,6 +85,8 @@ module TypeOperand =
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.Continuation _ ->
+            failwith $"BUG: type operand %O{handle} is a continuation type, which no token names"
 
     /// <summary>
     /// Why CoreCLR refuses a token whose type <paramref name="spelling"/> spells, in

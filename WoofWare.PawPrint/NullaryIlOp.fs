@@ -1617,6 +1617,12 @@ module NullaryIlOp =
                 IlMachineStateExecution.resumeVmRaise loggerFactory corelib step currentThread state
             | ReturnFrameResult.ResumeAsyncContexts (state, step) ->
                 AsyncContextSaving.resume loggerFactory corelib step currentThread state
+            | ReturnFrameResult.ResumedAsyncReturned (state, resultLocation, returned) ->
+                // The resumed frame completed, so `AsyncResume` returns null to CoreLib's dispatcher.
+                state
+                |> AsyncSuspension.deliverResult corelib resultLocation returned
+                |> IlMachineState.pushToEvalStack (CliType.ObjectRef None) currentThread
+                |> fun state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
             | ReturnFrameResult.DispatchException (state, exnAddr, exnType, making) ->
                 let state, origin =
                     match making with

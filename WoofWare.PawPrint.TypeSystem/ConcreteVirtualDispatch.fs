@@ -138,7 +138,8 @@ module ConcreteVirtualDispatch =
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> None
         | ConcreteTypeHandle.OneDimArrayZero _ ->
 
         if not (baseClassTypes.IsImplicitInterfaceOfSzArray methodToCall.RequiredDeclaringType.Identity) then
@@ -222,7 +223,8 @@ module ConcreteVirtualDispatch =
         let isReferenceType (handle : ConcreteTypeHandle) : bool =
             match handle with
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ -> true
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ -> true
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _ -> false
@@ -959,7 +961,8 @@ module ConcreteVirtualDispatch =
                     | ConcreteTypeHandle.FunctionPointer _ -> state, Ok None
                     | ConcreteTypeHandle.Concrete _
                     | ConcreteTypeHandle.OneDimArrayZero _
-                    | ConcreteTypeHandle.Array _ ->
+                    | ConcreteTypeHandle.Array _
+                    | ConcreteTypeHandle.Continuation _ ->
                         let state, baseType =
                             TypeSystemState.resolveBaseConcreteType
                                 loggerFactory
@@ -1320,7 +1323,8 @@ module ConcreteVirtualDispatch =
             | ConcreteTypeHandle.FunctionPointer _ -> state, Ok (visited, [])
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ ->
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ ->
 
             let state, baseType =
                 TypeSystemState.resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state typeHandle

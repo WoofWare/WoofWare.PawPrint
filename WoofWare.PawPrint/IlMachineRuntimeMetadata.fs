@@ -288,6 +288,7 @@ module IlMachineRuntimeMetadata =
         | ConcreteTypeHandle.FunctionPointer _ ->
             failwith
                 $"TODO: %s{describe} is instantiated with %s{AllConcreteTypes.describe state.TypeSystem._LoadedAssemblies state.TypeSystem.ConcreteTypes argument}, which is not a valid type argument; PawPrint does not model how CoreCLR refuses it"
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked describe layout
         | ConcreteTypeHandle.Concrete _ ->
 
         match
@@ -1699,6 +1700,7 @@ module IlMachineRuntimeMetadata =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.FunctionPointer _ -> state, None
         | ConcreteTypeHandle.Concrete _ ->
             match builtInPrimitiveIdentity state handle with
@@ -1902,6 +1904,7 @@ module IlMachineRuntimeMetadata =
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _
         | ConcreteTypeHandle.OneDimArrayZero _
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Array _ -> false
         | ConcreteTypeHandle.Concrete _ ->
             match AllConcreteTypes.lookup nullableCandidate state.TypeSystem.ConcreteTypes with
@@ -2276,6 +2279,8 @@ module IlMachineRuntimeMetadata =
                 Some (CompositeShape.OneDimArrayZero, RuntimeTypeHandleTarget.Closed element)
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array (element, rank)) ->
                 Some (CompositeShape.Array rank, RuntimeTypeHandleTarget.Closed element)
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                ContinuationType.unasked "RuntimeTypeHandle parameterized shape" layout
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ | ConcreteTypeHandle.FunctionPointer _)
             | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
             | RuntimeTypeHandleTarget.OpenConstructed _
@@ -2305,6 +2310,9 @@ module IlMachineRuntimeMetadata =
             // so even the "everything is assignable to System.Object" rule does not apply to it.
             | RuntimeTypeHandleTarget.DynamicMethodsClass _, _
             | _, RuntimeTypeHandleTarget.DynamicMethodsClass _ -> state, false
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout), _
+            | _, RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                ContinuationType.unasked "RuntimeTypeHandle cast" layout
             | RuntimeTypeHandleTarget.Closed s, RuntimeTypeHandleTarget.Closed t ->
                 let closedVisited =
                     visited

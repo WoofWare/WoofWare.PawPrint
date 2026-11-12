@@ -610,6 +610,7 @@ public class Outer<A>
         | ConcreteTypeHandle.Byref element -> renderHandle state element + "&"
         | ConcreteTypeHandle.Pointer element -> renderHandle state element + "*"
         | ConcreteTypeHandle.FunctionPointer _ -> "<fnptr>"
+        | ConcreteTypeHandle.Continuation _ -> "<continuation>"
         | ConcreteTypeHandle.Concrete _ ->
             match AllConcreteTypes.lookup handle state.TypeSystem.ConcreteTypes with
             | None -> $"<unregistered %O{handle}>"

@@ -285,7 +285,9 @@ module AbstractMachine =
                 | FunctionPointerTarget.RuntimeAllocator
                 | FunctionPointerTarget.OpenDelegateShuffleThunk
                 | FunctionPointerTarget.VirtualCallStub _
-                | FunctionPointerTarget.UnboxingStub _ ->
+                | FunctionPointerTarget.UnboxingStub _
+                | FunctionPointerTarget.AsyncResume
+                | FunctionPointerTarget.SuspensionPoint _ ->
                     FunctionPointerTarget.requireManaged "delegate invocation" callee
                     |> fun m -> state, Ok m
 
@@ -323,6 +325,8 @@ module AbstractMachine =
                 failwith "unexpected step of a thrown non-exception's wrapping from delegate frame pop"
             | ReturnFrameResult.ResumeAsyncContexts _ ->
                 failwith "unexpected step of a runtime-async body's context handling from delegate frame pop"
+            | ReturnFrameResult.ResumedAsyncReturned _ ->
+                failwith "unexpected return of a resumed runtime-async frame from delegate frame pop"
             | ReturnFrameResult.NormalReturn state ->
 
             // Every failure below happens *after* the delegate's synthetic `Invoke` frame is
