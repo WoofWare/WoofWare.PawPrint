@@ -60,16 +60,28 @@ module AbstractMachine =
         | StateLoadResult.ThrowingTypeInitializationException state ->
             // The dispatch above already ran against this frame, so the exception's trace names
             // it. Clear the flag on whichever frame is still ours to clear: dispatch may have
-            // unwound us entirely, in which case there is nothing to do.
+            // unwound us entirely, in which case there is nothing to do. A synchronized method's
+            // frame that the unwind is parked on, to call its monitor exit helper, keeps its flag:
+            // the resumed second pass reads it to know that none of the body ran, so that none of
+            // the body's cleanup clauses runs.
             let state =
                 match state.ThreadState |> Map.tryFind thread with
                 | None -> state
                 | Some threadState ->
                     match threadState.MethodStates |> Map.tryFind threadState.ActiveMethodState with
                     | None -> state
-                    | Some _ ->
-                        state
-                        |> IlMachineState.mapFrame thread threadState.ActiveMethodState MethodState.clearPendingTypeInit
+                    | Some frame ->
+                        match frame.Synchronized with
+                        | Some (SynchronizedFrame.ExitingOnUnwind _) -> state
+                        | Some SynchronizedFrame.AwaitingEnter
+                        | Some (SynchronizedFrame.Holding _)
+                        | Some SynchronizedFrame.Exited
+                        | None ->
+                            state
+                            |> IlMachineState.mapFrame
+                                thread
+                                threadState.ActiveMethodState
+                                MethodState.clearPendingTypeInit
 
             ExecutionResult.stepped (state, WhatWeDid.ThrowingTypeInitializationException)
             |> Choice1Of2
