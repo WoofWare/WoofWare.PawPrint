@@ -327,8 +327,11 @@ How many sites, in RC1's linux-x64 `Microsoft.NETCore.App` and `Microsoft.AspNet
   (`Parallel.ForEachAsync`'s await of `MoveNextAsync`, and two awaits of `Stream.DisposeAsync` in
   `ZipArchiveEntry`), and none is CoreLib's. No site has `ConfigureAwait(true)`.
 * Async versions hold 5,933 `ret`s: 4,274 end `call M; ret` where `M` has a variant, 73
-  `call M; newobj ValueTask; ret`, none `call M; stloc; ldloca; call AsTask; ret`, and 1,586 wrap
-  what they return. Of the `call; ret`s, 67 return a `Task<T>` as a `Task` and 3 are in a
+  `call M; newobj ValueTask; ret`, and 1,586 wrap what they return. The census read each
+  `call M; stloc; ldloca; call AsTask; ret` as the `call AsTask; ret` it ends with, among the
+  4,274; the JIT matches the longer shape at `M` first, and never reads the shorter. Stage 4a's
+  matcher finds 99 (74 in `Microsoft.NETCore.App`, 25 in `Microsoft.AspNetCore.App`), most a
+  `Stream` override's `ReadAsync` or `WriteAsync` returning `ReadAsync(Memory<byte>, …).AsTask()`. Of the `call; ret`s, 67 return a `Task<T>` as a `Task` and 3 are in a
   `NoInlining` method. 22 async versions are of synchronized methods (`TextReader.SyncTextReader`,
   `TextWriter.SyncTextWriter`), and none holds `jmp` or `tail.`.
 * No method carries `PreserveBaseOverridesAttribute` over a promise return, and no ComImport type
@@ -442,7 +445,7 @@ it means by a distinction that only `frameBody` needs.
 
   Refused by name: an async version of a synchronized method, which releases its monitor before
   the await and matches no tail shape (22 in RC1); `jmp`; and the `AsTask` shape until a guest
-  needs it (none in RC1).
+  needs it (99 in RC1, decision 13).
 
 ### 18. Where a caller keeps what it does if its call suspends
 
@@ -542,8 +545,8 @@ probes behind decisions 13 to 20 were built so, and run out of process on real .
 probe's unmatched await must read its task from a field: in a Release build the compiler removes
 a local between the call and the `Await`, and the pattern matches after all.
 
-Shapes stage 4 handles that no method of RC1's shared framework or ASP.NET Core has: the
-`AsTask` tail shape, a covariant override's return-dropping thunk, and an await of a method
+Shapes stage 4 handles that no method of RC1's shared framework or ASP.NET Core has: a covariant
+override's return-dropping thunk, and an await of a method
 called directly that continues on the captured context outside ASP.NET Core. Shapes only a guest's
 own assembly gives: a tail shape in a body compiled without optimisation, as the test project
 compiles guests (`Roslyn.compileAssembly`), which runs as an async version when library code awaits
@@ -781,6 +784,42 @@ Each stage is one pull request, with its tests first.
    and an `Await` at IL_0053.
 
    Depends on stage 3b.
+
+   As built:
+   * `AwaitPattern` (`WoofWare.PawPrint.Semantics`) reads what follows a `call` or `callvirt` in its
+     block: `awaitAfter` the await pattern, as an `AwaitFollower` (the `ConfigureAwait` call with its
+     constant, and the `Await` call's operand, its offset and the offset after it), and
+     `tailShapeAfter` an async version's `TailShape` (`Return`, `NewValueTask`, `AsTask`). Each
+     returns the operands it read past without resolving them. Where the caller finds one that does
+     not name the intrinsic the JIT tests for, the JIT matches nothing at that call, since nothing
+     shorter it would read instead can match there. A block starts where `BoxPattern.blockStarts`,
+     now public, says.
+   * Each answers at any call, so it answers too for the `ConfigureAwait` or `AsTask` call inside a
+     longer match. The JIT never imports such a call once the longer match binds; the caller asks
+     only at a call it runs.
+   * `AwaitPattern.isTailAwait` is decision 17's rule over an `AsyncVersionAwait`: a wrapped `ret`,
+     or a call in a tail shape with the `TailCallFacts` that `Tier0OptimizationEnabled` and
+     `canTailCall` read.
+   * `RuntimeAsyncMethod.asyncVariantOf` constructs the variant of every promise-returning method
+     whose body is runtime-async IL, IL (an async version) or none (`MethodBody.Abstract`), and the
+     variant keeps that body. It refuses by name a delegate's method (`DelegateMethod`, decided
+     before the return type is classified, as the class loader decides it, so `Func<Task>.Invoke`
+     is refused as a delegate's), a ComImport type's (`ComImportType`), and a P/Invoke, an
+     InternalCall, a runtime-provided body or a row naming no IL (`UnmodelledBody`). A type is a
+     delegate when its immediate base type is CoreLib's `MulticastDelegate`, bound by identity.
+   * `IlMachineStateExecution.frameBody` refuses by name a variant whose body is not runtime-async
+     IL.
+   * `TestAwaitPattern` checks both matchers at every call against a reference that reads backwards
+     from each `call Await` and each `ret`: over 3,000 generated bodies, whose block starts (branch
+     targets and exception-region bounds) the generator records and `BoxPattern.blockStarts` must
+     agree with, and over every IL body of the framework under test. Over RC1's linux-x64
+     `Microsoft.NETCore.App` it reads the census's 1,932 awaits in 901 runtime-async bodies, and the
+     4 that a block's start splits. `TestRuntimeAsyncVariant` checks the variant of every method of
+     CoreLib and `System.Net.Http` on both runtimes, the methods named above, and the refusals over
+     Roslyn-compiled fixtures, among them a `MulticastDelegate` of another assembly.
+   * Not modelled: in debuggable code compiled with a debugger's scope information, the JIT also
+     starts a block where a local's scope begins or ends (`fgMakeBasicBlocks`). PawPrint has no
+     debugger.
 
 9. **(4b) Awaits of `Async` methods called directly.** A matched site with `ConfigureAwait(false)`
    in a user's runtime-async body, whose method is flagged `Async` and does not dispatch (a `call`,
