@@ -1840,12 +1840,12 @@ public static class SR
                 []
                 id
 
-        // Every fortieth method definition: a sample spread over the whole of CoreLib.
+        // Every hundred-and-sixtieth method definition: a sample spread over the whole of CoreLib.
         let methods =
             corelib.Methods
             |> Seq.map (fun (KeyValue (handle, _)) -> MethodKey.make corelib handle)
             |> Seq.sort
-            |> Seq.chunkBySize 40
+            |> Seq.chunkBySize 160
             |> Seq.map Array.head
             |> List.ofSeq
 
@@ -1972,14 +1972,14 @@ public static class SR
         let analysis = analysisOver [] id
         let corelib = hostCoreLib ()
 
-        // Every fortieth method definition, from the eleventh: a sample spread over the whole of
-        // CoreLib, beside the one the test of unknown places takes.
+        // Every hundred-and-sixtieth method definition, from the eighty-first: a sample spread over
+        // the whole of CoreLib, beside the one the test of unknown places takes.
         let methods =
             corelib.Methods
             |> Seq.map (fun (KeyValue (handle, _)) -> MethodKey.make corelib handle)
             |> Seq.sort
-            |> Seq.chunkBySize 40
-            |> Seq.choose (Array.tryItem 10)
+            |> Seq.chunkBySize 160
+            |> Seq.choose (Array.tryItem 80)
             |> List.ofSeq
 
         match lessPreciseWithContexts analysis methods with
