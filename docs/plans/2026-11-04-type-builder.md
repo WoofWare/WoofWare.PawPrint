@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1221,4 +1221,56 @@ and `MergeUpdateTokenInSig`:
 
 * `ModuleBuilder_GetMemberRef`, for a `FieldBuilder` and a field of a `TypeBuilder` instantiation.
 * A created type's own field (the TypeDef parent), with `ModuleBuilder_GetTypeRef` for a type of the
+  module itself.
+
+### 5j: a reference to the module's own created type
+
+A created type of a dynamic module is a `RuntimeType`, not a `TypeBuilder`, so a reference to it, or to a
+`RuntimeMethodInfo` or `RuntimeFieldInfo` of it, takes the paths that 3a, 3d and 5i refuse for the
+module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemberRefOfMethodInfo` and
+`ModuleBuilder_GetMemberRefOfFieldInfo` (vm/commodule.cpp), `RegMeta::FindTypeDefByName`,
+`ImportHelper::FindTypeDefByName` and `ImportTypeDef` (md/compiler), and `GetTypeTokenWorkerNoLock`,
+`GetMethodTokenNoLock` and `GetFieldTokenNoLock` (RuntimeModuleBuilder.cs):
+
+* `GetTypeTokenWorkerNoLock` asks `GetTypeRef` for a type of this module that is not a `TypeBuilder`,
+  `EnumBuilder` or `GenericTypeParameterBuilder`, passing the type's escaped `FullName` and, for a nested
+  type, its enclosing type's token. The QCall unescapes the name, and for its own module finds the TypeDef
+  (`FindTypeDefByName`): the name divided as `ns::SplitInline` divides it, which is
+  `EmitScopeReferences.splitTypeName`, then the first row with that namespace and name that is not
+  nested, or, given an enclosing TypeDef, that its `NestedClass` row nests in it. Nothing is added, and no
+  AssemblyRef is recorded. A name it does not find fails with `CLDB_E_RECORD_NOTFOUND`, which only a
+  user-derived `Type` claiming the module can reach.
+* For a method whose `MethodTable`'s module is the emitting module, `GetMemberRefOfMethodInfo` hands back
+  the method's MethodDef token, whatever parent it was given.
+* For a TypeDef parent, `GetMemberRefOfFieldInfo` hands back the field's FieldDef token. A field of an
+  instantiation of a created generic type has a TypeSpec parent, and its signature is translated from the
+  emitting module into itself, which `ImportTypeDef` recognises by the scopes' MVIDs and answers with the
+  TypeDef.
+* Measured on .NET 10 by `ModuleBuilderOwnTypeReferences.cs`: a created type's and a created interface's
+  tokens are their TypeDefs; its field, method and constructor have their builders' tokens; a second type
+  calls, stores, constructs and loads through them; and no TypeRef or MemberRef is added.
+
+### 5j: the decisions
+
+* **The lookup is 3b's `EmitScopeDefinitions.tryFindTopLevelTypeDef`**, which `defineTopLevelTypeDef`
+  already uses to find a duplicate, over the name `splitTypeName` divides. It is `FindTypeDefByName` with
+  no enclosing type.
+* **Refused by name, each with a TODO:** a nested type of the module, which no scope holds yet (3b refuses
+  `DefineNestedType`, since an emit scope has no `NestedClass` table); a name no TypeDef has, for which
+  CoreCLR raises a `COMException`; and a field of the module declared under a TypeSpec parent, which needs
+  a created generic type, and the scope has no `GenericParam` table either.
+* **The FieldDef token is checked against the scope's fields**, though CoreCLR hands it back unread: the
+  managed caller passes a `RuntimeFieldInfo`'s own token, so a token the scope lacks is a PawPrint fault.
+
+### 5j: the oracle
+
+* Real .NET's emitter, in the test host, over generated lists of type names (with namespaces, leading,
+  trailing and doubled dots, and the characters `FullName` escapes): each name real .NET accepts is
+  defined in a real dynamic module and in a scope, each type created, and `GetTypeMetadataToken` of each
+  created type equals the TypeDef that `tryFindTopLevelTypeDef` finds for its unescaped, divided
+  `FullName`.
+* `ModuleBuilderOwnTypeReferences.cs`, with a terminal-state check that the module's TypeRef and
+  MemberRef rows are only `object` and `object..ctor`.
+* Each mutant is caught: a TypeRef added for the module's own type; the name not unescaped or not
+  divided; the method's or field's token taken from the parent; and an AssemblyRef recorded for the
   module itself.
