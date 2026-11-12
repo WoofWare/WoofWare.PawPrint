@@ -164,6 +164,7 @@ module BoxedValue =
         | ConcreteTypeHandle.FunctionPointer _ ->
             failwith
                 $"TODO: %s{opName} of %O{targetConcreteTypeHandle} is not implemented. Arrays and byrefs are invalid IL here per ECMA-335 III.4.32; a pointer token is legal on real .NET (measured) and needs the boxed pointer `box` does not implement."
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked opName layout
         | ConcreteTypeHandle.Concrete _ ->
 
         let targetConcreteType =

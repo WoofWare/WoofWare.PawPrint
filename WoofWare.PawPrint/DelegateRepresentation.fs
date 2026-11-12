@@ -174,7 +174,9 @@ module DelegateRepresentation =
         | FunctionPointerTarget.Dynamic handle -> state, handle.GetRegistryId ()
         | FunctionPointerTarget.RuntimeAllocator
         | FunctionPointerTarget.OpenDelegateShuffleThunk
-        | FunctionPointerTarget.VirtualCallStub _ ->
+        | FunctionPointerTarget.VirtualCallStub _
+        | FunctionPointerTarget.AsyncResume
+        | FunctionPointerTarget.SuspensionPoint _ ->
             failwith $"%s{operation}: the delegate's %s{fieldName} names %O{target}, which is not a method"
         | FunctionPointerTarget.UnboxingStub _ ->
             // CoreCLR's closed delegates over a value-type method do hold one, but PawPrint's
@@ -217,7 +219,9 @@ module DelegateRepresentation =
                     | FunctionPointerTarget.Dynamic _ -> state, NativeIntSource.Verbatim 0L
                     | FunctionPointerTarget.RuntimeAllocator
                     | FunctionPointerTarget.OpenDelegateShuffleThunk
-                    | FunctionPointerTarget.UnboxingStub _ ->
+                    | FunctionPointerTarget.UnboxingStub _
+                    | FunctionPointerTarget.AsyncResume
+                    | FunctionPointerTarget.SuspensionPoint _ ->
                         failwith $"logic error: an open delegate's _methodPtrAux cannot be %O{aux}"
 
                 Some delegateAddr,

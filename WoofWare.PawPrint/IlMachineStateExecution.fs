@@ -384,6 +384,104 @@ module IlMachineStateExecution =
             failwith
                 $"logic error: asked for the permitted faults of %s{MethodOwner.describe methodState.ExecutingMethod.Owner}::%s{methodState.ExecutingMethod.Name}, whose body is %O{body} rather than IL; only an instruction has an OpcodeFaults entry"
 
+    /// What a frame running a method executes, as `frameBody` chooses it.
+    type FrameBody =
+        {
+            /// The method as the frame holds it, with the body the frame executes: an IL body
+            /// whenever the frame runs IL. Its locals are the frame's.
+            Method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
+            /// The stub the frame runs in place of the method's own body.
+            VmStub : VmStub option
+            /// What the frame keeps of runtime async's calling convention.
+            AsyncFrame : AsyncFrame option
+        }
+
+    /// What a frame for `method`, declared in `declaringAssy`, runs. `callMethodWithCommitment`
+    /// builds every frame a guest's call reaches (by token, `calli`, delegate, reflection or an
+    /// emitted stub) from this, after virtual dispatch and intrinsics; a path that loads a
+    /// method's locals before the frame exists asks it which body's locals those are.
+    ///
+    /// A method's runtime-async IL (`MethodBody.AsyncIl`) is the frame's IL body only when `method`
+    /// has the async calling convention. A method flagged `Async` and returning a promise type,
+    /// named by its ordinary variant as a token, `ldftn`, delegate or reflection names it, runs the
+    /// task-returning thunk instead.
+    let frameBody
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (declaringAssy : DumpedAssembly)
+        (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (state : IlMachineState)
+        : IlMachineState * FrameBody
+        =
+        match method.Body with
+        | MethodBody.MissingIl ->
+            failwith
+                $"TODO: calling %s{MethodOwner.describe method.Owner}::%s{method.Name}, an IL method whose row names no body; real .NET raises BadImageFormatException (COR_E_BADIMAGEFORMAT) from the callee when the JIT finds no IL, before anything of it runs"
+        | MethodBody.AsyncIl instructions ->
+            match
+                RuntimeAsyncMethod.hasAsyncCallingConvention
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    baseClassTypes.Corelib
+                    declaringAssy
+                    method
+                    state.TypeSystem._LoadedAssemblies
+            with
+            | assemblies, Ok hasAsyncConvention ->
+                let state =
+                    { state with
+                        TypeSystem =
+                            { state.TypeSystem with
+                                _LoadedAssemblies = assemblies
+                            }
+                    }
+
+                if hasAsyncConvention then
+                    let asyncFrame =
+                        match method.TryVariant with
+                        | Some MethodVariant.AsyncVariant ->
+                            // Only a method flagged `Async` has an async variant
+                            // (`RuntimeAsyncMethod.asyncVariantOf`), and its body is
+                            // user-written.
+                            AsyncFrame.SavesContexts AsyncContextHandling.AwaitingCapture
+                        | Some MethodVariant.Ordinary
+                        | None -> AsyncFrame.Transparent TailAwait.NotRequested
+
+                    state,
+                    {
+                        Method = MethodInfo.setMethodVars (MethodBody.Il instructions) method.Signature method
+                        VmStub = None
+                        AsyncFrame = Some asyncFrame
+                    }
+                else
+                    let facts = MethodInfo.requireMetadata "the task-returning thunk" method
+
+                    let stub =
+                        TaskReturningThunk.ofMethod baseClassTypes.Corelib declaringAssy.Methods.[facts.Handle]
+
+                    state,
+                    {
+                        Method = MethodInfo.setMethodVars (MethodBody.Il stub.Body) method.Signature method
+                        VmStub = Some stub
+                        AsyncFrame = None
+                    }
+            // CoreCLR classified the method when it loaded the declaring type, which PawPrint has
+            // loaded too.
+            | _, Error failure ->
+                failwith
+                    $"calling %O{method}: classifying its return type needs a type PawPrint cannot bind, though it loaded the method's declaring type: %s{TypeBindingFailure.describe failure}"
+        | MethodBody.Il _
+        | MethodBody.InternalCall
+        | MethodBody.PInvoke
+        | MethodBody.RuntimeProvided _
+        | MethodBody.Abstract ->
+            state,
+            {
+                Method = method
+                VmStub = None
+                AsyncFrame = None
+            }
+
     /// What a call does once `callMethod` has offered it to PawPrint's own intrinsic
     /// implementations.
     [<RequireQualifiedAccess>]
@@ -516,10 +614,11 @@ module IlMachineStateExecution =
         let intrinsic : (MethodDefinitionHandle * IntrinsicMethodKeys.IntrinsicMethodKey) option =
             match methodToCall with
             | MethodInfo.Synthesised _ -> None
-            | MethodInfo.Metadata (_, facts) ->
+            | MethodInfo.Metadata (_, facts, _) ->
                 match methodToCall.Body with
                 | MethodBody.Abstract -> None
                 | MethodBody.Il _
+                | MethodBody.AsyncIl _
                 | MethodBody.MissingIl
                 | MethodBody.InternalCall
                 | MethodBody.PInvoke
@@ -586,6 +685,8 @@ module IlMachineStateExecution =
                     | ConcreteTypeHandle.FunctionPointer _ ->
                         failwith
                             $"Activator.CreateInstance<T>() requires T to satisfy `new()`, but T has handle %O{tHandle}"
+                    | ConcreteTypeHandle.Continuation layout ->
+                        ContinuationType.unasked "Activator.CreateInstance<T>()" layout
                     | ConcreteTypeHandle.OneDimArrayZero _
                     | ConcreteTypeHandle.Array _ ->
                         // Arrays are reference types but their construction is special; defer.
@@ -960,6 +1061,112 @@ module IlMachineStateExecution =
                         | _ ->
                             failwith
                                 $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces a call to this method with the address the calling method's next call returns to. PawPrint has no representation of a code address, so it runs only a `call` whose next instruction pops the address unread, as CoreLib's reflection invoke stubs do (`InvokerEmitUtil`); this call is not one (%s{MethodOwner.describe activeMethodState.ExecutingMethod.Owner}::%s{activeMethodState.ExecutingMethod.Name} at IL_%04X{activeMethodState.IlOpIndex}: %A{callSite})"
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.AsyncHelpers"
+                        && key.MethodName = "AsyncCallContinuation"
+                        ->
+                        // The hidden continuation the caller's last runtime-async call returned, which
+                        // the JIT reads from its return register (`GT_ASYNC_CONTINUATION`) and
+                        // CoreCLR's interpreter from a side slot it clears as it reads
+                        // (`INTOP_GET_CONTINUATION`).
+                        match activeMethodState.AsyncFrame with
+                        | Some _ ->
+                            // CoreCLR's interpreter calls this bad code (compiler.cpp): a method with
+                            // the async calling convention suspends on a continuation rather than
+                            // reading it.
+                            failwith
+                                $"%s{Intrinsics.formatMethodKey key}: called from %O{activeMethodState.ExecutingMethod}, which has runtime async's calling convention; only code without it (the task-returning thunk, the resumption stub) reads a call's hidden continuation"
+                        | None ->
+
+                        let continuation = activeMethodState.AsyncCallContinuation
+
+                        let state =
+                            state
+                            |> IlMachineState.mapFrame
+                                thread
+                                threadState.ActiveMethodState
+                                (fun frame ->
+                                    { frame with
+                                        AsyncCallContinuation = None
+                                    }
+                                )
+                            |> IlMachineState.pushToEvalStack (CliType.ObjectRef continuation) thread
+
+                        let state =
+                            if advanceProgramCounterOfCaller then
+                                IlMachineState.advanceProgramCounter thread state
+                            else
+                                state
+
+                        IntrinsicOutcome.Handled (state, CallCommitment.Committed)
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.RuntimeHelpers"
+                        && key.MethodName = "IsRuntimeAsync"
+                        ->
+                        // `compIsAsync()` of the calling method (importercalls.cpp), which is whether
+                        // it has runtime async's calling convention.
+                        let state =
+                            IlMachineState.pushToEvalStack
+                                (CliType.ofBool activeMethodState.AsyncFrame.IsSome)
+                                thread
+                                state
+
+                        let state =
+                            if advanceProgramCounterOfCaller then
+                                IlMachineState.advanceProgramCounter thread state
+                            else
+                                state
+
+                        IntrinsicOutcome.Handled (state, CallCommitment.Committed)
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.AsyncHelpers"
+                        && key.MethodName = "TailAwait"
+                        ->
+                        // The JIT marks the frame's next call with runtime async's calling convention
+                        // a tail await (`m_nextAwaitIsTail`), and refuses the intrinsic in a body that
+                        // saves contexts.
+                        match activeMethodState.AsyncFrame with
+                        | Some (AsyncFrame.Transparent TailAwait.NotRequested) ->
+                            let state =
+                                state
+                                |> IlMachineState.mapFrame
+                                    thread
+                                    threadState.ActiveMethodState
+                                    (fun frame ->
+                                        { frame with
+                                            AsyncFrame = Some (AsyncFrame.Transparent TailAwait.Requested)
+                                        }
+                                    )
+
+                            let state =
+                                if advanceProgramCounterOfCaller then
+                                    IlMachineState.advanceProgramCounter thread state
+                                else
+                                    state
+
+                            IntrinsicOutcome.Handled (state, CallCommitment.Committed)
+                        | other ->
+                            failwith
+                                $"%s{Intrinsics.formatMethodKey key}: called from %O{activeMethodState.ExecutingMethod}, whose frame is %A{other}; CoreCLR's JIT admits it only in runtime async's own machinery, once before each call it tail-awaits (\"TailAwait is not supported in async methods that capture contexts\")"
+                    | IntrinsicBody.CallSiteExpansion when
+                        key.DeclaringTypeFullName = "System.Runtime.CompilerServices.AsyncHelpers"
+                        && key.MethodName = "AsyncSuspend"
+                        ->
+                        // `GT_RETURN_SUSPEND`: the calling method returns at once, with the argument
+                        // as its hidden continuation.
+                        match activeMethodState.AsyncFrame with
+                        | None ->
+                            failwith
+                                $"%s{Intrinsics.formatMethodKey key}: called from %O{activeMethodState.ExecutingMethod}, which has the ordinary calling convention and so has no hidden continuation to return"
+                        | Some _ ->
+
+                        match IlMachineState.popEvalStack thread state with
+                        | EvalStackValue.ObjectRef continuation, state ->
+                            leaveBySuspension loggerFactory baseClassTypes thread continuation state
+                            |> IntrinsicOutcome.Handled
+                        | other, _ ->
+                            failwith
+                                $"%s{Intrinsics.formatMethodKey key}: %O{activeMethodState.ExecutingMethod} suspends on %O{other}, which is not a continuation"
                     | IntrinsicBody.CallSiteExpansion ->
                         failwith
                             $"%s{Intrinsics.formatMethodKey key}: CoreCLR's JIT replaces every call to this method with code of its own, and its IL is not what runs. Only code the runtime generates (IL stubs, the async resumption stub) and runtime-async methods call it, and PawPrint models none of those replacements"
@@ -983,15 +1190,18 @@ module IlMachineStateExecution =
         | IntrinsicOutcome.Handled (state, commitment) -> state, commitment
         | IntrinsicOutcome.RunBody (state, methodToCall) ->
 
-        match methodToCall.Body with
-        | MethodBody.MissingIl ->
+        let state, body =
+            frameBody loggerFactory baseClassTypes declaringAssy methodToCall state
+
+        let methodToCall = body.Method
+
+        // Decision 7 of docs/plans/2026-11-11-runtime-async.md: the caller reads the hidden
+        // continuation of its last runtime-async call before it calls anything else.
+        match activeMethodState.AsyncCallContinuation with
+        | None -> ()
+        | Some continuation ->
             failwith
-                $"TODO: calling %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}, an IL method whose row names no body; real .NET raises BadImageFormatException (COR_E_BADIMAGEFORMAT) from the callee when the JIT finds no IL, before anything of it runs"
-        | MethodBody.Il _
-        | MethodBody.InternalCall
-        | MethodBody.PInvoke
-        | MethodBody.RuntimeProvided _
-        | MethodBody.Abstract -> ()
+                $"BUG: %O{activeMethodState.ExecutingMethod} is calling %O{methodToCall} while it holds the continuation %O{continuation} that a runtime-async call returned, which it has not read through AsyncHelpers.AsyncCallContinuation()"
 
         // Get zero values for all parameters.
         //
@@ -1141,7 +1351,12 @@ module IlMachineStateExecution =
                     args
                     returnInfo
             with
-            | Ok frame -> state, frame
+            | Ok frame ->
+                state,
+                { frame with
+                    VmStub = body.VmStub
+                    AsyncFrame = body.AsyncFrame
+                }
             | Error toLoad ->
                 let state' =
                     (state, toLoad)
@@ -1256,6 +1471,16 @@ module IlMachineStateExecution =
             else
                 afterPop |> MethodState.advanceProgramCounter
 
+        // The tail await a frame of runtime async's machinery asked for is its next call with runtime
+        // async's calling convention, which this is.
+        let oldFrame =
+            match body.AsyncFrame, oldFrame.AsyncFrame with
+            | Some _, Some (AsyncFrame.Transparent TailAwait.Requested) ->
+                { oldFrame with
+                    AsyncFrame = Some (AsyncFrame.Transparent TailAwait.InFlight)
+                }
+            | _ -> oldFrame
+
         let threadState =
             ThreadState.setFrame threadState.ActiveMethodState oldFrame threadState
 
@@ -1338,6 +1563,292 @@ module IlMachineStateExecution =
 
                 failwith
                     $"a call made through `callMethod` aborted the process (%O{fatal.Code}: %s{message}). PawPrint cannot say what should happen here: this wrapper serves the interpreter's own entries — class initialisers, constructors, chosen BCL helpers — and it is unmeasured whether CoreCLR applies the reverse-P/Invoke transition to those at all. A guest cannot produce this; hand-authored metadata can"
+
+    /// Call the static `AsyncHelpers.methodName` with `arguments` from the active frame of
+    /// `thread`, a runtime-async frame whose program counter stays where it is, as CoreCLR's JIT
+    /// calls the helpers it names for a frame's contexts and suspension (`getAsyncInfo`); `step` is
+    /// what the frame does once the helper returns.
+    and callAsyncHelper
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (methodName : string)
+        (arguments : CliType list)
+        (step : AsyncContextStep)
+        (thread : ThreadId)
+        (state : IlMachineState)
+        : IlMachineState * CallCommitment
+        =
+        let helper =
+            CorelibEntryPoint.findCorelibStaticMethod
+                baseClassTypes
+                "System.Runtime.CompilerServices"
+                "AsyncHelpers"
+                methodName
+                (List.length arguments)
+                "save, restore and suspend a runtime-async body's contexts as CoreCLR's JIT does"
+
+        let state, concretized =
+            ExecutionConcretization.concretizeMethodWithAllGenerics
+                loggerFactory
+                baseClassTypes
+                ImmutableArray.Empty
+                helper
+                ImmutableArray.Empty
+                state
+
+        let concretized, _ = BindingStop.bound concretized
+
+        let state =
+            (state, arguments)
+            ||> List.fold (fun state argument -> IlMachineState.pushToEvalStack argument thread state)
+
+        match
+            callMethodWithCommitment
+                loggerFactory
+                baseClassTypes
+                None
+                ConstructionState.NotConstructing
+                CallDispatch.Direct
+                false
+                false
+                CallSiteTransition.StaysCooperative
+                concretized.Generics
+                concretized
+                thread
+                state.ThreadState.[thread]
+                None
+                (ReturnValueDisposition.ResumeAsyncContexts step)
+                ExceptionEscape.AsyncContextHelper
+                state
+        with
+        | state, CallCommitment.Committed -> state, CallCommitment.Committed
+        | _, CallCommitment.Raised ->
+            failwith
+                $"TODO: calling AsyncHelpers.%s{methodName} for a runtime-async body raised before it ran; what CoreCLR raises then is not modelled"
+        | state, CallCommitment.Aborted fatal -> state, CallCommitment.Aborted fatal
+
+    /// The active frame of `thread`, which has runtime async's calling convention, returns
+    /// `continuation` as its hidden continuation: it suspends, runs no handler, and pushes no value
+    /// (`GT_RETURN_SUSPEND`). What that does to its caller is the caller's: a frame of the ordinary
+    /// convention reads the continuation through `AsyncHelpers.AsyncCallContinuation()` and gets a
+    /// zero for the call's formal result; a frame of the async convention that made the call a tail
+    /// await returns the same continuation in turn; any other suspends itself
+    /// (`beginSuspension`); and CoreLib's dispatcher, if it resumed the frame, gets the
+    /// continuation from its `calli`.
+    and leaveBySuspension
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (continuation : ManagedHeapAddress)
+        (state : IlMachineState)
+        : IlMachineState * CallCommitment
+        =
+        let threadState = state.ThreadState.[thread]
+        let leavingId = threadState.ActiveMethodState
+        let leaving = threadState.MethodState
+
+        if leaving.AsyncFrame.IsNone then
+            failwith $"BUG: %O{leaving.ExecutingMethod} is suspending, but it has the ordinary calling convention"
+
+        let returnState =
+            match leaving.ReturnState with
+            | Some returnState -> returnState
+            | None ->
+                failwith
+                    $"BUG: %O{leaving.ExecutingMethod} is suspending at the bottom of its thread, where nothing could read its continuation"
+
+        match returnState.WasInitialisingType, returnState.Constructing, returnState.ExceptionEscape with
+        | None, ConstructionState.NotConstructing, ExceptionEscape.Propagate -> ()
+        | initialising, constructing, escape ->
+            failwith
+                $"BUG: %O{leaving.ExecutingMethod} is suspending, but its frame was entered as no call with runtime async's calling convention is (initialising %O{initialising}, %O{constructing}, %O{escape})"
+
+        let threadState =
+            threadState
+            |> ThreadState.setActiveFrame returnState.JumpTo
+            |> ThreadState.removeFrame leavingId
+
+        let state =
+            { state with
+                ThreadState = state.ThreadState |> Map.add thread threadState
+            }
+
+        match returnState.ReturnValueDisposition with
+        | ReturnValueDisposition.ResumedAsync _ ->
+            IlMachineState.pushToEvalStack (CliType.ObjectRef (Some continuation)) thread state,
+            CallCommitment.Committed
+        | ReturnValueDisposition.PushToCaller ->
+            let callerId = returnState.JumpTo
+            let caller = threadState.MethodState
+
+            match caller.AsyncFrame with
+            | None ->
+                let state =
+                    IlMachineState.mapFrame
+                        thread
+                        callerId
+                        (fun frame ->
+                            { frame with
+                                AsyncCallContinuation = Some continuation
+                            }
+                        )
+                        state
+
+                // The call's formal result is undefined once it has suspended.
+                let state =
+                    match leaving.ExecutingMethod.Signature.ReturnType with
+                    | MethodReturnType.Void -> state
+                    | MethodReturnType.Returns ty ->
+                        let zero, state = IlMachineState.cliTypeZeroOfHandle state baseClassTypes ty
+                        IlMachineState.pushToEvalStack zero thread state
+
+                state, CallCommitment.Committed
+            | Some (AsyncFrame.Transparent TailAwait.InFlight) ->
+                state
+                |> IlMachineState.mapFrame
+                    thread
+                    callerId
+                    (fun frame ->
+                        { frame with
+                            AsyncFrame = Some (AsyncFrame.Transparent TailAwait.NotRequested)
+                        }
+                    )
+                |> leaveBySuspension loggerFactory baseClassTypes thread continuation
+            | Some _ ->
+                beginSuspension
+                    loggerFactory
+                    baseClassTypes
+                    thread
+                    returnState.CallSiteIlOpIndex
+                    leaving.ExecutingMethod.Signature.ReturnType
+                    continuation
+                    state
+        | other ->
+            failwith
+                $"BUG: %O{leaving.ExecutingMethod} is suspending, but its caller wanted its product as %A{other}, which no call with runtime async's calling convention does"
+
+    /// The active frame of `thread`, a runtime-async frame whose call at `callSite`, which returns
+    /// `awaited`, has just suspended with `calleeContinuation`, suspends too
+    /// (`AsyncTransformation::CreateSuspension`): it makes a continuation of its own, with an
+    /// exception slot if the call lies in a `try` region, links it after the callee's, and calls the
+    /// CoreLib helper that captures the thread's `ExecutionContext` into it (and, for a frame that
+    /// saves contexts, puts back the ones the frame found on entry). Once that returns,
+    /// `completeSuspension` saves the frame and leaves.
+    and beginSuspension
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (callSite : int)
+        (awaited : MethodReturnType<ConcreteTypeHandle>)
+        (calleeContinuation : ManagedHeapAddress)
+        (state : IlMachineState)
+        : IlMachineState * CallCommitment
+        =
+        let frame = state.ThreadState.[thread].MethodState
+        let method = frame.ExecutingMethod
+
+        // Roslyn moves an await out of a handler, and neither CoreCLR's JIT nor its interpreter
+        // can suspend in one, so no IL CoreCLR runs suspends here.
+        match AsyncSuspension.handlersAround method callSite with
+        | [] -> ()
+        | (start, finish) :: _ ->
+            failwith
+                $"TODO: %O{method} suspends at its await at IL_%04X{callSite}, which lies in a filter or handler (IL_%04X{start} to IL_%04X{finish}); CoreCLR cannot suspend there, and PawPrint refuses to"
+
+        match frame.AsyncFrame with
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _))
+        | Some (AsyncFrame.Transparent _) -> ()
+        | other -> failwith $"BUG: %O{method} is suspending at IL_%04X{callSite}, but its frame is %A{other}"
+
+        let layout =
+            AsyncSuspension.layoutAwaiting (not (AsyncSuspension.tryRegionsAround method callSite).IsEmpty) awaited
+
+        let continuation, state =
+            AsyncSuspension.allocateContinuation loggerFactory baseClassTypes layout state
+
+        let resumeInfo, state = AsyncSuspension.allocateResumeInfo method callSite state
+
+        let state =
+            state
+            |> AsyncSuspension.initialiseContinuation continuation layout resumeInfo callSite
+            |> AsyncSuspension.link calleeContinuation continuation
+
+        let suspension : PendingSuspension =
+            {
+                Continuation = continuation
+                Layout = layout
+                ResumeInfo = resumeInfo
+                CallSite = callSite
+            }
+
+        match frame.AsyncFrame with
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured contexts)) ->
+            // `FinishSuspensionNoContinuationContext(ref execCtx, resumed, previousExecCtx,
+            // previousSyncCtx)`, the helper for an await of no continuation context
+            // (`GetSuspensionContextHelper`), which captures the thread's `ExecutionContext` into the
+            // continuation and puts back the contexts the frame found on entry.
+            callAsyncHelper
+                loggerFactory
+                baseClassTypes
+                "FinishSuspensionNoContinuationContext"
+                [
+                    CliType.RuntimePointer (
+                        CliRuntimePointer.Managed (
+                            AsyncSuspension.slotPointer continuation ContinuationSlot.ExecutionContext
+                        )
+                    )
+                    CliType.ofBool contexts.Resumed
+                    CliType.ObjectRef contexts.ExecutionContext
+                    CliType.ObjectRef contexts.SynchronizationContext
+                ]
+                (AsyncContextStep.AfterFinishSuspension suspension)
+                thread
+                state
+        | Some (AsyncFrame.Transparent _) ->
+            // A method of runtime async's own machinery saves no contexts, so its suspension
+            // captures the `ExecutionContext` itself, from a call of `CaptureExecutionContext()`
+            // (`FinishContextHandlingAndSuspension`). CoreLib's only such await is
+            // `AwaitTaskWithRareOptions`'s, of `UnsafeAwaitAwaiter`, reached by an await of a task
+            // configured with `ConfigureAwaitOptions.SuppressThrowing`.
+            callAsyncHelper
+                loggerFactory
+                baseClassTypes
+                "CaptureExecutionContext"
+                []
+                (AsyncContextStep.AfterCaptureExecutionContext suspension)
+                thread
+                state
+        | other -> failwith $"BUG: %O{method} is suspending at IL_%04X{callSite}, but its frame is %A{other}"
+
+    /// The active frame of `thread`, which has made `suspension` for itself and finished its
+    /// contexts' handling, leaves for `IlMachineState.SuspendedAsyncFrames`, as a suspension keeps
+    /// it (`AsyncSuspension.suspendedFrame`), and returns its continuation.
+    and completeSuspension
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (thread : ThreadId)
+        (suspension : PendingSuspension)
+        (state : IlMachineState)
+        : IlMachineState * CallCommitment
+        =
+        let frame, state =
+            AsyncSuspension.suspendedFrame baseClassTypes state.ThreadState.[thread].MethodState state
+
+        let state =
+            { state with
+                SuspendedAsyncFrames =
+                    SuspendedFrames.suspend
+                        suspension.Continuation
+                        {
+                            Frame = frame
+                            Layout = suspension.Layout
+                            ResumeInfo = suspension.ResumeInfo
+                            CallSite = suspension.CallSite
+                        }
+                        state.SuspendedAsyncFrames
+            }
+
+        leaveBySuspension loggerFactory baseClassTypes thread suspension.Continuation state
 
     and loadClass
         (loggerFactory : ILoggerFactory)
@@ -1663,7 +2174,7 @@ module IlMachineStateExecution =
     /// runs the constructor itself and raises that again from the `throw`, continuing its trace
     /// (`ExceptionEscape.RaisedAgainFromCaller`). On .NET 11 it runs the constructor inside the
     /// CoreLib helper `Exception.CreateRuntimeWrappedException`, and first preserves the trace of
-    /// what that caught (`resumeNonExceptionWrap`), so the `throw`'s raise begins a fresh one.
+    /// what that caught (`resumeVmRaise`), so the `throw`'s raise begins a fresh one.
     and wrapNonException
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -1715,27 +2226,26 @@ module IlMachineStateExecution =
             let raised, pool = NativeReferenceCell.allocate None pool
             let state = IlMachineState.setNativeMemoryPool pool state
 
-            callNonExceptionWrapHelper
+            callVmExceptionHelper
                 loggerFactory
                 baseClassTypes
                 "CreateRuntimeWrappedException"
                 "WrapNonCompliantException"
                 [ thrownCell ; result ; raised ]
-                (NonExceptionWrapStep.AfterCreate (thrownCell, result, raised))
+                (VmRaiseStep.AfterCreate (thrownCell, result, raised))
                 currentThread
                 state
 
-    /// Call the static `[UnmanagedCallersOnly]` helper `methodName` of `System.Exception`, as the
-    /// runtime's `runtimeCaller` does from inside the active frame's `throw` of an object that is not
-    /// an exception, passing a pointer to each of `arguments`; `step` is what the runtime does once
-    /// it returns.
-    and private callNonExceptionWrapHelper
+    /// Call the static `[UnmanagedCallersOnly]` helper `methodName` of `System.Exception`, as .NET
+    /// 11's `runtimeCaller` does on the way to raising an exception from the active frame, passing a
+    /// pointer to each of `arguments`; `step` is what the runtime does once it returns.
+    and private callVmExceptionHelper
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (methodName : string)
         (runtimeCaller : string)
         (arguments : NativeReferenceCell list)
-        (step : NonExceptionWrapStep)
+        (step : VmRaiseStep)
         (currentThread : ThreadId)
         (state : IlMachineState)
         : ExecutionResult
@@ -1747,7 +2257,7 @@ module IlMachineStateExecution =
                 "Exception"
                 methodName
                 (List.length arguments)
-                $"wrap a thrown object that is not an exception, as .NET 11's %s{runtimeCaller} does"
+                $"raise an exception as .NET 11's %s{runtimeCaller} does"
 
         let state, concretizedResult =
             ExecutionConcretization.concretizeMethodWithTypeGenerics
@@ -1773,8 +2283,8 @@ module IlMachineStateExecution =
 
         // The VM calls an `[UnmanagedCallersOnly]` method from native code
         // (`UnmanagedCallersOnlyCaller`), which is the transition such a method admits. The
-        // `throw` is not finished, so its program counter stays where it is: the exception the
-        // runtime settles on is dispatched from it.
+        // raising frame's instruction is not finished, so its program counter stays where it is:
+        // the exception the runtime settles on is dispatched from it.
         let state, commitment =
             callMethodWithCommitment
                 loggerFactory
@@ -1790,7 +2300,7 @@ module IlMachineStateExecution =
                 currentThread
                 state.ThreadState.[currentThread]
                 None
-                (ReturnValueDisposition.ResumeNonExceptionWrap step)
+                (ReturnValueDisposition.ResumeVmRaise step)
                 (ExceptionEscape.UnhandledAtNativeCaller runtimeCaller)
                 state
 
@@ -1798,29 +2308,27 @@ module IlMachineStateExecution =
         | CallCommitment.Committed -> ExecutionResult.stepped (state, WhatWeDid.Executed)
         | CallCommitment.Raised ->
             failwith
-                $"TODO: calling System.Exception.%s{methodName}, which .NET 11's %s{runtimeCaller} calls to wrap a thrown object that is not an exception, raised before it ran; CoreCLR would raise that from the throw, which is not modelled"
+                $"TODO: calling System.Exception.%s{methodName}, which .NET 11's %s{runtimeCaller} calls on the way to raising an exception, raised before it ran; what CoreCLR raises then is not modelled"
         | CallCommitment.Aborted fatal -> ExecutionResult.Aborted (state, currentThread, fatal)
 
-    /// Do what .NET 11's `WrapNonCompliantException` does next once the helper whose frame carried
-    /// `step` has returned to the throwing frame, which is active: dispatch from the `throw` the
-    /// exception the runtime has settled on, or call `Exception.InternalPreserveStackTrace` on the
-    /// one it is about to raise.
+    /// Do what .NET 11's runtime does next once the helper whose frame carried `step` has returned
+    /// to the frame the runtime is raising from, which is active: dispatch the exception the runtime
+    /// has settled on, or call `Exception.InternalPreserveStackTrace` on the one it is about to
+    /// raise.
     ///
     /// Each exception a helper caught is raised through `COMPlusThrow`, which first preserves its
     /// trace (`ExceptionPreserveStackTrace`), and raises instead whatever preserving it raised,
     /// preserving that in turn. That recursion is on the native stack, which real .NET 11
     /// overflows if every preserve raises; PawPrint follows a bounded number of re-raises and then
     /// refuses.
-    and resumeNonExceptionWrap
+    and resumeVmRaise
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (step : NonExceptionWrapStep)
+        (step : VmRaiseStep)
         (currentThread : ThreadId)
         (state : IlMachineState)
         : ExecutionResult
         =
-        let reraiseBound = 16
-
         let read (cell : NativeReferenceCell) : ManagedHeapAddress option =
             NativeReferenceCell.read cell (IlMachineState.getNativeMemoryPool state)
 
@@ -1829,68 +2337,141 @@ module IlMachineStateExecution =
             ||> List.fold (fun pool cell -> NativeReferenceCell.free cell pool)
             |> fun pool -> IlMachineState.setNativeMemoryPool pool state
 
-        // `IL_Throw` dispatches what `WrapNonCompliantException` left in `*ppThrowable` from the
-        // `throw`, so the method that threw is the first frame of the trace that raise begins.
-        let raiseFromThrow (exceptionAddr : ManagedHeapAddress) (state : IlMachineState) : ExecutionResult =
-            let exceptionType =
-                ManagedHeap.getObjectConcreteType exceptionAddr state.ManagedHeap
-
-            match
-                ExceptionDispatching.throwExceptionObject
-                    loggerFactory
-                    baseClassTypes
-                    state
-                    currentThread
-                    TraceHeadOrigin.IlThrow
-                    exceptionAddr
-                    exceptionType
-            with
-            | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
-            | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
-                ExecutionResult.UnhandledException (state, currentThread, exn)
-
-        // `preserved` holds `candidate`; CoreCLR passes the address of its own copy, which no
-        // guest can tell apart.
-        let preserve
-            (candidate : ManagedHeapAddress)
-            (preserved : NativeReferenceCell)
-            (reraises : int)
-            (state : IlMachineState)
-            : ExecutionResult
-            =
-            let raised, pool =
-                NativeReferenceCell.allocate None (IlMachineState.getNativeMemoryPool state)
-
-            callNonExceptionWrapHelper
-                loggerFactory
-                baseClassTypes
-                "InternalPreserveStackTrace"
-                "ExceptionPreserveStackTrace"
-                [ preserved ; raised ]
-                (NonExceptionWrapStep.AfterPreserve (candidate, preserved, raised, reraises))
-                currentThread
-                (IlMachineState.setNativeMemoryPool pool state)
-
         match step with
-        | NonExceptionWrapStep.AfterCreate (thrown, result, raised) ->
+        | VmRaiseStep.AfterCreate (thrown, result, raised) ->
             match read raised, read result with
-            | None, Some wrapper -> state |> free [ thrown ; result ; raised ] |> raiseFromThrow wrapper
+            | None, Some wrapper ->
+                state
+                |> free [ thrown ; result ; raised ]
+                |> raiseFromVmSite loggerFactory baseClassTypes VmRaiseSite.NonExceptionThrow wrapper currentThread
             | None, None ->
                 failwith
                     "logic error: Exception.CreateRuntimeWrappedException returned having stored neither a wrapper nor an exception, though its body stores one or the other"
-            | Some caught, None -> state |> free [ thrown ; result ] |> preserve caught raised 0
+            | Some caught, None ->
+                state
+                |> free [ thrown ; result ; raised ]
+                |> preserveForVmRaise loggerFactory baseClassTypes VmRaiseSite.NonExceptionThrow caught 0 currentThread
             | Some caught, Some wrapper ->
                 failwith
                     $"logic error: Exception.CreateRuntimeWrappedException stored both a wrapper (%O{wrapper}) and an exception (%O{caught}), though it stores the wrapper only once the constructor has returned"
-        | NonExceptionWrapStep.AfterPreserve (candidate, preserved, raised, reraises) ->
+        | VmRaiseStep.AfterPreserve (site, candidate, preserved, raised, reraises) ->
             match read raised with
-            | None -> state |> free [ preserved ; raised ] |> raiseFromThrow candidate
+            | None ->
+                state
+                |> free [ preserved ; raised ]
+                |> raiseFromVmSite loggerFactory baseClassTypes site candidate currentThread
             | Some caught ->
-                if reraises + 1 > reraiseBound then
-                    failwith
-                        $"TODO: Exception.InternalPreserveStackTrace raised more than %d{reraiseBound} times running, each time on the exception the call before it raised, while .NET 11 wrapped a thrown object that is not an exception. Real .NET 11 raises each of them through COMPlusThrow, which preserves it in turn on the native stack, until a preserve raises nothing or the stack overflows and the process aborts; PawPrint follows %d{reraiseBound} and then refuses rather than model the overflow."
+                state
+                |> free [ preserved ; raised ]
+                |> preserveForVmRaise loggerFactory baseClassTypes site caught (reraises + 1) currentThread
 
-                state |> free [ preserved ] |> preserve caught raised (reraises + 1)
+    /// Dispatch `exceptionAddr` from the active frame, as .NET 11's runtime raises the exception it
+    /// settled on from `site`.
+    and private raiseFromVmSite
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (site : VmRaiseSite)
+        (exceptionAddr : ManagedHeapAddress)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        let origin =
+            match site with
+            // `IL_Throw` dispatches what `WrapNonCompliantException` left in `*ppThrowable` from the
+            // `throw`, so the method that threw is the first frame of the trace that raise begins.
+            | VmRaiseSite.NonExceptionThrow -> TraceHeadOrigin.IlThrow
+            | VmRaiseSite.NativeFrame -> TraceHeadOrigin.RuntimeRaise RuntimeRaiseSite.ThrownAgainByVm
+
+        let exceptionType =
+            ManagedHeap.getObjectConcreteType exceptionAddr state.ManagedHeap
+
+        match
+            ExceptionDispatching.throwExceptionObject
+                loggerFactory
+                baseClassTypes
+                state
+                currentThread
+                origin
+                exceptionAddr
+                exceptionType
+        with
+        | ExceptionDispatchResult.Dispatched state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
+        | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
+            ExecutionResult.UnhandledException (state, currentThread, exn)
+
+    /// Call `Exception.InternalPreserveStackTrace` on `candidate`, which .NET 11's runtime is about
+    /// to raise from `site`; `reraises` is how many preserves before it raised.
+    and private preserveForVmRaise
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (site : VmRaiseSite)
+        (candidate : ManagedHeapAddress)
+        (reraises : int)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        let reraiseBound = 16
+
+        if reraises > reraiseBound then
+            failwith
+                $"TODO: Exception.InternalPreserveStackTrace raised more than %d{reraiseBound} times running, each time on the exception the call before it raised, while .NET 11's runtime was raising an exception (%A{site}). Real .NET 11 raises each of them through COMPlusThrow, which preserves it in turn on the native stack, until a preserve raises nothing or the stack overflows and the process aborts; PawPrint follows %d{reraiseBound} and then refuses rather than model the overflow."
+
+        // `preserved` holds `candidate`; CoreCLR passes the address of its own copy, which no
+        // guest can tell apart.
+        let preserved, pool =
+            NativeReferenceCell.allocate (Some candidate) (IlMachineState.getNativeMemoryPool state)
+
+        let raised, pool = NativeReferenceCell.allocate None pool
+
+        callVmExceptionHelper
+            loggerFactory
+            baseClassTypes
+            "InternalPreserveStackTrace"
+            "ExceptionPreserveStackTrace"
+            [ preserved ; raised ]
+            (VmRaiseStep.AfterPreserve (site, candidate, preserved, raised, reraises))
+            currentThread
+            (IlMachineState.setNativeMemoryPool pool state)
+
+    /// What the active native frame's runtime code does throwing `exceptionAddr`, an exception
+    /// object it already holds, as `COMPlusThrow(OBJECTREF)` does (`NativeHandlerResult.ThrowExisting`).
+    /// On .NET 11 `RealCOMPlusThrow` first preserves its trace, unless it is not an exception
+    /// (`ExceptionPreserveStackTrace`), and raises instead whatever preserving it raised.
+    and throwExistingFromNativeFrame
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (exceptionAddr : ManagedHeapAddress)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        match EmulatedRuntime.ofCoreLib baseClassTypes.Corelib with
+        | EmulatedRuntime.Net10 ->
+            // .NET 10's `RealCOMPlusThrow` preserves through a plain managed call, whose raise
+            // escapes in place; no .NET 10 native handler throws an object it holds.
+            failwith
+                $"TODO: a .NET 10 native method threw the exception object %O{exceptionAddr} it held; .NET 10's COMPlusThrow preserves its trace through a plain call of Exception.InternalPreserveStackTrace, which is not modelled because no .NET 10 handler needs it"
+        | EmulatedRuntime.Net11 ->
+            let exceptionType =
+                ManagedHeap.getObjectConcreteType exceptionAddr state.ManagedHeap
+
+            let exceptionHandle =
+                AllConcreteTypes.getRequiredNonGenericHandle state.TypeSystem.ConcreteTypes baseClassTypes.Exception
+
+            let state, isException =
+                isAssignableFrom loggerFactory baseClassTypes exceptionType exceptionHandle state
+
+            if not isException then
+                // `ExceptionPreserveStackTrace` skips an object that is not an exception, and so
+                // does nothing a guest could see; but none of the runtime's callers hands one here.
+                failwith
+                    $"logic error: a native method threw %O{exceptionAddr}, of type %O{exceptionType}, which is not an exception; the runtime throws only exceptions an [UnmanagedCallersOnly] helper caught"
+
+            // `ExceptionPreserveStackTrace` also skips the runtime's preallocated exceptions, which
+            // PawPrint does not make.
+            preserveForVmRaise loggerFactory baseClassTypes VmRaiseSite.NativeFrame exceptionAddr 0 currentThread state
 
     /// Synthesise an exception from inside the runtime itself (the host emulating the CLR),
     /// as opposed to a `throw` opcode executed by guest IL. Allocates the exception without

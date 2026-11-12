@@ -581,6 +581,8 @@ module VirtualSlotLayout =
             // pointers are TypeDescs with no MethodTable, so GetFirstIntroducedMethod returns null
             // and the managed enumerator terminates without iterating.
             None
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+            ContinuationType.unasked operation layout
         | RuntimeTypeHandleTarget.GenericParameter _
         | RuntimeTypeHandleTarget.MethodGenericParameter _ ->
             // Also TypeVarTypeDescs, and CoreCLR agrees they introduce nothing:

@@ -102,7 +102,9 @@ module internal DynamicMethodExecution =
                     |> Seq.choose (fun region ->
                         match region with
                         | ExceptionRegion.Catch (ExceptionCatchType.FromDynamicScope index, _) -> Some index
+                        // `DynamicMethodBody` refuses either in a dynamic method's body.
                         | ExceptionRegion.Catch (ExceptionCatchType.FromMetadata _, _)
+                        | ExceptionRegion.Catch (ExceptionCatchType.FromStubScope _, _)
                         | ExceptionRegion.Filter _
                         | ExceptionRegion.Finally _
                         | ExceptionRegion.Fault _ -> None

@@ -524,6 +524,7 @@ module internal UnsafeAccessorDispatch =
             | Some (_, typeInfo) ->
                 not (LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo)
             | None -> failwith $"BUG: %s{describe}: concrete type argument %O{argument} has no TypeDef row"
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked describe layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ ->
@@ -906,6 +907,7 @@ module internal UnsafeAccessorDispatch =
             | ConcreteTypeHandle.Array _ -> true
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _ -> false
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked describe layout
             | ConcreteTypeHandle.Byref _ -> failwith $"BUG: %s{describe} bound a constructor of an array of byrefs"
             | ConcreteTypeHandle.Concrete _ ->
                 match
@@ -1526,6 +1528,7 @@ module internal UnsafeAccessorDispatch =
         | ConcreteTypeHandle.Pointer element -> TypeDefn.Pointer (recurse element)
         | ConcreteTypeHandle.OneDimArrayZero element -> TypeDefn.OneDimensionalArrayLowerBoundZero (recurse element)
         | ConcreteTypeHandle.Array (element, rank) -> TypeDefn.Array (recurse element, rank)
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked describe layout
         | ConcreteTypeHandle.FunctionPointer _ ->
             failwith
                 $"BUG: %s{describe} resolved an [UnsafeAccessorType] name to the function pointer type %O{handle}, which no type name can spell"
@@ -1577,6 +1580,7 @@ module internal UnsafeAccessorDispatch =
             | Some (_, typeInfo) ->
                 LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
             | None -> failwith $"BUG: %s{describe}: resolved type %O{handle} has no TypeDef row"
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked describe layout
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.OneDimArrayZero _

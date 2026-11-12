@@ -138,7 +138,8 @@ module ConcreteVirtualDispatch =
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> None
         | ConcreteTypeHandle.OneDimArrayZero _ ->
 
         if not (baseClassTypes.IsImplicitInterfaceOfSzArray methodToCall.RequiredDeclaringType.Identity) then
@@ -222,7 +223,8 @@ module ConcreteVirtualDispatch =
         let isReferenceType (handle : ConcreteTypeHandle) : bool =
             match handle with
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ -> true
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ -> true
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _ -> false
@@ -843,9 +845,9 @@ module ConcreteVirtualDispatch =
                >
             =
             let interfaceMethod =
-                match methodToCall.TryMetadata with
-                | Some metadata -> methodToCall.DeclaringAssemblyFullName, (Some metadata.Handle, None)
-                | None ->
+                match methodToCall.IdentityKey with
+                | Some row, None -> methodToCall.DeclaringAssemblyFullName, (Some row, None)
+                | _ ->
                     failwith
                         $"TODO: interface dispatch to synthesised method %s{methodToCall.Name} on %O{methodToCall.RequiredDeclaringType.Name}, which has no MethodDef row to key the dispatch map on"
 
@@ -959,7 +961,8 @@ module ConcreteVirtualDispatch =
                     | ConcreteTypeHandle.FunctionPointer _ -> state, Ok None
                     | ConcreteTypeHandle.Concrete _
                     | ConcreteTypeHandle.OneDimArrayZero _
-                    | ConcreteTypeHandle.Array _ ->
+                    | ConcreteTypeHandle.Array _
+                    | ConcreteTypeHandle.Continuation _ ->
                         let state, baseType =
                             TypeSystemState.resolveBaseConcreteType
                                 loggerFactory
@@ -1071,6 +1074,7 @@ module ConcreteVirtualDispatch =
 
                 state, Ok (VirtualImplementation.Reabstracted candidate.Body)
             | MethodBody.Il _
+            | MethodBody.AsyncIl _
             | MethodBody.MissingIl
             | MethodBody.InternalCall
             | MethodBody.PInvoke
@@ -1319,7 +1323,8 @@ module ConcreteVirtualDispatch =
             | ConcreteTypeHandle.FunctionPointer _ -> state, Ok (visited, [])
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Array _ ->
+            | ConcreteTypeHandle.Array _
+            | ConcreteTypeHandle.Continuation _ ->
 
             let state, baseType =
                 TypeSystemState.resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state typeHandle
@@ -1422,6 +1427,13 @@ module ConcreteVirtualDispatch =
         if methodToCall.IsStatic then
             failwith
                 $"virtual dispatch of %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}: a static virtual is resolved by StaticVirtualDispatch.resolve, not by instance dispatch"
+
+        match methodToCall.TryVariant with
+        | Some MethodVariant.AsyncVariant ->
+            failwith
+                $"TODO: virtual dispatch of the async variant of %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}: CoreCLR gives a promise-returning virtual method's async variant a slot of its own, which PawPrint's tables do not have (runtime-async plan, stage 4)"
+        | Some MethodVariant.Ordinary
+        | None -> ()
 
         tryResolveVirtualImplementationForSlot
             loggerFactory

@@ -100,24 +100,127 @@ type RuntimeExceptionMaking =
     /// `_HResult` and `_message` stand.
     | WrappedNonException
 
-/// What .NET 11's `WrapNonCompliantException` (excep.cpp) does once a CoreLib helper it called from
-/// inside a `throw` of an object that is not an exception has returned. Each helper is an
-/// `[UnmanagedCallersOnly]` method that stores what it raised in an out-slot, and the runtime
-/// preserves the trace of any exception it is about to raise
-/// (`ExceptionPreserveStackTrace`), so the steps run until one raises nothing.
+/// Where .NET 11's runtime raises the exception a `VmRaiseStep` settles on.
 [<RequireQualifiedAccess>]
-type NonExceptionWrapStep =
-    /// `Exception.CreateRuntimeWrappedException` returned on the object `thrown` holds: `result`
-    /// holds the wrapper, unless `raised` holds what its constructor raised.
+type VmRaiseSite =
+    /// From the active frame's `throw` of an object that is not an exception, which
+    /// `WrapNonCompliantException` (excep.cpp) wrapped: `IL_Throw` dispatches it from the `throw`.
+    | NonExceptionThrow
+    /// From the active native frame, whose runtime code throws an exception object it already
+    /// holds (`COMPlusThrow(OBJECTREF)`), as `UnmanagedCallersOnlyCaller::InvokeThrowing` does with
+    /// what the `[UnmanagedCallersOnly]` method it called handed back.
+    | NativeFrame
+
+/// What .NET 11's runtime does once a CoreLib helper it called, on the way to raising an exception,
+/// has returned. Each helper is an `[UnmanagedCallersOnly]` method that stores what it raised in an
+/// out-slot, and the runtime preserves the trace of any exception it is about to raise
+/// (`RealCOMPlusThrow`'s `ExceptionPreserveStackTrace`), so the steps run until one raises nothing.
+[<RequireQualifiedAccess>]
+type VmRaiseStep =
+    /// `Exception.CreateRuntimeWrappedException` returned on the object `thrown` holds, for
+    /// `WrapNonCompliantException`: `result` holds the wrapper, unless `raised` holds what its
+    /// constructor raised.
     | AfterCreate of thrown : NativeReferenceCell * result : NativeReferenceCell * raised : NativeReferenceCell
     /// `Exception.InternalPreserveStackTrace` returned on `candidate`, the exception the runtime is
-    /// raising in the wrapper's place, which `preserved` holds; `raised` holds what preserving it
+    /// about to raise from `site`, which `preserved` holds; `raised` holds what preserving it
     /// raised, if anything. `reraises` is how many earlier preserves raised.
     | AfterPreserve of
+        site : VmRaiseSite *
         candidate : ManagedHeapAddress *
         preserved : NativeReferenceCell *
         raised : NativeReferenceCell *
         reraises : int
+
+/// The thread's contexts as a user-written runtime-async body captured them on entry, which it puts
+/// back when it returns and when an exception leaves it: the hidden locals CoreCLR's JIT gives such
+/// a body (`SaveAsyncContexts`, jit/async.cpp).
+type AsyncContexts =
+    {
+        /// What `AsyncHelpers.CaptureContexts` stored through its `thread` parameter.
+        Thread : ManagedHeapAddress option
+        /// What `AsyncHelpers.CaptureContexts` stored through its `execCtx` parameter.
+        ExecutionContext : ManagedHeapAddress option
+        /// What `AsyncHelpers.CaptureContexts` stored through its `syncCtx` parameter.
+        SynchronizationContext : ManagedHeapAddress option
+        /// Whether the frame has been resumed from a suspension, in which case `RestoreContexts`
+        /// puts nothing back.
+        Resumed : bool
+    }
+
+/// How far a user-written runtime-async body has got with the contexts it saves and restores.
+[<RequireQualifiedAccess>]
+type AsyncContextHandling =
+    /// `AsyncHelpers.CaptureContexts` has not returned, so none of the body has run: this is the
+    /// frame's prologue, after its type-initialisation check.
+    | AwaitingCapture
+    /// The body is running, and captured these on entry.
+    | Captured of AsyncContexts
+    /// The exception `unwind` describes is leaving the body, which first calls
+    /// `AsyncHelpers.RestoreContexts` with these, as the JIT's fault handler round the whole body
+    /// does.
+    | RestoringOnUnwind of
+        AsyncContexts *
+        unwind : ExceptionUnwindState<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
+    /// `AsyncHelpers.RestoreContexts` has returned, so the frame leaves next.
+    | Restored
+
+/// Whether a frame of runtime async's own machinery has asked, through `AsyncHelpers.TailAwait()`,
+/// that its next call with runtime async's calling convention be a tail await: one that, if the
+/// callee suspends, returns the callee's continuation as the frame's own, with no continuation of
+/// the frame's (`m_nextAwaitIsTail`, jit/importercalls.cpp).
+[<RequireQualifiedAccess>]
+type TailAwait =
+    | NotRequested
+    /// `TailAwait()` has run, and the frame has made no call with runtime async's calling convention
+    /// since.
+    | Requested
+    /// The frame's call in flight is the tail await `TailAwait()` asked for.
+    | InFlight
+
+/// A frame running a method with runtime async's calling convention.
+[<RequireQualifiedAccess>]
+type AsyncFrame =
+    /// Runtime async's own machinery (`AsyncHelpers.Await` and the like), which handles no contexts,
+    /// and alone may tail-await.
+    | Transparent of TailAwait
+    /// The async variant of a method flagged `MethodImplAttributes.Async`, which saves and restores
+    /// the thread's contexts (`MethodDesc::RequiresAsyncContextSaveAndRestore`).
+    | SavesContexts of AsyncContextHandling
+
+/// What a frame suspending at an await has made, which it records once its last CoreLib helper has
+/// returned to it and it leaves.
+type PendingSuspension =
+    {
+        /// The continuation the frame made for itself, which it returns as its hidden continuation.
+        Continuation : ManagedHeapAddress
+        /// The type of `Continuation`.
+        Layout : ContinuationLayout
+        /// The native block holding the `ResumeInfo` that `Continuation.ResumeInfo` points at.
+        ResumeInfo : NativeMemoryBlockId
+        /// The IL offset of the call the frame awaits.
+        CallSite : int
+    }
+
+/// What the runtime does once a CoreLib helper it called for a runtime-async frame's contexts has
+/// returned to that frame.
+[<RequireQualifiedAccess>]
+type AsyncContextStep =
+    /// `AsyncHelpers.CaptureContexts` returned, having stored what it captured in these cells.
+    | AfterCapture of
+        thread : NativeReferenceCell *
+        executionContext : NativeReferenceCell *
+        synchronizationContext : NativeReferenceCell
+    /// `AsyncHelpers.RestoreContexts` returned before the body's `ret`.
+    | AfterRestoreOnReturn
+    /// `AsyncHelpers.RestoreContexts` returned while an exception was leaving the body.
+    | AfterRestoreOnUnwind
+    /// `AsyncHelpers.FinishSuspensionNoContinuationContext` returned to the body, which is
+    /// suspending at an await with `suspension`; it leaves next.
+    | AfterFinishSuspension of suspension : PendingSuspension
+    /// `AsyncHelpers.CaptureExecutionContext` returned its result to a frame of runtime async's own
+    /// machinery, which is suspending at an await with `suspension`; the result goes into the
+    /// continuation's `ExecutionContext` slot, and the frame leaves next.
+    | AfterCaptureExecutionContext of suspension : PendingSuspension
 
 /// What `returnStackFrame` should do with a frame's product — the object it was constructing if
 /// `Constructing`, otherwise the value its signature says it returns — once it returns.
@@ -145,10 +248,18 @@ type ReturnValueDisposition =
     /// Only meaningful for a `NotConstructing` frame: a constructor's product is the object, not
     /// a return value, and no caller wants that discarded.
     | Discard
-    /// The runtime called this `[UnmanagedCallersOnly]` helper from inside the caller's `throw`,
-    /// to wrap an object that is not an exception, and does `step` next (see
-    /// `IlMachineStateExecution.resumeNonExceptionWrap`). The helpers return nothing.
-    | ResumeNonExceptionWrap of step : NonExceptionWrapStep
+    /// The runtime called this `[UnmanagedCallersOnly]` helper on the way to raising an exception
+    /// from the caller, and does `step` next (see `IlMachineStateExecution.resumeVmRaise`). The
+    /// helpers return nothing.
+    | ResumeVmRaise of step : VmRaiseStep
+    /// The runtime called this CoreLib helper for the contexts of the runtime-async frame it returns
+    /// to, and does `step` next, with what the helper returned.
+    | ResumeAsyncContexts of step : AsyncContextStep
+    /// The frame is a suspended runtime-async frame that CoreLib's dispatcher resumed through
+    /// `FunctionPointerTarget.AsyncResume`, whose return is a continuation. If the frame returns,
+    /// its value goes through `resultLocation`, the result slot of the continuation after it, and
+    /// the caller gets null; if it suspends again, the caller gets its new continuation.
+    | ResumedAsync of resultLocation : ManagedPointerSource
 
 /// What happens to an exception that escapes a frame, decided by whatever pushed the frame rather
 /// than by the frame's own method: the runtime code that calls a method can catch what it throws.
@@ -178,7 +289,7 @@ type ExceptionEscape =
     /// frame's boundary and raises it again from the caller's call site: .NET 10's `EX_CATCH`
     /// around `RuntimeWrappedException`'s constructor in `WrapNonCompliantException`, after which
     /// `IL_Throw` dispatches what it caught in the wrapper's place. (.NET 11 runs that constructor
-    /// inside a CoreLib helper of its own instead; see `NonExceptionWrapStep`.) The first raise
+    /// inside a CoreLib helper of its own instead; see `VmRaiseStep`.) The first raise
     /// ends at this boundary, so every `finally` inside the frame runs before any filter outside
     /// it, and the second continues the trace the first left.
     | RaisedAgainFromCaller
@@ -190,6 +301,11 @@ type ExceptionEscape =
     /// reaching such a frame's boundary rather than let the exception unwind into a caller the
     /// runtime would never have shown it to.
     | UnhandledAtNativeCaller of runtimeCaller : string
+    /// The runtime calls this CoreLib helper for the contexts of the runtime-async frame beneath it
+    /// (`AsyncContextStep`), where CoreCLR's JIT puts the call outside every handler of the frame's
+    /// method. Nothing the helpers do raises, so PawPrint does not model an exception escaping
+    /// one: exception dispatch ends the run on reaching such a frame's boundary.
+    | AsyncContextHelper
 
 /// What a native frame PawPrint implements keeps between its entries: what a C function
 /// in the runtime's native shim read from guest memory once, before a loop that makes a
@@ -293,6 +409,18 @@ and MethodState =
         /// For a native frame whose call a signal interrupted, what the C function kept in
         /// its own locals for the call it makes again. `None` for every other frame.
         NativeLocals : NativeLocals option
+        /// The stub the runtime emits that this frame runs in place of its method's own body, whose
+        /// operands the body's `FromStubScope` operands index. `None` for a frame running its
+        /// method's own body.
+        VmStub : VmStub option
+        /// The frame's method has runtime async's calling convention, and this is what of it the
+        /// frame keeps. `None` for a method with the ordinary convention.
+        AsyncFrame : AsyncFrame option
+        /// The hidden continuation the last method with runtime async's calling convention that this
+        /// frame called returned: `None` (null) when that call completed, and the continuation
+        /// describing its suspension otherwise. `AsyncHelpers.AsyncCallContinuation()` reads and
+        /// clears it; a frame must not call anything else, or return, while it is non-null.
+        AsyncCallContinuation : ManagedHeapAddress option
     }
 
     member this.IlOpIndex = this._IlOpIndex
@@ -409,6 +537,17 @@ and MethodState =
             LastErrorCleared = true
         }
 
+    /// Record how far this frame's runtime-async body has got with its contexts. See `AsyncFrame`.
+    static member withAsyncContextHandling (handling : AsyncContextHandling) (state : MethodState) : MethodState =
+        match state.AsyncFrame with
+        | Some (AsyncFrame.SavesContexts _) ->
+            { state with
+                AsyncFrame = Some (AsyncFrame.SavesContexts handling)
+            }
+        | other ->
+            failwith
+                $"BUG: %O{state.ExecutingMethod} was given the context handling %A{handling}, but its frame is %A{other}, which saves no contexts"
+
     /// Keep `locals` for the call this native frame makes again. See `NativeLocals`.
     static member withNativeLocals (locals : NativeLocals option) (state : MethodState) : MethodState =
         { state with
@@ -513,6 +652,17 @@ and MethodState =
                 failwith
                     $"%s{shape} {method.Name} should have had %i{expected} parameters, but was given %i{args.Length}"
 
+            match method.Body with
+            | MethodBody.AsyncIl _ ->
+                failwith
+                    $"BUG: a frame of %O{method} was asked for with its runtime-async IL; IlMachineStateExecution.frameBody gives a frame that IL only as an IL body"
+            | MethodBody.Il _
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _
+            | MethodBody.Abstract
+            | MethodBody.MissingIl -> ()
+
             CatchClauseRefusal.check baseClassTypes loadedAssemblies containingAssembly method
 
         let declaredLocals =
@@ -561,5 +711,8 @@ and MethodState =
             PendingTypeInit = None
             LastErrorCleared = false
             NativeLocals = None
+            VmStub = None
+            AsyncFrame = None
+            AsyncCallContinuation = None
         }
         |> Ok

@@ -88,7 +88,11 @@ type TypeRef =
         /// <summary>The simple name of the referenced type (without namespace).</summary>
         Name : string
 
-        /// <summary>The namespace of the referenced type, or empty string for nested types.</summary>
+        /// <summary>
+        /// The row's Namespace column. For a nested type it is usually empty, but it is part of the
+        /// name all the same: CoreCLR resolves a nested TypeRef by its namespace as well as its name
+        /// (`ComputeHashFunctionWithTypeRef`, classhash.cpp).
+        /// </summary>
         Namespace : string
 
         /// <summary>
@@ -118,3 +122,18 @@ module TypeRef =
             Namespace = prettyNamespace
             ResolutionScope = resolutionScope
         }
+
+    /// The full name of the type a TypeRef names, in `TypeInfo.fullName`'s spelling: a TypeRef
+    /// that resolves to a TypeDef renders as that TypeDef does.
+    let rec fullName (get : TypeReferenceHandle -> TypeRef) (typeRef : TypeRef) : string =
+        let own =
+            if String.IsNullOrEmpty typeRef.Namespace then
+                typeRef.Name
+            else
+                $"%s{typeRef.Namespace}.%s{typeRef.Name}"
+
+        match typeRef.ResolutionScope with
+        | TypeRefResolutionScope.TypeRef parent -> $"%s{fullName get (get parent)}+%s{own}"
+        | TypeRefResolutionScope.Assembly _
+        | TypeRefResolutionScope.ModuleDef _
+        | TypeRefResolutionScope.ModuleRef _ -> own

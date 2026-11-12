@@ -238,7 +238,8 @@ module internal DebuggerValueJson =
         | FieldId.Metadata (declaringType = declaringType)
         | FieldId.InlineArrayElement (declaringType = declaringType) ->
             writer.WriteString ("declaringType", typeDescription context declaringType)
-        | FieldId.Named _ -> writer.WriteNull "declaringType"
+        | FieldId.Named _
+        | FieldId.ContinuationSlot _ -> writer.WriteNull "declaringType"
 
         writer.WriteEndObject ()
 
@@ -467,7 +468,9 @@ module internal DebuggerValueJson =
             | FunctionPointerTarget.Dynamic _
             | FunctionPointerTarget.OpenDelegateShuffleThunk
             | FunctionPointerTarget.VirtualCallStub _
-            | FunctionPointerTarget.UnboxingStub _ -> writer.WriteNull "method"
+            | FunctionPointerTarget.UnboxingStub _
+            | FunctionPointerTarget.AsyncResume -> writer.WriteNull "method"
+            | FunctionPointerTarget.SuspensionPoint (method, _) -> writer.WriteString ("method", string method)
         | NativeIntSource.TypeHandlePtr target -> writeTargetSource writer context "typeHandle" target
         | NativeIntSource.TypeDescPtr target -> writeTargetSource writer context "typeDesc" target
         | NativeIntSource.MethodTablePtr target -> writeTargetSource writer context "methodTable" target

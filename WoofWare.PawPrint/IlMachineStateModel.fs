@@ -200,6 +200,10 @@ type IlMachineState =
         /// is an interpreter-level concern — it isn't a syscall the guest
         /// can observe or perturb.
         Scheduling : SchedulerState
+        /// The runtime-async frames that suspended and have not resumed, keyed by their
+        /// continuations: a suspended frame belongs to no thread until CoreLib's dispatcher resumes
+        /// it, on whichever thread that is.
+        SuspendedAsyncFrames : SuspendedFrames
     }
 
     member this.WithKernel (kernel : EmulatedKernel) : IlMachineState =
@@ -619,6 +623,12 @@ type NativeHandlerResult =
     /// resumption. Dispatcher leaves the native frame on the stack and reports
     /// `WhatWeDid.SuspendedForManagedCall` to the Scheduler.
     | PushedManagedCallee of IlMachineState * StepEffect
+    /// The native method's runtime code throws `exceptionObject`, an exception it already holds,
+    /// as CoreCLR's `COMPlusThrow(OBJECTREF)` does: on .NET 11 the dispatcher first preserves its
+    /// trace (`Exception.InternalPreserveStackTrace`), raising instead whatever that raises, and
+    /// then dispatches it from the native frame (`RuntimeRaiseSite.ThrownAgainByVm`). The handler
+    /// is never re-entered, and must have popped any re-entry markers of its own.
+    | ThrowExisting of IlMachineState * exceptionObject : ManagedHeapAddress * StepEffect
     /// Native handler is raising a runtime exception. The dispatcher invokes
     /// `IlMachineStateExecution.raiseRuntimeException` for the supplied exception
     /// type, as `RaiseOrigin.Callee` (which must be a non-generic BCL exception with a parameterless ctor), allocating
@@ -719,10 +729,25 @@ type ReturnFrameResult =
         exceptionAddr : ManagedHeapAddress *
         exceptionType : ConcreteTypeHandle *
         making : RuntimeExceptionMaking
-    /// The frame that returned was a CoreLib helper the runtime called from inside a `throw` to
-    /// wrap an object that is not an exception, and the runtime does `step` next; state is
-    /// positioned at the throwing frame.
-    | ResumeNonExceptionWrap of IlMachineState * step : NonExceptionWrapStep
+    /// The frame that returned was a CoreLib helper the runtime called on the way to raising an
+    /// exception from its caller, and the runtime does `step` next; state is positioned at that
+    /// caller.
+    | ResumeVmRaise of IlMachineState * step : VmRaiseStep
+    /// The frame that returned was a CoreLib helper the runtime called for the contexts of the
+    /// runtime-async frame it returned to, and the runtime does `step` next with what the helper
+    /// returned; state is positioned at that frame.
+    | ResumeAsyncContexts of
+        IlMachineState *
+        step : AsyncContextStep *
+        returned : (EvalStackValue * ConcreteTypeHandle) option
+    /// The frame that returned was a suspended runtime-async frame CoreLib's dispatcher resumed
+    /// (`ReturnValueDisposition.ResumedAsync`), so the frame's value, if it returned one, goes
+    /// through `resultLocation`, and the dispatcher's `calli` gets null; state is positioned at the
+    /// dispatcher's frame.
+    | ResumedAsyncReturned of
+        IlMachineState *
+        resultLocation : ManagedPointerSource *
+        returned : (EvalStackValue * ConcreteTypeHandle) option
 
 /// How a run of the simulated process ended: the process itself ended, and each case
 /// carries the machine as it stood when it did, and how the kernel says it ended

@@ -30,6 +30,9 @@ module CodeSharing =
             // (`Generics::CheckInstantiation`, generics.cpp), so no instantiation that runs has one.
             failwith
                 $"BUG: CodeSharing: %O{handle} is a generic argument, but CoreCLR admits no byref, pointer or function pointer as one"
+        | ConcreteTypeHandle.Continuation _ ->
+            // No signature can name a type the runtime makes with no metadata.
+            failwith $"BUG: CodeSharing: %O{handle}, a continuation type, is a generic argument"
         | ConcreteTypeHandle.Concrete _ ->
             if TypeSystemState.isReferenceTypeHandle baseClassTypes "CodeSharing" state handle then
                 true

@@ -79,6 +79,7 @@ module TestInterfaceDispatchMap =
         | ConcreteTypeHandle.Pointer element -> (toHost hostAssemblies state element).MakePointerType ()
         | ConcreteTypeHandle.Byref element -> (toHost hostAssemblies state element).MakeByRefType ()
         | ConcreteTypeHandle.FunctionPointer _ -> failwith $"no host type is built for the function pointer %O{handle}"
+        | ConcreteTypeHandle.Continuation _ -> failwith $"no host type is built for the continuation type %O{handle}"
 
     let private concretizeDefinition
         (state : IlMachineState)
@@ -167,7 +168,11 @@ module TestInterfaceDispatchMap =
 
                 let interfaceMethodKey : SlotIdentity =
                     entry.Type.AssemblyFullName,
-                    (Some (MetadataTokens.MethodDefinitionHandle (interfaceMethod.MetadataToken &&& 0xFFFFFF)), None)
+                    (Some (
+                        MetadataTokens.MethodDefinitionHandle (interfaceMethod.MetadataToken &&& 0xFFFFFF),
+                        MethodVariant.ordinary
+                     ),
+                     None)
 
                 let state, slot =
                     InterfaceDispatch.tryFindImplementationSlot

@@ -15,6 +15,7 @@
     <Compile Include="PreparedGuest.fs" />
     <Compile Include="SynthesisedLayoutKind.fs" />
     <Compile Include="TestGcHeapHardLimit.fs" />
+    <Compile Include="TestCoverageSample.fs" />
     <Compile Include="TestJitSwitchLowering.fs" />
     <Compile Include="TestNoMissedInterpolation.fs" />
     <Compile Include="TestFixturesDeclareParallelism.fs" />
@@ -126,6 +127,9 @@
     <Compile Include="TestMarshalByValArrayLayout.fs" />
     <Compile Include="TestStructureMarshalerRefusal.fs" />
     <Compile Include="TestRuntimeAsyncMethod.fs" />
+    <Compile Include="TestRuntimeAsyncVariant.fs" />
+    <Compile Include="TestRuntimeAsyncSuspension.fs" />
+    <Compile Include="TestTaskReturningThunk.fs" />
     <Compile Include="TestManagedHeap.fs" />
     <Compile Include="TestStaticStorage.fs" />
     <Compile Include="TestByrefContainer.fs" />

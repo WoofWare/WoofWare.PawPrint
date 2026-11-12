@@ -60,6 +60,7 @@ module TestUnsafeStubs =
                     | other -> failwith $"TestUnsafeStubs: a stub's type operand is %O{other}, not !!0"
                 | other -> failwith $"TestUnsafeStubs: a stub's type operand is %O{other}, not a TypeSpec"
             | MetadataOperand.FromDynamicScope _ -> failwith "TestUnsafeStubs: a stub has a dynamic-scope operand"
+            | MetadataOperand.FromStubScope _ -> failwith "TestUnsafeStubs: an Unsafe stub names a stub-scope operand"
 
         match instruction with
         | IlOp.Nullary op ->

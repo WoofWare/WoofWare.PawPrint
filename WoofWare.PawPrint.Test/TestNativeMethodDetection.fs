@@ -47,6 +47,7 @@ module TestNativeMethodDetection =
         | MethodBody.InternalCall
         | MethodBody.PInvoke -> true
         | MethodBody.Il _
+        | MethodBody.AsyncIl _
         | MethodBody.RuntimeProvided _
         | MethodBody.Abstract
         | MethodBody.MissingIl -> false

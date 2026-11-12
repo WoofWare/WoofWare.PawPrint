@@ -108,6 +108,10 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 10.
     let parkedOnNet10 : Map<string, string> =
         [
+            "RuntimeAsyncCatchWrapsAfterSuspension.cs",
+            """On .NET 10 `LoadIntoBufferAsyncCore` is a state machine, and the `HttpRequestException` its `catch` makes goes through `ExceptionDispatchInfo.SetCurrentStackTrace`, which formats the current stack; formatting the state machine's `MoveNext` looks up the method it belongs to, by type name (`StackTrace.TryResolveStateMachineMethod`), which stops in `RuntimeAssembly.GetTypeCore` (measured): "MemoryBlock.readBytes: byte at offset 0 in <stack memory block #0> is uninitialised", as `RuntimeAsyncTraceHidesThunk.cs` does. .NET 11's runtime-async methods are no state machines. Un-park when `RuntimeAssembly.GetTypeCore` runs on .NET 10. Verified to exit 0 on real .NET 10."""
+            "RuntimeAsyncTraceHidesThunk.cs",
+            """On .NET 10 the guest's methods are state machines, and formatting a trace that names one looks up the method its `MoveNext` belongs to, by type name (`StackTrace.TryResolveStateMachineMethod`), which stops in `RuntimeAssembly.GetTypeCore` (measured): "MemoryBlock.readBytes: byte at offset 0 in <stack memory block #0> is uninitialised". .NET 11's runtime-async methods are no state machines, and the guest passes there. Un-park when `RuntimeAssembly.GetTypeCore` runs on .NET 10. Verified to exit 0 on real .NET 10."""
             "MarshalDestroyStructurePointerOrEmpty.cs",
             """On .NET 10, `Marshal.DestroyStructure` asks `MarshalNative_TryGetStructMarshalStub`, which hands back no stub for a blittable struct. PawPrint's arm of it calls blittable only a struct it can copy as bytes, so for a struct holding a pointer, or one without fields, it builds a stub, and its plan refuses both, the pointer field first: "TODO MarshalNative_TryGetStructMarshalStub: type 95 has layout but is not blittable, and PawPrint has not implemented its marshalling: field P is neither blittable nor a marshalling case PawPrint implements (contents RuntimePointer (Managed Null))", and a struct without fields because "the type has raw-byte storage rather than declared fields". Un-park when that arm answers blittable as `Blittability.ofValue` does. Verified to exit 0 on real .NET 10."""
             "FileSystemSupportsLockingDirect.cs",
@@ -121,8 +125,6 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 11.
     let parkedOnNet11 : Map<string, string> =
         [
-            "StringContentRoundTrip.cs",
-            """On .NET 11, `HttpContent.LoadIntoBufferAsyncCore` in System.Net.Http is a runtime-async method: it awaits through `AsyncHelpers.Await` and returns its `Task` from an empty stack, which PawPrint does not run, and its stack-shape check refuses the body: "is executing offset 49, which is invalid IL: StackUnderflow (49, Nullary Ret, 0)". Un-park when runtime-async methods run. Verified to exit 0 on real .NET 11."""
             "ProcessStartRootedSeeded.cs",
             """On .NET 11, `Process.Start` creates its redirections' pipes in managed code and then calls `SystemNative_ForkAndExecProcess`, whose .NET 11 argument list PawPrint does not recognise, so it stops there (measured): "Unimplemented native method (PInvokeImpl libSystem.Native!SystemNative_ForkAndExecProcess)". That shim makes no `access` check before it forks: a rooted path naming nothing executable forks a child, whose failed `execve` sends its errno back over a pipe. Un-park when PawPrint models that child. Verified to exit 0 on real .NET 11 RC1, which skips the guest's direct calls of .NET 10's shim."""
         ]
@@ -131,6 +133,7 @@ module TestPureCases =
     /// How each case ends on .NET 10 alone, when that is not a normal exit with code 0.
     let endingsOnNet10 : Map<string, GuestEnding> =
         [
+            "RuntimeAsyncTraceHidesThunk.cs", GuestEnding.ExitCode 7
             "ThreadStateOfEntryThreadAfterMain.cs", GuestEnding.ExitCode 11
             "DelegateOpenStaticVirtualInvoke.cs", GuestEnding.ExitCode 10
             "FileSystemSupportsLockingDirect.cs", GuestEnding.ExitCode 100

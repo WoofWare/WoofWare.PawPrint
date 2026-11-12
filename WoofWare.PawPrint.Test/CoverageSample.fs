@@ -4,27 +4,40 @@ open System.Collections.Generic
 open FsCheck
 open FsCheck.FSharp
 
-/// How many times a property reached each label over the fixed sample that
-/// `CoverageSample.check` draws.
+/// A label as `Coverage` keys it. `None` and `()` are null at run time, which a
+/// `Dictionary` refuses as a key; this struct never is.
+[<Struct>]
+type private CoverageKey<'label when 'label : equality> = | CoverageKey of 'label
+
+/// How many times a property reached each label: over the fixed sample that
+/// `CoverageSample.check` draws, or over every case of a test that enumerates
+/// its cases itself.
 [<Sealed>]
 type Coverage<'label when 'label : equality> internal () =
-    let counts = Dictionary<'label, int> ()
+    let counts = Dictionary<CoverageKey<'label>, int> ()
 
     member internal _.Hit (label : 'label) : unit =
-        match counts.TryGetValue label with
-        | true, n -> counts.[label] <- n + 1
-        | false, _ -> counts.[label] <- 1
+        let key = CoverageKey label
+
+        match counts.TryGetValue key with
+        | true, n -> counts.[key] <- n + 1
+        | false, _ -> counts.[key] <- 1
 
     /// How many times the fixed sample reached `label`: zero for a label it
     /// never reached.
     member _.Count (label : 'label) : int =
-        match counts.TryGetValue label with
+        match counts.TryGetValue (CoverageKey label) with
         | true, n -> n
         | false, _ -> 0
 
     /// Every label the fixed sample reached, each with its count.
     member _.Reached : ('label * int) list =
-        counts |> Seq.map (fun kv -> kv.Key, kv.Value) |> List.ofSeq
+        counts
+        |> Seq.map (fun kv ->
+            let (CoverageKey label) = kv.Key
+            label, kv.Value
+        )
+        |> List.ofSeq
 
 /// Checking a property whose test also asserts coverage: that its cases reach
 /// each of some labels, or reach it often enough.

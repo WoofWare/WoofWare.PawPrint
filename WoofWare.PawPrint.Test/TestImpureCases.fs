@@ -4999,6 +4999,25 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `MethodInfo.Invoke` of runtime-async methods through the `InvokeStub_` dynamic
+                // method, which binds their task-returning thunks. Registered with the dynamic-code
+                // switch overridden, like its siblings; verified to exit 0 on real .NET 10 and 11,
+                // whose default is true.
+                FileName = "RuntimeAsyncReflectionInvokeEmittedStub.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // Executing the body of a `Reflection.Emit` method: the first slice that runs the
                 // IL rather than only minting, describing or binding it. Registered with the
                 // dynamic-code switch overridden, like its siblings.
@@ -7003,10 +7022,6 @@ module TestImpureCases =
 
     [<Test>]
     let ``FileSystemWatcher on the pinned linux-x64 CoreLib raises an event for each change, and ends`` () : unit =
-        Net11Frontier.park (
-            "On .NET 11's linux-x64 CoreLib the watcher's read loop reaches `AsyncHelpers.Await`, a runtime-async method's, whose `TailAwait` call PawPrint refuses: \"CoreCLR's JIT replaces every call to this method with code of its own\" (measured on 11.0.0-rc.1). Un-park when runtime-async methods run."
-        )
-
         // On a macOS host the framework under test is a Darwin CoreLib, whose
         // FileSystemWatcher is FSEvents; production and CI run the Linux one, over inotify.
         let frameworkDir = FrameworkUnderTest.requireLinuxFrameworkDirectory ()

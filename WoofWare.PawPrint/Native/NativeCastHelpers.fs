@@ -39,6 +39,7 @@ module NativeCastHelpers =
             | ConcreteTypeHandle.FunctionPointer _ -> true
             | ConcreteTypeHandle.Concrete _
             | ConcreteTypeHandle.OneDimArrayZero _
+            | ConcreteTypeHandle.Continuation _
             | ConcreteTypeHandle.Array _ -> false
 
     /// Is `target` an interface type? Only a nominal, MethodTable-backed handle can be one:

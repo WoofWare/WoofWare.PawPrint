@@ -173,6 +173,24 @@ module AbstractMachine =
                         state
 
                 ExecutionResult.Stepped (state, WhatWeDid.SuspendedForManagedCall, effect)
+            | NativeHandlerResult.ThrowExisting (state, exceptionAddr, effect) ->
+                // The handler's runtime code throws an exception object it holds. The native frame
+                // stays on the stack: a preserve of its trace runs above it, and the exception is
+                // dispatched from it.
+                match
+                    IlMachineStateExecution.throwExistingFromNativeFrame
+                        loggerFactory
+                        baseClassTypes
+                        exceptionAddr
+                        thread
+                        state
+                with
+                | ExecutionResult.Stepped (state, whatWeDid, StepEffect.NoEffect) ->
+                    ExecutionResult.Stepped (state, whatWeDid, effect)
+                | ExecutionResult.Stepped (_, _, raised) ->
+                    failwith
+                        $"logic error: throwing an existing exception from a native frame produced the step effect %O{raised}, though it runs no handler that has one"
+                | other -> other
             | NativeHandlerResult.SuspendedForClassInit (state, effect) ->
                 // A cctor was pushed; the native frame must stay on the stack so the dispatch
                 // loop runs the cctor first, then re-enters this native method on the next step.
@@ -267,7 +285,9 @@ module AbstractMachine =
                 | FunctionPointerTarget.RuntimeAllocator
                 | FunctionPointerTarget.OpenDelegateShuffleThunk
                 | FunctionPointerTarget.VirtualCallStub _
-                | FunctionPointerTarget.UnboxingStub _ ->
+                | FunctionPointerTarget.UnboxingStub _
+                | FunctionPointerTarget.AsyncResume
+                | FunctionPointerTarget.SuspensionPoint _ ->
                     FunctionPointerTarget.requireManaged "delegate invocation" callee
                     |> fun m -> state, Ok m
 
@@ -301,8 +321,12 @@ module AbstractMachine =
             match state |> IlMachineState.returnFromSyntheticStackFrame thread with
             | ReturnFrameResult.NoFrameToReturn -> failwith "unexpectedly nowhere to return from delegate"
             | ReturnFrameResult.DispatchException _ -> failwith "unexpected exception dispatch from delegate frame pop"
-            | ReturnFrameResult.ResumeNonExceptionWrap _ ->
+            | ReturnFrameResult.ResumeVmRaise _ ->
                 failwith "unexpected step of a thrown non-exception's wrapping from delegate frame pop"
+            | ReturnFrameResult.ResumeAsyncContexts _ ->
+                failwith "unexpected step of a runtime-async body's context handling from delegate frame pop"
+            | ReturnFrameResult.ResumedAsyncReturned _ ->
+                failwith "unexpected return of a resumed runtime-async frame from delegate frame pop"
             | ReturnFrameResult.NormalReturn state ->
 
             // Every failure below happens *after* the delegate's synthetic `Invoke` frame is
@@ -418,6 +442,7 @@ module AbstractMachine =
                 raiseFromPoppedStub baseClassTypes.BadImageFormatException (Some BadImageFormatMessages.ofHResult) state
             | MethodBody.Abstract
             | MethodBody.Il _
+            | MethodBody.AsyncIl _
             | MethodBody.MissingIl
             | MethodBody.InternalCall
             | MethodBody.PInvoke
@@ -534,6 +559,9 @@ module AbstractMachine =
                 $"BUG: reached executeOneStep for {MethodOwner.describe instruction.ExecutingMethod.Owner}::{instruction.ExecutingMethod.Name}, an IL method whose row names no body; callMethod refuses to push a frame for one"
         | MethodBody.InternalCall
         | MethodBody.PInvoke -> dispatchNative ()
+        | MethodBody.AsyncIl _ ->
+            failwith
+                $"BUG: reached executeOneStep for {MethodOwner.describe instruction.ExecutingMethod.Owner}::{instruction.ExecutingMethod.Name}, whose frame carries runtime-async IL; IlMachineStateExecution.frameBody gives a frame that IL only as an IL body"
         | MethodBody.Il instructions ->
 
         let state = StackShapeOfMethod.beforeInstruction baseClassTypes thread state
@@ -666,13 +694,20 @@ module AbstractMachine =
         =
         let logger = logger loggerFactory
 
+        // A user-written runtime-async body's call of a context helper is a step of its own: CoreCLR's
+        // JIT emits it into the body, after the type-initialisation check.
+        let afterPrologue (state : IlMachineState) : ExecutionResult =
+            match AsyncContextSaving.beforeInstruction loggerFactory baseClassTypes thread state with
+            | Some result -> result
+            | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
+
         let ran =
             match state.ThreadState.[thread].MethodState.PendingTypeInit with
-            | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
+            | None -> afterPrologue state
             | Some ty ->
                 match runPendingTypeInit loggerFactory baseClassTypes state thread ty with
                 | Choice1Of2 result -> result
-                | Choice2Of2 state -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
+                | Choice2Of2 state -> afterPrologue state
 
         ran
         |> AssemblyLoadEvent.announceBeforeStep loggerFactory baseClassTypes thread state

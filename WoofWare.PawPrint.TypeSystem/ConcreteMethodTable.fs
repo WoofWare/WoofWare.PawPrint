@@ -231,8 +231,10 @@ module ConcreteMethodTable =
             // TypeDescs with no method table: no slots, so nothing to dispatch through.
             state, Ok None
         | ConcreteTypeHandle.OneDimArrayZero _
-        | ConcreteTypeHandle.Array _ ->
-            // A synthesised array's virtual slots are `System.Array`'s, as in `vtableOfClosed`.
+        | ConcreteTypeHandle.Array _
+        | ConcreteTypeHandle.Continuation _ ->
+            // A synthesised array's virtual slots are `System.Array`'s, as in `vtableOfClosed`, and
+            // a continuation type's are CoreLib's `Continuation`'s.
             let state, baseHandle =
                 TypeSystemState.resolveBaseConcreteType
                     loggerFactory
@@ -336,9 +338,12 @@ module ConcreteMethodTable =
             // MethodTable, so they have no vtable at all.
             state, Ok []
         | ConcreteTypeHandle.OneDimArrayZero _
-        | ConcreteTypeHandle.Array _ ->
+        | ConcreteTypeHandle.Array _
+        | ConcreteTypeHandle.Continuation _ ->
             // Synthesised array MethodTables inherit their virtual slots from System.Array (and
             // through it, System.Object); the structural array handle itself introduces none.
+            // Likewise a continuation type inherits CoreLib's `Continuation`'s, and introduces none
+            // (`CreateNewContinuationMethodTable`, vm/asynccontinuations.cpp).
             let state, baseHandle =
                 TypeSystemState.resolveBaseConcreteType
                     loggerFactory
@@ -392,6 +397,14 @@ module ConcreteMethodTable =
         | ConcreteTypeHandle.FunctionPointer _ ->
             // TypeDescs with no MethodTable, so no slots of either kind -- the same
             // reason `vtableOfClosed` gives them an empty vtable.
+            state,
+            Ok
+                {
+                    MethodTableLayout.MethodSlotTable.Vtable = virtualSlots
+                    MethodTableLayout.MethodSlotTable.BeyondVtable = []
+                }
+        | ConcreteTypeHandle.Continuation _ ->
+            // The runtime gives a continuation type no methods of its own.
             state,
             Ok
                 {

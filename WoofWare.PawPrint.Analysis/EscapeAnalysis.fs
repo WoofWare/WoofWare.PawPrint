@@ -68,6 +68,10 @@ type Opacity =
     | NativeBody
     /// The method is abstract.
     | AbstractBody
+    /// The method is a runtime-async method returning a promise type, whose ordinary variant every
+    /// call binds: CoreCLR runs the task-returning thunk its VM emits in its place, which no IL here
+    /// describes.
+    | TaskReturningThunk
     /// The method is IL, but its row names no body. CoreCLR raises <c>BadImageFormatException</c>
     /// when it is invoked, before any of it runs; the analysis does not model that verdict.
     | MissingBody
@@ -3475,6 +3479,18 @@ module EscapeAnalysis =
             | state, None -> state, false
         | _ -> state, false
 
+    /// The IL a MethodDef row carries, whichever of the row's `MethodDesc`s runs it: a runtime-async
+    /// method's IL (`MethodBody.AsyncIl`) as much as any other.
+    let private rowIl (method : MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>) : MethodInstructions option =
+        match method.Body with
+        | MethodBody.Il body
+        | MethodBody.AsyncIl body -> Some body
+        | MethodBody.InternalCall
+        | MethodBody.PInvoke
+        | MethodBody.RuntimeProvided _
+        | MethodBody.Abstract
+        | MethodBody.MissingIl -> None
+
     /// Where `assembly`'s own IL writes its fields.
     let private fieldWrites
         (state : EscapeAnalysisState)
@@ -3507,7 +3523,7 @@ module EscapeAnalysis =
             let stores, addressed =
                 ((Map.empty, Set.empty), assembly.Methods)
                 ||> Seq.fold (fun (stores, addressed) (KeyValue (handle, method)) ->
-                    match MethodInfo.tryIlBody method with
+                    match rowIl method with
                     | None -> stores, addressed
                     | Some body ->
                         ((stores, addressed), body.Instructions)
@@ -3796,7 +3812,7 @@ module EscapeAnalysis =
 
         let handle =
             match method with
-            | MethodInfo.Metadata (_, facts) -> facts.Handle
+            | MethodInfo.Metadata (_, facts, _) -> facts.Handle
             | MethodInfo.Synthesised _ ->
                 failwith "BUG: a synthesised method carries [UnmanagedCallersOnly], which only metadata can apply"
 
@@ -4128,7 +4144,13 @@ module EscapeAnalysis =
     /// What CoreCLR runs when `key` is called, or the contract of one of `assumptions` that stands
     /// in for it. The VM's substitute for an intrinsic runs whatever IL CoreLib ships in its place,
     /// working or not.
-    let private runsFor (assumptions : Set<Assumption>) (assembly : DumpedAssembly) (key : MethodKey) : Runs =
+    let private runsFor
+        (state : EscapeAnalysisState)
+        (assembly : DumpedAssembly)
+        (key : MethodKey)
+        : EscapeAnalysisState * Runs
+        =
+        let assumptions = state.Assumptions
         let method = assembly.Methods.[key.Method.Get]
 
         let intrinsic =
@@ -4143,34 +4165,34 @@ module EscapeAnalysis =
             | None -> None
 
         match Assumption.summarises assembly key.Method.Get with
-        | Some assumption when assumptions.Contains assumption -> Runs.Assumed assumption
-        | _ when ResourceLookup.isLookup assembly key.Method.Get -> Runs.ResourceLookup
-        | _ when ObjectGetType.isGetType assembly key.Method.Get -> Runs.ObjectGetType
+        | Some assumption when assumptions.Contains assumption -> state, Runs.Assumed assumption
+        | _ when ResourceLookup.isLookup assembly key.Method.Get -> state, Runs.ResourceLookup
+        | _ when ObjectGetType.isGetType assembly key.Method.Get -> state, Runs.ObjectGetType
         | _ ->
 
         match substituted, intrinsic with
-        | Some stub, _ -> Runs.Il (stub, None)
+        | Some stub, _ -> state, Runs.Il (stub, None)
         | None, Some IntrinsicBody.VmSubstitution ->
             // A substitute the VM chooses by instantiation, which may be one of the runtime's own
             // operations.
             match IntrinsicPrimitive.recognise assembly key.Method.Get with
-            | Some primitive -> Runs.Primitive primitive
-            | None -> Runs.Opaque Opacity.IntrinsicExpansion
+            | Some primitive -> state, Runs.Primitive primitive
+            | None -> state, Runs.Opaque Opacity.IntrinsicExpansion
         // The JIT replaces every call with code of its own, which no IL here describes.
-        | None, Some IntrinsicBody.CallSiteExpansion -> Runs.Opaque Opacity.IntrinsicExpansion
+        | None, Some IntrinsicBody.CallSiteExpansion -> state, Runs.Opaque Opacity.IntrinsicExpansion
         // Whether the VM replaces the body turns on whether the instantiation's type argument is
         // blittable, which the analysis does not decide.
-        | None, Some (IntrinsicBody.StructMarshalling _) -> Runs.Opaque Opacity.IntrinsicExpansion
+        | None, Some (IntrinsicBody.StructMarshalling _) -> state, Runs.Opaque Opacity.IntrinsicExpansion
         | None, Some (IntrinsicBody.JitExpansion expansion) ->
             match method.Body with
-            | MethodBody.Il body -> Runs.Il (body, Some expansion)
+            | MethodBody.Il body -> state, Runs.Il (body, Some expansion)
             | _ ->
                 failwith
                     $"%O{key}: IntrinsicBody classifies it as a JIT expansion, whose IL calls itself, but it has no IL"
         | None, _ ->
             match method.Body with
-            | MethodBody.Abstract -> Runs.Opaque Opacity.AbstractBody
-            | MethodBody.MissingIl -> Runs.Opaque Opacity.MissingBody
+            | MethodBody.Abstract -> state, Runs.Opaque Opacity.AbstractBody
+            | MethodBody.MissingIl -> state, Runs.Opaque Opacity.MissingBody
             | MethodBody.InternalCall
             | MethodBody.PInvoke
             | MethodBody.RuntimeProvided _ ->
@@ -4179,11 +4201,32 @@ module EscapeAnalysis =
                     (NativeMethod.contract native).Assumes
                     |> List.forall (Assumption.ofNative >> assumptions.Contains)
                     ->
-                    Runs.Native native
+                    state, Runs.Native native
                 // Its contract holds under a claim the caller does not allow.
                 | Some _
-                | None -> Runs.Opaque Opacity.NativeBody
-            | MethodBody.Il body -> Runs.Il (body, None)
+                | None -> state, Runs.Opaque Opacity.NativeBody
+            | MethodBody.Il body -> state, Runs.Il (body, None)
+            // A key names a MethodDef, whose token binds the ordinary variant: that runs this IL
+            // only where it has the async calling convention, as `Await` and the like do.
+            | MethodBody.AsyncIl body ->
+                match
+                    RuntimeAsyncMethod.hasAsyncCallingConvention
+                        state.LoggerFactory
+                        state.RuntimeDirs
+                        state.BaseTypes.Corelib
+                        assembly
+                        method
+                        state.TypeSystem._LoadedAssemblies
+                with
+                | assemblies, Ok true -> withAssemblies state assemblies, Runs.Il (body, None)
+                | assemblies, Ok false -> withAssemblies state assemblies, Runs.Opaque Opacity.TaskReturningThunk
+                // CoreCLR classifies the method's return type as it loads the declaring type, so it
+                // cannot load that type either.
+                | assemblies, Error (TypeBindingFailure.AssemblyUnavailable _) ->
+                    withAssemblies state assemblies, Runs.Opaque Opacity.UnresolvedAssembly
+                | _, Error failure ->
+                    failwith
+                        $"%O{key}: classifying the return type of a runtime-async method reaches a type CoreCLR cannot load, which the analysis does not model: %s{TypeBindingFailure.describe failure}"
 
     /// What one body does by itself.
     /// The facts of `key`'s body, where CoreCLR runs `runs` for it (`runsFor`).
@@ -4409,6 +4452,11 @@ module EscapeAnalysis =
                 match operand with
                 // No metadata names the field, so nothing says whose initializer runs.
                 | MetadataOperand.FromDynamicScope _ -> state, [], [], [ offset, Opacity.IndirectCall, None ]
+                // The analysis reads only bodies of PE images (a task-returning thunk is
+                // `Opacity.TaskReturningThunk`), whose operands are metadata.
+                | MetadataOperand.FromStubScope index ->
+                    failwith
+                        $"BUG: %O{op} at offset %d{offset} names operand %d{index} of a runtime-emitted stub, which no body the analysis reads has"
                 | MetadataOperand.FromMetadata token ->
 
                 match staticFieldOwner state token.Token with
@@ -4972,6 +5020,10 @@ module EscapeAnalysis =
                     match operand, methodTarget, selfCall with
                     | MetadataOperand.FromDynamicScope _, _, _ ->
                         state, raises, (offset, Opacity.IndirectCall, None) :: opaque, calls
+                    // The analysis reads only bodies of PE images, whose operands are metadata.
+                    | MetadataOperand.FromStubScope index, _, _ ->
+                        failwith
+                            $"BUG: %O{call} at offset %d{offset} names operand %d{index} of a runtime-emitted stub, which no body the analysis reads has"
                     | MetadataOperand.FromMetadata _, Some (CallTarget.Method callee), Some expansion when
                         callee.Callee = key
                         && call <> UnaryMetadataTokenIlOp.Newobj
@@ -5193,7 +5245,7 @@ module EscapeAnalysis =
         let state, spellings, monitor =
             let synchronized =
                 match method with
-                | MethodInfo.Metadata (_, facts) -> facts.ImplAttributes.HasFlag MethodImplAttributes.Synchronized
+                | MethodInfo.Metadata (_, facts, _) -> facts.ImplAttributes.HasFlag MethodImplAttributes.Synchronized
                 | MethodInfo.Synthesised _ -> false
 
             if not synchronized then
@@ -5391,7 +5443,7 @@ module EscapeAnalysis =
                 && Debuggable.allowsJitOptimisation assembly = Some true
                 && (
                     match method with
-                    | MethodInfo.Metadata (_, facts) ->
+                    | MethodInfo.Metadata (_, facts, _) ->
                         not (facts.ImplAttributes.HasFlag MethodImplAttributes.NoOptimization)
                     | MethodInfo.Synthesised _ -> false
                 )
@@ -6310,6 +6362,8 @@ module EscapeAnalysis =
         | ConcreteTypeHandle.Pointer element
         | ConcreteTypeHandle.OneDimArrayZero element
         | ConcreteTypeHandle.Array (element, _) -> 1 + depthOf state element
+        | ConcreteTypeHandle.Continuation layout ->
+            1 + (layout.Result |> Option.map (depthOf state) |> Option.defaultValue 0)
         | ConcreteTypeHandle.FunctionPointer signature ->
             let returned =
                 match signature.ReturnType with
@@ -6601,11 +6655,12 @@ module EscapeAnalysis =
         let _, definition = methodOf state named.Definition
 
         // Instantiating the method the call names reads its locals, which the JIT does not unless
-        // that method runs.
+        // that method runs. A runtime-async method's are read whichever of its `MethodDesc`s the
+        // call binds, which can only make the analysis less sure that the call binds.
         let namedLocals =
-            match definition.Body with
-            | MethodBody.Il body -> body.LocalVars |> Option.map List.ofSeq |> Option.defaultValue []
-            | _ -> []
+            match rowIl definition with
+            | Some body -> body.LocalVars |> Option.map List.ofSeq |> Option.defaultValue []
+            | None -> []
 
         let state, binds =
             match TypeSystemState.tryGetConcreteTypeInfo state.TypeSystem receiver with
@@ -7088,7 +7143,8 @@ module EscapeAnalysis =
         | Some facts -> state, facts
         | None ->
             let assembly = assemblyOf state key.AssemblyFullName
-            let state, facts = factsOfRuns state key (runsFor state.Assumptions assembly key)
+            let state, runs = runsFor state assembly key
+            let state, facts = factsOfRuns state key runs
 
             { state with
                 Facts = state.Facts.Add (key, facts)
@@ -7220,6 +7276,8 @@ module EscapeAnalysis =
             | ConcreteTypeHandle.OneDimArrayZero inner
             | ConcreteTypeHandle.Array (inner, _) -> named state inner
             | ConcreteTypeHandle.FunctionPointer _ -> false
+            // No metadata names a continuation type, so no spelling the analysis compares does.
+            | ConcreteTypeHandle.Continuation _ -> false
 
         match query with
         | TypeQuery.IsValueType spelled ->
@@ -7748,7 +7806,9 @@ module EscapeAnalysis =
         let key = instance.Definition
         let assembly, method = methodOf state key
 
-        match runsFor state.Assumptions assembly key, MethodInfo.tryIlBody method with
+        let state, runs = runsFor state assembly key
+
+        match runs, rowIl method with
         | Runs.Il (body, _), _ ->
             let state, facts = instanceFacts state instance
             state, Some (body, facts)
@@ -7890,8 +7950,7 @@ module EscapeAnalysis =
                                 | _ -> None
 
                             let scanned =
-                                MethodInfo.tryIlBody method
-                                |> Option.bind (fun own -> storedBy (own.Locations.TryFind offset))
+                                rowIl method |> Option.bind (fun own -> storedBy (own.Locations.TryFind offset))
 
                             match writerFacts state instance with
                             | state, None -> state, None

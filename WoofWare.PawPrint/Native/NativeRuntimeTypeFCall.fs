@@ -276,6 +276,8 @@ module NativeRuntimeTypeFCall =
                         )
 
                     assembly.TypeDefs.[identity.TypeDefinition.Get].Name
+                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                    ContinuationType.unasked operation layout
                 | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _ as typeHandle)
                 | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _ as typeHandle) ->
                     failwith
@@ -749,6 +751,8 @@ module NativeRuntimeTypeFCall =
                 | RuntimeTypeHandleTarget.Composite (_, element) -> NativeIntSource.TypeHandlePtr element
                 | RuntimeTypeHandleTarget.Closed handle ->
                     match handle with
+                    | ConcreteTypeHandle.Continuation layout ->
+                        ContinuationType.unasked "RuntimeTypeHandle.GetElementType" layout
                     | ConcreteTypeHandle.Concrete _
                     | ConcreteTypeHandle.FunctionPointer _ -> NativeIntSource.Verbatim 0L
                     | ConcreteTypeHandle.Byref inner
@@ -906,6 +910,8 @@ module NativeRuntimeTypeFCall =
                     int typeInfo.TypeAttributes
                 | RuntimeTypeHandleTarget.Closed handle ->
                     match handle with
+                    | ConcreteTypeHandle.Continuation layout ->
+                        ContinuationType.unasked "RuntimeTypeHandle.GetAttributes" layout
                     | ConcreteTypeHandle.Byref _
                     | ConcreteTypeHandle.Pointer _
                     | ConcreteTypeHandle.FunctionPointer _ -> int System.Reflection.TypeAttributes.Public

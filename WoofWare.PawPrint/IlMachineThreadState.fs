@@ -163,9 +163,15 @@ module IlMachineThreadState =
                 | ReturnValueDisposition.DispatchAsException _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly requested exception dispatch on return"
-                | ReturnValueDisposition.ResumeNonExceptionWrap _ ->
+                | ReturnValueDisposition.ResumeVmRaise _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of the runtime's wrapping of a thrown non-exception"
+                | ReturnValueDisposition.ResumeAsyncContexts _ ->
+                    failwith
+                        $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of a runtime-async body's context handling"
+                | ReturnValueDisposition.ResumedAsync _ ->
+                    failwith
+                        $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly claimed to be a resumed runtime-async frame"
                 | ReturnValueDisposition.Discard ->
                     // A trampoline has no value of its own to discard: the concrete callee it
                     // dispatches to produces the return value, and does so into the caller this
@@ -246,6 +252,12 @@ module IlMachineThreadState =
                 failwith
                     $"Invalid CIL: method %s{returningMethodState.ExecutingMethod.Name} returned with more than one evaluation stack value"
 
+        match returningMethodState.AsyncCallContinuation with
+        | None -> ()
+        | Some continuation ->
+            failwith
+                $"BUG: %O{returningMethodState.ExecutingMethod} is returning while it holds the continuation %O{continuation} that a runtime-async call returned, which it has not read through AsyncHelpers.AsyncCallContinuation()"
+
         match returningMethodState.ReturnState with
         | None -> ReturnFrameResult.NoFrameToReturn
         | Some returnState ->
@@ -262,6 +274,29 @@ module IlMachineThreadState =
             |> ThreadState.setActiveFrame returnState.JumpTo
             |> ThreadState.removeFrame returningFrameId
 
+        // A method with runtime async's calling convention that returns has completed, so its
+        // hidden continuation, which the caller reads, is null, and a tail await the caller made of
+        // the call is over.
+        let threadState =
+            match returningMethodState.AsyncFrame with
+            | None -> threadState
+            | Some _ ->
+                let caller = ThreadState.getFrame returnState.JumpTo threadState
+
+                let asyncFrame =
+                    match caller.AsyncFrame with
+                    | Some (AsyncFrame.Transparent TailAwait.InFlight) ->
+                        Some (AsyncFrame.Transparent TailAwait.NotRequested)
+                    | other -> other
+
+                ThreadState.setFrame
+                    returnState.JumpTo
+                    { caller with
+                        AsyncCallContinuation = None
+                        AsyncFrame = asyncFrame
+                    }
+                    threadState
+
         let state =
             { state with
                 ThreadState = state.ThreadState |> Map.add currentThread threadState
@@ -276,9 +311,15 @@ module IlMachineThreadState =
                 // dispatch should occur.
                 let constructed = ManagedHeap.get constructing state.ManagedHeap
                 ReturnFrameResult.DispatchException (state, constructing, constructed.ConcreteType, making)
-            | ReturnValueDisposition.ResumeNonExceptionWrap _ ->
+            | ReturnValueDisposition.ResumeVmRaise _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"
+            | ReturnValueDisposition.ResumeAsyncContexts _ ->
+                failwith
+                    $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of a runtime-async frame's context handling, which only a call the runtime makes for those contexts carries"
+            | ReturnValueDisposition.ResumedAsync _ ->
+                failwith
+                    $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame was a resumed runtime-async frame, which no newobj makes"
             | ReturnValueDisposition.Discard ->
                 // A constructor's product is the object, and it is already allocated and reachable
                 // from `Constructing` — there is nothing here to throw away, and the caller
@@ -316,12 +357,16 @@ module IlMachineThreadState =
             // throw the runtime had decided on.
             failwith
                 $"logic error: %s{returningMethodState.ExecutingMethod.Name} was not constructing an object, but its frame asked for its product to be dispatched as an exception"
-        | ReturnValueDisposition.ResumeNonExceptionWrap step ->
+        | ReturnValueDisposition.ResumeVmRaise step ->
             match returned with
-            | None -> ReturnFrameResult.ResumeNonExceptionWrap (state, step)
+            | None -> ReturnFrameResult.ResumeVmRaise (state, step)
             | Some _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} returned a value, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"
+        | ReturnValueDisposition.ResumeAsyncContexts step ->
+            ReturnFrameResult.ResumeAsyncContexts (state, step, returned)
+        | ReturnValueDisposition.ResumedAsync resultLocation ->
+            ReturnFrameResult.ResumedAsyncReturned (state, resultLocation, returned)
         | ReturnValueDisposition.Discard ->
             // The caller is mid-instruction and will re-execute it; its evaluation stack still
             // holds that instruction's operands, so there is nowhere to put this value that would
@@ -382,6 +427,7 @@ module IlMachineThreadState =
                 HasWrappedNonException = false
                 StackShapes = Map.empty
                 Scheduling = SchedulerState.RoundRobin
+                SuspendedAsyncFrames = SuspendedFrames.empty
             }
 
         state.WithLoadedAssembly entryAssembly

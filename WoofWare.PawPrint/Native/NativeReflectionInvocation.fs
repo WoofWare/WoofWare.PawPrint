@@ -176,6 +176,7 @@ module internal NativeReflectionInvocation =
                 $"argumentStorageOf: %O{ty} is a byref, which never occupies argument storage of its own; classify its element instead"
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> ArgumentStorage.IntPtrPayload
+        | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "argumentStorageOf" layout
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ ->
@@ -544,15 +545,45 @@ module internal NativeReflectionInvocation =
                 // constructor is compiled, so its `.cctor` does not see them
                 // (`sourcesPure/ConstructorInvokeRunsCctorBeforeLocals.cs`). Either way, the frame
                 // pushed below concretises the locals again, from the memo.
+                //
+                // The locals are those of the body the frame will run (`frameBody`). For a method
+                // flagged `Async` and returning a promise type, reflection binds the ordinary
+                // variant, whose code is the task-returning thunk: CoreCLR compiles the thunk, and
+                // the async variant's IL only when the thunk first calls it, after the thunk's
+                // prologue has run the `.cctor` (`CEEInfo::initClass` asks for it in any static
+                // method of a type without `beforefieldinit`). The thunk's locals name only CoreLib's
+                // types and the method's result type, which the signature has already loaded.
+                //
+                // A method whose row names no body has no locals to load. Virtual dispatch, which
+                // `callMethodWithCommitment` performs below, may yet run an override, as
+                // `sourcesPure/ReflectionInvokeOverrideOfBodylessVirtual.cs` does; the call refuses
+                // a missing body only once it has chosen the method that runs.
                 let state =
-                    if isConstructor then
-                        state
-                    else
-                        ExecutionConcretization.concretizeLocals
-                            ctx.LoggerFactory
-                            ctx.BaseClassTypes
-                            target.Method
-                            state
+                    match isConstructor, target.Method.Body with
+                    | true, _
+                    | false, MethodBody.MissingIl -> state
+                    | false, MethodBody.Il _
+                    | false, MethodBody.AsyncIl _
+                    | false, MethodBody.InternalCall
+                    | false, MethodBody.PInvoke
+                    | false, MethodBody.RuntimeProvided _
+                    | false, MethodBody.Abstract ->
+                        let declaringAssy =
+                            match state.LoadedAssembly target.Method.DeclaringAssemblyFullName with
+                            | Some assy -> assy
+                            | None ->
+                                failwith
+                                    $"%s{operation}: the assembly declaring %O{target.Method} is not loaded: %O{target.Method.DeclaringAssemblyFullName}"
+
+                        let state, body =
+                            IlMachineStateExecution.frameBody
+                                ctx.LoggerFactory
+                                ctx.BaseClassTypes
+                                declaringAssy
+                                target.Method
+                                state
+
+                        ExecutionConcretization.concretizeLocals ctx.LoggerFactory ctx.BaseClassTypes body.Method state
                         |> fst
 
                 let state, typeInit =

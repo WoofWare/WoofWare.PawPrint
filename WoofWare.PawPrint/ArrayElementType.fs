@@ -12,6 +12,7 @@ module ArrayElementType =
         match shape.ConcreteType with
         | ConcreteTypeHandle.OneDimArrayZero element -> element
         | ConcreteTypeHandle.Array (element, _) -> element
+        | ConcreteTypeHandle.Continuation _
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _

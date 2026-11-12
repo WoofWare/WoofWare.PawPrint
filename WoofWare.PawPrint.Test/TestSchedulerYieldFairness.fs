@@ -34,8 +34,11 @@ module TestSchedulerYieldFairness =
 
     let private testAssy = typeof<Marker>.Assembly
 
+    /// The pack of the default kernel's flavour, on every host: the step count depends on which
+    /// CoreLib code path each thread takes (Darwin's `StartHelper.RunWorker` checks for an
+    /// autorelease pool, Linux's does not), so a host's own flavour would measure something else.
     let private dotnetRuntimes : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirs ()
+        FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
 
     /// Compiled once and reused across seeds: recompiling per seed would dominate the run
     /// without changing semantics.
@@ -116,16 +119,17 @@ module TestSchedulerYieldFairness =
     /// The seeds are fixed, so this is fully deterministic despite being a statistical claim:
     /// no flakiness, and a failure reproduces exactly.
     ///
-    /// Measured totals over these twenty seeds: 601,789 steps without the yield-debt filter,
-    /// 151,253 with it — a 4x reduction. The bound below sits between the two, so it is not a
+    /// Measured totals over these twenty seeds, on the Linux CoreLib: on .NET 10, 864,485 steps
+    /// without the yield-debt filter and 214,046 with it; on .NET 11, 1,044,790 without and
+    /// 317,884 with it. The bound below sits between the two on both runtimes, so it is not a
     /// change-detector on exact interleavings: a scheduler tweak that shuffles individual seeds
     /// around is free to pass, and only losing the fairness effect itself fails.
+    ///
+    /// The filter guarantees a thread the spinners' yields name one step per round of their
+    /// yields, which is why the entry thread, starting the others, still runs slowly while they
+    /// spin; how many spin at once is up to `Pct`'s priorities.
     [<Test>]
     let ``yielding spinners do not starve the worker under Pct`` () : unit =
-        Net11Frontier.park (
-            "On .NET 11's Linux CoreLib the twenty seeds take 317804 steps, over this test's 300000 budget (seed 3 alone takes 52994), where the Darwin CoreLib stays within it; measured on CI's Linux leg on 2026-10-17, and again on the Linux CoreLib with the futex wait answered on 2026-10-22, unchanged, so the futex is not the cause, which is not yet established. Un-park once it is, and re-measure."
-        )
-
         let seeds = [ 1UL .. 20UL ]
 
         let results = seeds |> List.map (fun seed -> seed, runOne seed)
@@ -136,11 +140,11 @@ module TestSchedulerYieldFairness =
 
         let total = results |> List.sumBy (fun (_, (_, steps)) -> steps)
 
-        if total > 300_000L then
+        if total > 450_000L then
             let perSeed =
                 results
                 |> List.map (fun (seed, (_, steps)) -> $"%d{seed}:%d{steps}")
                 |> String.concat " "
 
             failwith
-                $"guest took %d{total} scheduler steps in total across %d{seeds.Length} PCT seeds (budget 300000); the yielding spinners are consuming the machine despite having declared they have nothing to do. Per seed: %s{perSeed}"
+                $"guest took %d{total} scheduler steps in total across %d{seeds.Length} PCT seeds (budget 450000); the yielding spinners are consuming the machine despite having declared they have nothing to do. Per seed: %s{perSeed}"

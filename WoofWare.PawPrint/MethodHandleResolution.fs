@@ -183,6 +183,7 @@ module MethodHandleResolution =
                 | None ->
                     failwith
                         $"%s{operation}: declaring type handle %O{declaringTypeHandle} was not concretized, so the target method cannot be resolved"
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _

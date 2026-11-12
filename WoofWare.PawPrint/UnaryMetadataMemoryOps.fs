@@ -209,6 +209,7 @@ module internal UnaryMetadataMemoryOps =
             | ConcreteTypeHandle.Array _ ->
                 // Arrays are reference types, so III.4.13 reduces to `ldind.ref` below.
                 false
+            | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked "Ldobj" layout
             | ConcreteTypeHandle.Byref _ ->
                 failwith $"unreachable: Ldobj's byref type operand %O{typeHandle} is refused above"
             | ConcreteTypeHandle.Pointer _

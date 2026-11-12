@@ -1052,6 +1052,16 @@ module TestTypeLoadValidity =
         | Signature.FunctionReturning inner
         | Signature.FunctionTaking inner -> mentionsParameter inner
 
+    /// What the host made of one generated method instantiation.
+    [<RequireQualifiedAccess>]
+    type private MethodInstantiationLabel =
+        /// The host's outcome, with a type load's type name left out.
+        | Host of Outcome
+        /// Refused as a bad image for one of its arguments, none of which names a type variable.
+        | RefusedForAnArgument
+        /// Refused as a bad image for its number of arguments, none of which names a type variable.
+        | RefusedForArity
+
     [<Test>]
     let ``Generated method instantiations agree with CoreCLR`` () : unit =
         let generator =
@@ -1093,12 +1103,14 @@ module TestTypeLoadValidity =
                 return typeArity, methodArity, instantiations
             }
 
-        let seen = HashSet<Outcome> ()
-        let mutable refusedForAnArgument = 0
-        let mutable refusedForArity = 0
+        // Numbers each case's assembly, so that every case's name is distinct.
         let mutable cases = 0
 
-        let property (typeArity : int, methodArity : int, instantiations : Instantiation list) : unit =
+        let property
+            (cover : MethodInstantiationLabel -> unit)
+            (typeArity : int, methodArity : int, instantiations : Instantiation list)
+            : unit
+            =
             cases <- cases + 1
 
             let _, outcomes =
@@ -1108,12 +1120,13 @@ module TestTypeLoadValidity =
                 if outcome.Concretized <> outcome.Host then
                     failwith $"%A{instantiation}: the host gives %A{outcome.Host}, PawPrint %A{outcome.Concretized}"
 
-                seen.Add (
-                    match outcome.Host with
-                    | Outcome.TypeLoad (rule, _) -> Outcome.TypeLoad (rule, "")
-                    | other -> other
+                cover (
+                    MethodInstantiationLabel.Host (
+                        match outcome.Host with
+                        | Outcome.TypeLoad (rule, _) -> Outcome.TypeLoad (rule, "")
+                        | other -> other
+                    )
                 )
-                |> ignore
 
                 // With no type variable to be out of scope, the instantiation itself is refused.
                 if
@@ -1121,19 +1134,37 @@ module TestTypeLoadValidity =
                     && not (instantiation.Arguments |> List.exists mentionsParameter)
                 then
                     if instantiation.Arguments.Length = declaredArity instantiation.Callee then
-                        refusedForAnArgument <- refusedForAnArgument + 1
+                        cover MethodInstantiationLabel.RefusedForAnArgument
                     else
-                        refusedForArity <- refusedForArity + 1
+                        cover MethodInstantiationLabel.RefusedForArity
 
-        Check.One (Config.QuickThrowOnFailure.WithMaxTest 200, Prop.forAll (Arb.fromGen generator) property)
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 200) (Arb.fromGen generator) property
 
-        seen |> shouldContain Outcome.Loads
-        seen |> shouldContain Outcome.BadImageFormat
-        seen |> shouldContain (Outcome.TypeLoad (Rule.InvalidInstantiation, ""))
-        seen |> shouldContain (Outcome.TypeLoad (Rule.General, ""))
-        // Over 25 unseeded runs, measured between 60 and 91, and between 116 and 151.
-        refusedForAnArgument |> shouldBeGreaterThan 40
-        refusedForArity |> shouldBeGreaterThan 80
+        for outcome in
+            [
+                Outcome.Loads
+                Outcome.BadImageFormat
+                Outcome.TypeLoad (Rule.InvalidInstantiation, "")
+                Outcome.TypeLoad (Rule.General, "")
+            ] do
+            coverage.Count (MethodInstantiationLabel.Host outcome) |> shouldBeGreaterThan 0
+
+        coverage.Count MethodInstantiationLabel.RefusedForAnArgument
+        |> shouldBeGreaterThan 40
+
+        coverage.Count MethodInstantiationLabel.RefusedForArity
+        |> shouldBeGreaterThan 80
+
+    /// What happened to one generated type signature.
+    [<RequireQualifiedAccess>]
+    type private TypeLoadLabel =
+        /// The host's outcome, with a type load's type name left out.
+        | Host of Outcome
+        /// The host's outcome, as above, for a signature the Loader also loaded.
+        | ByTheLoader of Outcome
+        /// The type the host refused as an invalid instantiation.
+        | RefusingHead of name : string
 
     [<Test>]
     let ``Generated signatures agree with CoreCLR, whatever kind of type they name`` () : unit =
@@ -1150,12 +1181,14 @@ module TestTypeLoadValidity =
                 return legacy, typeArity, methodArity, signatures
             }
 
-        let seen = HashSet<Outcome> ()
-        let seenByTheLoader = HashSet<Outcome> ()
-        let refusingHeads = HashSet<string> ()
+        // Numbers each case's assembly, so that every case's name is distinct.
         let mutable cases = 0
 
-        let property (legacy : bool, typeArity : int, methodArity : int, signatures : Signature list) : unit =
+        let property
+            (cover : TypeLoadLabel -> unit)
+            (legacy : bool, typeArity : int, methodArity : int, signatures : Signature list)
+            : unit
+            =
             cases <- cases + 1
 
             let outcomes, _ =
@@ -1169,23 +1202,43 @@ module TestTypeLoadValidity =
                     | Outcome.TypeLoad (rule, _) -> Outcome.TypeLoad (rule, "")
                     | other -> other
 
-                seen.Add kind |> ignore
+                cover (TypeLoadLabel.Host kind)
 
                 if outcome.Loaded.IsSome then
-                    seenByTheLoader.Add kind |> ignore
+                    cover (TypeLoadLabel.ByTheLoader kind)
 
                 match outcome.Host with
-                | Outcome.TypeLoad (Rule.InvalidInstantiation, name) -> refusingHeads.Add name |> ignore
+                | Outcome.TypeLoad (Rule.InvalidInstantiation, name) -> cover (TypeLoadLabel.RefusingHead name)
                 | _ -> ()
 
-        Check.One (Config.QuickThrowOnFailure.WithMaxTest 300, Prop.forAll (Arb.fromGen generator) property)
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 300) (Arb.fromGen generator) property
+
+        let reached (pick : TypeLoadLabel -> 'a option) : Set<'a> =
+            coverage.Reached |> List.choose (fst >> pick) |> Set.ofList
 
         // Every outcome, under concretization and the Loader alike, and an invalid instantiation of a
         // struct, an enum and a class.
-        seen.Count |> shouldEqual 6
-        seenByTheLoader.Count |> shouldEqual 6
+        reached (
+            function
+            | TypeLoadLabel.Host outcome -> Some outcome
+            | _ -> None
+        )
+        |> Set.count
+        |> shouldEqual 6
 
-        refusingHeads
-        |> Set.ofSeq
+        reached (
+            function
+            | TypeLoadLabel.ByTheLoader outcome -> Some outcome
+            | _ -> None
+        )
+        |> Set.count
+        |> shouldEqual 6
+
+        reached (
+            function
+            | TypeLoadLabel.RefusingHead name -> Some name
+            | _ -> None
+        )
         |> Set.isSubset (Set.ofList [ "Holder`1" ; "E" ; "Klass`1" ])
         |> shouldEqual true

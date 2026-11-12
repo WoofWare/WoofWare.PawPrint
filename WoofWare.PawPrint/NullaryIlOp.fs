@@ -1606,11 +1606,23 @@ module NullaryIlOp =
             |> Tuple.withRight WhatWeDid.Executed
             |> ExecutionResult.stepped
         | Ret ->
+            match AsyncContextSaving.beforeReturn loggerFactory corelib currentThread state with
+            | Some restoring -> restoring
+            | None ->
+
             match IlMachineState.returnStackFrame loggerFactory corelib currentThread state with
             | ReturnFrameResult.NoFrameToReturn -> ExecutionResult.Terminated (state, currentThread)
             | ReturnFrameResult.NormalReturn state -> (state, WhatWeDid.Executed) |> ExecutionResult.stepped
-            | ReturnFrameResult.ResumeNonExceptionWrap (state, step) ->
-                IlMachineStateExecution.resumeNonExceptionWrap loggerFactory corelib step currentThread state
+            | ReturnFrameResult.ResumeVmRaise (state, step) ->
+                IlMachineStateExecution.resumeVmRaise loggerFactory corelib step currentThread state
+            | ReturnFrameResult.ResumeAsyncContexts (state, step, returned) ->
+                AsyncContextSaving.resume loggerFactory corelib step returned currentThread state
+            | ReturnFrameResult.ResumedAsyncReturned (state, resultLocation, returned) ->
+                // The resumed frame completed, so `AsyncResume` returns null to CoreLib's dispatcher.
+                state
+                |> AsyncSuspension.deliverResult corelib resultLocation returned
+                |> IlMachineState.pushToEvalStack (CliType.ObjectRef None) currentThread
+                |> fun state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
             | ReturnFrameResult.DispatchException (state, exnAddr, exnType, making) ->
                 let state, origin =
                     match making with

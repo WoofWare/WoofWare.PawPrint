@@ -209,7 +209,9 @@ namespace PawPrint.MethodAtSlot
 
     let private methodToken (slot : VtableSlot) : int =
         match fst slot.Method.IdentityKey with
-        | Some handle ->
+        | Some (_, MethodVariant.AsyncVariant) ->
+            failwith "a vtable slot holds an async variant, which PawPrint's tables never place"
+        | Some (handle, MethodVariant.Ordinary) ->
             MetadataTokens.GetToken (
                 System.Reflection.Metadata.MethodDefinitionHandle.op_Implicit handle
                 : System.Reflection.Metadata.EntityHandle

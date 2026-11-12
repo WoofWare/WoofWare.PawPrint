@@ -412,9 +412,9 @@ module TestEmitScopeDefinitions =
     let ``every field is a new row with the flags the emitter keeps`` () : unit =
         let names = [ "value__" ; "Value__" ; "value_" ; "x" ; "日本" ; "x" ]
         let signature = ImmutableArray.Create<byte> [| 0x06uy ; 0x08uy |]
-        let special = ref 0
 
-        let property (definitions : (int * int * bool) list) : unit =
+        // `cover` is called for each field named `value__`.
+        let property (cover : unit -> unit) (definitions : (int * int * bool) list) : unit =
             let scope = DynamicAssemblyImage.scope dynamicParts Guid.Empty
             let name, scope = EmitScope.internString "Thing" scope
 
@@ -445,7 +445,7 @@ module TestEmitScopeDefinitions =
                 let isSpecial = (name = "value__")
 
                 if isSpecial then
-                    special.Value <- special.Value + 1
+                    cover ()
 
                 row.Owner |> shouldEqual owner
                 EmitScope.stringAt row.Name next |> shouldEqual name
@@ -459,9 +459,9 @@ module TestEmitScopeDefinitions =
 
                 scope <- next
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 100,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
                 (Arb.fromGen (
                     Gen.listOf (
                         Gen.zip3 (Gen.choose (0, 100)) (Gen.choose (0, 0x1FFFF)) (Gen.elements [ true ; false ])
@@ -469,9 +469,8 @@ module TestEmitScopeDefinitions =
                     |> Gen.map List.ofSeq
                 ))
                 property
-        )
 
-        special.Value |> shouldBeGreaterThan 100
+        coverage.Count () |> shouldBeGreaterThan 100
 
     /// `fdHasFieldRVA` makes `RegMeta::_SetFieldProps` add a `FieldRVA` row, which a scope does not hold.
     [<Test>]
@@ -500,9 +499,8 @@ module TestEmitScopeDefinitions =
     /// the emitter checks for duplicates elsewhere.
     [<Test>]
     let ``an interface implementation is added only if the table lacks it`` () : unit =
-        let found = ref 0
-
-        let property (requests : (int * int) list) : unit =
+        // `cover` is called for each request the table already holds.
+        let property (cover : unit -> unit) (requests : (int * int) list) : unit =
             let scope = DynamicAssemblyImage.scope dynamicParts Guid.Empty
             let mutable scope = scope
 
@@ -529,7 +527,7 @@ module TestEmitScopeDefinitions =
                 let next = EmitScopeDefinitions.addInterfaceImpl cls target scope
 
                 if List.contains (cls, target) model then
-                    found.Value <- found.Value + 1
+                    cover ()
                     Object.ReferenceEquals (next, scope) |> shouldEqual true
                 else
                     model <- model @ [ cls, target ]
@@ -541,17 +539,16 @@ module TestEmitScopeDefinitions =
 
                 scope <- next
 
-        Check.One (
-            Config.QuickThrowOnFailure.WithMaxTest 100,
-            Prop.forAll
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
                 (Arb.fromGen (
                     Gen.listOf (Gen.zip (Gen.choose (0, 8)) (Gen.choose (0, 8)))
                     |> Gen.map List.ofSeq
                 ))
                 property
-        )
 
-        found.Value |> shouldBeGreaterThan 100
+        coverage.Count () |> shouldBeGreaterThan 100
 
     /// `ModuleBuilder_GetTypeRef` for a created type of the emitting module unescapes the type's
     /// `FullName`, which the managed caller passes, and finds its TypeDef (`FindTypeDefByName`) rather
@@ -571,11 +568,9 @@ module TestEmitScopeDefinitions =
         let genNames : Gen<string list> =
             Gen.listOf genName |> Gen.map (List.ofSeq >> List.truncate 8)
 
-        // Names real .NET accepts and the model defines, found in its module and in the scope.
-        let accepted = ref 0
-        let escaped = ref 0
-
-        let property (names : string list) : unit =
+        // `cover escaped` is called for each name real .NET accepts and the model defines, found in its
+        // module and in the scope, with whether its `FullName` escapes a reserved character.
+        let property (cover : bool -> unit) (names : string list) : unit =
             let assembly =
                 System.Reflection.Emit.AssemblyBuilder.DefineDynamicAssembly (
                     AssemblyName "OwnTypeOracle",
@@ -614,20 +609,17 @@ module TestEmitScopeDefinitions =
                 token |> shouldEqual builder.MetadataToken
 
                 let unescaped = EmitScopeReferences.unescapeTypeName created.FullName
-
-                if unescaped <> created.FullName then
-                    escaped.Value <- escaped.Value + 1
-
                 let ns, name = EmitScopeReferences.splitTypeName unescaped
 
                 EmitScopeDefinitions.tryFindTopLevelTypeDef ns name scope
                 |> shouldEqual (Some (TypeDefRid (token &&& 0x00FFFFFF)))
 
-                accepted.Value <- accepted.Value + 1
+                cover (unescaped <> created.FullName)
 
-        Check.One (Config.QuickThrowOnFailure.WithMaxTest 300, Prop.forAll (Arb.fromGen genNames) property)
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 300) (Arb.fromGen genNames) property
 
         // The generator reaches names real .NET accepts, and among them names whose `FullName` escapes a
         // reserved character.
-        accepted.Value |> shouldBeGreaterThan 300
-        escaped.Value |> shouldBeGreaterThan 30
+        coverage.Count false + coverage.Count true |> shouldBeGreaterThan 300
+        coverage.Count true |> shouldBeGreaterThan 30

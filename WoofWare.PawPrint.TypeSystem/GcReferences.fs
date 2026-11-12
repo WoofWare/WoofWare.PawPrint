@@ -53,6 +53,8 @@ module GcReferences =
         // An array is an object reference.
         | ConcreteTypeHandle.OneDimArrayZero _
         | ConcreteTypeHandle.Array _ -> state, Ok (seenSoFar, true)
+        // So is a continuation, which is a class.
+        | ConcreteTypeHandle.Continuation _ -> state, Ok (seenSoFar, true)
         // A byref is a GC-tracked pointer, and CoreCLR counts it: the JIT answers
         // `IsReferenceOrContainsReferences<T>` with `varTypeIsGC(fromType) || fromLayout->HasGCPtr()`
         // (jit/importercalls.cpp:3624), and a layout's `m_gcPtrCount` includes its `TYP_BYREF`

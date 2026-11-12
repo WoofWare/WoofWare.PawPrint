@@ -191,7 +191,7 @@ module NativeMethod =
         let definition = assembly.Methods.[method]
 
         match definition, definition.TryNativeImport with
-        | MethodInfo.Metadata (_, facts), Some import ->
+        | MethodInfo.Metadata (_, facts, _), Some import ->
             let convention =
                 import.Attributes
                 &&& System.Reflection.MethodImportAttributes.CallingConventionMask

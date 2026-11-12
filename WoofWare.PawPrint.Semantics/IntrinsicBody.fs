@@ -68,9 +68,11 @@ type IntrinsicBody =
     /// A CoreLib method the JIT replaces at every call to it, whatever it is optimising for: one of
     /// the named intrinsics `impIntrinsic` (importercalls.cpp) expands before it tests whether to
     /// optimise. What replaces the call is not the method's IL, which throws
-    /// `UnreachableException`. Code the runtime generates calls these (IL stubs, the async
-    /// resumption stub), as do runtime-async methods and the reflection invoke stubs CoreLib emits
-    /// (`InvokerEmitUtil`), which call `StubHelpers.NextCallReturnAddress`.
+    /// `UnreachableException` (or, for `RuntimeHelpers.IsRuntimeAsync`, answers for a method without
+    /// runtime async's calling convention). Code the runtime generates calls these (IL stubs, the
+    /// async resumption stub), as do runtime-async methods, the reflection invoke stubs CoreLib emits
+    /// (`InvokerEmitUtil`), which call `StubHelpers.NextCallReturnAddress`, and any CoreLib method
+    /// whose IL differs between its variants, which calls `RuntimeHelpers.IsRuntimeAsync`.
     | CallSiteExpansion
     /// A method of CoreLib's `System.StubHelpers.StructureMarshaler<T>`, whose body CoreCLR's VM
     /// replaces with a stub that performs the operation on T field by field when T is a value type
@@ -99,10 +101,10 @@ module IntrinsicBody =
 
     /// The methods `IntrinsicBody.CallSiteExpansion` names, by namespace, class and name, in every
     /// runtime PawPrint supports: .NET 10's `StubHelpers.AsyncCallContinuation` is .NET 11's
-    /// `AsyncHelpers.AsyncCallContinuation`. Of the other named intrinsics `impIntrinsic` handles
-    /// before its optimisation test, `RuntimeHelpers.IsRuntimeAsync` becomes whether the method
-    /// calling it is runtime-async, as its IL answers for a method that is not, and the JIT
-    /// declines to expand the rest (`AsyncHelpers.Await` and the like), so a call runs their IL.
+    /// `AsyncHelpers.AsyncCallContinuation`. `RuntimeHelpers.IsRuntimeAsync` becomes whether the
+    /// method calling it has runtime async's calling convention (`compIsAsync`). The JIT declines to
+    /// expand the other named intrinsics `impIntrinsic` handles before its optimisation test
+    /// (`AsyncHelpers.Await` and the like), so a call runs their IL.
     let private callSiteExpansions : Set<string * string * string> =
         Set.ofList
             [
@@ -114,6 +116,7 @@ module IntrinsicBody =
                 "System.Runtime.CompilerServices", "AsyncHelpers", "TailAwait"
                 "System.Runtime.CompilerServices", "RuntimeHelpers", "SetNextCallGenericContext"
                 "System.Runtime.CompilerServices", "RuntimeHelpers", "SetNextCallAsyncContinuation"
+                "System.Runtime.CompilerServices", "RuntimeHelpers", "IsRuntimeAsync"
             ]
 
     let private getMemberRefParentType (assembly : DumpedAssembly) (handle : MemberReferenceHandle) : TypeRef =
@@ -135,19 +138,6 @@ module IntrinsicBody =
 
         MethodInfo.isJITIntrinsic (getMemberRefParentType assembly) assembly.Methods definition
         || MethodInfo.hasIntrinsicAttribute (getMemberRefParentType assembly) assembly.Methods declaringType.Attributes
-
-    /// The full name of the type a TypeRef names, in `TypeInfo.fullName`'s spelling.
-    let rec private typeRefFullName (assembly : DumpedAssembly) (typeRef : TypeRef) : string =
-        match typeRef.ResolutionScope with
-        | TypeRefResolutionScope.TypeRef parent ->
-            $"%s{typeRefFullName assembly assembly.TypeRefs.[parent]}+%s{typeRef.Name}"
-        | TypeRefResolutionScope.Assembly _
-        | TypeRefResolutionScope.ModuleDef _
-        | TypeRefResolutionScope.ModuleRef _ ->
-            if System.String.IsNullOrEmpty typeRef.Namespace then
-                typeRef.Name
-            else
-                $"%s{typeRef.Namespace}.%s{typeRef.Name}"
 
     /// Whether a `call` or `callvirt` token can name `method` itself: the shape CoreCLR's importer
     /// tests with `gtIsRecursiveCall`.
@@ -173,7 +163,7 @@ module IntrinsicBody =
         let byTypeRef (typeRef : TypeRef) (reference : MemberReference<MetadataToken>) =
             match reference.Signature with
             | MemberSignature.Method signature ->
-                typeRefFullName assembly typeRef = ownTypeName
+                TypeRef.fullName (fun h -> assembly.TypeRefs.[h]) typeRef = ownTypeName
                 && reference.PrettyName = definition.Name
                 && signature.ParameterTypes.Length = definition.Signature.ParameterTypes.Length
                 && signature.GenericParameterCount = definition.Signature.GenericParameterCount
@@ -355,7 +345,10 @@ module IntrinsicBody =
         | MethodBody.RuntimeProvided _
         | MethodBody.Abstract
         | MethodBody.MissingIl -> IntrinsicBody.NoIl
-        | MethodBody.Il body ->
+        // A runtime-async method's IL is what its async-convention `MethodDesc` runs; whether a given
+        // call reaches that `MethodDesc` is the caller's to decide.
+        | MethodBody.Il body
+        | MethodBody.AsyncIl body ->
             if callsItself assembly method body then
                 IntrinsicBody.JitExpansion (expansionOf assembly method)
             else if

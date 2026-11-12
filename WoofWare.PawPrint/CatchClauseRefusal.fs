@@ -47,6 +47,8 @@ module internal CatchClauseRefusal =
                     | Ok None
                     | Error _ -> None
                 | ExceptionRegion.Catch (ExceptionCatchType.FromDynamicScope _, _)
+                // A stub the runtime emits catches nothing the JIT refuses.
+                | ExceptionRegion.Catch (ExceptionCatchType.FromStubScope _, _)
                 | ExceptionRegion.Filter _
                 | ExceptionRegion.Finally _
                 | ExceptionRegion.Fault _ -> None

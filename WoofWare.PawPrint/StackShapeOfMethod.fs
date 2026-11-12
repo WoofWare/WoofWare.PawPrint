@@ -12,7 +12,7 @@ module StackShapeOfMethod =
     /// placeholder is not a guest body at all.
     let keyOf (method : MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>) : StackShapeKey option =
         match method with
-        | MethodInfo.Metadata (_, facts) ->
+        | MethodInfo.Metadata (_, facts, variant) ->
             let row =
                 MetadataTokens.GetRowNumber (MethodDefinitionHandle.op_Implicit facts.Handle : EntityHandle)
 
@@ -20,6 +20,7 @@ module StackShapeOfMethod =
                 StackShapeKey.Metadata (
                     method.DeclaringAssemblyFullName,
                     row,
+                    variant,
                     List.ofSeq method.DeclaringTypeGenerics,
                     List.ofSeq method.Generics
                 )
@@ -56,14 +57,14 @@ module StackShapeOfMethod =
         (assembly : DumpedAssembly)
         (binding : GenericBinding)
         (isStatic : bool)
-        (signature : TypeMethodSignature<TypeDefn>)
+        (parameterTypes : TypeDefn list)
+        (returnsValue : bool)
         (body : MethodInstructions)
         (tokens : Map<int, TokenShape>)
         : StackShapeInputs
         =
         let declared =
-            signature.ParameterTypes
-            |> List.map (StackShapeTokens.shapeOfTypeDefn assembly binding)
+            parameterTypes |> List.map (StackShapeTokens.shapeOfTypeDefn assembly binding)
 
         {
             Arguments = ImmutableArray.CreateRange (if isStatic then declared else SlotShape.Other :: declared)
@@ -74,16 +75,25 @@ module StackShapeOfMethod =
                     vars
                     |> Seq.map (StackShapeTokens.shapeOfTypeDefn assembly binding)
                     |> ImmutableArray.CreateRange
-            ReturnsValue =
-                (StackShapeTokens.returnShape assembly binding GenericSubstitution.None signature.ReturnType).IsSome
+            ReturnsValue = returnsValue
             Tokens = tokens
         }
+
+    /// Whether a body with this signature returns a value.
+    let private returnsValueOf
+        (assembly : DumpedAssembly)
+        (binding : GenericBinding)
+        (signature : TypeMethodSignature<TypeDefn>)
+        : bool
+        =
+        (StackShapeTokens.returnShape assembly binding GenericSubstitution.None signature.ReturnType).IsSome
 
     /// A body from a PE image: everything comes from the owning assembly's metadata.
     let private analyseMetadata
         (state : IlMachineState)
         (method : MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
         (facts : MetadataMethodFacts)
+        (variant : MethodVariant)
         : StackShape
         =
         let assembly =
@@ -95,11 +105,21 @@ module StackShapeOfMethod =
 
         let definition = assembly.Methods.[facts.Handle]
 
-        // The body `callMethod` runs, which for a VM-substituted placeholder is the VM's.
+        // The body `callMethod` runs, which for a VM-substituted placeholder is the VM's. A frame
+        // runs a runtime-async body only as a method with the async calling convention, as
+        // `callMethod` decides.
         let body =
             match IntrinsicBody.substitutedBody assembly facts.Handle with
             | Some substituted -> Some substituted
-            | None -> MethodInfo.tryIlBody definition
+            | None ->
+                match definition.Body with
+                | MethodBody.Il body
+                | MethodBody.AsyncIl body -> Some body
+                | MethodBody.InternalCall
+                | MethodBody.PInvoke
+                | MethodBody.RuntimeProvided _
+                | MethodBody.Abstract
+                | MethodBody.MissingIl -> None
 
         let body =
             match body with
@@ -115,7 +135,61 @@ module StackShapeOfMethod =
         let tokens =
             StackShapeTokens.ofBody assembly binding (StackFlow.reachable body) body
 
-        StackShape.analyse (inputsOf assembly binding definition.IsStatic definition.Signature body tokens) body
+        // An async variant's IL is written for its own signature, which unwraps the promise the
+        // definition's returns; the frame's concretised signature is that one.
+        let returnsValue =
+            match variant with
+            | MethodVariant.Ordinary -> returnsValueOf assembly binding definition.Signature
+            | MethodVariant.AsyncVariant ->
+                match method.Signature.ReturnType with
+                | MethodReturnType.Void -> false
+                | MethodReturnType.Returns _ -> true
+
+        StackShape.analyse
+            (inputsOf assembly binding definition.IsStatic definition.Signature.ParameterTypes returnsValue body tokens)
+            body
+
+    /// A stub the runtime emits in place of the body of `method`, a method a PE image declares: its
+    /// arguments are the method's, and the stub's operands say what its token-bearing instructions
+    /// do, except the call of the method's async variant, which takes the stub's arguments and
+    /// returns the result of the promise the method returns.
+    let private analyseStub
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (method : MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (facts : MetadataMethodFacts)
+        (stub : VmStub)
+        : StackShape
+        =
+        let assembly =
+            state.LoadedAssembly method.DeclaringAssemblyFullName
+            |> Option.defaultWith (fun () ->
+                failwith
+                    $"stack shape: assembly %s{method.DeclaringAssemblyFullName} of executing method %s{method.Name} is not loaded"
+            )
+
+        let definition = assembly.Methods.[facts.Handle]
+        let binding = bindingOf state method
+
+        let asyncVariant =
+            let returns =
+                match fst (TaskReturningThunk.promiseOf definition.Signature.ReturnType) with
+                | ThunkPromise.TaskOf result
+                | ThunkPromise.ValueTaskOf result -> Some (StackShapeTokens.shapeOfTypeDefn assembly binding result)
+                | ThunkPromise.Task
+                | ThunkPromise.ValueTask -> None
+
+            TokenShape.Callee (
+                definition.Signature.ParameterTypes.Length
+                + (if definition.IsStatic then 0 else 1),
+                returns
+            )
+
+        let tokens = VmStub.tokenShapes baseClassTypes.Corelib asyncVariant stub
+
+        StackShape.analyse
+            (inputsOf assembly binding definition.IsStatic definition.Signature.ParameterTypes true stub.Body tokens)
+            stub.Body
 
     /// The signature of a `DynamicMethod` that has not yet been minted, read from the guest
     /// object itself: its `_parameterTypes` array and `_returnType`.
@@ -417,6 +491,9 @@ module StackShapeOfMethod =
                         op
                         sourced.Token
                     |> Option.map (fun shape -> offset, shape)
+                | IlOp.UnaryMetadataToken (op, MetadataOperand.FromStubScope index) ->
+                    failwith
+                        $"BUG: %O{op} at offset %d{offset} of a dynamic method names operand %d{index} of a runtime-emitted stub, which the decoder of a dynamic method's body never produces"
                 | IlOp.Nullary _
                 | IlOp.UnaryConst _
                 | IlOp.UnaryStringToken _
@@ -425,7 +502,16 @@ module StackShapeOfMethod =
             |> Map.ofList
 
         // A dynamic method is always static.
-        StackShape.analyse (inputsOf scopeAssembly GenericBinding.AtDefinition true signature body tokens) body
+        StackShape.analyse
+            (inputsOf
+                scopeAssembly
+                GenericBinding.AtDefinition
+                true
+                signature.ParameterTypes
+                (returnsValueOf scopeAssembly GenericBinding.AtDefinition signature)
+                body
+                tokens)
+            body
 
     let private isDebugBuild : bool =
 #if DEBUG
@@ -475,13 +561,21 @@ module StackShapeOfMethod =
             | Some shape -> shape, state
             | None ->
                 let shape =
-                    match frame.ExecutingMethod with
-                    | MethodInfo.Metadata (_, facts) -> analyseMetadata state frame.ExecutingMethod facts
-                    | MethodInfo.Synthesised (_, SynthesisedMethod.DynamicMethod handle) ->
+                    match frame.VmStub, frame.ExecutingMethod with
+                    // A stub stands in for one `MethodDesc` alone, so the key, which names it, is
+                    // the stub's whichever frame of it asks.
+                    | Some stub, MethodInfo.Metadata (_, facts, _) ->
+                        analyseStub baseClassTypes state frame.ExecutingMethod facts stub
+                    | None, MethodInfo.Metadata (_, facts, variant) ->
+                        analyseMetadata state frame.ExecutingMethod facts variant
+                    | Some _, MethodInfo.Synthesised _ ->
+                        failwith
+                            $"BUG: %O{frame.ExecutingMethod} is synthesised, but its frame runs a stub the runtime emits in place of a declared method's body"
+                    | None, MethodInfo.Synthesised (_, SynthesisedMethod.DynamicMethod handle) ->
                         analyseDynamic baseClassTypes state handle
-                    | MethodInfo.Synthesised (_, SynthesisedMethod.StructMarshalStub)
-                    | MethodInfo.Synthesised (_, SynthesisedMethod.MulticastDelegateInvokeStub)
-                    | MethodInfo.Synthesised (_, SynthesisedMethod.EntryPointPlaceholder) ->
+                    | None, MethodInfo.Synthesised (_, SynthesisedMethod.StructMarshalStub)
+                    | None, MethodInfo.Synthesised (_, SynthesisedMethod.MulticastDelegateInvokeStub)
+                    | None, MethodInfo.Synthesised (_, SynthesisedMethod.EntryPointPlaceholder) ->
                         failwith "BUG: keyOf gave a synthesised non-dynamic body a stack-shape key"
 
                 shape,

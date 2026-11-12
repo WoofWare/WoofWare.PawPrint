@@ -134,6 +134,8 @@ module ManagedPointerByteView =
             // needs, without forcing the byte-addressability promise
             // we cannot keep. Arithmetic on the result is still byte-strided,
             // because that does not depend on the anchor.
+            | ConcreteTypeHandle.Continuation layout ->
+                ContinuationType.unasked "ManagedPointerByteView array element anchoring" layout
             | ConcreteTypeHandle.Byref _
             | ConcreteTypeHandle.Pointer _
             | ConcreteTypeHandle.FunctionPointer _ -> ptr

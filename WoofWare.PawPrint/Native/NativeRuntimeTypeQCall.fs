@@ -754,6 +754,7 @@ module NativeRuntimeTypeQCall =
                             )
 
                         concreteType.Generics |> Seq.map RuntimeTypeHandleTarget.Closed |> List.ofSeq
+                    | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
                     | ConcreteTypeHandle.Byref _
                     | ConcreteTypeHandle.Pointer _
                     | ConcreteTypeHandle.FunctionPointer _
@@ -867,6 +868,8 @@ module NativeRuntimeTypeQCall =
                             $"%s{operation}: BCL contract violation: QCall reached for non-generic target %O{typeHandleTarget}; the managed wrapper throws InvalidOperationException unless IsGenericType"
 
                     RuntimeTypeHandleTarget.OpenGenericTypeDefinition concreteType.Identity
+                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                    ContinuationType.unasked operation layout
                 | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _ ->
                     failwith
                         $"%s{operation}: BCL contract violation: QCall reached for open generic type definition %O{typeHandleTarget}; RuntimeTypeCache.GetGenericTypeDefinition returns the receiver unchanged when IsGenericTypeDefinition"
@@ -1197,6 +1200,7 @@ module NativeRuntimeTypeQCall =
                             )
 
                         Some assembly.TypeDefs.[concreteType.Definition.Get]
+                    | ConcreteTypeHandle.Continuation layout -> ContinuationType.unasked operation layout
                     | ConcreteTypeHandle.OneDimArrayZero _
                     | ConcreteTypeHandle.Array _ ->
                         // Arrays have no DeclaringType. PawPrint reports IsTypeDesc=false for
@@ -2328,6 +2332,8 @@ module NativeRuntimeTypeQCall =
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _ as handle) ->
                 failwith
                     $"%s{operation}: byref/pointer/function-pointer handle %O{handle} reached the QCall; the managed wrapper should have short-circuited IsTypeDesc to `[]`"
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                ContinuationType.unasked operation layout
             | RuntimeTypeHandleTarget.GenericParameter (declaringType, position) ->
                 failwith
                     $"%s{operation}: generic parameter #%i{position} of %O{declaringType.TypeDefinition.Get} reached the QCall; the managed wrapper short-circuits IsTypeDesc to `[]` before this point"
@@ -2397,6 +2403,8 @@ module NativeRuntimeTypeQCall =
                     | RuntimeTypeHandleTarget.OpenConstructed _ as openConstructed ->
                         failwith
                             $"TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs:%s{__LINE__}; got %O{openConstructed}"
+                    | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+                        ContinuationType.unasked operation layout
                     | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _)
                     | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _)
                     | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _)

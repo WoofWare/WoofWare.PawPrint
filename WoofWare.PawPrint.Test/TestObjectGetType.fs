@@ -44,8 +44,9 @@ module TestObjectGetType =
                         match sourced.Token with
                         | MetadataToken.MethodSpecification handle -> Some (named corelib.MethodSpecs.[handle].Method)
                         | token -> Some (named token)
-                    | MetadataOperand.FromDynamicScope _ ->
-                        failwith $"%s{fullName corelib method} has a dynamic-scope operand"
+                    | MetadataOperand.FromDynamicScope _
+                    | MetadataOperand.FromStubScope _ ->
+                        failwith $"%s{fullName corelib method} has a dynamic-scope or stub-scope operand"
                 | _ -> None
             )
 

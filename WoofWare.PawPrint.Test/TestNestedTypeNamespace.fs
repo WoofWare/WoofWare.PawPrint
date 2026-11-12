@@ -32,6 +32,10 @@ module TestNestedTypeNamespace =
     let private nestedRows : (string * string) list =
         [ "", "Sys" ; "A", "Sys" ; "B", "Sys" ; "A.B", "Deep" ; "A", "Only" ]
 
+    /// The (Namespace, Name) of a TypeDef nested in the `A`/`Sys` row, so that a chain has a
+    /// namespaced row at more than one level.
+    let private grandchildRow : string * string = "C", "Leaf"
+
     /// Names to ask for under `Probe.Outer`: every row's own spelling, and others that differ from
     /// one only in namespace, only in case, or not at all similar.
     let private queries : (string * string) list =
@@ -119,7 +123,7 @@ module TestNestedTypeNamespace =
         peBuilder.Serialize peImage |> ignore<BlobContentId>
         peImage.ToArray ()
 
-    /// `Probe.Outer`, with `nestedRows` nested in it.
+    /// `Probe.Outer`, with `nestedRows` nested in it, and `grandchildRow` nested in its `A`/`Sys`.
     let private libImage : Lazy<byte[]> =
         lazy
             let metadata = MetadataBuilder ()
@@ -155,11 +159,28 @@ module TestNestedTypeNamespace =
 
                 metadata.AddNestedType (nested, outer)
 
+                if (ns, name) = ("A", "Sys") then
+                    let grandchildNs, grandchildName = grandchildRow
+
+                    let grandchild =
+                        metadata.AddTypeDefinition (
+                            TypeAttributes.NestedPublic ||| TypeAttributes.Class,
+                            stringOrNil metadata grandchildNs,
+                            metadata.GetOrAddString grandchildName,
+                            (TypeReferenceHandle.op_Implicit objectRef : EntityHandle),
+                            MetadataTokens.FieldDefinitionHandle 1,
+                            MetadataTokens.MethodDefinitionHandle 1
+                        )
+
+                    metadata.AddNestedType (grandchild, nested)
+
             serialise metadata
 
     /// One top-level `Consumer.D{i}` per entry of `queries`, deriving from a TypeRef nested in a
     /// TypeRef to `Probe.Outer` that spells the entry's namespace and name. Loading `D{i}` loads its
-    /// base, so the host answers for the TypeRef by loading it or throwing `TypeLoadException`.
+    /// base, so the host answers for the TypeRef by loading it or throwing `TypeLoadException`. A
+    /// last `D{queries.Length}` derives from a TypeRef spelling `grandchildRow`, nested in the
+    /// TypeRef that spells the `A`/`Sys` row.
     let private consumerImage : Lazy<byte[]> =
         lazy
             let metadata = MetadataBuilder ()
@@ -173,25 +194,42 @@ module TestNestedTypeNamespace =
                     metadata.GetOrAddString "Outer"
                 )
 
-            queries
-            |> List.iteri (fun i (ns, name) ->
-                let nestedRef =
-                    metadata.AddTypeReference (
-                        (TypeReferenceHandle.op_Implicit outerRef : EntityHandle),
-                        stringOrNil metadata ns,
-                        metadata.GetOrAddString name
-                    )
-
+            let derive (i : int) (baseRef : TypeReferenceHandle) : unit =
                 metadata.AddTypeDefinition (
                     TypeAttributes.Public ||| TypeAttributes.Class,
                     metadata.GetOrAddString "Consumer",
                     metadata.GetOrAddString $"D%d{i}",
-                    (TypeReferenceHandle.op_Implicit nestedRef : EntityHandle),
+                    (TypeReferenceHandle.op_Implicit baseRef : EntityHandle),
                     MetadataTokens.FieldDefinitionHandle 1,
                     MetadataTokens.MethodDefinitionHandle 1
                 )
                 |> ignore<TypeDefinitionHandle>
-            )
+
+            let nestedRefs =
+                queries
+                |> List.mapi (fun i (ns, name) ->
+                    let nestedRef =
+                        metadata.AddTypeReference (
+                            (TypeReferenceHandle.op_Implicit outerRef : EntityHandle),
+                            stringOrNil metadata ns,
+                            metadata.GetOrAddString name
+                        )
+
+                    derive i nestedRef
+                    (ns, name), nestedRef
+                )
+                |> Map.ofList
+
+            let grandchildNs, grandchildName = grandchildRow
+
+            let grandchildRef =
+                metadata.AddTypeReference (
+                    (TypeReferenceHandle.op_Implicit nestedRefs.[("A", "Sys")] : EntityHandle),
+                    stringOrNil metadata grandchildNs,
+                    metadata.GetOrAddString grandchildName
+                )
+
+            derive queries.Length grandchildRef
 
             serialise metadata
 
@@ -439,3 +477,144 @@ module TestNestedTypeNamespace =
         expected |> List.choose id |> List.length |> shouldEqual nestedRows.Length
 
         List.zip queries pawPrint |> shouldEqual (List.zip queries expected)
+
+    /// CoreCLR renders each row of a nested chain with its own Namespace column
+    /// (`TypeString::AppendNestedTypeDef` hands every row to `AppendTypeDef`, which passes the row's
+    /// namespace to `TypeNameBuilder::AddName`), so the `A`/`Sys` row under `Probe.Outer` is
+    /// `Probe.Outer+A.Sys`. Without FormatNamespace, only the innermost row's name is rendered.
+    [<Test>]
+    let ``a nested TypeDef renders with its own namespace, as on the host`` () : unit =
+        let lib = dumpedLib ()
+
+        let nested =
+            lib.TypeDefs.Values
+            |> Seq.filter (fun ty -> ty.IsNested)
+            |> Seq.map (fun ty ->
+                MetadataTokens.GetRowNumber (TypeDefinitionHandle.op_Implicit ty.TypeDefHandle : EntityHandle), ty
+            )
+            |> Seq.sortBy fst
+            |> List.ofSeq
+
+        let pawPrint =
+            nested
+            |> List.map (fun (row, ty) ->
+                row,
+                (TypeInfo.fullName (fun h -> lib.TypeDefs.[h]) ty,
+                 NativeRuntimeTypeHelpers.typeInfoDisplayName true lib ty,
+                 NativeRuntimeTypeHelpers.typeInfoDisplayName false lib ty)
+            )
+
+        let host =
+            withHostAssemblies
+                [ libImage.Force () ]
+                (fun assemblies ->
+                    let hostModule = (List.exactlyOne assemblies).ManifestModule
+
+                    nested
+                    |> List.map (fun (row, _) ->
+                        let ty = hostModule.ResolveType (0x02000000 ||| row)
+                        row, (ty.FullName, ty.ToString (), ty.Name)
+                    )
+                )
+
+        // Not vacuous: every nested row is compared, a namespaced one at each level of a chain.
+        host |> List.length |> shouldEqual (nestedRows.Length + 1)
+
+        host
+        |> List.map (fun (_, (full, _, _)) -> full)
+        |> shouldContain "Probe.Outer+A.Sys+C.Leaf"
+
+        pawPrint |> shouldEqual host
+
+    /// A nested TypeRef renders as the TypeDef it resolves to (`TypeRef.fullName`), which is how a
+    /// self-call named through a TypeRef is recognised (`IntrinsicBody`). The host renders the
+    /// resolved type; a TypeRef it does not resolve has no rendering to compare.
+    [<Test>]
+    let ``a nested TypeRef renders as the TypeDef it resolves to, as on the host`` () : unit =
+        let consumer =
+            dumpedAssembly (Some $"%s{consumerName}.dll") (consumerImage.Force ())
+
+        let derivedCount = queries.Length + 1
+
+        let pawPrint =
+            List.init
+                derivedCount
+                (fun i ->
+                    let derived = getTopLevelTypeDef consumer "Consumer" $"D%d{i}"
+
+                    match derived.BaseType with
+                    | Some (BaseTypeInfo.TypeRef baseRef) ->
+                        TypeRef.fullName (fun h -> consumer.TypeRefs.[h]) consumer.TypeRefs.[baseRef]
+                    | other -> failwith $"Consumer.D%d{i}: expected a TypeRef base, got %O{other}"
+                )
+
+        let host =
+            withHostAssemblies
+                [ libImage.Force () ; consumerImage.Force () ]
+                (fun assemblies ->
+                    let consumer = assemblies.[1]
+
+                    List.init
+                        derivedCount
+                        (fun i ->
+                            try
+                                Some (consumer.GetType($"Consumer.D%d{i}", true).BaseType.FullName)
+                            with :? TypeLoadException ->
+                                None
+                        )
+                )
+
+        let resolved =
+            List.zip pawPrint host
+            |> List.choose (fun (rendered, hostName) -> hostName |> Option.map (fun hostName -> rendered, hostName))
+
+        resolved |> List.map snd |> shouldContain "Probe.Outer+A.Sys+C.Leaf"
+        resolved |> List.length |> shouldEqual (nestedRows.Length + 1)
+
+        resolved |> List.map fst |> shouldEqual (resolved |> List.map snd)
+
+    /// `AllConcreteTypes.describe` renders a nested type's chain as `TypeInfo.fullName` does, each
+    /// row with its own namespace, so a diagnostic does not spell three of these rows alike.
+    [<Test>]
+    let ``a concrete-type description spells each nested row's own namespace`` () : unit =
+        let lib = dumpedLib ()
+
+        let corelib =
+            withLoggerFactory (fun loggerFactory -> Assembly.readFile loggerFactory HostImage.coreLibPath)
+
+        let assemblies = LoadedAssemblies.ofAssemblies [ corelib ; lib ]
+        let bct = BaseClassTypes.ofCorelib corelib
+
+        let concreteTypes =
+            Corelib.concretizeAll (LoadedAssemblies.ofAssemblies [ corelib ]) bct AllConcreteTypes.Empty
+
+        let rendered =
+            lib.TypeDefs.Values
+            |> Seq.filter (fun ty -> ty.IsNested)
+            |> Seq.map (fun ty ->
+                let handle, concreteTypes =
+                    ConcreteType.makeFromIdentity ty.Identity ty.Namespace ty.Name ImmutableArray.Empty
+                    |> fun ct -> AllConcreteTypes.add bct assemblies ct concreteTypes
+                    |> function
+                        | Ok added -> added
+                        | Error refusal -> failwith (TypeLoadRefusal.describe refusal)
+
+                let description = AllConcreteTypes.describe assemblies concreteTypes handle
+                // The rendering is `<name>#<id> [<assembly>]`; only the name is under test.
+                description.Substring (0, description.IndexOf '#')
+            )
+            |> Seq.sort
+            |> List.ofSeq
+
+        rendered
+        |> shouldEqual (
+            [
+                "Probe.Outer+Sys"
+                "Probe.Outer+A.Sys"
+                "Probe.Outer+B.Sys"
+                "Probe.Outer+A.B.Deep"
+                "Probe.Outer+A.Only"
+                "Probe.Outer+A.Sys+C.Leaf"
+            ]
+            |> List.sort
+        )

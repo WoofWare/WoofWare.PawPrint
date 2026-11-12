@@ -134,6 +134,13 @@ module StaticVirtualDispatch =
         if (TypeSystemState.tryGetConcreteTypeInfo state constrained).IsNone then
             failwith $"%s{operation}: the constrained type %O{constrained} has no TypeDef row"
 
+        match method.TryVariant with
+        | Some MethodVariant.AsyncVariant ->
+            failwith
+                $"TODO: %s{operation} of the async variant of %s{method.Name}: CoreCLR gives a promise-returning virtual method's async variant a slot of its own, which PawPrint's tables do not have (runtime-async plan, stage 4)"
+        | Some MethodVariant.Ordinary
+        | None -> ()
+
         let slot : SlotIdentity = method.DeclaringAssemblyFullName, method.IdentityKey
 
         let found (state : TypeSystemState) (on : ConcreteTypeHandle) body =
@@ -264,6 +271,7 @@ module StaticVirtualDispatch =
                 match candidate.Body.Body with
                 | MethodBody.Abstract -> state, Ok (Some (VirtualImplementation.Reabstracted candidate.Body))
                 | MethodBody.Il _
+                | MethodBody.AsyncIl _
                 | MethodBody.MissingIl
                 | MethodBody.InternalCall
                 | MethodBody.PInvoke
@@ -288,6 +296,7 @@ module StaticVirtualDispatch =
         match definition.Body with
         | MethodBody.Abstract -> state, Ok VirtualImplementation.NotImplemented
         | MethodBody.Il _
+        | MethodBody.AsyncIl _
         | MethodBody.MissingIl
         | MethodBody.InternalCall
         | MethodBody.PInvoke
@@ -346,7 +355,8 @@ module StaticVirtualDispatch =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ ->
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ ->
             failwith
                 $"%s{opName}: static interface dispatch for non-concrete constrained type %O{constrainedTypeHandle} is not implemented"
 

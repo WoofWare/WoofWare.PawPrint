@@ -388,7 +388,7 @@ public static class Driver
     [<Test>]
     let ``callvirt of a MethodSpec over a MethodDef on a generic type agrees with the real runtime`` () : unit =
         Net11Frontier.park
-            "Measured on real .NET 11: the fabricated driver dies of `InvalidProgramException` (\"Common Language Runtime detected an invalid program\"), where .NET 10 runs it, so the real runtime no longer agrees with the outcome the test expects of both. Un-park when the test states each runtime's outcome."
+            "Measured on real .NET 11: compiling `G<T>.CallLenOnStringReceiver` raises `InvalidProgramException` (\"Common Language Runtime detected an invalid program\"), where .NET 10 runs it and the receiver's override returns 7. Of the driver's scenarios, it is the one whose MethodSpec over a bare MethodDef names a method whose signature mentions the declaring type's `T` (`Len<U>(T value)`), passed a string inside `G<T>`'s own frame. The rule RC1 applies there is not established: its `getArgType`, `getMethodSigInternal` and `resolveToken`'s generic-variable checks read as .NET 10's do. Un-park when PawPrint raises what RC1 raises there, and the test states each runtime's outcome."
 
         let image = fabricate ()
         assertMethodSpecsWrapMethodDefs image

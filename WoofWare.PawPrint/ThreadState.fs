@@ -802,6 +802,9 @@ type ThreadState =
         | MethodBody.MissingIl ->
             failwith
                 $"ThreadState.peekNextOp: reached %s{MethodOwner.describe frame.ExecutingMethod.Owner}.%s{frame.ExecutingMethod.Name}, an IL method whose row names no body; callMethod refuses to push a frame for one."
+        | MethodBody.AsyncIl _ ->
+            failwith
+                $"ThreadState.peekNextOp: reached %s{MethodOwner.describe frame.ExecutingMethod.Owner}.%s{frame.ExecutingMethod.Name}, whose frame carries runtime-async IL; IlMachineStateExecution.frameBody gives a frame that IL only as an IL body."
         | MethodBody.Abstract ->
             failwith
                 $"ThreadState.peekNextOp: reached abstract method %s{MethodOwner.describe frame.ExecutingMethod.Owner}.%s{frame.ExecutingMethod.Name}; virtual dispatch should have resolved to a concrete override."

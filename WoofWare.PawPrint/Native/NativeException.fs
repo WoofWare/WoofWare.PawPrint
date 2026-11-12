@@ -200,6 +200,8 @@ module NativeException =
                         "CoreCLR raises it from InitHelpers.InitClassSlow, the managed helper that runs a type's initialiser"
                     | RuntimeRaiseSite.TargetInvocationWrap ->
                         "CoreCLR raises it from the managed code that called the constructor or initialiser, such as RuntimeType.CreateInstanceOfT"
+                    | RuntimeRaiseSite.ThrownAgainByVm ->
+                        "CoreCLR throws it again from the native method's runtime code, and which frame its fresh trace begins with there, the native method's own or its caller's, PawPrint has not established"
 
                 failwith
                     $"TODO: %s{operation} (Exception.TargetSite, which Exception.Source reads): the runtime raised this exception (RuntimeRaiseSite.%A{site}). %s{firstFrame}; that frame begins its trace and is what TargetSite names, and PawPrint runs no frame for it. PawPrint's first frame is %s{head.Method.Name}."

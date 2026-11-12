@@ -154,6 +154,9 @@ public static class Program
         catch (CultureNotFoundException e)
         {
             if (e.InvalidCultureName != "fr") return 2;
+            // Its trace still runs through CultureInfo, where it was thrown: on .NET 11 the VM
+            // throws it again from the QCall, having preserved that trace first.
+            if (e.StackTrace == null || !e.StackTrace.Contains("CultureInfo")) return 3;
             return 0;
         }
     }
@@ -236,9 +239,6 @@ public static class Program
 
     [<Test>]
     let ``a referenced culture is made by CoreLib's CultureInfo`` () : unit =
-        Net11Frontier.park
-            "On .NET 11 the VM makes each AssemblyName through `[UnmanagedCallersOnly] AssemblyName.CreateAssemblyName`, which catches the `CultureNotFoundException` for the VM to rethrow from the QCall (`UnmanagedCallersOnlyCaller::InvokeThrowing`), and PawPrint does not model a native frame throwing an existing exception object: `AssemblyNative_GetReferencedAssemblies` refuses. Un-park when it does."
-
         let image = client (library "Cultured" culturedSource) culturedClientSource
 
         assemblyRefNames image |> shouldContain "Cultured"

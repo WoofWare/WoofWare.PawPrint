@@ -61,9 +61,10 @@ type ConcreteMethodKey =
     {
         /// Identity of the definition that declares the method.
         DeclaringType : ResolvedTypeIdentity
-        /// Which method of that definition: its MethodDef row and its synthesised kind, one of
-        /// which is set, exactly as `MethodInfo.IdentityKey` pairs them.
-        MethodRow : int option
+        /// Which method of that definition: its MethodDef row with which of the row's
+        /// `MethodDesc`s it is, or its synthesised kind, one of which is set, exactly as
+        /// `MethodInfo.IdentityKey` pairs them.
+        MethodRow : (int * MethodVariant) option
         Synthesised : SynthesisedMethod option
         /// The declaring type's generic arguments.
         TypeGenerics : ConcreteTypeHandle list
@@ -91,8 +92,9 @@ module ConcreteMethodKey =
                     DeclaringType = declaringType.Identity
                     MethodRow =
                         row
-                        |> Option.map (fun h ->
-                            Ecma335.MetadataTokens.GetRowNumber (MethodDefinitionHandle.op_Implicit h : EntityHandle)
+                        |> Option.map (fun (h, variant) ->
+                            Ecma335.MetadataTokens.GetRowNumber (MethodDefinitionHandle.op_Implicit h : EntityHandle),
+                            variant
                         )
                     Synthesised = synthesised
                     TypeGenerics = List.ofSeq typeGenerics
@@ -817,6 +819,31 @@ module TypeSystemState =
         | ConcreteTypeHandle.FunctionPointer _ ->
             failwith
                 $"TODO: resolveBaseConcreteType: function pointer types (%O{concreteType}) not yet supported; the runtime base type is System.ValueType but the lookup path needs adjusting"
+        | ConcreteTypeHandle.Continuation _ ->
+            // The runtime makes every continuation type a subclass of CoreLib's `Continuation`
+            // (`CreateNewContinuationMethodTable`, vm/asynccontinuations.cpp).
+            let continuation =
+                baseClassTypes.Corelib.TypeDefs
+                |> Seq.choose (fun (KeyValue (_, ty)) ->
+                    if ty.Namespace = "System.Runtime.CompilerServices" && ty.Name = "Continuation" then
+                        Some ty
+                    else
+                        None
+                )
+                |> Seq.exactlyOne
+
+            let state, continuationHandle =
+                LoadedTypeInfo.typeInfoToTypeDefn' baseClassTypes state._LoadedAssemblies continuation
+                |> concretizeType
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    state
+                    baseClassTypes.Corelib.DefinitionFullName
+                    ImmutableArray.Empty
+                    ImmutableArray.Empty
+
+            state, continuationHandle |> Result.map Some
         | ConcreteTypeHandle.Concrete _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _ ->
@@ -870,7 +897,8 @@ module TypeSystemState =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> None
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> None
 
     /// Does this handle denote a reference type (as opposed to a value type)?
     ///
@@ -891,7 +919,8 @@ module TypeSystemState =
         =
         match handle with
         | ConcreteTypeHandle.OneDimArrayZero _
-        | ConcreteTypeHandle.Array _ -> true
+        | ConcreteTypeHandle.Array _
+        | ConcreteTypeHandle.Continuation _ -> true
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
         | ConcreteTypeHandle.FunctionPointer _ -> false
@@ -915,7 +944,8 @@ module TypeSystemState =
         | ConcreteTypeHandle.Array _
         | ConcreteTypeHandle.Byref _
         | ConcreteTypeHandle.Pointer _
-        | ConcreteTypeHandle.FunctionPointer _ -> state, Ok false
+        | ConcreteTypeHandle.FunctionPointer _
+        | ConcreteTypeHandle.Continuation _ -> state, Ok false
         | ConcreteTypeHandle.Concrete _ ->
             match resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state handle with
             | state, Error failure -> state, Error failure

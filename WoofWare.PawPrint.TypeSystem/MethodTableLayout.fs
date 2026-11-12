@@ -1015,7 +1015,8 @@ module MethodTableLayout =
             // comparison is needed or wanted: the row *is* the identity, and `Placed` is keyed on it.
             // Absent from `Placed` means the row names something that holds no vtable slot -- an
             // interface method of this same assembly, or a non-virtual -- so it is not a vtable write.
-            let target = assembly.DefinitionFullName, (Some handle, None)
+            let target =
+                assembly.DefinitionFullName, (Some (handle, MethodVariant.ordinary), None)
 
             ctx,
             Ok (
@@ -1397,24 +1398,10 @@ module MethodTableLayout =
         // map and not the vtable, and `declarationSlot` returns `None` for those.
         let applyMethodImpl
             (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>)
-            (
-                content : SlotContent list,
-                writtenHere :
-                    Map<
-                        int,
-                        string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option)
-                     >
-            )
+            (content : SlotContent list, writtenHere : Map<int, SlotIdentity>)
             (impl : MethodImplParsed)
             : TypeConcretization.ConcretizationContext<DumpedAssembly> *
-              Result<
-                  SlotContent list *
-                  Map<
-                      int,
-                      string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option)
-                   >,
-                  TypeBindingFailure
-               >
+              Result<SlotContent list * Map<int, SlotIdentity>, TypeBindingFailure>
             =
             let ctx, declared =
                 declarationSlot loggerFactory dotnetRuntimeDirs operation ctx table assembly impl.Declaration
@@ -1885,19 +1872,11 @@ module MethodTableLayout =
     /// is unique only within its own module, and a vtable routinely spans assemblies -- a guest type
     /// deriving from `System.Object` has corelib's rows sitting underneath its own. Row 6 of the
     /// guest and row 6 of corelib are different methods that compare equal on `IdentityKey` alone.
-    let slotIdentity
-        (slot : VtableSlot)
-        : string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option)
-        =
+    let slotIdentity (slot : VtableSlot) : SlotIdentity =
         slot.DeclaredBy.AssemblyFullName, slot.Method.IdentityKey
 
     /// The index of the slot occupied by the method with the given identity, or `None`.
-    let slotIndexOfIdentity
-        (target : string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option))
-        (slotIdentities :
-            (string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option)) list)
-        : int option
-        =
+    let slotIndexOfIdentity (target : SlotIdentity) (slotIdentities : (SlotIdentity) list) : int option =
         slotIdentities |> List.tryFindIndex (fun identity -> identity = target)
 
     /// The slot CoreCLR assigns a method in its declaring type's method table -- `MethodDesc::GetSlot`
@@ -1909,11 +1888,7 @@ module MethodTableLayout =
     /// `None` is not "not virtual": every method a type declares in metadata occupies a slot, in one
     /// half or the other. It means the method is not this type's at all -- a synthesised method,
     /// which has no MethodDef row and so is never placed, or a lookup against the wrong type.
-    let slotIndexInTable
-        (target : string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option))
-        (table : MethodSlotTable)
-        : int option
-        =
+    let slotIndexInTable (target : SlotIdentity) (table : MethodSlotTable) : int option =
         match slotIndexOfIdentity target (table.Vtable |> List.map slotIdentity) with
         | Some index -> Some index
         | None ->
