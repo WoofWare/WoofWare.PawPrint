@@ -124,12 +124,64 @@ module TestRuntimeAsyncVariant =
     /// What the corpus check below found, for asserting it is not vacuous.
     [<RequireQualifiedAccess>]
     type private CorpusOutcome =
-        | Variant of MethodReturnKind * isValueTask : bool
+        | Variant of MethodReturnKind * isValueTask : bool * body : string
+        | AsyncCallNoPromise
         | NoPromise
-        | NotAsync
+        | Delegate
+
+    /// Whether a TypeDef row's immediate base type is named `System.MulticastDelegate`, and whether
+    /// it is flagged `TypeAttributes.Import`, read straight from the image with
+    /// System.Reflection.Metadata.
+    let private delegateAndComImportRows
+        (path : string)
+        : System.Collections.Generic.HashSet<TypeDefinitionHandle> *
+          System.Collections.Generic.HashSet<TypeDefinitionHandle>
+        =
+        use stream = File.OpenRead path
+        use pe = new PEReader (stream)
+        let reader = pe.GetMetadataReader ()
+
+        let delegates = System.Collections.Generic.HashSet ()
+        let comImports = System.Collections.Generic.HashSet ()
+
+        for handle in reader.TypeDefinitions do
+            let row = reader.GetTypeDefinition handle
+
+            if int row.Attributes &&& int TypeAttributes.Import <> 0 then
+                comImports.Add handle |> ignore
+
+            if not row.BaseType.IsNil then
+                let ns, name =
+                    match row.BaseType.Kind with
+                    | HandleKind.TypeReference ->
+                        let reference =
+                            reader.GetTypeReference (TypeReferenceHandle.op_Explicit row.BaseType)
+
+                        reader.GetString reference.Namespace, reader.GetString reference.Name
+                    | HandleKind.TypeDefinition ->
+                        let definition =
+                            reader.GetTypeDefinition (TypeDefinitionHandle.op_Explicit row.BaseType)
+
+                        reader.GetString definition.Namespace, reader.GetString definition.Name
+                    | _ -> "", ""
+
+                if ns = "System" && name = "MulticastDelegate" then
+                    delegates.Add handle |> ignore
+
+        delegates, comImports
+
+    let private bodyKind (body : MethodBody) : string =
+        match body with
+        | MethodBody.Il _ -> "Il"
+        | MethodBody.AsyncIl _ -> "AsyncIl"
+        | MethodBody.Abstract -> "Abstract"
+        | MethodBody.InternalCall -> "InternalCall"
+        | MethodBody.PInvoke -> "PInvoke"
+        | MethodBody.RuntimeProvided _ -> "RuntimeProvided"
+        | MethodBody.MissingIl -> "MissingIl"
 
     [<TestCaseSource(nameof runtimes)>]
-    let ``the async variant of every Async promise-returning method has the unwrapped signature, and no other method has one``
+    let ``every promise-returning method of a type neither a delegate nor ComImport has an async variant with the unwrapped signature, and no other method has one``
         (runtime : EmulatedRuntime)
         : unit
         =
@@ -151,9 +203,13 @@ module TestRuntimeAsyncVariant =
             | _, Error failure -> failwith $"%s{description}: %s{TypeBindingFailure.describe failure}"
 
         for name, image in images do
+            let delegates, comImports =
+                delegateAndComImportRows (Path.Combine (frameworkDirectory, name + ".dll"))
+
             for method : MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> in
                 image.Methods.Values do
                 let facts = MethodInfo.requireMetadata "TestRuntimeAsyncVariant" method
+                let declaringType = method.RequiredDeclaringType.Identity.TypeDefinition.Get
 
                 let declaresAsync =
                     facts.ImplAttributes.HasFlag RuntimeAsyncMethod.asyncImplAttribute
@@ -185,15 +241,23 @@ module TestRuntimeAsyncVariant =
 
                 assemblies.Value <- updated
 
-                match declaresAsync, kind, variant with
-                | false, _, Error AsyncVariantRefusal.NotDeclaredAsync ->
+                // Neither assembly declares a promise-returning method of a ComImport type.
+                if comImports.Contains declaringType then
+                    kind |> shouldEqual MethodReturnKind.NormalMethod
+
+                match delegates.Contains declaringType, declaresAsync, kind, variant with
+                | true, _, _, Error AsyncVariantRefusal.DelegateMethod ->
                     ordinaryConvention |> shouldEqual false
-                    outcomes.Add CorpusOutcome.NotAsync |> ignore
-                | true, MethodReturnKind.NormalMethod, Error AsyncVariantRefusal.ReturnsNoPromise ->
+                    outcomes.Add CorpusOutcome.Delegate |> ignore
+                | false, false, MethodReturnKind.NormalMethod, Error AsyncVariantRefusal.ReturnsNoPromise ->
+                    ordinaryConvention |> shouldEqual false
+                    outcomes.Add CorpusOutcome.NoPromise |> ignore
+                | false, true, MethodReturnKind.NormalMethod, Error AsyncVariantRefusal.ReturnsNoPromise ->
                     // `Await`, `Suspend` and the like: one MethodDesc, with the async calling convention.
                     ordinaryConvention |> shouldEqual true
-                    outcomes.Add CorpusOutcome.NoPromise |> ignore
-                | true,
+                    outcomes.Add CorpusOutcome.AsyncCallNoPromise |> ignore
+                | false,
+                  _,
                   (MethodReturnKind.GenericTaskReturningMethod | MethodReturnKind.NonGenericTaskReturningMethod),
                   Ok asyncVariant ->
                     ordinaryConvention |> shouldEqual false
@@ -245,6 +309,11 @@ module TestRuntimeAsyncVariant =
                     | _, other ->
                         failwith $"%s{name}: the async variant of %O{method} gave a variant of its own: %A{other}"
 
+                    // The IL of a method flagged `Async` is runtime-async IL, and of no other.
+                    match method.Body with
+                    | MethodBody.AsyncIl _ -> declaresAsync |> shouldEqual true
+                    | _ -> declaresAsync |> shouldEqual false
+
                     let isValueTask =
                         match facts.RawSignature.ReturnType with
                         | MethodReturnType.Returns ty ->
@@ -259,30 +328,284 @@ module TestRuntimeAsyncVariant =
                             | other -> failwith $"unexpected promise type %O{other}"
                         | MethodReturnType.Void -> failwith "logic error: a promise-returning method returns void"
 
-                    outcomes.Add (CorpusOutcome.Variant (kind, isValueTask)) |> ignore
-                | _, _, result ->
+                    outcomes.Add (CorpusOutcome.Variant (kind, isValueTask, bodyKind method.Body))
+                    |> ignore
+                | isDelegate, _, _, result ->
                     failwith
-                        $"%s{name}: %O{method} (declares Async: %b{declaresAsync}, returns %O{kind}) gave %A{result}"
+                        $"%s{name}: %O{method} (a delegate's: %b{isDelegate}; declares Async: %b{declaresAsync}; returns %O{kind}) gave %A{result}"
+
+        // Every promise type comes back, from a body of each kind there is.
+        let variants (body : string) : CorpusOutcome list =
+            [
+                CorpusOutcome.Variant (MethodReturnKind.NonGenericTaskReturningMethod, false, body)
+                CorpusOutcome.Variant (MethodReturnKind.NonGenericTaskReturningMethod, true, body)
+                CorpusOutcome.Variant (MethodReturnKind.GenericTaskReturningMethod, false, body)
+                CorpusOutcome.Variant (MethodReturnKind.GenericTaskReturningMethod, true, body)
+            ]
+
+        let observed = outcomes |> Set.ofSeq
+
+        for outcome in
+            [
+                CorpusOutcome.Delegate
+                CorpusOutcome.NoPromise
+                CorpusOutcome.AsyncCallNoPromise
+                yield! variants "Il"
+                CorpusOutcome.Variant (MethodReturnKind.GenericTaskReturningMethod, false, "Abstract")
+                CorpusOutcome.Variant (MethodReturnKind.GenericTaskReturningMethod, true, "Abstract")
+            ] do
+            if not (observed.Contains outcome) then
+                failwith $"the corpus gave no %A{outcome}"
 
         match runtime with
         | EmulatedRuntime.Net10 ->
-            outcomes
-            |> Set.ofSeq
-            |> shouldEqual (Set.ofList [ CorpusOutcome.NotAsync ; CorpusOutcome.NoPromise ])
-        | EmulatedRuntime.Net11 ->
-            outcomes
-            |> Set.ofSeq
-            |> shouldEqual (
-                Set.ofList
-                    [
-                        CorpusOutcome.NotAsync
-                        CorpusOutcome.NoPromise
-                        CorpusOutcome.Variant (MethodReturnKind.NonGenericTaskReturningMethod, false)
-                        CorpusOutcome.Variant (MethodReturnKind.NonGenericTaskReturningMethod, true)
-                        CorpusOutcome.Variant (MethodReturnKind.GenericTaskReturningMethod, false)
-                        CorpusOutcome.Variant (MethodReturnKind.GenericTaskReturningMethod, true)
-                    ]
+            observed
+            |> Set.exists (fun outcome ->
+                match outcome with
+                | CorpusOutcome.Variant (_, _, "AsyncIl") -> true
+                | _ -> false
             )
+            |> shouldEqual false
+        | EmulatedRuntime.Net11 ->
+            for outcome in variants "AsyncIl" do
+                if not (observed.Contains outcome) then
+                    failwith $"the corpus gave no %A{outcome}"
+
+    /// The async variant of `method`, or why there is none, against the framework of `runtime`.
+    let private variantOf
+        (runtime : EmulatedRuntime)
+        (assemblyName : string)
+        (ns : string)
+        (typeName : string)
+        (methodName : string)
+        : (MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> *
+          Result<MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>, AsyncVariantRefusal>) list
+        =
+        let frameworkDirectory =
+            FrameworkUnderTest.requireSharedFrameworkDirectoryOf runtime
+
+        let loggerFactory, images = readImages frameworkDirectory
+        let coreLib = snd images.Head
+
+        let image =
+            match images |> List.tryFind (fun (name, _) -> name = assemblyName) with
+            | Some (_, image) -> image
+            | None -> Assembly.readFile loggerFactory (Path.Combine (frameworkDirectory, assemblyName + ".dll"))
+
+        let methods =
+            image.Methods.Values
+            |> Seq.filter (fun m ->
+                m.Name = methodName
+                && m.RequiredDeclaringType.Namespace = ns
+                && m.RequiredDeclaringType.Name = typeName
+            )
+            |> List.ofSeq
+
+        if methods.IsEmpty then
+            failwith $"%s{assemblyName} declares no %s{ns}.%s{typeName}::%s{methodName}"
+
+        let assemblies = LoadedAssemblies.ofAssemblies (image :: List.map snd images)
+
+        methods
+        |> List.map (fun method ->
+            method,
+            snd (
+                RuntimeAsyncMethod.asyncVariantOf loggerFactory [ frameworkDirectory ] coreLib image method assemblies
+            )
+        )
+
+    /// Each of `methods` has an async variant, whose body is the method's own, of kind `body`.
+    let private shouldHaveVariants
+        (body : string)
+        (methods :
+            (MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> *
+            Result<MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>, AsyncVariantRefusal>) list)
+        : unit
+        =
+        for method, variant in methods do
+            match variant with
+            | Ok variant ->
+                match variant.TryVariant with
+                | Some MethodVariant.AsyncVariant -> ()
+                | other -> failwith $"the async variant of %O{method} is %O{other}"
+
+                obj.ReferenceEquals (variant.Body, method.Body) |> shouldEqual true
+                bodyKind variant.Body |> shouldEqual body
+            | Error refusal -> failwith $"%O{method} has no async variant: %A{refusal}"
+
+    let private shouldBeRefused
+        (refusal : AsyncVariantRefusal)
+        (methods :
+            (MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> *
+            Result<MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>, AsyncVariantRefusal>) list)
+        : unit
+        =
+        for method, variant in methods do
+            match variant with
+            | Error actual when actual = refusal -> ()
+            | other -> failwith $"%O{method}: expected %A{refusal}, got %A{other}"
+
+    [<Test>]
+    let ``the variant of a user's runtime-async method runs its runtime-async IL`` () : unit =
+        variantOf EmulatedRuntime.Net11 "System.Private.CoreLib" "System.IO" "StreamReader" "ReadBufferAsync"
+        |> shouldHaveVariants "AsyncIl"
+
+    [<Test>]
+    let ``the variant of a promise-returning method with IL and no Async flag is an async version`` () : unit =
+        variantOf EmulatedRuntime.Net11 "System.Private.CoreLib" "System.IO" "StreamWriter" "FlushAsyncInternal"
+        |> shouldHaveVariants "Il"
+
+        variantOf
+            EmulatedRuntime.Net11
+            "System.Private.CoreLib"
+            "System.Threading.Tasks"
+            "TaskCompletionSource`1"
+            "get_Task"
+        |> shouldHaveVariants "Il"
+
+    [<Test>]
+    let ``a virtual promise-returning method has a variant`` () : unit =
+        let readAsync =
+            variantOf EmulatedRuntime.Net11 "System.Private.CoreLib" "System.IO" "Stream" "ReadAsync"
+            |> List.filter (fun (method, _) -> method.IsVirtual)
+
+        // `ReadAsync(byte[], int, int, CancellationToken)` and `ReadAsync(Memory<byte>, CancellationToken)`.
+        readAsync.Length |> shouldEqual 2
+        readAsync |> shouldHaveVariants "Il"
+
+    [<Test>]
+    let ``an abstract promise-returning method has a variant, a name to dispatch on`` () : unit =
+        variantOf
+            EmulatedRuntime.Net11
+            "System.Private.CoreLib"
+            "System.Collections.Generic"
+            "IAsyncEnumerator`1"
+            "MoveNextAsync"
+        |> shouldHaveVariants "Abstract"
+
+    [<Test>]
+    let ``a delegate's method has no variant, whatever it returns`` () : unit =
+        // `Func<TResult>.Invoke` returns its type parameter; `ServerOptionsSelectionCallback.Invoke`
+        // returns a `ValueTask<SslServerAuthenticationOptions>`.
+        variantOf EmulatedRuntime.Net11 "System.Private.CoreLib" "System" "Func`1" "Invoke"
+        |> shouldBeRefused AsyncVariantRefusal.DelegateMethod
+
+        variantOf
+            EmulatedRuntime.Net11
+            "System.Net.Security"
+            "System.Net.Security"
+            "ServerOptionsSelectionCallback"
+            "Invoke"
+        |> shouldBeRefused AsyncVariantRefusal.DelegateMethod
+
+    [<Test>]
+    let ``ConfigureAwait returns no promise type, so has no variant`` () : unit =
+        variantOf EmulatedRuntime.Net11 "System.Private.CoreLib" "System.Threading.Tasks" "Task`1" "ConfigureAwait"
+        |> shouldBeRefused AsyncVariantRefusal.ReturnsNoPromise
+
+    /// Shapes the framework does not declare, compiled for the purpose.
+    let private fabricatedSource =
+        """
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+
+[ComImport, Guid("3B6A9F4C-6D57-4E8A-9C1D-2F0E4B7A1C55"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IComThing
+{
+    Task Run();
+}
+
+public delegate Task<int> Producer();
+
+public abstract class Holder
+{
+    [DllImport("nowhere")]
+    public static extern Task<int> Imported();
+
+    [MethodImpl(MethodImplOptions.InternalCall)]
+    public static extern ValueTask Internal();
+
+    public static Task<int> WithIl() => Task.FromResult(3);
+
+    public abstract ValueTask<string> Declared();
+
+    public static T Identity<T>(T value) => value;
+}
+"""
+
+    let private fabricatedVariants
+        ()
+        : Map<
+              string,
+              Result<MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>, AsyncVariantRefusal>
+           >
+        =
+        let frameworkDirectory = FrameworkUnderTest.sharedFrameworkDirectory ()
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let coreLib =
+            Assembly.readFile loggerFactory (Path.Combine (frameworkDirectory, "System.Private.CoreLib.dll"))
+
+        let image =
+            Roslyn.compileAssembly
+                "AsyncVariantShapes"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ fabricatedSource ]
+
+        let fixture =
+            Assembly.read loggerFactory (Some "AsyncVariantShapes.dll") (new MemoryStream (image))
+
+        let assemblies = LoadedAssemblies.ofAssemblies [ coreLib ; fixture ]
+
+        fixture.Methods.Values
+        |> Seq.filter (fun m -> m.Name <> ".ctor" && m.Name <> "BeginInvoke")
+        |> Seq.map (fun method ->
+            $"%s{method.RequiredDeclaringType.Name}::%s{method.Name}",
+            snd (
+                RuntimeAsyncMethod.asyncVariantOf
+                    loggerFactory
+                    [ frameworkDirectory ]
+                    coreLib
+                    fixture
+                    method
+                    assemblies
+            )
+        )
+        |> Map.ofSeq
+
+    [<Test>]
+    let ``asyncVariantOf refuses by name the methods CoreCLR binds no await to, or PawPrint cannot run`` () : unit =
+        let variants = fabricatedVariants ()
+
+        let outcome (name : string) : string =
+            match variants.[name] with
+            | Ok variant -> $"variant (%s{bodyKind variant.Body})"
+            | Error refusal -> $"%A{refusal}"
+
+        [
+            "IComThing::Run"
+            "Producer::Invoke"
+            "Producer::EndInvoke"
+            "Holder::Imported"
+            "Holder::Internal"
+            "Holder::WithIl"
+            "Holder::Declared"
+            "Holder::Identity"
+        ]
+        |> List.map (fun name -> name, outcome name)
+        |> shouldEqual
+            [
+                "IComThing::Run", "ComImportType"
+                "Producer::Invoke", "DelegateMethod"
+                "Producer::EndInvoke", "DelegateMethod"
+                "Holder::Imported", "UnmodelledBody PInvoke"
+                "Holder::Internal", "UnmodelledBody InternalCall"
+                "Holder::WithIl", "variant (Il)"
+                "Holder::Declared", "variant (Abstract)"
+                "Holder::Identity", "ReturnsNoPromise"
+            ]
 
     /// A method the runtime synthesises has no MethodDef, so no variants.
     [<Test>]

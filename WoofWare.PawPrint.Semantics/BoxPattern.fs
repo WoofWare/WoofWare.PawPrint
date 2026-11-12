@@ -35,7 +35,7 @@ module BoxPattern =
     /// Every offset of `body` at which a basic block starts, beyond its entry: where control lands
     /// other than by falling through (`ControlFlow.landedOn`), and where a protected block or a
     /// handler starts or ends (`fgFindBasicBlocks`, fgbasic.cpp).
-    let private blockStarts (body : MethodInstructions) : Set<int> =
+    let blockStarts (body : MethodInstructions) : Set<int> =
         let regionBounds =
             body.ExceptionRegions
             |> Seq.collect (fun region ->

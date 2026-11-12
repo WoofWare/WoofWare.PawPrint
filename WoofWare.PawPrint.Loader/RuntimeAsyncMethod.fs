@@ -30,6 +30,17 @@ type AsyncVariantRefusal =
     | ReturnsNoPromise
     /// Classifying the method's return type needed a type that does not bind.
     | ReturnTypeUnbound of TypeBindingFailure
+    /// The method's type is a delegate, whose methods CoreCLR's class loader takes to return no
+    /// promise type, whatever they return.
+    | DelegateMethod
+    /// Deciding whether the method's type is a delegate needed its base type, which does not bind.
+    | BaseTypeUnbound of TypeBindingFailure
+    /// The method's type is ComImport (`TypeAttributes.Import`). CoreCLR binds no await to an async
+    /// variant of such a method (`CORINFO_TOKENKIND_Await`, jitinterface.cpp).
+    | ComImportType
+    /// CoreCLR gives the method an async variant, but its body is one whose async variant PawPrint
+    /// does not model: a P/Invoke, an InternalCall, one the runtime provides, or none.
+    | UnmodelledBody of MethodBody
 
 /// Which methods CoreCLR's class loader makes callable with runtime async's calling convention.
 [<RequireQualifiedAccess>]
