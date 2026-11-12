@@ -14,6 +14,23 @@ type MethodReturnKind =
     /// Returns CoreLib's `System.Threading.Tasks.Task<T>` or `ValueTask<T>`.
     | GenericTaskReturningMethod
 
+/// Why a method has no async variant for `RuntimeAsyncMethod.asyncVariantOf` to construct.
+[<RequireQualifiedAccess>]
+type AsyncVariantRefusal =
+    /// The runtime synthesised the method: it has no MethodDef for CoreCLR to make variants of.
+    | Synthesised
+    /// The method is already its MethodDef's async variant.
+    | AlreadyAsyncVariant
+    /// The method does not declare `MethodImplAttributes.Async`. If it returns a promise type,
+    /// CoreCLR's async variant of it is its own IL compiled as an async version (every `ret`
+    /// awaiting the returned promise), which PawPrint does not construct.
+    | NotDeclaredAsync
+    /// The method declares `MethodImplAttributes.Async` and returns no promise type, so CoreCLR makes
+    /// it one `MethodDesc`, which is the ordinary one and has the async calling convention.
+    | ReturnsNoPromise
+    /// Classifying the method's return type needed a type that does not bind.
+    | ReturnTypeUnbound of TypeBindingFailure
+
 /// Which methods CoreCLR's class loader makes callable with runtime async's calling convention.
 [<RequireQualifiedAccess>]
 module RuntimeAsyncMethod =
@@ -130,7 +147,7 @@ module RuntimeAsyncMethod =
     /// CoreCLR's `MethodDesc::IsAsyncMethod` for the method `method`, which `declaringAssembly`
     /// declares: whether the class loader gives it the `AsyncCall` flag. This is the method a
     /// MethodDef row declares, never the async variant CoreCLR adds beside a method returning a
-    /// promise type, which reflection does not see.
+    /// promise type, which reflection does not see; `hasAsyncCallingConvention` answers for either.
     let isAsyncCall
         (loggerFactory : ILoggerFactory)
         (runtimeDirs : string seq)
@@ -158,3 +175,128 @@ module RuntimeAsyncMethod =
         | assemblies, Ok MethodReturnKind.NonGenericTaskReturningMethod
         | assemblies, Ok MethodReturnKind.GenericTaskReturningMethod -> assemblies, Ok false
         | assemblies, Error failure -> assemblies, Error failure
+
+    /// The return column of a promise-returning method's async variant, as CoreCLR's class loader
+    /// rewrites the signature blob (`methodtablebuilder.cpp`): the bytes of `Task<T>` or
+    /// `ValueTask<T>` become those of `T`, and those of `Task` or `ValueTask` become `void`, after
+    /// whatever custom modifiers precede them. `kind` is what `classifyReturn` made of `returnType`.
+    let private unwrappedReturn
+        (kind : MethodReturnKind)
+        (returnType : MethodReturnType<TypeDefn>)
+        : MethodReturnType<TypeDefn>
+        =
+        // The custom modifiers on the outside of the promise type, put back around its replacement.
+        let rec replace (replacement : TypeDefn -> TypeDefn) (ty : TypeDefn) : TypeDefn =
+            match ty with
+            | TypeDefn.Modified modified ->
+                TypeDefn.Modified
+                    { modified with
+                        Unmodified = replace replacement modified.Unmodified
+                    }
+            | promise -> replacement promise
+
+        match kind, returnType with
+        | MethodReturnKind.NormalMethod, _ ->
+            failwith "logic error: asked to unwrap the return type of a method returning no promise type"
+        | _, MethodReturnType.Void ->
+            failwith "logic error: a method returning void was classified as returning a promise type"
+        | MethodReturnKind.GenericTaskReturningMethod, MethodReturnType.Returns ty ->
+            replace
+                (fun promise ->
+                    match promise with
+                    | TypeDefn.GenericInstantiation (_, args) when args.Length = 1 -> args.[0]
+                    | other -> failwith $"logic error: %O{other} was classified as Task<T> or ValueTask<T>"
+                )
+                ty
+            |> MethodReturnType.Returns
+        // A bare `void` decodes as `Void`, and one under custom modifiers as `Returns`, as
+        // `TypeMethodSignature.make` decodes the blob.
+        | MethodReturnKind.NonGenericTaskReturningMethod, MethodReturnType.Returns (TypeDefn.Modified _ as ty) ->
+            MethodReturnType.Returns (replace (fun _ -> TypeDefn.Void) ty)
+        | MethodReturnKind.NonGenericTaskReturningMethod, MethodReturnType.Returns _ -> MethodReturnType.Void
+
+    /// <summary>
+    /// The async variant of <paramref name="method" />, the ordinary variant of a method
+    /// <paramref name="declaringAssembly" /> declares: the second <c>MethodDesc</c> CoreCLR's class
+    /// loader makes for a MethodDef flagged <c>MethodImplAttributes.Async</c> that returns
+    /// <c>Task</c>, <c>Task&lt;T&gt;</c>, <c>ValueTask</c> or <c>ValueTask&lt;T&gt;</c>. It has the
+    /// same token and IL, and the signature with the promise type unwrapped (<c>Task&lt;T&gt;</c> and
+    /// <c>ValueTask&lt;T&gt;</c> to <c>T</c>, <c>Task</c> and <c>ValueTask</c> to <c>void</c>).
+    /// </summary>
+    /// <remarks>
+    /// This is the only way to construct an async variant. Any other method is refused.
+    /// </remarks>
+    let asyncVariantOf
+        (loggerFactory : ILoggerFactory)
+        (runtimeDirs : string seq)
+        (coreLib : DumpedAssembly)
+        (declaringAssembly : DumpedAssembly)
+        (method : MethodInfo<'typeGenerics, 'methodGenerics, TypeDefn>)
+        (assemblies : LoadedAssemblies)
+        : LoadedAssemblies * Result<MethodInfo<'typeGenerics, 'methodGenerics, TypeDefn>, AsyncVariantRefusal>
+        =
+        match method with
+        | MethodInfo.Synthesised _ -> assemblies, Error AsyncVariantRefusal.Synthesised
+        | MethodInfo.Metadata (_, _, MethodVariant.AsyncVariant) ->
+            assemblies, Error AsyncVariantRefusal.AlreadyAsyncVariant
+        | MethodInfo.Metadata (core, facts, MethodVariant.Ordinary) ->
+            if not (facts.ImplAttributes.HasFlag asyncImplAttribute) then
+                assemblies, Error AsyncVariantRefusal.NotDeclaredAsync
+            else
+
+            match
+                classifyReturn
+                    loggerFactory
+                    runtimeDirs
+                    coreLib
+                    declaringAssembly
+                    facts.RawSignature.ReturnType
+                    assemblies
+            with
+            | assemblies, Error failure -> assemblies, Error (AsyncVariantRefusal.ReturnTypeUnbound failure)
+            | assemblies, Ok MethodReturnKind.NormalMethod -> assemblies, Error AsyncVariantRefusal.ReturnsNoPromise
+            | assemblies, Ok kind ->
+                match core.Body with
+                | MethodBody.AsyncIl _ -> ()
+                | body ->
+                    failwith
+                        $"logic error: %O{method} declares MethodImplAttributes.Async and returns a promise type, but its body is %O{body} rather than runtime-async IL"
+
+                let variant =
+                    MethodInfo.Metadata (
+                        { core with
+                            Signature =
+                                { core.Signature with
+                                    ReturnType = unwrappedReturn kind core.Signature.ReturnType
+                                }
+                        },
+                        facts,
+                        MethodVariant.AsyncVariantMethodDesc
+                    )
+
+                assemblies, Ok variant
+
+    /// <summary>
+    /// Whether <paramref name="method" />, which <paramref name="declaringAssembly" /> declares, has
+    /// runtime async's calling convention (a hidden continuation argument and return), and so runs
+    /// a runtime-async body.
+    /// </summary>
+    /// <remarks>
+    /// An async variant has it. An ordinary variant has it exactly when CoreCLR makes it
+    /// <c>AsyncCall</c> (<see cref="isAsyncCall" />): a method declaring <c>Async</c> that returns no
+    /// promise type, which has no async variant beside it. A synthesised method never has it.
+    /// </remarks>
+    let hasAsyncCallingConvention
+        (loggerFactory : ILoggerFactory)
+        (runtimeDirs : string seq)
+        (coreLib : DumpedAssembly)
+        (declaringAssembly : DumpedAssembly)
+        (method : MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
+        (assemblies : LoadedAssemblies)
+        : LoadedAssemblies * Result<bool, TypeBindingFailure>
+        =
+        match method with
+        | MethodInfo.Synthesised _ -> assemblies, Ok false
+        | MethodInfo.Metadata (_, _, MethodVariant.AsyncVariant) -> assemblies, Ok true
+        | MethodInfo.Metadata (_, facts, MethodVariant.Ordinary) ->
+            isAsyncCall loggerFactory runtimeDirs coreLib declaringAssembly facts assemblies

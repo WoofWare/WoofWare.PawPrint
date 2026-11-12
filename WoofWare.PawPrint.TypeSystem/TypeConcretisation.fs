@@ -2748,6 +2748,8 @@ module Concretization =
     /// instantiation, in slot order; and load every assembly the base chain of each names, as
     /// `concretizeMethod` does for its signature, since a frame zeroes each local. This is what
     /// CoreCLR loads when it compiles the method. A method with no IL body, or no locals, has none.
+    /// `method` must not carry runtime-async IL (`MethodBody.AsyncIl`), which a frame is given only as
+    /// an IL body.
     ///
     /// A type a local names that does not bind is the result's failure, with what was loaded and
     /// registered before it.
@@ -2759,7 +2761,19 @@ module Concretization =
         (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
         : Result<ImmutableArray<ConcreteTypeHandle>, TypeBindingFailure> * AllConcreteTypes * LoadedAssemblies
         =
-        match MethodInfo.tryIlBody method |> Option.bind _.LocalVars with
+        let locals =
+            match method.Body with
+            | MethodBody.Il body -> body.LocalVars
+            | MethodBody.AsyncIl _ ->
+                failwith
+                    $"BUG: asked for the locals of %O{method}, whose body is runtime-async IL; a frame runs that IL only once callMethod has given it to the frame as an IL body"
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _
+            | MethodBody.Abstract
+            | MethodBody.MissingIl -> None
+
+        match locals with
         | None -> Ok ImmutableArray.Empty, ctx, assemblies
         | Some vars ->
 

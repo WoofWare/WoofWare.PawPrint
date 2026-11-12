@@ -140,7 +140,7 @@ module UnmanagedTarget =
 
         let implAttributes =
             match definition with
-            | MethodInfo.Metadata (_, facts) -> facts.ImplAttributes
+            | MethodInfo.Metadata (_, facts, _) -> facts.ImplAttributes
             | MethodInfo.Synthesised _ ->
                 failwith $"BUG: %O{method} of %s{assembly.DefinitionFullName} is a P/Invoke without metadata"
 

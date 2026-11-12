@@ -516,10 +516,11 @@ module IlMachineStateExecution =
         let intrinsic : (MethodDefinitionHandle * IntrinsicMethodKeys.IntrinsicMethodKey) option =
             match methodToCall with
             | MethodInfo.Synthesised _ -> None
-            | MethodInfo.Metadata (_, facts) ->
+            | MethodInfo.Metadata (_, facts, _) ->
                 match methodToCall.Body with
                 | MethodBody.Abstract -> None
                 | MethodBody.Il _
+                | MethodBody.AsyncIl _
                 | MethodBody.MissingIl
                 | MethodBody.InternalCall
                 | MethodBody.PInvoke
@@ -983,15 +984,46 @@ module IlMachineStateExecution =
         | IntrinsicOutcome.Handled (state, commitment) -> state, commitment
         | IntrinsicOutcome.RunBody (state, methodToCall) ->
 
-        match methodToCall.Body with
-        | MethodBody.MissingIl ->
-            failwith
-                $"TODO: calling %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}, an IL method whose row names no body; real .NET raises BadImageFormatException (COR_E_BADIMAGEFORMAT) from the callee when the JIT finds no IL, before anything of it runs"
-        | MethodBody.Il _
-        | MethodBody.InternalCall
-        | MethodBody.PInvoke
-        | MethodBody.RuntimeProvided _
-        | MethodBody.Abstract -> ()
+        let state, methodToCall =
+            match methodToCall.Body with
+            | MethodBody.MissingIl ->
+                failwith
+                    $"TODO: calling %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}, an IL method whose row names no body; real .NET raises BadImageFormatException (COR_E_BADIMAGEFORMAT) from the callee when the JIT finds no IL, before anything of it runs"
+            | MethodBody.AsyncIl instructions ->
+                // A runtime-async method's IL is run by the `MethodDesc` with the async calling
+                // convention, so the frame gets it as an ordinary IL body. The other `MethodDesc`,
+                // the ordinary variant of a method returning a promise type, runs the thunk the VM
+                // emits in its place.
+                match
+                    RuntimeAsyncMethod.hasAsyncCallingConvention
+                        loggerFactory
+                        state.DotnetRuntimeDirs
+                        baseClassTypes.Corelib
+                        declaringAssy
+                        methodToCall
+                        state.TypeSystem._LoadedAssemblies
+                with
+                | assemblies, Ok true ->
+                    { state with
+                        TypeSystem =
+                            { state.TypeSystem with
+                                _LoadedAssemblies = assemblies
+                            }
+                    },
+                    MethodInfo.setMethodVars (MethodBody.Il instructions) methodToCall.Signature methodToCall
+                | _, Ok false ->
+                    failwith
+                        $"TODO: calling the ordinary variant of %O{methodToCall}, a runtime-async method (MethodImplAttributes.Async) returning a promise type. CoreCLR runs the task-returning thunk the VM emits in its place, which calls the async variant that owns this IL; PawPrint does not yet emit that thunk"
+                // CoreCLR classified the method when it loaded the declaring type, which PawPrint has
+                // loaded too.
+                | _, Error failure ->
+                    failwith
+                        $"calling %O{methodToCall}: classifying its return type needs a type PawPrint cannot bind, though it loaded the method's declaring type: %s{TypeBindingFailure.describe failure}"
+            | MethodBody.Il _
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _
+            | MethodBody.Abstract -> state, methodToCall
 
         // Get zero values for all parameters.
         //

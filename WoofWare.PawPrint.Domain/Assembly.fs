@@ -1250,7 +1250,7 @@ module Assembly =
                 // PE image — but the match keeps the key honest rather than inventing a token.
                 |> List.choose (fun mi ->
                     match mi with
-                    | MethodInfo.Metadata (_, facts) -> Some (KeyValuePair (facts.Handle, mi))
+                    | MethodInfo.Metadata (_, facts, _) -> Some (KeyValuePair (facts.Handle, mi))
                     | MethodInfo.Synthesised _ -> None
                 )
             )
@@ -1666,6 +1666,12 @@ module Assembly =
 
                 match method.Body with
                 | MethodBody.Il instructions ->
+                    instructions.Instructions
+                    |> List.map (fun (op, index) -> IlOp.Format op index)
+                    |> List.iter Console.WriteLine
+                | MethodBody.AsyncIl instructions ->
+                    Console.WriteLine "<runtime-async IL, written for the async calling convention>"
+
                     instructions.Instructions
                     |> List.map (fun (op, index) -> IlOp.Format op index)
                     |> List.iter Console.WriteLine

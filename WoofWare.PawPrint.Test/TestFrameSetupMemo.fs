@@ -149,7 +149,9 @@ static class Program
                 memoised.Method.DeclaringTypeGenerics
                 |> List.ofSeq
                 |> shouldEqual key.TypeGenerics
-            | Some row ->
+            | Some (_, MethodVariant.AsyncVariant) ->
+                failwith "the memo holds an async variant, which nothing constructs from a guest's calls yet"
+            | Some (row, MethodVariant.Ordinary) ->
                 let assy =
                     state.TypeSystem._LoadedAssemblies.ByDefinitionName key.DeclaringType.AssemblyFullName
 
@@ -221,7 +223,9 @@ static class Program
             | None ->
                 // The runtime synthesises such a method's behaviour; it has no IL, so no locals.
                 memoised.IsEmpty |> shouldEqual true
-            | Some row ->
+            | Some (_, MethodVariant.AsyncVariant) ->
+                failwith "the memo holds an async variant, which nothing constructs from a guest's calls yet"
+            | Some (row, MethodVariant.Ordinary) ->
 
             let assy =
                 state.TypeSystem._LoadedAssemblies.ByDefinitionName key.DeclaringType.AssemblyFullName

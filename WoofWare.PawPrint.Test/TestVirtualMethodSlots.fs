@@ -279,13 +279,10 @@ module TestVirtualMethodSlots =
     /// The identity `slotIndexInTable` looks a method up by. Every corpus type is corelib's, so the
     /// declaring assembly is corelib's; the row number comes straight from the host's metadata
     /// token, which is the same number PawPrint read out of the same image.
-    let private identityOf
-        (method : MethodBase)
-        : string * (System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option)
-        =
+    let private identityOf (method : MethodBase) : SlotIdentity =
         let row = method.MetadataToken &&& 0xFFFFFF
 
-        corelib.Name.FullName, (Some (MetadataTokens.MethodDefinitionHandle row), None)
+        corelib.Name.FullName, (Some (MetadataTokens.MethodDefinitionHandle row, MethodVariant.ordinary), None)
 
     /// The host's vtable as a list of MethodDef tokens, slot 0 upwards: `GetSlot` gives the index and
     /// `MetadataToken` names the occupant. This is the *layout*, not merely its size.
@@ -302,7 +299,9 @@ module TestVirtualMethodSlots =
         slots
         |> List.map (fun slot ->
             match fst slot.Method.IdentityKey with
-            | Some handle ->
+            | Some (_, MethodVariant.AsyncVariant) ->
+                failwith "a vtable slot holds an async variant, which PawPrint's tables never place"
+            | Some (handle, MethodVariant.Ordinary) ->
                 MetadataTokens.GetToken (
                     System.Reflection.Metadata.MethodDefinitionHandle.op_Implicit handle
                     : System.Reflection.Metadata.EntityHandle
@@ -320,8 +319,11 @@ module TestVirtualMethodSlots =
     /// a silently wrong slot, and `PopulateMethods` would then suppress the wrong declaration.
     [<Test>]
     let ``slot lookup is scoped to the declaring assembly`` () : unit =
-        let row (n : int) : System.Reflection.Metadata.MethodDefinitionHandle option * SynthesisedMethod option =
-            Some (MetadataTokens.MethodDefinitionHandle n), None
+        let row
+            (n : int)
+            : (System.Reflection.Metadata.MethodDefinitionHandle * MethodVariant) option * SynthesisedMethod option
+            =
+            Some (MetadataTokens.MethodDefinitionHandle n, MethodVariant.ordinary), None
 
         // A base method from corelib and a derived method from the guest, sharing row 6.
         let slots = [ "CoreLib", row 6 ; "Guest", row 6 ]
@@ -776,11 +778,13 @@ module TestVirtualMethodSlots =
         // debugging round to spot.
         let keyOf
             (assembly : string)
-            (handle : System.Reflection.Metadata.MethodDefinitionHandle option)
+            (handle : (System.Reflection.Metadata.MethodDefinitionHandle * MethodVariant) option)
             : string * int
             =
             match handle with
-            | Some handle ->
+            | Some (_, MethodVariant.AsyncVariant) ->
+                failwith "a vtable slot holds an async variant, which PawPrint's tables never place"
+            | Some (handle, MethodVariant.Ordinary) ->
                 assembly,
                 MetadataTokens.GetRowNumber (
                     System.Reflection.Metadata.MethodDefinitionHandle.op_Implicit handle
@@ -826,7 +830,10 @@ module TestVirtualMethodSlots =
                     let key =
                         keyOf
                             corelib.Name.FullName
-                            (Some (MetadataTokens.MethodDefinitionHandle (method.MetadataToken &&& 0xFFFFFF)))
+                            (Some (
+                                MetadataTokens.MethodDefinitionHandle (method.MetadataToken &&& 0xFFFFFF),
+                                MethodVariant.ordinary
+                            ))
 
                     match Map.tryFind key byIdentity with
                     | None ->
@@ -1003,7 +1010,9 @@ module TestVirtualMethodSlots =
 
         let methodToken =
             match fst slot.Method.IdentityKey with
-            | Some handle ->
+            | Some (_, MethodVariant.AsyncVariant) ->
+                failwith "a vtable slot holds an async variant, which PawPrint's tables never place"
+            | Some (handle, MethodVariant.Ordinary) ->
                 MetadataTokens.GetToken (
                     System.Reflection.Metadata.MethodDefinitionHandle.op_Implicit handle
                     : System.Reflection.Metadata.EntityHandle

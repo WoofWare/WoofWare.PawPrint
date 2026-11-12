@@ -436,6 +436,7 @@ module AbstractMachine =
                 raiseFromPoppedStub baseClassTypes.BadImageFormatException (Some BadImageFormatMessages.ofHResult) state
             | MethodBody.Abstract
             | MethodBody.Il _
+            | MethodBody.AsyncIl _
             | MethodBody.MissingIl
             | MethodBody.InternalCall
             | MethodBody.PInvoke
@@ -552,6 +553,9 @@ module AbstractMachine =
                 $"BUG: reached executeOneStep for {MethodOwner.describe instruction.ExecutingMethod.Owner}::{instruction.ExecutingMethod.Name}, an IL method whose row names no body; callMethod refuses to push a frame for one"
         | MethodBody.InternalCall
         | MethodBody.PInvoke -> dispatchNative ()
+        | MethodBody.AsyncIl _ ->
+            failwith
+                $"BUG: reached executeOneStep for {MethodOwner.describe instruction.ExecutingMethod.Owner}::{instruction.ExecutingMethod.Name}, whose frame carries runtime-async IL; callMethod gives a frame that IL only as an IL body, and refuses a method that does not run it"
         | MethodBody.Il instructions ->
 
         let state = StackShapeOfMethod.beforeInstruction baseClassTypes thread state

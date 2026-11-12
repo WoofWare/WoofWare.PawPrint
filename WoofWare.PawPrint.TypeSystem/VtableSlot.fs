@@ -37,7 +37,11 @@ type VtableSlot =
 /// The assembly is not decoration. `MethodInfo.IdentityKey` is a MethodDef *row number*, unique only
 /// within its own module, and a vtable routinely spans assemblies -- a guest type deriving from
 /// `System.Object` has corelib's rows sitting underneath its own.
-type SlotIdentity = string * (MethodDefinitionHandle option * SynthesisedMethod option)
+///
+/// Every slot holds an ordinary variant (`MethodVariant`), so an async variant's identity names no
+/// slot. CoreCLR gives a promise-returning virtual method's async variant a slot of its own, which
+/// PawPrint's tables do not yet have.
+type SlotIdentity = string * ((MethodDefinitionHandle * MethodVariant) option * SynthesisedMethod option)
 
 /// A type's method table as virtual dispatch reads it.
 ///

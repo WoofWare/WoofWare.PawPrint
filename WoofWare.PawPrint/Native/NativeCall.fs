@@ -987,6 +987,7 @@ module NativeCall =
             | MethodBody.Abstract -> "Abstract"
             | MethodBody.MissingIl -> "IL with no body"
             | MethodBody.Il _ -> "IL"
+            | MethodBody.AsyncIl _ -> "runtime-async IL"
 
         let rec formatTypeHandle (cth : ConcreteTypeHandle) : string =
             match AllConcreteTypes.lookup cth state.TypeSystem.ConcreteTypes with

@@ -267,10 +267,16 @@ module Assumption =
             | MethodBody.PInvoke, Some import -> import.ModuleName = "QCall" && import.EntryPointName = entryPoint
             | _ -> false
 
+        // A runtime-async body is not one of the shapes these contracts were written for.
         let il : bool =
             match definition.Body with
             | MethodBody.Il _ -> true
-            | _ -> false
+            | MethodBody.AsyncIl _
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _
+            | MethodBody.Abstract
+            | MethodBody.MissingIl -> false
 
         if
             inCoreLib "System" "RuntimeTypeHandle" true

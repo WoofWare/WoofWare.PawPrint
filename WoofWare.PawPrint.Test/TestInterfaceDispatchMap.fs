@@ -167,7 +167,11 @@ module TestInterfaceDispatchMap =
 
                 let interfaceMethodKey : SlotIdentity =
                     entry.Type.AssemblyFullName,
-                    (Some (MetadataTokens.MethodDefinitionHandle (interfaceMethod.MetadataToken &&& 0xFFFFFF)), None)
+                    (Some (
+                        MetadataTokens.MethodDefinitionHandle (interfaceMethod.MetadataToken &&& 0xFFFFFF),
+                        MethodVariant.ordinary
+                     ),
+                     None)
 
                 let state, slot =
                     InterfaceDispatch.tryFindImplementationSlot

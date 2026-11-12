@@ -14899,6 +14899,82 @@ public static class Runners
                 }
         )
 
+    /// A call binds a runtime-async method's ordinary variant. Where the method returns a promise
+    /// type, that runs the task-returning thunk CoreCLR's VM emits, not the method's IL; where it
+    /// returns none, as `AsyncHelpers.Await` does, it runs the IL.
+    [<Test>]
+    let ``a promise-returning runtime-async method is opaque as the task-returning thunk`` () : unit =
+        match FrameworkUnderTest.runtime () with
+        | EmulatedRuntime.Net10 -> Assert.Ignore ".NET 10's CoreLib declares no promise-returning runtime-async method"
+        | EmulatedRuntime.Net11 -> ()
+
+        let corelib = hostCoreLib ()
+        let analysis = analysisOver [] id
+
+        let thunkSource (key : MethodKey) : Opacity option =
+            let _, sources = EscapeAnalysis.unknownSources analysis key
+
+            sources
+            |> Seq.tryFind (fun source -> source.Method = key && source.Offset.IsNone)
+            |> Option.map _.Reason
+
+        thunkSource (methodNamed corelib "System.IO.StreamReader" "ReadToEndAsyncInternal")
+        |> shouldEqual (Some Opacity.TaskReturningThunk)
+
+        let await =
+            corelib.Methods
+            |> Seq.pick (fun (KeyValue (handle, method)) ->
+                if
+                    method.Name = "Await"
+                    && method.RequiredDeclaringType.Name = "AsyncHelpers"
+                    && method.Signature.GenericParameterCount = 0
+                    && method.Signature.ParameterTypes.Length = 1
+                    && method.Body.IsAsyncIl
+                then
+                    Some (MethodKey.make corelib handle)
+                else
+                    None
+            )
+
+        thunkSource await |> shouldEqual None
+
+    /// Whether a runtime-async method returns a promise type turns on whether its return type's
+    /// reference binds to CoreLib's. Where the assembly it names is not found, CoreCLR cannot load
+    /// the method's declaring type, and the analysis says so rather than stopping.
+    [<Test>]
+    let ``a runtime-async method whose return type names a missing assembly is opaque for want of it`` () : unit =
+        match FrameworkUnderTest.runtime () with
+        | EmulatedRuntime.Net10 -> Assert.Ignore ".NET 10's System.Net.Http declares no runtime-async method"
+        | EmulatedRuntime.Net11 -> ()
+
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let http =
+            Assembly.readFile
+                loggerFactory
+                (Path.Combine (FrameworkUnderTest.sharedFrameworkDirectory (), "System.Net.Http.dll"))
+
+        // No runtime directories, so System.Runtime, through which System.Net.Http names `Task`, is
+        // not found.
+        let analysis =
+            analysisOf
+                (hostCoreLib ())
+                []
+                (hostTarget ())
+                HardwareIntrinsicsProfile.ScalarOnly
+                Assumption.all
+                [ http ]
+                id
+
+        let key = methodNamed http "System.Net.Http.HttpContent" "LoadIntoBufferAsyncCore"
+
+        let _, sources = EscapeAnalysis.unknownSources analysis key
+
+        sources
+        |> Seq.tryFind (fun source -> source.Method = key && source.Offset.IsNone)
+        |> Option.map _.Reason
+        |> shouldEqual (Some Opacity.UnresolvedAssembly)
+
     /// Where the object a `throw` raises comes from, in an emitted method.
     [<RequireQualifiedAccess>]
     type private Raise =
