@@ -1542,12 +1542,14 @@ through CoreLib's internal `MetadataImport.Enum` and the token each constraint n
 `ModuleBuilder.GetTypeMetadataToken`:
 
 * `Box<T, U, V, W>` (TypeDef 4), after `IMark` (TypeDef 2) and `Base : IMark` (TypeDef 3), with
-  `T : struct, IComparable<T>`, `U : Stream, IDisposable, IAsyncDisposable, new()` (the base type set
-  first), `V : class, Base, IMark` and `W : T`: rows 1 to 7, `T`'s 1, `U`'s 2 to 4, `V`'s 5 and 6, `W`'s 7.
+  `T : IComparable<T>`, `U : Stream, IDisposable, IAsyncDisposable, new()` (the base type set first),
+  `V : class, Base, IMark` and `W : T`: rows 1 to 7, `T`'s 1, `U`'s 2 to 4, `V`'s 5 and 6, `W`'s 7.
   `GetGenericParameterConstraints` reports each parameter's in RID order: `IComparable<T>` (TypeSpec 2),
   `IDisposable`, `IAsyncDisposable`, `Stream` (TypeRefs 3 to 5), `IMark`, `Base` (TypeDefs 2 and 3), and
   `T` (TypeSpec 1, `!0`), so the interfaces come first however the calls were ordered. The special
-  constraints are only flags.
+  constraints are only flags: a parameter with the `struct` flag and the constraint `IFormattable`
+  reports `IFormattable` alone, with no `ValueType`, which Roslyn writes as a row beside the flag and
+  `TypeBuilder` does not.
 * `SetBaseTypeConstraint(null)` adds a row naming `object` (TypeRef 1). `SetInterfaceConstraints` with
   `IDisposable` twice adds two rows, and the type loads. An interface constraint naming `string` loads.
   Setting the interface constraints twice keeps the second list.
@@ -1582,7 +1584,11 @@ Taken 2026-11-13.
   `object` for a null base type is a row, as measured. The managed caller decides what the tokens are.
 * **The extension check gets `RowChanged` and `AddedToCreatedType` for the table**, a constraint counting
   as a member of the type that owns its parameter, or of the method's declaring type for a method's
-  parameter.
+  parameter. Since a constraint is added only with its parameter, a constraint added to a created type
+  comes with its parameter's own `AddedToCreatedType`; the constraint's arm says which rows.
+* **PawPrint enforces the constraints of a created dynamic type as of any other**: `MakeGenericType`
+  reads them from the image through `GenericParameter.readAll`, as for an assembly on disk.
+  `TypeBuilderGenericParamConstraintViolated.cs` passes without a change for it.
 
 ### 5m: the oracle
 
@@ -1604,13 +1610,22 @@ Taken 2026-11-13.
   checks the tokens, each parameter's constraints and flags, makes `Box<int, MemoryStream, Base, int>`,
   and calls a method comparing two `T`s through `constrained. !0 callvirt IComparable<!0>::CompareTo`.
   Its terminal-state check reads the GenericParamConstraint rows.
+* `TypeBuilderGenericParamStructFlag.cs`, the `struct` flag without a `ValueType` row, exits 0 on .NET
+  10 and is parked: PawPrint reports `ValueType` among the constraints, because
+  `GenericParameter.readAll` drops the row Roslyn writes beside the flag and
+  `genericParameterConstraintTargets` appends `ValueType` for the flag, whether or not the image had the
+  row. That is so for any image without the row, and is not about this table.
 * `TypeBuilderGenericParamConstraintViolated.cs` asks `MakeGenericType` for instantiations of created
   dynamic types that break a TypeRef, a TypeDef and a TypeSpec constraint, and expects
   `ArgumentException` for each.
 * `TestTypeBuilderGenericParamRefusals` loses its constraint case.
-* Each mutant is caught: the constraints dropped or reversed, the coded index's tag wrong, the owner off
-  by one, the extension arms removed, the writer's columns swapped, and the handler stopping at the
-  first token rather than the nil.
+* Each mutant is caught: the constraints dropped or reversed in the scope; the owner off by one in the
+  scope or in the writer; a target not checked against the scope; the coded index's TypeDef and TypeRef
+  tags swapped, or a TypeSpec tagged as a TypeRef; the writer's columns swapped, or its row count 0; the
+  extension check's `RowChanged` or `AddedToCreatedType` arm removed, or the latter naming the first
+  parameter's type; and the handler passing no constraints, stopping at the first token rather than
+  the nil, or reversing them. The handler's mutants are caught only by the guests. The writer's
+  assertion that the table is sorted guards a state the scope cannot hold, so no test reaches it.
 
 ### 5m: left to later stages
 
@@ -1620,3 +1635,5 @@ Taken 2026-11-13.
   already takes them.
 * If a later stage writes `GenericParam` rows out of creation order (5l's options B and F), the
   constraint rows' owners move with them.
+* The `struct` flag's constraints, reported as the rows the metadata holds, which un-parks
+  `TypeBuilderGenericParamStructFlag.cs`.
