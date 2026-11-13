@@ -24,8 +24,6 @@ module TestPureCases =
     /// was verified to behave on real .NET. `onRuntime` folds these into every runtime's parks.
     let parkedEverywhere : Map<string, string> =
         [
-            "SynchronizedMainWithTypeInitialiser.cs",
-            """A synchronized `Main` whose type has a static constructor. CoreCLR runs the entry type's initialiser from `Main`'s prologue, inside the region the type's monitor guards, so the initialiser sees the monitor held; PawPrint runs it in a startup phase of its own before `Main` is installed, and refuses the combination rather than run it without the monitor: "TODO: the entry point ... is synchronized and its type has a type initialiser". Un-park when the entry type's initialiser runs from `Main`'s frame. Verified to exit 0 on real .NET 10 and 11."""
             "UnsafeAccessorTypeByrefArgument.cs",
             """An `[UnsafeAccessorType("Hidden&")]` on a `ref object` (and an `out object`) parameter. CoreCLR's stub (`EmitTypeCheck`, unsafeaccessors.cpp) type-checks what the caller's byref holds, copies it into a local of the named type, passes the target a byref to that local, and writes the local back through the caller's byref once the target returns, unless the parameter is `in`. The name resolves and the lookup binds; dispatch then refuses rather than pass the caller's byref straight through: "TODO: [UnsafeAccessor] .TestUnsafeAccessorTypeByrefArgument::Replace retypes its byref parameter 1 to Hidden&". The only such declaration in the shared framework is COM licensing's `out License` (`ComActivator`). Un-park when the accessor's frame can hold the typed local and write it back after the target returns. Verified to exit 0 on real .NET 10 and 11."""
             "UnsafeAccessorTypeGenericParameter.cs",
@@ -87,6 +85,8 @@ module TestPureCases =
         [
             "UnhandledException.cs", GuestEnding.UnhandledException
             "SynchronizedMethodUnhandledException.cs", GuestEnding.UnhandledException
+            "EntryTypeInitialiserThrowsUnhandled.cs", GuestEnding.UnhandledException
+            "SynchronizedMainTypeInitialiserThrows.cs", GuestEnding.UnhandledException
             "EnumHasFlagMismatchUnhandled.cs", GuestEnding.UnhandledException
             "EnumHasFlagNullFlagUnhandled.cs", GuestEnding.UnhandledException
             "ArrayGetLengthOutOfRangeUnhandled.cs", GuestEnding.UnhandledException
@@ -97,6 +97,7 @@ module TestPureCases =
             "ForegroundThreadExitsAfterMainReturns.cs", GuestEnding.ExitCode 7
             "IntMainReturnOverridesExitCode.cs", GuestEnding.ExitCode 3
             "VoidMainSetsExitCode.cs", GuestEnding.ExitCode 9
+            "EntryTypeInitialiserBackgroundsEntryThread.cs", GuestEnding.ExitCode 3
             "ExitOverridesExitCode.cs", GuestEnding.ExitCode 2
             "ForegroundWorkerTurnsBackgroundAfterMainReturns.cs", GuestEnding.ExitCode 5
             "BackgroundWorkerJoinsMainThread.cs", GuestEnding.ExitCode 4
