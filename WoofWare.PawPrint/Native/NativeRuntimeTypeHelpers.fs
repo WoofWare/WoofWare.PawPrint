@@ -1714,16 +1714,14 @@ module NativeRuntimeTypeHelpers =
                 failwith
                     $"TODO: validateConstraintsOn: generic parameter '%s{param.Name}' of %s{ownerDisplayName} declares constraints, and its argument %O{arg} is not closed; deciding them needs the argument's own constraints (`SatisfiesSpecialConstraintRecursive` / `GatherConstraintsRecursive` for a type variable) or an open construction's MethodTable, which PawPrint does not model"
 
-            match arg with
-            | RuntimeTypeHandleTarget.GenericParameter _
-            | RuntimeTypeHandleTarget.MethodGenericParameter _ -> false
-            | _ ->
-                not paramMd.AllowsByRefLike
-                && RuntimeTypeHandleTarget.isByRefLike
-                    baseClassTypes
-                    state.TypeSystem._LoadedAssemblies
-                    state.TypeSystem.ConcreteTypes
-                    arg
+            // CoreCLR skips the byref-like rejection for a type variable; asking agrees, because
+            // `isByRefLike` answers false for one.
+            not paramMd.AllowsByRefLike
+            && RuntimeTypeHandleTarget.isByRefLike
+                baseClassTypes
+                state.TypeSystem._LoadedAssemblies
+                state.TypeSystem.ConcreteTypes
+                arg
 
         ((state, None), Seq.zip generics genericArguments)
         ||> Seq.fold (fun (state, found) ((param, paramMd), arg) ->
