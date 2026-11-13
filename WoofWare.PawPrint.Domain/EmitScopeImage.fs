@@ -49,10 +49,20 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 /// form PawPrint's loader reads like any assembly on disk.
 ///
 /// Every RID in the image is the one the scope gave its row, except in `InterfaceImpl` and `MethodImpl`,
-/// which ECMA-335 requires to be sorted and which are sorted stably by class. `GenericParam` and
-/// `GenericParamConstraint` must be sorted by owner too, and the scope holds their rows in that order
-/// already, so the writer fails on a scope whose rows are not. A child table whose rows are
-/// not grouped by parent, or whose parameters are not in sequence order within their method, gets a
+/// which ECMA-335 requires to be sorted and which are sorted stably by class.
+///
+/// `GenericParam` is in the scope's order, which is the order the parameters were created and need not
+/// be ECMA-335's order by owner, so that each RID is the token CoreCLR gave the parameter. The header
+/// declares the table sorted all the same, whatever its order, because SRM's reader refuses an unsorted
+/// table that it is not told is sorted. The declaration is false whenever the rows are out of owner
+/// order, so nothing may find an owner's parameters by searching the table (SRM's
+/// `TypeDefinition.GetGenericParameters` and `MethodDefinition.GetGenericParameters` do, and answer
+/// wrongly); `GenericParamOwnerIndex` finds them instead. Every read of a row by its RID, and a
+/// parameter's constraints, are right. No other table is declared sorted, so SRM checks the order of
+/// each other one that must be sorted: `GenericParamConstraint` is, by its owner's RID, because the
+/// scope adds a parameter's constraints only with it, and the writer fails on a scope whose rows are not.
+///
+/// A child table whose rows are not grouped by parent, or whose parameters are not in sequence order within their method, gets a
 /// pointer table (`FieldPtr`, `MethodPtr`, `ParamPtr`), as CoreCLR's read-write metadata starts one, so the table stream is always the uncompressed `#-` kind, the only one
 /// that may hold pointer tables. Every heap offset is the one the scope handed out.
 [<RequireQualifiedAccess>]
@@ -142,15 +152,6 @@ module EmitScopeImage =
     /// added `i`-th (from 0).
     let methodImplRids (scope : EmitScope) : ImmutableArray<int> =
         EmitScope.methodImpls scope |> Seq.map (fun row -> row.Class) |> imageRids
-
-    /// ECMA-335 II.22.20 requires `GenericParam` sorted by owner, and SRM's reader refuses it otherwise.
-    /// The scope admits a row only in that order (`EmitScope.genericParamOrderConflict`), so a scope whose
-    /// rows are out of it was built by something else.
-    let private requireGenericParamsSorted (rows : ImmutableList<GenericParamRow>) : unit =
-        for i in 1 .. rows.Count - 1 do
-            if rows.[i].Owner.CodedIndex < rows.[i - 1].Owner.CodedIndex then
-                failwith
-                    $"EmitScopeImage: GenericParam row %d{i + 1}'s owner %O{rows.[i].Owner} sorts before row %d{i}'s owner %O{rows.[i - 1].Owner}, so no image can hold the rows at the scope's RIDs"
 
     /// ECMA-335 II.22.21 requires `GenericParamConstraint` sorted by owner, and SRM's reader refuses it
     /// otherwise. The scope adds a parameter's constraints only with the parameter, so a scope whose rows
@@ -258,7 +259,6 @@ module EmitScopeImage =
             |> Array.map (fun i -> rows.[i])
 
         let genericParams = EmitScope.genericParams scope
-        requireGenericParamsSorted genericParams
         let genericParamConstraints = EmitScope.genericParamConstraints scope
         requireGenericParamConstraintsSorted genericParamConstraints
 
@@ -511,9 +511,9 @@ module EmitScopeImage =
             |> Array.fold (fun mask (table, rows) -> if rows > 0 then mask ||| (1UL <<< table) else mask) 0UL
 
         stream.WriteUInt64 present
-        // No table is declared sorted, so SRM's reader checks the order of each one that must be,
-        // rather than trusting the declaration.
-        stream.WriteUInt64 0UL
+        // Only `GenericParam` is declared sorted, true or not (see the module's docstring); SRM's reader
+        // checks the order of every other table that must be sorted, rather than trusting a declaration.
+        stream.WriteUInt64 (1UL <<< int TableIndex.GenericParam)
 
         for rows in rowCounts do
             if rows > 0 then

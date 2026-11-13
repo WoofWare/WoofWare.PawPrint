@@ -382,7 +382,8 @@ module TestEmitScopeImage =
             token actual.Method |> shouldEqual (methodDefOrRefToken expected.Method)
             checkBlob scope reader expected.Instantiation actual.Signature
 
-        // The scope holds its rows in owner order already, so every row is at the RID the scope gave it.
+        // The image holds the rows in the scope's order, which is creation order, so every row is at the
+        // RID the scope gave it.
         let genericParams = EmitScope.genericParams scope
 
         reader.GetTableRowCount TableIndex.GenericParam
@@ -403,7 +404,7 @@ module TestEmitScopeImage =
             |> List.ofSeq
             |> shouldEqual (constraintsOwnedBy i scope)
 
-        // The constraints are added with their parameter, so they too are in owner order already.
+        // The constraints are added with their parameter, so they are in order of their owner's RID.
         let constraints = EmitScope.genericParamConstraints scope
 
         reader.GetTableRowCount TableIndex.GenericParamConstraint
@@ -549,6 +550,22 @@ module TestEmitScopeImage =
         |> Seq.filter (fun s -> ownedBy true s && ownedBy false s)
         |> Seq.length
         |> shouldBeGreaterThan 20
+
+        // And generic parameters out of owner order, as CoreCLR creates them, and in it.
+        let genericParamsInOwnerOrder (s : EmitScope) =
+            EmitScope.genericParams s
+            |> Seq.pairwise
+            |> Seq.forall (fun (a, b) -> a.Owner.CodedIndex <= b.Owner.CodedIndex)
+
+        scopes
+        |> Seq.filter (genericParamsInOwnerOrder >> not)
+        |> Seq.length
+        |> shouldBeGreaterThan 20
+
+        scopes
+        |> Seq.filter (fun s -> genericParamsInOwnerOrder s && (EmitScope.genericParams s).Count > 1)
+        |> Seq.length
+        |> shouldBeGreaterThan 5
 
         // And constraints of each kind, a parameter constrained to one target twice, and a parameter
         // with several constraints.

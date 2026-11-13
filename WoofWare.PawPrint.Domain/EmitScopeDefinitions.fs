@@ -20,21 +20,6 @@ type TypeDefDefinition =
     | Duplicate of TypeDefRid
 
 /// <summary>
-/// The outcome of asking CoreCLR's emitter to define a generic parameter in a dynamic module's scope
-/// (<c>RegMeta::DefineGenericParam</c>).
-/// </summary>
-[<RequireQualifiedAccess>]
-type GenericParamDefinition =
-    /// A new <c>GenericParam</c> row, and the scope that holds it.
-    | Defined of GenericParamRid * EmitScope
-    /// <summary>
-    /// Nothing is added: a row owned by <c>owner</c> would sort before the scope's last row, owned by
-    /// <c>last</c>, in ECMA-335's order. CoreCLR adds it, numbered in the order of creation, and an image
-    /// sorted by owner cannot give it that RID.
-    /// </summary>
-    | OutOfOrder of owner : TypeOrMethodDef * last : TypeOrMethodDef
-
-/// <summary>
 /// A generic parameter whose variance PawPrint does not model when its type is created.
 /// </summary>
 [<RequireQualifiedAccess>]
@@ -394,8 +379,8 @@ module EmitScopeDefinitions =
     /// set): a new row, at the next RID, holding the name, and the flags as
     /// <c>_SetGenericParamProps</c> stores them, 0 for <c>-1</c> and otherwise their low 16 bits; then one
     /// <c>GenericParamConstraint</c> row for each of <paramref name="constraints"/>, in that order,
-    /// repeats included. Nothing is added if the row would sort before the scope's last
-    /// (<c>EmitScope.genericParamOrderConflict</c>).
+    /// repeats included. The new row's RID is the token CoreCLR gives the parameter, in the order of
+    /// creation, whatever owns the rows before it.
     /// </summary>
     let defineGenericParam
         (owner : TypeOrMethodDef)
@@ -404,32 +389,26 @@ module EmitScopeDefinitions =
         (name : string)
         (constraints : TypeDefOrRef list)
         (scope : EmitScope)
-        : GenericParamDefinition
+        : GenericParamRid * EmitScope
         =
-        match EmitScope.genericParamOrderConflict owner scope with
-        | Some last -> GenericParamDefinition.OutOfOrder (owner, last)
-        | None ->
-            // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
-            let name, scope = EmitScope.internString name scope
+        // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
+        let name, scope = EmitScope.internString name scope
 
-            let flags =
-                if flags = -1 then
-                    enum<GenericParameterAttributes> 0
-                else
-                    enum<GenericParameterAttributes> (flags &&& 0xFFFF)
+        let flags =
+            if flags = -1 then
+                enum<GenericParameterAttributes> 0
+            else
+                enum<GenericParameterAttributes> (flags &&& 0xFFFF)
 
-            let rid, scope =
-                EmitScope.addGenericParam
-                    {
-                        Number = number
-                        Flags = flags
-                        Owner = owner
-                        Name = name
-                    }
-                    constraints
-                    scope
-
-            GenericParamDefinition.Defined (rid, scope)
+        EmitScope.addGenericParam
+            {
+                Number = number
+                Flags = flags
+                Owner = owner
+                Name = name
+            }
+            constraints
+            scope
 
     /// <summary>
     /// The first generic parameter of <paramref name="typeDef"/> or of one of its methods, in RID order,

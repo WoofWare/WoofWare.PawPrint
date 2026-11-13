@@ -831,19 +831,17 @@ module NativeRuntimeTypeBuilder =
                         $"TODO: %s{operation}: %s{name} has a null constraint array, which RegMeta::_SetGenericParamProps reads as leaving the constraints as they are; the managed caller passes a nil-terminated array, and PawPrint does not model a null one"
                 | tokens -> typeTokensUntilNil operation "constraint" ctx tokens held
 
-            match EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name constraints held with
-            | GenericParamDefinition.OutOfOrder (owner, last) ->
-                failwith
-                    $"TODO: %s{operation}: %s{name} of %O{owner} (coded index %d{owner.CodedIndex}) of %s{moduleName} would sort before the last GenericParam row, of %O{last} (coded index %d{last.CodedIndex}); CoreCLR numbers generic parameters in the order they are created, and an image sorted by owner cannot hold this one at that RID"
-            | GenericParamDefinition.Defined (rid, extended) ->
-                let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+            let rid, extended =
+                EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name constraints held
 
-                state
-                |> IlMachineState.pushToEvalStack
-                    (CliType.Numeric (CliNumericType.Int32 (0x2A000000 ||| rid.Rid)))
-                    ctx.Thread
-                |> NativeHandlerResult.completed
-                |> Some
+            let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+            state
+            |> IlMachineState.pushToEvalStack
+                (CliType.Numeric (CliNumericType.Int32 (0x2A000000 ||| rid.Rid)))
+                ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
         | "TypeBuilder_TermCreateClass",
           "System.Private.CoreLib",
           "System.Reflection.Emit",
