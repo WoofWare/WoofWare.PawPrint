@@ -2705,6 +2705,10 @@ module IlMachineRuntimeMetadata =
     /// other than `Object`, `ValueType` and `Enum`. `new()` is proved by the variable's own `new()`
     /// flag, but not a constraining variable's, by `struct` on it or a constraining variable, or by
     /// a value-type constraint. An interface constraint proves nothing.
+    ///
+    /// C# reaches only some of these rules: it cannot constrain a variable to a value type, nor
+    /// (CS0456) to a variable carrying `struct`, and its `struct` sets the `new()` flag too. The
+    /// rest are CoreCLR's as written, for IL that spells them.
     let typeVariableSatisfiesSpecialConstraint
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -2824,6 +2828,10 @@ module IlMachineRuntimeMetadata =
     /// is a variable equal to it, a variable carrying `struct` when it is `System.ValueType`, or
     /// anything else that casts to it (`isRuntimeTypeHandleTargetAssignableTo`). CoreCLR's
     /// static-virtual refinement for an abstract argument does not apply to a variable argument.
+    ///
+    /// C# cannot spell `System.Object` or `System.ValueType` as a constraint (the `ValueType` row
+    /// Roslyn emits beside `struct` is not among a parameter's constraints here), so those two
+    /// rules are CoreCLR's as written, for IL that spells them.
     let typeVariableSatisfiesGeneralConstraints
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)

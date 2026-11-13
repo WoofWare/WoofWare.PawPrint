@@ -150,7 +150,7 @@ public static class Program
         if (Admits(typeof(NeedsClass<>), Formal(typeof(ChainClass<,>)))) return 12;
         if (!Admits(typeof(NeedsClass<>), Formal(typeof(ChainException<,>)))) return 13;
 
-        // `new()`: proved by the flag, or by `struct`.
+        // `new()`: proved by the flag, which C# sets beside `struct` too.
         if (!Admits(typeof(NeedsNew<>), n)) return 14;
         if (!Admits(typeof(NeedsNew<>), s)) return 15;
         if (Admits(typeof(NeedsNew<>), u)) return 16;
