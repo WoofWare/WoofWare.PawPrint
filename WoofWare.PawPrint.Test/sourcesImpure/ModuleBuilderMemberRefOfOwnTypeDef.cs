@@ -8,7 +8,8 @@ using System.Reflection.Emit;
 // method through the created type's `MethodInfo` (`GetMethodTokenInternal` finds that its module is not the
 // `ModuleBuilder` and asks `GetMemberRefToken`, whose parent is the type's TypeDef), and a call, field access and
 // construction through user-derived `MethodInfo`, `FieldInfo` and `ConstructorInfo`s standing for created members.
-// Each is found again when asked again, and every method emitted through them runs. The emitted operands are read
+// Each is found again when asked again, and every method emitted through them runs. Last, a user-derived method of a
+// type never created, which the emitter names under that type's TypeDef all the same, in a body that never runs. The emitted operands are read
 // by the test's terminal-state check. Measured on .NET 10 to exit 0.
 //
 // Returns 0 on success, or the number of the first check that failed.
@@ -92,6 +93,37 @@ public sealed class DerivedConstructor : ConstructorInfo
     public override MethodImplAttributes GetMethodImplementationFlags () => inner.GetMethodImplementationFlags ();
     public override object Invoke (object obj, BindingFlags invokeAttr, Binder binder, object[] parameters, CultureInfo culture) => throw new NotSupportedException ();
     public override object Invoke (BindingFlags invokeAttr, Binder binder, object[] parameters, CultureInfo culture) => throw new NotSupportedException ();
+    public override object[] GetCustomAttributes (bool inherit) => Array.Empty<object> ();
+    public override object[] GetCustomAttributes (Type attributeType, bool inherit) => Array.Empty<object> ();
+    public override bool IsDefined (Type attributeType, bool inherit) => false;
+}
+
+/// A user-derived `MethodInfo` naming a static method `M` of `type`, taking nothing and returning `int`, which
+/// `GetMethodTokenNoLock` names by a MemberRef under `type`'s token whatever `type` holds.
+public sealed class UncreatedMethod : MethodInfo
+{
+    readonly Type type;
+
+    public UncreatedMethod (Type type)
+    {
+        this.type = type;
+    }
+
+    public override string Name => "M";
+    public override Type DeclaringType => type;
+    public override Type ReflectedType => type;
+    public override Module Module => type.Module;
+    public override MethodAttributes Attributes => MethodAttributes.Public | MethodAttributes.Static;
+    public override CallingConventions CallingConvention => CallingConventions.Standard;
+    public override RuntimeMethodHandle MethodHandle => throw new NotSupportedException ();
+    public override ParameterInfo[] GetParameters () => Array.Empty<ParameterInfo> ();
+    public override MethodImplAttributes GetMethodImplementationFlags () => MethodImplAttributes.IL;
+    public override object Invoke (object obj, BindingFlags invokeAttr, Binder binder, object[] parameters, CultureInfo culture) => throw new NotSupportedException ();
+    public override Type ReturnType => typeof (int);
+    // `GetMethodTokenNoLock` then makes the signature from the return type and parameters alone.
+    public override ParameterInfo ReturnParameter => throw new NotImplementedException ();
+    public override MethodInfo GetBaseDefinition () => this;
+    public override ICustomAttributeProvider ReturnTypeCustomAttributes => throw new NotSupportedException ();
     public override object[] GetCustomAttributes (bool inherit) => Array.Empty<object> ();
     public override object[] GetCustomAttributes (Type attributeType, bool inherit) => Array.Empty<object> ();
     public override bool IsDefined (Type attributeType, bool inherit) => false;
@@ -291,6 +323,18 @@ public static class Program
             || resolving.ResolveMethod (0x2B000005) != createdG.MakeGenericMethod (typeof (string)))
         {
             return 12;
+        }
+
+        // TypeDef 5: `U`, never created. A user-derived method of it, emitted into a method of `U` that never runs,
+        // is MemberRef 7 under `U`'s TypeDef, `00 00 08`: the emitter reads nothing of the type.
+        TypeBuilder u = module.DefineType ("U", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed);
+        ILGenerator uncreatedIl = Static (u, "NeverRun", typeof (int)).GetILGenerator ();
+        uncreatedIl.Emit (OpCodes.Call, new UncreatedMethod (u));
+        uncreatedIl.Emit (OpCodes.Ret);
+
+        if (u.MetadataToken != 0x02000005)
+        {
+            return 13;
         }
 
         return 0;

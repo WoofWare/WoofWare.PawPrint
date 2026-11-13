@@ -2402,8 +2402,9 @@ module TestImpureCases =
     /// (TypeDef 3) from `E`'s bodies: `G<X>`'s and `H<Y>`'s instantiations through the created type's `MethodInfo`s,
     /// each a MemberRef under `D`'s TypeDef with a MethodSpec under it, `G<int>` through the `MethodBuilder` a
     /// MethodSpec under `G`'s MethodDef, `N` by its MethodDef, and `N`, `F` and `K..ctor` through user-derived
-    /// members, each a MemberRef under its type's TypeDef; each found again when asked again, all as .NET 10
-    /// numbers them, and no TypeRef added for either type. The operands are read from `E`'s bodies, since the
+    /// members, each a MemberRef under its type's TypeDef; each found again when asked again; and a user-derived
+    /// method of `U` (TypeDef 5), never created, under `U`'s TypeDef; all as .NET 10 numbers them, and no TypeRef
+    /// added for any of the types. The operands are read from `E`'s bodies, since the
     /// guest cannot see them, and resolving a token cannot tell MethodSpecs 1 and 4 apart, nor a TypeDef parent
     /// from a TypeRef one.
     let private assertOwnTypeDefMemberRefRows (state : IlMachineState) : unit =
@@ -2438,6 +2439,8 @@ module TestImpureCases =
                 typeDef 2, "N", [ 0x00uy ; 0x01uy ; 0x08uy ; 0x08uy ]
                 typeDef 2, "F", [ 0x06uy ; 0x08uy ]
                 typeDef 3, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                // `U`, never created.
+                typeDef 5, "M", [ 0x00uy ; 0x00uy ; 0x08uy ]
             ]
 
         let memberRef (rid : int) =
