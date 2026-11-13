@@ -1703,15 +1703,14 @@ module NativeRuntimeTypeHelpers =
     /// `methodVariables` is `Open` in the same way when the method is a generic method definition
     /// read as itself, which is the context `RuntimeTypeHandle.SatisfiesConstraints` asks in.
     ///
-    /// An argument need not be closed. Against a parameter that declares no constraint of its own
-    /// (no special constraint and no general one), an open argument is decided exactly: a type
-    /// variable satisfies it, since CoreCLR applies the byref-like rejection only to an argument
-    /// that is not a variable (typedesc.cpp:1527-1606), and any other open argument is refused
-    /// only if it is byref-like, as an open construction of a `ref struct` is. Against a parameter
-    /// that does declare one, an open argument fails loudly: CoreCLR then reads a variable's own
-    /// constraints (`SatisfiesSpecialConstraintRecursive`, `GatherConstraintsRecursive`), because
-    /// `class A&lt;S, T&gt; where S : T` may be instantiated as `A&lt;U, U&gt;`, and asks an open
-    /// construction's MethodTable, neither of which PawPrint models.
+    /// An argument need not be closed. A type variable is judged by what its own constraints prove
+    /// (`IlMachineRuntimeMetadata.typeVariableSatisfiesSpecialConstraint` and
+    /// `typeVariableSatisfiesGeneralConstraints`), and is never refused as byref-like
+    /// (typedesc.cpp:1527-1606); so `class A&lt;S, T&gt; where S : T` admits `A&lt;U, U&gt;`. Any
+    /// other open argument, such as an open construction, is decided only against a parameter that
+    /// declares no constraint of its own, where it is refused only if it is byref-like, as an open
+    /// construction of a `ref struct` is. Against a parameter that does declare one, it fails
+    /// loudly: CoreCLR asks the open construction's MethodTable, which PawPrint does not model.
     ///
     /// The static-virtual-method refinement at typedesc.cpp:1686 (an abstract argument against an
     /// interface constraint carrying unimplemented virtual statics) is likewise not implemented:
@@ -1781,8 +1780,25 @@ module NativeRuntimeTypeHelpers =
             || violatesNew ()
             || violatesByRefLike ()
 
-        /// Whether the general "must be assignable to" constraints refuse `arg`. Concretizing them
-        /// can load assemblies and register types, hence the state threading.
+        /// One of `param`'s general constraints, read under the declarer's context. Reading it can
+        /// load assemblies and register types, hence the state threading.
+        let generalConstraintTarget
+            (state : IlMachineState)
+            (param : GenericParameter)
+            (constraintTypeDefn : TypeDefn)
+            : IlMachineState * RuntimeTypeHandleTarget
+            =
+            ReflectedTypeTarget.reflectedTypeTarget
+                loggerFactory
+                baseClassTypes
+                "validateConstraintsOn"
+                $"a constraint on generic parameter '%s{param.Name}' of %s{ownerDisplayName}"
+                declaringAssembly
+                environment
+                state
+                constraintTypeDefn
+
+        /// Whether the general "must be assignable to" constraints refuse `arg`.
         let violatesGeneralConstraint
             (state : IlMachineState)
             (param : GenericParameter)
@@ -1796,16 +1812,7 @@ module NativeRuntimeTypeHelpers =
                     state, true
                 else
 
-                let state, constraintTarget =
-                    ReflectedTypeTarget.reflectedTypeTarget
-                        loggerFactory
-                        baseClassTypes
-                        "validateConstraintsOn"
-                        $"a constraint on generic parameter '%s{param.Name}' of %s{ownerDisplayName}"
-                        declaringAssembly
-                        environment
-                        state
-                        constraintTypeDefn
+                let state, constraintTarget = generalConstraintTarget state param constraintTypeDefn
 
                 // "System.Object constraint will be always satisfied" (typedesc.cpp:1637).
                 // Untested: C# cannot spell `where T : object`, so no Roslyn-compiled corpus
@@ -1834,8 +1841,64 @@ module NativeRuntimeTypeHelpers =
                 state, not satisfied
             )
 
-        /// Whether `paramMd` refuses an argument that is not closed, where that is decidable
-        /// without the argument's own constraints.
+        /// Whether `paramMd` refuses `arg`, a type variable, by what the variable's own constraints
+        /// prove. CoreCLR checks the special constraints first, and the general ones only if there
+        /// are any.
+        let violatedByTypeVariable
+            (state : IlMachineState)
+            (param : GenericParameter)
+            (paramMd : GenericParamMetadata)
+            (arg : RuntimeTypeHandleTarget)
+            : IlMachineState * bool
+            =
+            let specialConstraints =
+                [
+                    if paramMd.RequiresNonNullableValueType then
+                        IlMachineRuntimeMetadata.SpecialConstraint.NotNullableValueType
+                    if paramMd.RequiresReferenceType then
+                        IlMachineRuntimeMetadata.SpecialConstraint.ReferenceType
+                    if paramMd.RequiresParameterlessConstructor then
+                        IlMachineRuntimeMetadata.SpecialConstraint.DefaultConstructor
+                ]
+
+            let state, specialsMet =
+                ((state, true), specialConstraints)
+                ||> List.fold (fun (state, met) required ->
+                    if met then
+                        IlMachineRuntimeMetadata.typeVariableSatisfiesSpecialConstraint
+                            loggerFactory
+                            baseClassTypes
+                            state
+                            required
+                            arg
+                    else
+                        state, false
+                )
+
+            if not specialsMet then
+                state, true
+            elif paramMd.Constraints.IsEmpty then
+                state, false
+            else
+                let state, constraintTargets =
+                    ((state, []), paramMd.Constraints)
+                    ||> Seq.fold (fun (state, acc) constraintTypeDefn ->
+                        let state, target = generalConstraintTarget state param constraintTypeDefn
+                        state, target :: acc
+                    )
+
+                let state, met =
+                    IlMachineRuntimeMetadata.typeVariableSatisfiesGeneralConstraints
+                        loggerFactory
+                        baseClassTypes
+                        state
+                        arg
+                        (List.rev constraintTargets)
+
+                state, not met
+
+        /// Whether `paramMd` refuses an argument that is neither closed nor a type variable, where
+        /// that is decidable without the argument's MethodTable.
         let violatedByOpenArgument
             (state : IlMachineState)
             (param : GenericParameter)
@@ -1851,10 +1914,8 @@ module NativeRuntimeTypeHelpers =
 
             if declaresConstraint then
                 failwith
-                    $"TODO: validateConstraintsOn: generic parameter '%s{param.Name}' of %s{ownerDisplayName} declares constraints, and its argument %O{arg} is not closed; deciding them needs the argument's own constraints (`SatisfiesSpecialConstraintRecursive` / `GatherConstraintsRecursive` for a type variable) or an open construction's MethodTable, which PawPrint does not model"
+                    $"TODO: validateConstraintsOn: generic parameter '%s{param.Name}' of %s{ownerDisplayName} declares constraints, and its argument %O{arg} is neither closed nor a type variable; deciding them needs the open type's MethodTable, which PawPrint does not model"
 
-            // CoreCLR skips the byref-like rejection for a type variable; asking agrees, because
-            // `isByRefLike` answers false for one.
             not paramMd.AllowsByRefLike
             && RuntimeTypeHandleTarget.isByRefLike
                 baseClassTypes
@@ -1875,6 +1936,8 @@ module NativeRuntimeTypeHelpers =
                         state, true
                     else
                         violatesGeneralConstraint state param paramMd arg
+                | RuntimeTypeHandleTarget.GenericParameter _
+                | RuntimeTypeHandleTarget.MethodGenericParameter _ -> violatedByTypeVariable state param paramMd arg
                 | open' -> state, violatedByOpenArgument state param paramMd open'
 
             if violated then
