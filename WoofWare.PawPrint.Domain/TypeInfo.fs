@@ -572,6 +572,7 @@ module TypeInfo =
         (peReader : PEReader)
         (thisAssembly : WoofWare.PawPrint.AssemblyDefinition)
         (metadataReader : MetadataReader)
+        (genericParamOwners : GenericParamOwnerIndex)
         (typeHandle : TypeDefinitionHandle)
         : TypeInfo<GenericParamFromMetadata, TypeDefn>
         =
@@ -596,7 +597,12 @@ module TypeInfo =
         let fields =
             typeDef.GetFields ()
             |> Seq.map (fun h ->
-                FieldInfo.make metadataReader thisAssembly.Name h (metadataReader.GetFieldDefinition h)
+                FieldInfo.make
+                    metadataReader
+                    genericParamOwners
+                    thisAssembly.Name
+                    h
+                    (metadataReader.GetFieldDefinition h)
             )
             |> Seq.toList
 
@@ -634,11 +640,15 @@ module TypeInfo =
             |> Seq.toList
 
         let genericParams =
-            GenericParameter.readAll thisAssembly.Name metadataReader (typeDef.GetGenericParameters ())
+            GenericParameter.readAll
+                thisAssembly.Name
+                metadataReader
+                genericParamOwners
+                (GenericParamOwner.TypeDef typeHandle)
 
         let methods =
             methods
-            |> Seq.map (fun m -> MethodInfo.read peReader metadataReader m)
+            |> Seq.map (fun m -> MethodInfo.read peReader metadataReader genericParamOwners m)
             |> Seq.toList
 
         let baseType =

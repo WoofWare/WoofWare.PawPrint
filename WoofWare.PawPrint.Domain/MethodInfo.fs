@@ -1523,9 +1523,12 @@ module MethodInfo =
             |> CustomAttribute.parseUnmanagedCallersOnly
         )
 
+    /// The method `methodHandle` of `metadataReader`; `genericParamOwners` must have been built from
+    /// `metadataReader`.
     let read
         (peReader : PEReader)
         (metadataReader : MetadataReader)
+        (genericParamOwners : GenericParamOwnerIndex)
         (methodHandle : MethodDefinitionHandle)
         : MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
         =
@@ -1618,8 +1621,11 @@ module MethodInfo =
                             $"%s{assemblyName.Name}::%s{declaringTypeNamespace}.%s{declaringTypeName}::%s{methodName}: RVA=0 but no InternalCall/PInvoke/Runtime/Abstract flag, no [UnsafeAccessor] attribute, and not managed IL (ImplAttributes=%O{implAttrs}, MethodAttributes=%O{methodAttrs}); malformed metadata or unhandled body classification"
 
         let declaringTypeGenericParams =
-            metadataReader.GetTypeDefinition(declaringType).GetGenericParameters ()
-            |> GenericParameter.readAll assemblyName metadataReader
+            GenericParameter.readAll
+                assemblyName
+                metadataReader
+                genericParamOwners
+                (GenericParamOwner.TypeDef declaringType)
 
         let attrs =
             let result = ImmutableArray.CreateBuilder ()
@@ -1637,7 +1643,11 @@ module MethodInfo =
         let methodParams = Parameter.readAll metadataReader (methodDef.GetParameters ())
 
         let methodGenericParams =
-            GenericParameter.readAll assemblyName metadataReader (methodDef.GetGenericParameters ())
+            GenericParameter.readAll
+                assemblyName
+                metadataReader
+                genericParamOwners
+                (GenericParamOwner.MethodDef methodHandle)
 
         let nativeImport =
             if methodAttrs.HasFlag MethodAttributes.PinvokeImpl then

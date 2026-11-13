@@ -1179,6 +1179,20 @@ module Assembly =
         let entryPointMethod =
             managedEntryPoint peReader.PEHeaders.CorHeader (metadataReader.GetTableRowCount TableIndex.MethodDef)
 
+        let genericParamOwners =
+            match GenericParamOwnerIndex.ofReader metadataReader with
+            | Ok index -> index
+            | Error error ->
+                let owner =
+                    match error.Owner with
+                    | GenericParamOwner.TypeDef handle ->
+                        MetadataTokens.GetToken (TypeDefinitionHandle.op_Implicit handle : EntityHandle)
+                    | GenericParamOwner.MethodDef handle ->
+                        MetadataTokens.GetToken (MethodDefinitionHandle.op_Implicit handle : EntityHandle)
+
+                failwith
+                    $"Assembly %s{assy.FullName}: GenericParam row %d{MetadataTokens.GetRowNumber (GenericParameterHandle.op_Implicit error.Row : EntityHandle)} is number %d{error.Actual} of its owner 0x%08x{owner}, but %d{error.Expected} of that owner's rows precede it. ECMA-335 II.22.20 numbers an owner's parameters from 0 in order, so this image is refused."
+
         let assemblyRefs =
             let builder = ImmutableDictionary.CreateBuilder ()
 
@@ -1199,7 +1213,7 @@ module Assembly =
             let builder = ImmutableDictionary.CreateBuilder ()
 
             for ty in metadataReader.TypeDefinitions do
-                builder.Add (ty, TypeInfo.read peReader assy metadataReader ty)
+                builder.Add (ty, TypeInfo.read peReader assy metadataReader genericParamOwners ty)
 
             builder.ToImmutable ()
 
@@ -1311,7 +1325,7 @@ module Assembly =
             for field in metadataReader.FieldDefinitions do
                 let fieldDefn =
                     metadataReader.GetFieldDefinition field
-                    |> FieldInfo.make metadataReader assy.Name field
+                    |> FieldInfo.make metadataReader genericParamOwners assy.Name field
 
                 result.Add (field, fieldDefn)
 

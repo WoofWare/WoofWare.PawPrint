@@ -117,10 +117,16 @@ module TestGenericParamOwnerOracle =
         |> List.ofSeq
 
     let private compareAll (directory : string) : Compared list =
-        Directory.GetFiles (directory, "*.dll")
-        |> Array.sort
-        |> Array.choose compare
-        |> List.ofArray
+        let compared =
+            Directory.GetFiles (directory, "*.dll")
+            |> Array.sort
+            |> Array.choose compare
+            |> List.ofArray
+
+        System.Console.WriteLine
+            $"%s{directory}: %d{compared.Length} images, %d{compared |> List.sumBy _.TypeOwners} generic types, %d{compared |> List.sumBy _.MethodOwners} generic methods"
+
+        compared
 
     [<Test>]
     let ``the index agrees with SRM over the framework under test`` () : unit =
