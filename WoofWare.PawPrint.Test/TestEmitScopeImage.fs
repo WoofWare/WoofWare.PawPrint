@@ -429,7 +429,10 @@ module TestEmitScopeImage =
 
         for i in 1 .. properties.Count do
             let expected = properties.[i - 1]
-            let actual = reader.GetPropertyDefinition (MetadataTokens.PropertyDefinitionHandle i)
+
+            let actual =
+                reader.GetPropertyDefinition (MetadataTokens.PropertyDefinitionHandle i)
+
             actual.Attributes |> shouldEqual expected.Flags
             checkString scope reader expected.Name actual.Name
             checkBlob scope reader expected.Signature actual.Signature

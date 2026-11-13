@@ -229,7 +229,10 @@ module EmitScopeExtension =
                     (fun row -> row.Owner)
 
             yield!
-                rewritten TableIndex.MethodSemantics (EmitScope.methodSemantics before) (EmitScope.methodSemantics after)
+                rewritten
+                    TableIndex.MethodSemantics
+                    (EmitScope.methodSemantics before)
+                    (EmitScope.methodSemantics after)
 
             yield!
                 addedToCreated

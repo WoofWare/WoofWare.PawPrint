@@ -960,8 +960,12 @@ module TestEmitScopeExtension =
         let _, scope =
             EmitScopeDefinitions.defineMethod second "get_B" signature Reflection.MethodAttributes.Public scope
 
-        let a, scope = EmitScopeDefinitions.defineProperty first "A" propertySignature 0 scope
-        let b, scope = EmitScopeDefinitions.defineProperty second "B" propertySignature 0 scope
+        let a, scope =
+            EmitScopeDefinitions.defineProperty first "A" propertySignature 0 scope
+
+        let b, scope =
+            EmitScopeDefinitions.defineProperty second "B" propertySignature 0 scope
+
         scope, a, b
 
     [<Test>]
@@ -1055,14 +1059,13 @@ module TestEmitScopeExtension =
                 scope
 
         EmitScopeExtension.violations ImmutableHashSet.Empty before rewritten
-        |> shouldEqual
-            [
-                EmitScopeExtensionViolation.RowChanged (TableIndex.MethodSemantics, 1)
-            ]
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.MethodSemantics, 1) ]
 
         let oneProperty =
             let define (name : string) (scope : EmitScope) : TypeDefRid * EmitScope =
-                match EmitScopeDefinitions.defineTopLevelTypeDef name Reflection.TypeAttributes.Public None [] scope with
+                match
+                    EmitScopeDefinitions.defineTopLevelTypeDef name Reflection.TypeAttributes.Public None [] scope
+                with
                 | TypeDefDefinition.Defined (rid, scope) -> rid, scope
                 | TypeDefDefinition.Duplicate _ -> failwith $"%s{name} is defined twice"
 

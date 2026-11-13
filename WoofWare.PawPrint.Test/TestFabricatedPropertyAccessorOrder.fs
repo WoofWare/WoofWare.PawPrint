@@ -18,16 +18,19 @@ module TestFabricatedPropertyAccessorOrder =
             PersistedAssemblyBuilder (AssemblyName "AccessorOrder", typeof<obj>.Assembly)
 
         let modul = builder.DefineDynamicModule "AccessorOrder"
-        let t = modul.DefineType ("T", TypeAttributes.Public ||| TypeAttributes.Class, typeof<obj>)
 
-        t.DefineDefaultConstructor MethodAttributes.Public
-        |> ignore<ConstructorBuilder>
+        let t =
+            modul.DefineType ("T", TypeAttributes.Public ||| TypeAttributes.Class, typeof<obj>)
+
+        t.DefineDefaultConstructor MethodAttributes.Public |> ignore<ConstructorBuilder>
 
         let constant (name : string) (value : int) : MethodBuilder =
             let method =
                 t.DefineMethod (
                     name,
-                    MethodAttributes.Public ||| MethodAttributes.SpecialName ||| MethodAttributes.HideBySig,
+                    MethodAttributes.Public
+                    ||| MethodAttributes.SpecialName
+                    ||| MethodAttributes.HideBySig,
                     typeof<int>,
                     Type.EmptyTypes
                 )
@@ -38,7 +41,9 @@ module TestFabricatedPropertyAccessorOrder =
             method
 
         // P's getter and three other methods, then 21 properties of one getter each: 25 rows.
-        let p = t.DefineProperty ("P", PropertyAttributes.None, typeof<int>, Type.EmptyTypes)
+        let p =
+            t.DefineProperty ("P", PropertyAttributes.None, typeof<int>, Type.EmptyTypes)
+
         p.SetGetMethod (constant "g" 0)
         p.AddOtherMethod (constant "o1" 1)
         p.AddOtherMethod (constant "o2" 2)

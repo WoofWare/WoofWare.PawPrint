@@ -722,7 +722,9 @@ module EmitScopeGen =
             let signature, applied =
                 internBlob
                     (ImmutableArray.CreateRange (
-                        (if flags % 2 = 0 then 0x08uy else 0x28uy) :: 0x00uy :: elementType scope propertyType
+                        (if flags % 2 = 0 then 0x08uy else 0x28uy)
+                        :: 0x00uy
+                        :: elementType scope propertyType
                     ))
                     applied
 
@@ -746,7 +748,8 @@ module EmitScopeGen =
                         Semantics = (pick semantics semanticsChoices).Value
                         Method = MethodDefRid (methodChoice % methodCount + 1)
                         Association =
-                            HasSemantics.Property (EmitScope.tryPropertyRid (propertyChoice % propertyCount + 1) scope).Value
+                            HasSemantics.Property
+                                (EmitScope.tryPropertyRid (propertyChoice % propertyCount + 1) scope).Value
                     }
 
                 withScope (EmitScope.addMethodSemantics row applied.Scope) applied
@@ -915,7 +918,9 @@ module EmitScopeGen =
                 if position <> maps.Length - 1 then
                     indirect <- true
 
-                maps <- maps |> List.mapi (fun i (parent, run) -> if i = position then parent, run @ [ rid ] else parent, run)
+                maps <-
+                    maps
+                    |> List.mapi (fun i (parent, run) -> if i = position then parent, run @ [ rid ] else parent, run)
         )
 
         let starts =

@@ -102,7 +102,10 @@ module TestEmitScopeProperties =
 
             EmitScope.properties scope
             |> Seq.map (fun row ->
-                row.Owner.Rid, EmitScope.stringAt row.Name scope, int row.Flags, List.ofSeq (EmitScope.blobAt row.Signature scope)
+                row.Owner.Rid,
+                EmitScope.stringAt row.Name scope,
+                int row.Flags,
+                List.ofSeq (EmitScope.blobAt row.Signature scope)
             )
             |> List.ofSeq
             |> shouldEqual (
@@ -117,8 +120,7 @@ module TestEmitScopeProperties =
                 let! types = Gen.choose (1, 4)
 
                 // Few names, so that a type often has two properties with one name and signature.
-                let! definitions =
-                    Gen.listOf (Gen.zip3 (Gen.choose (0, 10)) (Gen.elements [ "A" ; "B" ; "" ]) genFlags)
+                let! definitions = Gen.listOf (Gen.zip3 (Gen.choose (0, 10)) (Gen.elements [ "A" ; "B" ; "" ]) genFlags)
 
                 return types, List.ofSeq definitions
             }
@@ -134,7 +136,7 @@ module TestEmitScopeProperties =
             let start = withTypes 2 3
 
             let start =
-                (start, [ 0 .. 2 ])
+                (start, [ 0..2 ])
                 ||> List.fold (fun scope i ->
                     EmitScopeDefinitions.defineProperty (TypeDefRid (i % 2 + 2)) $"P%d{i}" propertySignature 0 scope
                     |> snd
@@ -161,13 +163,14 @@ module TestEmitScopeProperties =
             EmitScope.methodSemantics scope
             |> Seq.map (fun row -> row.Association.CodedIndex, row.Semantics, row.Method.Rid)
             |> List.ofSeq
-            |> shouldEqual (calls |> List.map (fun (p, s, m) -> ((p % 3 + 1) <<< 1) ||| 1, semantics s, m % 6 + 1))
+            |> shouldEqual (
+                calls
+                |> List.map (fun (p, s, m) -> ((p % 3 + 1) <<< 1) ||| 1, semantics s, m % 6 + 1)
+            )
 
         Check.One (
             Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll
-                (Arb.fromGen (Gen.listOf (Gen.zip3 choice choice choice) |> Gen.map List.ofSeq))
-                property
+            Prop.forAll (Arb.fromGen (Gen.listOf (Gen.zip3 choice choice choice) |> Gen.map List.ofSeq)) property
         )
 
     [<Test>]
@@ -230,9 +233,7 @@ module TestEmitScopeProperties =
         )
 
         // More matching rows than the table holds is a caller's fault.
-        Assert.Throws<ArgumentException> (fun () ->
-            ReadWriteMetadataLookup.rowsOfKey 1 [ 1 ; 2 ] |> ignore<int list>
-        )
+        Assert.Throws<ArgumentException> (fun () -> ReadWriteMetadataLookup.rowsOfKey 1 [ 1 ; 2 ] |> ignore<int list>)
         |> ignore<ArgumentException>
 
     /// One call a schedule makes, on real .NET's `TypeBuilder` and on a scope alike.
@@ -324,7 +325,8 @@ module TestEmitScopeProperties =
                     let name = $"P%d{hostProperties.Count}"
 
                     let builder =
-                        hostTypes.[owner].DefineProperty (name, enum<PropertyAttributes> flags, typeof<int>, Type.EmptyTypes)
+                        hostTypes.[owner]
+                            .DefineProperty (name, enum<PropertyAttributes> flags, typeof<int>, Type.EmptyTypes)
 
                     hostProperties.Add (builder, owner)
 
@@ -382,6 +384,7 @@ module TestEmitScopeProperties =
             let pe, reader = readImage (EmitScopeImage.write scope)
             use _ = pe
             let semanticsRows = methodSemanticsRows pe reader
+
             let methodName (rid : int) =
                 reader.GetString (reader.GetMethodDefinition (MetadataTokens.MethodDefinitionHandle rid)).Name
 
@@ -392,13 +395,19 @@ module TestEmitScopeProperties =
             let reportedByImage =
                 [
                     for t in 0 .. types - 1 do
-                        let definition = reader.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle (t + 2))
+                        let definition =
+                            reader.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle (t + 2))
+
                         let mutable usedSlots = Set.empty
 
                         yield
                             [
                                 for handle in definition.GetProperties () do
-                                    let rid = MetadataTokens.GetRowNumber (PropertyDefinitionHandle.op_Implicit handle : EntityHandle)
+                                    let rid =
+                                        MetadataTokens.GetRowNumber (
+                                            PropertyDefinitionHandle.op_Implicit handle : EntityHandle
+                                        )
+
                                     let row = reader.GetPropertyDefinition handle
                                     let association = (rid <<< 1) ||| 1
 
@@ -409,7 +418,10 @@ module TestEmitScopeProperties =
                                         |> ReadWriteMetadataLookup.rowsOfKey semanticsRows.Length
 
                                     let pick (semantics : int) =
-                                        rows |> List.filter (fun (s, _) -> s = semantics) |> List.tryLast |> Option.map snd
+                                        rows
+                                        |> List.filter (fun (s, _) -> s = semantics)
+                                        |> List.tryLast
+                                        |> Option.map snd
 
                                     let getter = pick 2
                                     let setter = pick 1
@@ -432,7 +444,11 @@ module TestEmitScopeProperties =
                                                 Getter = getter |> Option.map methodName
                                                 Setter = setter |> Option.map methodName
                                                 Accessors =
-                                                    [ yield! Option.toList getter ; yield! Option.toList setter ; yield! others ]
+                                                    [
+                                                        yield! Option.toList getter
+                                                        yield! Option.toList setter
+                                                        yield! others
+                                                    ]
                                                     |> List.map methodName
                                             }
                             ]

@@ -297,6 +297,7 @@ module EmitScopeImage =
         requireGenericParamConstraintsSorted genericParamConstraints
 
         let properties = EmitScope.properties scope
+
         let propertyMapOf, propertyMapParents =
             properties |> Seq.map _.Owner |> Array.ofSeq |> propertyMaps
 
@@ -498,7 +499,8 @@ module EmitScopeImage =
 
         // PropertyMap (II.22.35). Its list indexes the pointer table when there is one, which has as many
         // rows as `Property`.
-        let propertyLists = listStarts (propertyMapOf |> Array.map (fun m -> m + 1)) propertyMapParents.Length
+        let propertyLists =
+            listStarts (propertyMapOf |> Array.map (fun m -> m + 1)) propertyMapParents.Length
 
         for i in 0 .. propertyMapParents.Length - 1 do
             index TableIndex.TypeDef "PropertyMap.Parent" propertyMapParents.[i].Rid

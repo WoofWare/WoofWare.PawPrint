@@ -421,7 +421,9 @@ module NativeRuntimeTypeBuilder =
           "RuntimeTypeBuilder",
           [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
             ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
-            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection", "MethodSemanticsAttributes", semanticsGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection",
+                                                        "MethodSemanticsAttributes",
+                                                        semanticsGenerics)
             ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
           MethodReturnType.Void when moduleGenerics.IsEmpty && semanticsGenerics.IsEmpty ->
             let operation = "TypeBuilder_DefineMethodSemantics"
@@ -455,7 +457,9 @@ module NativeRuntimeTypeBuilder =
 
             // `_DefineMethodSemantics` takes the semantics as two bytes.
             let semantics =
-                enum<MethodSemanticsAttributes> (NativeCall.int32Argument operation instruction.Arguments.[2] &&& 0xFFFF)
+                enum<MethodSemanticsAttributes> (
+                    NativeCall.int32Argument operation instruction.Arguments.[2] &&& 0xFFFF
+                )
 
             // The managed caller passes `MethodBuilder.MetadataToken`, whatever module the builder is of;
             // CoreCLR stores its RID unread. A token of this module's method is CoreCLR's row, whichever
