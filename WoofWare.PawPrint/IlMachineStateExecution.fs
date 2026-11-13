@@ -1446,6 +1446,9 @@ module IlMachineStateExecution =
             with
             | Ok frame ->
                 match frame.Synchronized, body.VmStub, body.AsyncFrame with
+                | Some _, None, Some (AsyncFrame.AsyncVersion _) ->
+                    failwith
+                        $"TODO: %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name} is synchronized, and this frame runs its async version. CoreCLR's JIT releases the monitor immediately before a wrapped `ret`'s call of `AsyncHelpers.TransparentAwait` (`impWrapTopOfStackInAwait`, jit/importer.cpp), and a frame resumed after that call does not take it again; PawPrint models neither (stage 4d of docs/plans/2026-11-11-runtime-async.md)"
                 | Some _, Some _, _
                 | Some _, _, Some _ ->
                     failwith

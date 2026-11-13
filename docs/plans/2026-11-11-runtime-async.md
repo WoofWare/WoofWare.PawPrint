@@ -455,9 +455,9 @@ it means by a distinction that only `frameBody` needs.
   not for the wrapped `ret`.
 
   The async version of a synchronized method runs like any other async version, except that it
-  matches no tail shape (`AwaitPattern.tailShapeAfter` says so) and every `ret` wraps. Its monitor
-  is whatever the ordinary variant's is. When PawPrint models the monitor, the exit goes
-  immediately before the wrapped `ret`'s call of `TransparentAwait` (`jit/importer.cpp:11901-11914`).
+  matches no tail shape (`AwaitPattern.tailShapeAfter` says so) and every `ret` wraps. The monitor
+  is released immediately before the wrapped `ret`'s call of `TransparentAwait`
+  (`jit/importer.cpp:11901-11914`), so a frame resumed after that call holds none.
   RC1 has 22, all returning already-completed promises (`Task.CompletedTask`, `FromResult` or
   `FromCanceled` after synchronous work), so none can suspend.
 
@@ -941,8 +941,10 @@ Each stage is one pull request, with its tests first.
     `WriteEntryCoreAsync` come from a `constrained.` site unbound until 4e, so the guest checks only
     the three adjacent frames; real .NET 11 reports `WriteEntryAsync` at IL_002E.
 
-    The async version of a synchronized method is no longer refused; its guest lands in 4d, since
-    all 22 in RC1 are virtual overrides.
+    The async version of a synchronized method is refused by name, at frame creation: PawPrint holds
+    a synchronized method's monitor (#2221), and running its async version needs the release before
+    `TransparentAwait` and a resumed frame that does not take the monitor again. Both land in 4d with
+    its guest, since all 22 in RC1 are virtual overrides.
 
     Not yet bound: a tail shape whose callee dispatches, which wraps instead, as it does where the
     callee has no variant. Refused by name: `jmp`; a variant of a method with no IL, or one
@@ -1034,7 +1036,9 @@ Each stage is one pull request, with its tests first.
     `OutputTabsAsync`. Real .NET 11's trace is `GetResult(Task, Byte&)`, `OutputTabsAsync`,
     `WriteAsync`.
 
-    A guest for the async version of a synchronized method (all 22 in RC1 are virtual overrides):
+    The async version of a synchronized method runs, with its monitor released before the wrapped
+    `ret`'s call of `TransparentAwait` and not taken again by a resumed frame (decision 17). A guest
+    for it (all 22 in RC1 are virtual overrides):
     `TextWriter.CreateBroadcasting(TextWriter.Synchronized(writer), TextWriter.Null)`, then
     `WriteAsync` and `FlushAsync`, both over a guest writer that completes and over a `StreamWriter`
     on a stream whose synchronous `Write` throws. Real .NET 11's trace is `SyncTextWriter.Flush`,
