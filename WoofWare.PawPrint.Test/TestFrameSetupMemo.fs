@@ -18,10 +18,10 @@ module TestFrameSetupMemo =
 
     let private assy = System.Reflection.Assembly.GetExecutingAssembly ()
 
-    /// Methods concretised under type generics (`Ops<T>` twice over), under method generics
-    /// (`Swap<T>`), synthesised ones (the multi-dimensional array's accessors), and value-type
-    /// zeros of several shapes: a generic struct at two instantiations, a struct nesting another,
-    /// and CoreLib's own (`ValueTuple`, `KeyValuePair`, `Dictionary` entries).
+    /// Methods concretised under type generics (`Ops<T>` twice over) and under method generics
+    /// (`Swap<T>`), and value-type zeros of several shapes: a generic struct at two
+    /// instantiations, a struct nesting another, and CoreLib's own (`ValueTuple`, `KeyValuePair`,
+    /// `Dictionary` entries).
     let private source =
         """
 using System;
@@ -127,16 +127,15 @@ static class Program
         let withMethodGenerics =
             entries |> List.filter (fun (key, _) -> not key.MethodGenerics.IsEmpty)
 
-        let synthesised = entries |> List.filter (fun (key, _) -> key.Synthesised.IsSome)
-
+        // No synthesised method is required: every one the interpreter mints is built from
+        // concrete types already, or (a dynamic method) has no key, so none reaches the memo.
         if
             entries.Length < 100
             || withTypeGenerics.Length < 20
             || withMethodGenerics.Length < 2
-            || synthesised.Length < 1
         then
             failwith
-                $"the guest memoised %d{entries.Length} methods, %d{withTypeGenerics.Length} under type generics, %d{withMethodGenerics.Length} under method generics, %d{synthesised.Length} synthesised; it is not exercising the key"
+                $"the guest memoised %d{entries.Length} methods, %d{withTypeGenerics.Length} under type generics, %d{withMethodGenerics.Length} under method generics; it is not exercising the key"
 
         for key, memoised in entries do
             match key.MethodRow with

@@ -167,9 +167,6 @@ module NativeStackTrace =
             },
             id
         | Some (SynthesisedMethod.DynamicMethod handle) -> state, handle.GetRegistryId ()
-        | Some SynthesisedMethod.EntryPointPlaceholder ->
-            failwith
-                $"%s{operation}: a captured frame is the entry-point placeholder for %s{frame.Method.Name}, which the first phase of startup replaces before the entry thread runs a step, so no frame can be above it. This is an interpreter bug."
         | Some kind ->
             failwith
                 $"%s{operation}: a captured frame runs the synthesised method %s{frame.Method.Name} (%O{kind}), which has no MethodDef row and no registry id to name it. Reporting a null handle instead is not an option: CalculateFramesToSkip counts a null-method frame as skippable, so the frame would silently vanish from the guest's trace."

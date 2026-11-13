@@ -1150,9 +1150,6 @@ module internal NativeReflectionInvocation =
             | Some SynthesisedMethod.StructMarshalStub ->
                 failwith
                     $"TODO: %s{operation}: MethodBase.GetCurrentMethod was called from PawPrint's struct-marshalling stub %s{callerMethod.Name}. What CoreCLR reports for its own marshalling IL stub has not been measured."
-            | Some SynthesisedMethod.EntryPointPlaceholder ->
-                failwith
-                    $"%s{operation}: the caller of MethodBase.GetCurrentMethod is the entry thread's startup placeholder, whose body is a bare ret and calls nothing. This is an interpreter bug."
             | None ->
 
             // CoreCLR's walk does not skip reflection infrastructure for this QCall, so a guest that

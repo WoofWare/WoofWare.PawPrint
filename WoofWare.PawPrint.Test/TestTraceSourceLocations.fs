@@ -38,9 +38,7 @@ module TestTraceSourceLocations =
     /// One step of the trace log, as a structured consumer sees it: the extent of the executing
     /// method's body, and the source the step was attributed to if any.
     ///
-    /// `MaxIlOpIndex` identifies a line as a step of the trace rather than any other message, and
-    /// is retained because it distinguishes bodies that a line number cannot — see the synthetic
-    /// startup frame below.
+    /// `MaxIlOpIndex` identifies a line as a step of the trace rather than any other message.
     type private TracedStep =
         {
             MaxIlOpIndex : int
@@ -161,32 +159,3 @@ module TestTraceSourceLocations =
         guestLines |> List.contains 10 |> shouldEqual true
         // Nothing outside the two methods the guest declares.
         guestLines |> List.filter (fun line -> line < 3 || line > 11) |> shouldEqual []
-
-    /// `Program.buildStartupFrame` pumps class initialisers from a frame whose body is a lone
-    /// `ret`; `SynthesisedMethod.EntryPointPlaceholder` denies that frame a handle to resolve
-    /// against. A frame that kept `Main`'s metadata identity would resolve the `ret` against
-    /// `Main`'s sequence points, and the trace would claim a guest instruction had run when
-    /// none had.
-    ///
-    /// The tell is the body's extent rather than the line: the synthetic body has exactly one
-    /// instruction, so `MaxIlOpIndex` is 0, whereas real `Main` is longer. A line-based assertion
-    /// cannot see this at all — real `Main` reports its opening brace too, from the same offset.
-    [<Test>]
-    let ``the synthetic startup frame claims no guest source`` () : unit =
-        let steps = tracedRun.Value
-
-        // The bug this guards is only reachable if a one-instruction body is executed at all;
-        // without this the test passes vacuously against an interpreter that never runs one.
-        steps |> List.exists (fun step -> step.MaxIlOpIndex = 0) |> shouldEqual true
-
-        let offenders =
-            steps
-            |> List.filter (fun step ->
-                match step.MaxIlOpIndex, step.Source with
-                | 0, Some ("File0.cs", _) -> true
-                | _ -> false
-            )
-
-        match offenders with
-        | [] -> ()
-        | offenders -> failwith $"one-instruction synthetic bodies were attributed to guest source: %A{offenders}"
