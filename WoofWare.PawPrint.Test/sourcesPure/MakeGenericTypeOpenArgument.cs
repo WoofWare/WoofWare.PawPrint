@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 
 public class Box<T>
@@ -10,6 +11,14 @@ public class Pair<TFirst, TSecond>
 }
 
 public ref struct RefBox<T>
+{
+}
+
+public class FirstComparable<A, B> where A : IComparable
+{
+}
+
+public class FirstEnumeratesSecond<A, B> where A : IEnumerable<B>
 {
 }
 
@@ -99,6 +108,21 @@ public static class Program
         // A type parameter is never byref-like itself, so it is admitted.
         Type refBoxBox = typeof(RefBox<>).MakeGenericType(boxU);
         if (!refBoxBox.IsByRefLike) return 22;
+
+        // A closed argument beside an open one is checked against its own constraints, read under
+        // the instantiation being built.
+        Type comparable = typeof(FirstComparable<,>).MakeGenericType(typeof(int), u);
+        if (!ReferenceEquals(comparable.GetGenericArguments()[1], u)) return 23;
+        try
+        {
+            // `List<int>` does not implement `IEnumerable<U>`.
+            typeof(FirstEnumeratesSecond<,>).MakeGenericType(typeof(List<int>), u);
+            return 24;
+        }
+        catch (ArgumentException e)
+        {
+            if (e.InnerException is not TypeLoadException) return 25;
+        }
 
         return 0;
     }
