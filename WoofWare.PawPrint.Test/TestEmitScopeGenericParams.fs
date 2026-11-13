@@ -85,13 +85,13 @@ module TestEmitScopeGenericParams =
                 // The primitive refuses what the definition refuses, loudly.
                 let added =
                     try
-                        Some (EmitScope.addGenericParam row scope)
+                        Some (EmitScope.addGenericParam row [] scope)
                     with :? ArgumentException ->
                         None
 
                 added.IsSome |> shouldEqual modelAdmits
 
-                match EmitScopeDefinitions.defineGenericParam owner number 0 "" scope with
+                match EmitScopeDefinitions.defineGenericParam owner number 0 "" [] scope with
                 | GenericParamDefinition.Defined (rid, next) ->
                     modelAdmits |> shouldEqual true
                     rid.Rid |> shouldEqual (admitted + 1)
@@ -143,7 +143,7 @@ module TestEmitScopeGenericParams =
 
                 let added =
                     try
-                        Some (EmitScope.addGenericParam row scope)
+                        Some (EmitScope.addGenericParam row [] scope)
                     with :? ArgumentException ->
                         None
 
@@ -187,7 +187,7 @@ module TestEmitScopeGenericParams =
             let scope = withOwners 1 []
 
             match
-                EmitScopeDefinitions.defineGenericParam (TypeOrMethodDef.TypeDef (TypeDefRid 2)) 0us flags name scope
+                EmitScopeDefinitions.defineGenericParam (TypeOrMethodDef.TypeDef (TypeDefRid 2)) 0us flags name [] scope
             with
             | GenericParamDefinition.OutOfOrder (owner, last) ->
                 failwith $"the first parameter of a scope was refused as out of order: %O{owner} after %O{last}"
@@ -335,6 +335,7 @@ module TestEmitScopeGenericParams =
                             (uint16 number)
                             parameterFlags
                             parameterName
+                            []
                             scope
                     with
                     | GenericParamDefinition.OutOfOrder (owner, last) ->

@@ -688,7 +688,7 @@ module EmitScopeGen =
                         Name = name
                     }
 
-                withScope (EmitScope.addGenericParam row applied.Scope |> snd) applied
+                withScope (EmitScope.addGenericParam row [] applied.Scope |> snd) applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid

@@ -742,6 +742,7 @@ module TestEmitScopeExtension =
                 { parameter (TypeOrMethodDef.TypeDef owner) 0us with
                     Flags = flags
                 }
+                []
                 scope
             |> snd
 
@@ -754,8 +755,8 @@ module TestEmitScopeExtension =
 
         let owner = TypeDefRid 2
         let created = ImmutableHashSet.Create owner
-        let toMethod = EmitScope.addGenericParam ofMethod before |> snd
-        let toType = EmitScope.addGenericParam ofType before |> snd
+        let toMethod = EmitScope.addGenericParam ofMethod [] before |> snd
+        let toType = EmitScope.addGenericParam ofType [] before |> snd
 
         EmitScopeExtension.violations ImmutableHashSet.Empty before toType
         |> shouldEqual []

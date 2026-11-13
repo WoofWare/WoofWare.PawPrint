@@ -344,6 +344,13 @@ type GenericParamRow =
         Name : StringOffset
     }
 
+/// A `GenericParamConstraint` row (ECMA-335 II.22.21): one type a generic parameter is constrained to.
+type GenericParamConstraintRow =
+    {
+        Owner : GenericParamRid
+        Constraint : TypeDefOrRef
+    }
+
 type private ByteContentComparer () =
     interface IEqualityComparer<ImmutableArray<byte>> with
         member _.Equals (x : ImmutableArray<byte>, y : ImmutableArray<byte>) : bool =
@@ -890,15 +897,26 @@ module EmitScope =
                 None
 
     /// <summary>
-    /// Add a <c>GenericParam</c> row, at the next RID, which is the token CoreCLR hands out for it.
+    /// Add a <c>GenericParam</c> row, at the next RID, which is the token CoreCLR hands out for it, and
+    /// then one <c>GenericParamConstraint</c> row owned by it for each of <paramref name="constraints"/>,
+    /// in that order, as <c>RegMeta::DefineGenericParam</c> does. A parameter's constraints are added
+    /// only with it, so the constraint rows are in owner order.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The scope lacks the owner or the name; the flags do not fit the column's two bytes; the row's
-    /// number is not the count of rows its owner already has; or <c>genericParamOrderConflict</c> finds
-    /// a row the new one would sort before.
+    /// The scope lacks the owner, the name or a constraint; the flags do not fit the column's two bytes;
+    /// the row's number is not the count of rows its owner already has; or
+    /// <c>genericParamOrderConflict</c> finds a row the new one would sort before.
     /// </exception>
-    let addGenericParam (row : GenericParamRow) (scope : EmitScope) : GenericParamRid * EmitScope =
+    let addGenericParam
+        (row : GenericParamRow)
+        (constraints : TypeDefOrRef list)
+        (scope : EmitScope)
+        : GenericParamRid * EmitScope
+        =
         let operation = "EmitScope.addGenericParam"
+
+        if not constraints.IsEmpty then
+            failwith "TODO: stage 5m: EmitScope.addGenericParam does not add constraints yet"
 
         match row.Owner with
         | TypeOrMethodDef.TypeDef rid -> requireRid operation "TypeDef" scope.TypeDefs.Count rid.Rid
@@ -981,6 +999,10 @@ module EmitScope =
     let typeSpecs (scope : EmitScope) : ImmutableList<TypeSpecRow> = scope.TypeSpecs
     let methodSpecs (scope : EmitScope) : ImmutableList<MethodSpecRow> = scope.MethodSpecs
     let genericParams (scope : EmitScope) : ImmutableList<GenericParamRow> = scope.GenericParams
+
+    /// In RID order, which is owner order.
+    let genericParamConstraints (scope : EmitScope) : ImmutableList<GenericParamConstraintRow> =
+        failwith "TODO: stage 5m: EmitScope.genericParamConstraints is not implemented yet"
 
     /// In the order they were added, which is not the image's: the image sorts them by class.
     let interfaceImpls (scope : EmitScope) : ImmutableList<InterfaceImplRow> = scope.InterfaceImpls

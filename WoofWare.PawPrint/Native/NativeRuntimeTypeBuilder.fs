@@ -817,7 +817,7 @@ module NativeRuntimeTypeBuilder =
                     failwith
                         $"TODO: %s{operation}: %s{name} of %s{moduleName} has the constraint 0x%08x{first}, for which CoreCLR adds a GenericParamConstraint row; an emit scope has no GenericParamConstraint table yet"
 
-            match EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name held with
+            match EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name [] held with
             | GenericParamDefinition.OutOfOrder (owner, last) ->
                 failwith
                     $"TODO: %s{operation}: %s{name} of %O{owner} (coded index %d{owner.CodedIndex}) of %s{moduleName} would sort before the last GenericParam row, of %O{last} (coded index %d{last.CodedIndex}); CoreCLR numbers generic parameters in the order they are created, and an image sorted by owner cannot hold this one at that RID"
