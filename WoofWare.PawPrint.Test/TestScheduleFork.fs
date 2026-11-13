@@ -154,15 +154,6 @@ module TestScheduleFork =
             }
 
         match Program.prepare loggerFactory (Some sourceName) peImage hostConfig with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            {
-                Steps = []
-                Ending = $"completedBeforeMain %s{describeOutcome outcome}"
-                FinalStepCounter = (terminalStateOf outcome).Kernel.StepCounter
-                FinalClockTicks = (terminalStateOf outcome).Kernel.VirtualClockTicks
-                Stdout = bytesOf FileDescriptorRole.StandardOutput (terminalStateOf outcome)
-                Stderr = bytesOf FileDescriptorRole.StandardError (terminalStateOf outcome)
-            }
         | Program.ProgramStartResult.Ready prepared -> traceFrom loggerFactory prepared
 
     /// Compute the shared prefix once, failing the test if the guest does not actually fork —
@@ -191,6 +182,9 @@ module TestScheduleFork =
             "ReadWriteRace.cs"
             // Contends on a type initialiser, so the prefix ends inside class-init machinery.
             "NewobjCctorRace.cs"
+            // The entry type's static constructor starts the second thread, so the fork is in
+            // `Main`'s prologue, before any of `Main`'s body.
+            "ForkInCctor.cs"
             // Yields while single-threaded. If `chargeYieldDebt` ever draws with nobody else
             // Runnable, this is the guest whose traces diverge.
             "ForkAfterSoloYield.cs"
@@ -378,8 +372,8 @@ module TestScheduleFork =
         for seed in List.tail seeds do
             fromScratch loggerFactory sourceName image (Some seed) |> shouldEqual reference
 
-    /// One guest per phase: `runToFirstFork` drives startup through its own loop, so the startup
-    /// and main-phase deadlock arms are separate code paths.
+    /// One guest wedges in `Main`'s body and one in the entry type's static constructor, which
+    /// `Main`'s prologue runs.
     let private wedgingGuests : string list =
         [ "DeadlockBeforeFork.cs" ; "DeadlockInCctor.cs" ]
 
@@ -388,8 +382,7 @@ module TestScheduleFork =
         // `DeadlockedBeforeFork` is as seed-independent as `NeverForked` — nothing chose anything,
         // so every seed wedges identically — and it is the arm most likely to rot, because a
         // whole-program `Program.run` turns deadlock into a host `failwith` and so cannot cover
-        // it. Without this, swapping either arm for `ForkedDuringStartup` (or dropping it into the
-        // recursion) passes the whole suite.
+        // it. Without this, dropping that arm into the recursion passes the whole suite.
         let _messages, loggerFactory =
             LoggerFactory.makeTestWithProperties [ "source_file", sourceName ]
 
@@ -403,26 +396,6 @@ module TestScheduleFork =
             // debug with.
             stuck |> shouldContainText "thread 0"
         | other -> failwith $"%s{sourceName} wedges while single-threaded, but: %A{other}"
-
-    [<Test>]
-    let ``forking inside a class initialiser is refused, not mistaken for a forced prefix`` () : unit =
-        // `runToFirstFork` probes startup with the same predicate it uses for `Main`. Without
-        // that probe this guest would look like a forced prefix all the way to `Main`, and every
-        // seed resumed from the resulting snapshot would silently explore a schedule space
-        // missing whatever the startup choice decided. Refusing is the documented behaviour;
-        // this test is what stops it regressing into a wrong snapshot.
-        let sourceName = "ForkInCctor.cs"
-
-        let _messages, loggerFactory =
-            LoggerFactory.makeTestWithProperties [ "source_file", sourceName ]
-
-        use _loggerFactoryResource = loggerFactory
-
-        use peImage = new MemoryStream (compile sourceName)
-
-        match Program.runToFirstFork loggerFactory (Some sourceName) peImage guestConfig with
-        | Program.PrefixOutcome.ForkedDuringStartup _ -> ()
-        | other -> failwith $"%s{sourceName} forks in its .cctor, so startup must be refused, but: %A{other}"
 
     [<Test>]
     let ``contention created inside a tick's preamble is a fork point`` () : unit =

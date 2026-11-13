@@ -1,9 +1,7 @@
 using System.Threading;
 
-// The same wedge as `DeadlockBeforeFork.cs`, but during class initialisation rather than in
-// `Main`. `runToFirstFork` drives startup through its own loop, so the startup and main-phase
-// deadlock arms are separate code paths and a guest that only exercises one leaves the other
-// free to rot.
+// The same wedge as `DeadlockBeforeFork.cs`, but in the entry type's static constructor, which
+// `Main`'s prologue runs, rather than in `Main`'s body.
 public class DeadlockInCctor
 {
     private static int flag;

@@ -37,8 +37,6 @@ public static class Program
 
         match Program.prepare loggerFactory (Some "TrivialGuest.cs") peImage (HostConfig.Default runtimeDirs) with
         | Program.ProgramStartResult.Ready prepared -> prepared.BaseClassTypes.Corelib
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"the trivial guest ended during startup: %O{outcome}"
 
     /// The assembly-level `AssemblyInformationalVersionAttribute` value of `corelib`, verbatim.
     let private informationalVersion (corelib : DumpedAssembly) : string =

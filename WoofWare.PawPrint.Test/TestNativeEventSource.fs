@@ -79,8 +79,6 @@ public static class Entry
 
         match Program.prepare loggerFactory (Some "NativeEventSourceTest.cs") peImage host with
         | Program.ProgramStartResult.Ready prepared -> prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected program to be ready before Main, got %O{outcome}"
 
     /// Resolve and concretize `Thread.YieldInternal` — used purely as a
     /// donor `MethodInfo<ConcreteTypeHandle, _, _>`. Its `Signature` is

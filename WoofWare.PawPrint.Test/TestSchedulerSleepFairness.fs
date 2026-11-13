@@ -72,8 +72,6 @@ module TestSchedulerSleepFairness =
                     PctSeed = seed
                 }
         with
-        | Program.ProgramStartResult.CompletedBeforeMain _ ->
-            failwith "guest terminated before Main; it has no static initialisers that could do that"
         | Program.ProgramStartResult.Ready prepared ->
             let mutable parkedTicks = 0L
             let mutable totalTicks = 0L

@@ -32,19 +32,16 @@ type internal MainCall =
 /// Where a program's startup has got to: which call it is pumping on the entry thread, and
 /// what it does when that call returns.
 ///
-/// Startup runs guest code up to three times before `Main`, and the runs are not
-/// interchangeable. They are in the order CoreCLR runs them: the AppContext seed is
-/// `CorHost2::CreateAppDomainWithManager`, and the command line is
-/// `CorHost2::ExecuteAssembly` calling `SetCommandLineArgs` immediately before
-/// `ExecuteMainMethod` — which is what triggers the entry type's `.cctor`. Both deadlines
-/// bite: BCL feature switches latch into `static readonly` fields on first read, and a
-/// `.cctor` may call `Environment.GetCommandLineArgs` itself.
+/// Startup runs guest code up to twice before `Main`, and the runs are not interchangeable.
+/// They are in the order CoreCLR runs them: the AppContext seed is
+/// `CorHost2::CreateAppDomainWithManager`, and the command line is `CorHost2::ExecuteAssembly`
+/// calling `SetCommandLineArgs` immediately before `ExecuteMainMethod`. Both deadlines bite:
+/// BCL feature switches latch into `static readonly` fields on first read, and the entry type's
+/// `.cctor`, which `Main`'s own prologue runs, may call `Environment.GetCommandLineArgs`.
 ///
-/// Modelled as a DU carrying each phase's own data so the phases cannot drift apart —
-/// there is no way to be initialising classes without `Main`'s arguments in hand, nor to
-/// be pumping a call without knowing what to do when it returns. Each pumped phase names
-/// its successor rather than always yielding to class initialisation, so inserting or
-/// skipping one is a local change.
+/// Modelled as a DU carrying each phase's own data so the phases cannot drift apart: there is
+/// no way to be pumping a call without knowing what to do when it returns. Each pumped phase
+/// names its successor, so inserting or skipping one is a local change.
 ///
 /// The phase transitions are closures. They capture concretization results (a concretized
 /// `Main`, the entry type's handle) whose inspectable form would be no more use to a caller
@@ -53,22 +50,25 @@ type internal MainCall =
 /// the machine state, and which outcome a step produced — is data.
 [<RequireQualifiedAccess>]
 type internal StartupPhase =
-    /// Pumping `AppContext.Setup`; `onReturn` puts the next phase's call on the entry thread.
-    | SeedingAppContext of onReturn : (IlMachineState -> IlMachineState * StartupPhase)
+    /// Pumping `AppContext.Setup`; `onReturn` puts what the entry thread runs next on it.
+    | SeedingAppContext of onReturn : (IlMachineState -> IlMachineState * AfterStartupCall)
     /// Pumping `Environment.InitializeCommandLineArgs`, whose return value is the array
-    /// `Main` must receive; `onReturn` puts the next phase's call on the entry thread.
-    | InitialisingCommandLine of onReturn : (IlMachineState -> IlMachineState * StartupPhase)
-    /// Pumping class initialisers, the entry type's included, with `Main`'s arguments
-    /// already in hand: `installMain` puts the call of `Main` on the entry thread once they
-    /// have run, and says how it called `Main`.
-    | InitialisingClasses of installMain : (IlMachineState -> IlMachineState * MainCall)
+    /// `Main` must receive; `onReturn` puts what the entry thread runs next on it.
+    | InitialisingCommandLine of onReturn : (IlMachineState -> IlMachineState * AfterStartupCall)
+
+/// What the entry thread runs once one of startup's calls has returned.
+and [<RequireQualifiedAccess>] internal AfterStartupCall =
+    /// The next phase of startup, whose call is on the entry thread.
+    | Phase of StartupPhase
+    /// `Main`, called as `call` says, which is on the entry thread with its own type's
+    /// initialisation still to run in its prologue, as any callee's is.
+    | Main of call : MainCall
 
 /// What the entry thread is running, which decides what its bottom frame returning means.
 [<RequireQualifiedAccess>]
 type internal EntryFrameKind =
-    /// One of the calls startup pumps to completion: the AppContext seed, the command-line
-    /// initialiser, a class initialiser. Its return ends the phase, and `phase` says what the
-    /// entry thread runs next.
+    /// One of the calls startup pumps to completion: the AppContext seed or the command-line
+    /// initialiser. Its return ends the phase, and `phase` says what the entry thread runs next.
     | StartupCall of phase : StartupPhase
     /// The call of `Main`, made as `call` says. Its return latches the exit code if `Main`
     /// returns one, and does not end the run: the entry thread goes to
@@ -85,10 +85,8 @@ type internal EntryFrameKind =
     /// sleeps for ever, returns 3; the process exits 3). So it is carried as state rather
     /// than recomputed from the thread table when `Main` returns.
     ///
-    /// CoreCLR arms this (`g_fWeControlLifetime`) in `RunMainPre`, which is also before
-    /// the entry type's class initialiser runs; PawPrint arms it only once `Main` itself is
-    /// installed, so a `.cctor` that sends the entry thread background and starts a
-    /// foreground worker is waited for here where real .NET would abandon it.
+    /// CoreCLR arms this (`g_fWeControlLifetime`) in `RunMainPre`, before it calls `Main`, and
+    /// so before `Main`'s prologue runs the entry type's class initialiser.
     | Main of call : MainCall * shutdownSignalled : bool
 
 /// One PawPrint process the driver (`MultiProgram`) runs: its interpreter state, and what
@@ -509,10 +507,6 @@ module internal RunningProgram =
             failwith $"Installing the guest's command line %s{describeStartupOutcome outcome}."
         | EntryFrameKind.StartupCall (StartupPhase.SeedingAppContext _) ->
             failwith $"Seeding AppContext %s{describeStartupOutcome outcome}."
-        // The entry thread's `.cctor` raised, or a worker spawned during cctor pumping exited,
-        // failed fast, or took a terminating signal: the CLR tears the process down, and the
-        // guest-level diagnostic is the run's end, before `Main` ever ran.
-        | EntryFrameKind.StartupCall (StartupPhase.InitialisingClasses _)
         | EntryFrameKind.Main _ -> RunEnd.Ended outcome
 
     /// True iff the process waits for `thread` before it can exit: what CoreCLR's
@@ -662,8 +656,8 @@ module internal RunningProgram =
 
             // `nextThread` has now retired a step, and that is true of *every* outcome below —
             // including the ones that do not look like ordinary progress: a thread's final
-            // `Ret` arrives as `Terminated`, and the entry thread's synthetic `onlyRet` frame
-            // arrives as a `NormalExit` that the pre-`Main` pump then continues past. So the
+            // `Ret` arrives as `Terminated`, including the final `Ret` of each call startup pumps
+            // on the entry thread, which startup then continues past. So the
             // per-step scheduler bookkeeping that holds regardless of outcome is applied here,
             // once, before we look at which outcome we got.
             //
@@ -684,21 +678,21 @@ module internal RunningProgram =
                         // process, whatever the other threads are doing. The entry thread is
                         // deliberately not marked Terminated — it is about to get its next frame,
                         // ultimately `Main` — because a worker that joined it during a `.cctor`
-                        // must not observe a false end-of-thread and proceed past its Join before
-                        // `Main` has started.
-                        match phase with
-                        | StartupPhase.SeedingAppContext onReturn
-                        | StartupPhase.InitialisingCommandLine onReturn ->
-                            let state, next = onReturn state
+                        // that startup's call ran must not observe a false end-of-thread and
+                        // proceed past its Join before `Main` has started.
+                        let onReturn =
+                            match phase with
+                            | StartupPhase.SeedingAppContext onReturn
+                            | StartupPhase.InitialisingCommandLine onReturn -> onReturn
 
+                        match onReturn state with
+                        | state, AfterStartupCall.Phase next ->
                             ProgramTick.StartupCallReturned
                                 { program with
                                     State = state
                                     EntryFrame = EntryFrameKind.StartupCall next
                                 }
-                        | StartupPhase.InitialisingClasses installMain ->
-                            let state, call = installMain state
-
+                        | state, AfterStartupCall.Main call ->
                             ProgramTick.StartupCallReturned
                                 { program with
                                     State = state

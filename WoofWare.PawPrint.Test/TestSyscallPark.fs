@@ -176,8 +176,6 @@ class LockAndPortWaiters
 
         let prepared =
             match Program.prepare loggerFactory (Some "LockAndPortWaiters.cs") peImage config with
-            | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-                failwith $"guest completed before Main: %O{outcome}"
             | Program.ProgramStartResult.Ready prepared -> prepared
 
         let maxSteps = 20_000_000L

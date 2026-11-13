@@ -91,8 +91,8 @@ type IlMachineState =
         /// reports. Recorded at `IlMachineState.initial` rather than derived, because neither
         /// candidate derivation is truthful: `TypeSystem._LoadedAssemblies` has no ordering (and even if it
         /// did, registration order is an accident of type resolution), and the bottom stack frame
-        /// of the entry thread is a CoreLib `.cctor` during pre-`Main` pumping and absent entirely
-        /// once `Main` has returned.
+        /// of the entry thread is a CoreLib method while startup runs, and absent entirely once
+        /// `Main` has returned.
         EntryAssembly : AssemblyName
         /// CoreCLR's latched exit code (`LatchedExitCode`, ceemain.cpp): the exit code the host
         /// reports for a clean exit, `RunOutcome.NormalExit` and `ProcessExit` alike.
@@ -764,8 +764,6 @@ type RunOutcome =
     /// A thread called `Environment.Exit`. The process tore itself down regardless
     /// of other threads still running, with the exit code `IlMachineState.LatchedExitCode`,
     /// of which the kernel kept `termination`.
-    /// Distinct from `NormalExit` so the pre-main cctor pump can bail rather
-    /// than silently continuing into `Main` after the guest already asked to die.
     | ProcessExit of IlMachineState * exitingThread : ThreadId * termination : ProcessTermination
     /// A fatal error aborted the process while `abortingThread` was running: `Environment.FailFast`,
     /// or a refusal the runtime itself raises. The `FatalError` is surfaced for diagnostics, and

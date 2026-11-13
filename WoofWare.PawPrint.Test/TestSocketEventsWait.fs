@@ -89,7 +89,6 @@ class WaitsOnADuplicatedPort
         match
             Program.prepare loggerFactory (Some "WaitsOnADuplicatedPort.cs") peImage (HostConfig.Default dotnetRuntimes)
         with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared ->
 
         // A bound rather than an unbounded loop: a regression that failed to park would spin
@@ -586,8 +585,6 @@ class TwoPortsOneEdge
             match
                 Program.prepare loggerFactory (Some "TwoPortsOneEdge.cs") peImage (HostConfig.Default dotnetRuntimes)
             with
-            | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-                failwith $"guest completed before Main: %O{outcome}"
             | Program.ProgramStartResult.Ready prepared -> prepared
 
         let maxSteps = 20_000_000L

@@ -54,8 +54,6 @@ public static class Program
                     (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
             with
             | Program.ProgramStartResult.Ready prepared -> prepared
-            | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-                failwith $"expected guest to be ready before Main, but got %O{outcome}"
 
         let guest =
             prepared.State.LoadedAssembly prepared.State.EntryAssembly.FullName

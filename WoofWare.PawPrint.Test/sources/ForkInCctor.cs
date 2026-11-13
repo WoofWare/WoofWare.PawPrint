@@ -1,12 +1,7 @@
 using System.Threading;
 
-// A guest that forks during *startup*: the entry type's static constructor starts a thread, so
-// by the time `Main` is installed there are already two Runnable threads.
-//
-// `Program.runToFirstFork` must notice this and report `ForkedDuringStartup` rather than
-// mistaking startup for a forced prefix. Getting that wrong would be silent: the harness would
-// snapshot a state whose prefix already contained a scheduling choice, and every seed resumed
-// from it would explore a schedule space missing whatever the startup choice decided.
+// A guest that forks in `Main`'s prologue: the entry type's static constructor, which the prologue
+// runs, starts a thread, so the first contended decision comes before any of `Main`'s body.
 public class ForkInCctor
 {
     private static int flag;

@@ -75,7 +75,6 @@ module TestStepEffectStreaming =
         use peImage = new MemoryStream (image)
 
         match Program.prepare loggerFactory (Some sourceName) peImage (HostConfig.Default dotnetRuntimes) with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared ->
 
         let beforeMain = prepared.State.Kernel.OutputLog.Length
@@ -212,14 +211,11 @@ class Program
         |> Seq.toArray
         |> shouldEqual [| 0x62uy ; 0x65uy ; 0x66uy ; 0x0Auy |]
 
-    /// Startup runs guest code too, and it must be streamable for the same reason `Main` is: a
-    /// static initialiser that prints and then wedges has to deliver what it printed.
-    ///
-    /// `beginStartup`/`stepStartup` expose the AppContext-seed and class-initialiser steps,
-    /// and this pins that a `.cctor`'s write is reported *during* startup rather than merely
-    /// turning up in the log afterwards.
+    /// The entry type's static initialiser runs from `Main`'s prologue, as CoreCLR's does, not
+    /// in startup: its write is reported by a step of `Main`'s phase, before `Main`'s own write,
+    /// and startup's steps report none.
     [<Test>]
-    let ``a static initialiser's write is reported while startup is still running`` () : unit =
+    let ``the entry type's static initialiser writes after startup, from Main's prologue`` () : unit =
         let source =
             """
 using System;
@@ -270,8 +266,6 @@ class Program
             | Program.StartupStepOutcome.WorkerTerminated (startup, _)
             | Program.StartupStepOutcome.PhaseAdvanced startup -> pumpStartup startup acc
             | Program.StartupStepOutcome.Deadlocked (_, stuck) -> failwith $"startup deadlocked: %s{stuck}"
-            | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.CompletedBeforeMain outcome) ->
-                failwith $"guest completed before Main: %O{outcome}"
             | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.Ready prepared) -> List.rev acc, prepared
 
         let startupEffects, prepared =
@@ -283,13 +277,8 @@ class Program
                     (HostConfig.Default dotnetRuntimes))
                 []
 
-        // The cctor's write is reported by a startup step, not left to be discovered in the log
-        // once startup has finished. This is the whole claim.
-        startupEffects
-        |> shouldEqual [ FileDescriptorRole.StandardOutput, [| 0x63uy ; 0x63uy ; 0x74uy ; 0x0Auy |] ]
+        startupEffects |> shouldEqual []
 
-        // ...and Main's write is not: it belongs to the phase after startup, so a driver that
-        // only streamed startup would still be losing output.
         let rec pumpMain
             (prepared : Program.PreparedProgram)
             (acc : (FileDescriptorRole * byte array) list)
@@ -309,4 +298,8 @@ class Program
                 pumpMain prepared acc
 
         pumpMain prepared []
-        |> shouldEqual [ FileDescriptorRole.StandardOutput, [| 0x6Duy ; 0x61uy ; 0x6Euy ; 0x0Auy |] ]
+        |> shouldEqual
+            [
+                FileDescriptorRole.StandardOutput, [| 0x63uy ; 0x63uy ; 0x74uy ; 0x0Auy |]
+                FileDescriptorRole.StandardOutput, [| 0x6Duy ; 0x61uy ; 0x6Euy ; 0x0Auy |]
+            ]

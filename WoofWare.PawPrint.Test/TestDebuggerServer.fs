@@ -879,26 +879,25 @@ class Program
             |> shouldEqual spin
         }
 
-    /// Before `Main` is installed the entry thread carries a placeholder frame: shaped like the
-    /// entry point so that everything reading a frame sees something sensible, but with a bare
-    /// `ret` body, because `Main` has not run.
-    ///
-    /// It must therefore report no source location. Resolving its offsets against the real
-    /// `Main`'s debug information would name a line of code that has not executed — and this is
-    /// reachable, not theoretical: a static initialiser that throws leaves the guest here, and
-    /// `/state` is the first call the debugging workflow tells you to make.
+    /// The entry type's static initialiser runs from `Main`'s prologue, as CoreCLR's does: while
+    /// it runs, `Main`'s frame is beneath it, at offset 0 with none of its body run, and reports
+    /// `Main`'s opening brace, the position its prologue belongs to. (CoreCLR's trace of a failing
+    /// entry initialiser names a line of `Main` too.)
     [<Test>]
-    let ``the pre-Main placeholder frame reports no source location`` () : Task =
+    let ``Main's frame reports its opening brace while its prologue runs the entry type's initialiser`` () : Task =
         task {
             let source =
                 """
 class Program
 {
-    static readonly int Boom = int.Parse("not a number");
+    static Program()
+    {
+        while (true) { }
+    }
 
     static int Main(string[] args)
-    {
-        return Boom;
+    { // MAIN PROLOGUE
+        return 0;
     }
 }
 """
@@ -906,24 +905,27 @@ class Program
             use server = startServerWithSymbols source
             use client = client server (Some token)
 
-            let! state = client.GetAsync "state"
-            state.StatusCode |> shouldEqual HttpStatusCode.OK
-            use! stateJson = jsonDocument state
+            let! run = client.PostAsync ("run?maxSteps=2000", emptyContent ())
+            run.StatusCode |> shouldEqual HttpStatusCode.OK
 
-            let thread =
-                stateJson.RootElement.GetProperty("session").GetProperty("threads").EnumerateArray ()
-                |> Seq.head
+            let! thread = client.GetAsync "thread/0"
+            thread.StatusCode |> shouldEqual HttpStatusCode.OK
+            use! threadJson = jsonDocument thread
 
-            let frame = thread.GetProperty "activeFrameSummary"
+            (activeFrame threadJson.RootElement).GetProperty("method").GetString ()
+            |> shouldEqual "PawPrintTestAssembly.Program..cctor"
 
-            // Asserted so the test cannot pass by the frame having become unrecognisable: it is
-            // still the entry-point-shaped placeholder, sitting at offset 0 of its `ret` body.
-            frame.GetProperty("method").GetString ()
-            |> shouldEqual "PawPrintTestAssembly.Program.Main"
+            let main =
+                threadJson.RootElement.GetProperty("frames").EnumerateArray ()
+                |> Seq.filter (fun frame ->
+                    frame.GetProperty("method").GetString () = "PawPrintTestAssembly.Program.Main"
+                )
+                |> Seq.exactlyOne
 
-            frame.GetProperty("ilOffset").GetInt32 () |> shouldEqual 0
+            main.GetProperty("ilOffset").GetInt32 () |> shouldEqual 0
 
-            frame.GetProperty("sourceLocation").ValueKind |> shouldEqual JsonValueKind.Null
+            main.GetProperty("sourceLocation").GetProperty("startLine").GetInt32 ()
+            |> shouldEqual (lineContaining "// MAIN PROLOGUE" source)
         }
 
     /// Parks for ever in `SystemNative_WaitForSocketEvents`, on a `dup` of the port so that the

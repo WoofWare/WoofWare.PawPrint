@@ -226,22 +226,19 @@ module BoundedRun =
             | Program.ProgramStepOutcome.InstructionStepped (prepared, _, _, _)
             | Program.ProgramStepOutcome.WorkerTerminated (prepared, _) -> goMain (steps + 1L) prepared
 
-        /// Pumping startup, which runs guest code — the AppContext seed and then class
-        /// initialisers, the entry type's own among them.
+        /// Pumping startup, which runs managed code: the AppContext seed and the command line,
+        /// and whatever class initialisers they trigger.
         ///
-        /// Driven step by step rather than through `Program.prepare`, which pumps both phases
-        /// internally and returns only once they are done. A static initialiser that never
-        /// returns wedges startup exactly as a `Main` that never returns wedges the run, and
-        /// behind `prepare` that would hang the suite with no diagnostic; here it is bounded and
-        /// reported like any other stuck guest.
+        /// Driven step by step rather than through `Program.prepare`, which pumps startup
+        /// internally and returns only once it is done, so that startup is bounded by the same
+        /// budget as `Main` and reported like any other stuck run.
         let rec goStartup (steps : int64) (startup : Program.Startup) : RunEnd =
             if steps >= maxSteps then
                 failwith
-                    $"%s{description} did not finish starting up within %d{maxSteps} interpreted steps, so the harness gave up (kernel step counter %d{startup.State.Kernel.StepCounter}). Guest code runs before Main — the entry type's static initialiser among it — so this is a guest that wedged before Main was ever installed. Threads: %s{threadSummary startup.State}"
+                    $"%s{description} did not finish starting up within %d{maxSteps} interpreted steps, so the harness gave up (kernel step counter %d{startup.State.Kernel.StepCounter}). Startup runs managed code before Main (the AppContext seed and the command line), and the budget ran out before Main was ever installed. Threads: %s{threadSummary startup.State}"
             else
 
             match Program.stepStartup loggerFactory logger startup with
-            | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.CompletedBeforeMain runEnd) -> runEnd
             // The budget is shared, not per-phase: `Main` resumes the count startup left off at,
             // so the bound is a statement about the whole run. Startup is cheap enough for that
             // to cost nothing — lazy class initialisation means a trivial guest reaches `Main`

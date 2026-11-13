@@ -67,8 +67,6 @@ module TestSchedulerYieldFairness =
                     PctSeed = Some seed
                 }
         with
-        | Program.ProgramStartResult.CompletedBeforeMain _ ->
-            failwith "guest terminated before Main; it has no static initialisers that could do that"
         | Program.ProgramStartResult.Ready prepared ->
             let rec loop (prepared : Program.PreparedProgram) : int * int64 =
                 match Program.stepPrepared loggerFactory logger prepared with

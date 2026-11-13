@@ -94,8 +94,6 @@ public static class Program
                         (HostConfig.Default dotnetRuntimes)
                 with
                 | Program.ProgramStartResult.Ready prepared -> prepared
-                | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-                    failwith $"guest completed before Main: %O{outcome}"
 
             let baseClassTypes = prepared.BaseClassTypes
 

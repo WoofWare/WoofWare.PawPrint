@@ -88,8 +88,6 @@ public static class Program
                 (HostConfig.Default dotnetRuntimes)
         with
         | Program.ProgramStartResult.Ready prepared -> prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected guest to be ready before Main, but got %O{outcome}"
 
     let private requiredTopLevelType
         (assembly : DumpedAssembly)

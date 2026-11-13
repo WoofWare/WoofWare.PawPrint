@@ -184,8 +184,8 @@ class SpinsWithUnstartedThread
         exn.Message |> shouldContainText "did not terminate"
         exn.Message |> shouldNotContainText "is not live"
 
-    /// Guest code runs before `Main` — the entry type's static initialiser is pumped during
-    /// startup — so startup can wedge just as `Main` can, and must be bounded the same way.
+    /// The entry type's static initialiser runs from `Main`'s prologue, as CoreCLR's does, so a
+    /// wedge in it is a wedge of `Main`'s run, bounded like any other.
     let private wedgesInStaticInitialiser =
         """
 class WedgesInCctor
@@ -194,7 +194,7 @@ class WedgesInCctor
 
     static WedgesInCctor()
     {
-        // Runs during startup, before Main is ever installed.
+        // Runs from Main's prologue.
         while (true) { }
     }
 
@@ -218,14 +218,35 @@ class WedgesInCctor
         message |> shouldContainText "WedgesInCctor.cs"
         message |> shouldContainText "50000"
 
-        // Said to be *startup*, not Main: a wedged static initialiser and a wedged Main are
-        // different bugs.
-        message |> shouldContainText "did not finish starting up"
-        message |> shouldNotContainText "did not terminate"
+        // Said to be `Main`'s run, not startup, which runs none of the guest's code.
+        message |> shouldContainText "did not terminate"
+        message |> shouldNotContainText "did not finish starting up"
 
-        // And it locates the guest within startup: the thread summary names the initialiser
-        // itself.
+        // And it locates the guest: the thread summary names the initialiser itself.
         message |> shouldContainText ".cctor"
+
+    /// Startup runs managed code before `Main` (the AppContext seed and the command line), so it
+    /// is bounded by the same budget: one smaller than startup gives up before `Main` is ever
+    /// installed, and says so.
+    [<Test>]
+    let ``a budget smaller than startup gives up in startup`` () : unit =
+        let source =
+            """
+class Trivial
+{
+    static int Main(string[] args)
+    {
+        return 0;
+    }
+}
+"""
+
+        let exn =
+            Assert.Throws (fun () -> runSource 100L "Trivial.cs" source |> ignore<RunOutcome>)
+
+        exn.Message |> shouldContainText "Trivial.cs"
+        exn.Message |> shouldContainText "did not finish starting up"
+        exn.Message |> shouldNotContainText "did not terminate"
 
     /// Startup and `Main` share one budget: `Main` resumes the count startup left off at, rather
     /// than each phase getting its own allowance.
@@ -285,9 +306,9 @@ class CompletesButNotCheaply
     /// A static initialiser can deadlock as easily as it can spin, and that reaches a different
     /// arm: the scheduler reports `Deadlocked` and no step is possible.
     ///
-    /// `Program.prepare` raises on this itself, with a message that carries no thread summary
-    /// and no guest identification — so driving startup step by step is also what makes this
-    /// failure legible. The assertions below are on detail `prepare` does not produce.
+    /// `Program.run` raises on this itself, with a message that carries no thread summary and no
+    /// guest identification, so the harness reports it instead. The assertions below are on
+    /// detail `Program.run` does not produce.
     [<Test>]
     let ``a guest that deadlocks in a static initialiser is reported with the guest's state`` () : unit =
         let source =
@@ -321,7 +342,6 @@ class DeadlocksInCctor
 
         message |> shouldContainText "DeadlocksInCctor.cs"
         message |> shouldContainText "deadlocked"
-        message |> shouldContainText "startup"
         // Detail `Program.prepare`'s own failure lacks: which threads, and what they were doing.
         message |> shouldContainText "Threads:"
 

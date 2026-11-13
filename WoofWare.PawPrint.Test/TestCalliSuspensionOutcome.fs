@@ -82,7 +82,6 @@ module TestCalliSuspensionOutcome =
         use peImage = new MemoryStream (image)
 
         match Program.prepare loggerFactory (Some sourceName) peImage (HostConfig.Default dotnetRuntimes) with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared ->
 
         // `stepPrepared` reports which thread it ran, so attribute the outcome to *that* thread's

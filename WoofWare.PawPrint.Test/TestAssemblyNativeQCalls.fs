@@ -452,8 +452,6 @@ public static class StreamVersionLibrary
             Program.prepare loggerFactory (Some "SimpleNameTestGuest.cs") peImage (HostConfig.Default dotnetRuntimes)
         with
         | Program.ProgramStartResult.Ready prepared -> PreparedGuest.enterMain loggerFactory prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected guest to be ready before Main, but got %O{outcome}"
 
     let private requiredTopLevelType
         (assembly : DumpedAssembly)

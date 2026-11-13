@@ -47,9 +47,7 @@ module Program =
                         this.Driver
             }
 
-    type ProgramStartResult =
-        | Ready of PreparedProgram
-        | CompletedBeforeMain of RunEnd
+    type ProgramStartResult = | Ready of PreparedProgram
 
     type ProgramStepOutcome =
         /// `effect` is the step's `StepEffect`, forwarded verbatim from
@@ -88,7 +86,7 @@ module Program =
             }
 
         /// The machine state as it currently stands. A driver streaming guest output reads
-        /// `Kernel.OutputLog` from here when startup ends without a `ProgramStartResult`.
+        /// `Kernel.OutputLog` from here when startup deadlocks rather than reaching `Main`.
         member this.State : IlMachineState = this.Driver.Current.State
 
     /// The result of stepping startup once. Mirrors `ProgramStepOutcome`, and for the same
@@ -285,12 +283,9 @@ module Program =
                 },
                 onlyStuck stuck
             )
-        // The process ended before `Main` was installed, in the class-initialisation phase: the
-        // driver fails loudly on an end in an earlier phase (`RunningProgram.runEnd`). The CLR
-        // tears the process down, and the guest-level diagnostic is the run's end, rather than a
-        // host `failwith` that would mask it.
-        | MultiStepOutcome.Finished (ends, _) ->
-            StartupStepOutcome.Completed (ProgramStartResult.CompletedBeforeMain (onlyEnd ends))
+        | MultiStepOutcome.Finished _ ->
+            failwith
+                "Program.stepStartup: the process ended before Main was installed, but the driver fails loudly on an end during startup (`RunningProgram.runEnd`) rather than finishing (this is a bug in PawPrint)."
         | MultiStepOutcome.Stepped (_, pid, ProgramEvent.Ended _) ->
             failwith
                 $"Program.stepStartup: process %O{pid} ended and the driver ran on, but a driver of one program finishes when its program ends (this is a bug in PawPrint)."
@@ -339,7 +334,6 @@ module Program =
         let logger = loggerFactory.CreateLogger "Program"
 
         match prepare loggerFactory originalPath fileStream hostConfig with
-        | ProgramStartResult.CompletedBeforeMain runEnd -> runEnd
         | ProgramStartResult.Ready prepared -> pumpPrepared loggerFactory logger prepared
 
     /// A machine state sitting at a scheduler tick *boundary* whose next decision is contended:
@@ -402,19 +396,6 @@ module Program =
         | NeverForked of RunEnd
         /// Every thread blocked before any choice arose. Like `NeverForked`, seed-independent.
         | DeadlockedBeforeFork of stuckThreads : string
-        /// A class initialiser started a thread, so the first contended decision happens during
-        /// startup rather than in `Main`.
-        ///
-        /// Detected and refused rather than snapshotted. Snapshotting it is possible — the
-        /// detector finds the exact point — but resuming it means handing the caller a
-        /// half-finished `Startup` rather than a `PreparedProgram`, so `resumeFork` would have to
-        /// return a two-shape value and every caller would have to drive both phases. No guest in
-        /// this repository does it, so refuse loudly rather than build the surface. To lift the
-        /// restriction, give `ForkSnapshot` a startup arm — nothing else here has to change.
-        ///
-        /// Carries the contenders rather than a rendered message, so a caller can decide what to
-        /// do about the refusal (report it, fall back to per-seed runs).
-        | ForkedDuringStartup of contenders : ThreadId list
 
     /// Guard against a yield retiring at a tick we classified as forced whose *post*-step state is
     /// contended.
@@ -533,28 +514,28 @@ module Program =
             }
 
         let rec goStartup (startup : Startup) : PrefixOutcome =
-            // Probe startup with the same predicate `runToNextFork` uses, so a `.cctor` that
-            // starts a thread is reported rather than silently mistaken for a forced prefix. The
+            // Startup runs only the runtime's own calls on the entry thread (the AppContext seed and
+            // the command line), none of which starts a thread, so every decision in it is forced.
+            // Probe it with the same predicate `runToNextFork` uses anyway, so that a contended
+            // decision there crashes rather than being silently mistaken for a forced prefix. The
             // preamble runs twice per startup tick here, once for the probe and once inside
             // `stepStartup`; that is a handful of map operations against `executeOneStep`, and it
             // is paid once for a whole sweep rather than once per seed.
-            let contenders =
-                match
-                    MultiProgram.annotating startup.State (fun () -> MultiProgram.advance loggerFactory startup.Driver)
-                with
-                | Advanced.Decide (probed, _) -> Scheduler.tryContenders probed.Current.State
-                // `stepStartup` runs the same preamble, and ends or deadlocks the same way.
-                | Advanced.Settled _ -> None
-
-            match contenders with
-            | Some contenders -> PrefixOutcome.ForkedDuringStartup contenders
-            | None ->
+            match
+                MultiProgram.annotating startup.State (fun () -> MultiProgram.advance loggerFactory startup.Driver)
+            with
+            | Advanced.Decide (probed, _) ->
+                match Scheduler.tryContenders probed.Current.State with
+                | Some contenders ->
+                    failwith
+                        $"Program.runToFirstFork: threads %A{contenders} contend during startup, which runs only the runtime's own calls on the entry thread and starts no thread (this is a bug in PawPrint)."
+                | None -> ()
+            // `stepStartup` runs the same preamble, and ends or deadlocks the same way.
+            | Advanced.Settled _ -> ()
 
             match stepStartup loggerFactory logger startup with
             | StartupStepOutcome.Completed (ProgramStartResult.Ready prepared) ->
                 runToNextFork loggerFactory logger prepared
-            | StartupStepOutcome.Completed (ProgramStartResult.CompletedBeforeMain outcome) ->
-                PrefixOutcome.NeverForked outcome
             | StartupStepOutcome.Deadlocked (_, stuck) -> PrefixOutcome.DeadlockedBeforeFork stuck
             | StartupStepOutcome.Stepped (startup, ran, whatWeDid, _) ->
                 checkYieldDidNotStraddle ran whatWeDid startup.State
