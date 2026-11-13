@@ -1282,7 +1282,7 @@ module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemb
 ### 5j: left to later stages
 
 * A nested type of the module, once `DefineNestedType` adds `NestedClass` rows, and a field of an
-  instantiation of a created generic type, once the scope has `GenericParam` rows.
+  instantiation of a created generic type, once the scope has `GenericParam` rows (5n).
 
 ### 5k: a reference to a member of another module's builder
 
@@ -1342,7 +1342,7 @@ it (vm/commodule.cpp) and its callers in `RuntimeModuleBuilder.cs`:
 ### 5k: left to later stages
 
 * A member of an instantiation of the module's own generic `TypeBuilder`, once `CreateType` can add its
-  `GenericParam` rows.
+  `GenericParam` rows (5n).
 
 ### 5l: a generic type's parameters
 
@@ -1505,7 +1505,7 @@ refusal is a deletion.
     sorted bit untruthful, and SRM's by-RID accessors on a table declared sorted but not sorted must be
     measured before choosing it (only `GetGenericParameters` was measured, and it gives wrong rows).
 * A reference from a module into itself: 5k's member of an instantiation of the module's own generic
-  `TypeBuilder` and 5j's field of an instantiation of a created generic type, now able to run.
+  `TypeBuilder` and 5j's field of an instantiation of a created generic type, now able to run (5n).
 * Types created out of TypeDef order, which the order rule refuses.
 * A variant parameter of a class or a delegate, and both variance bits.
 * A custom attribute on a parameter, which `CreateType` writes with the parameter's token straight after

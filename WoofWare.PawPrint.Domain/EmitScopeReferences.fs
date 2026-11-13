@@ -870,12 +870,28 @@ module EmitScopeReferences =
         | Method
         | Field
 
+    /// The module `TranslateSigWithScope` reads a signature from.
+    [<RequireQualifiedAccess>]
+    type private SignatureSource =
+        /// Another module, read by this reader, whose TypeDef and TypeRef tokens become TypeRefs of the
+        /// scope.
+        | OtherModule of MetadataReader
+        /// The scope's own module, whose TypeDef and TypeRef tokens `ImportTypeDef` and `ImportTypeRef`
+        /// keep, recognising the source scope as the emitting one.
+        | Itself
+
+    /// The first token the walk does not translate, as its source refuses it.
+    [<RequireQualifiedAccess>]
+    type private TokenRefusal =
+        | OfOtherModule of SignatureTokenRefusal
+        | OfItself of OwnSignatureRefusal
+
     let private importSignature
         (kind : SignatureKind)
-        (source : MetadataReader)
+        (source : SignatureSource)
         (signature : ImmutableArray<byte>)
         (scope : EmitScope)
-        : SignatureImport
+        : Result<ImmutableArray<byte> * EmitScope, TokenRefusal>
         =
         if signature.IsDefaultOrEmpty then
             invalidArg (nameof signature) "a signature is never empty"
@@ -883,9 +899,7 @@ module EmitScopeReferences =
         let output = ResizeArray<byte> ()
         let position = ref 0
         let scope = ref scope
-        let refusal : SignatureTokenRefusal option ref = ref None
-        // `CreateAssemblyRefFromAssembly` reads the source's `Assembly` row afresh for each TypeDef.
-        let assemblyRequest = lazy (AssemblyRefRequest.ofDefinition source)
+        let refusal : TokenRefusal option ref = ref None
 
         let fail (reason : string) : 'a =
             invalidArg
@@ -930,44 +944,78 @@ module EmitScopeReferences =
             element = 0x0F || element = 0x10 || element &&& 0x40 <> 0
 
         // `CorSigUncompressToken`'s table for each tag of a `TypeDefOrRefOrSpecEncoded` token.
-        let translateToken (coded : int) : int option =
-            let rid = coded >>> 2
+        let translateToken : int -> int option =
+            match source with
+            | SignatureSource.OtherModule source ->
+                // `CreateAssemblyRefFromAssembly` reads the source's `Assembly` row afresh for each TypeDef.
+                let assemblyRequest = lazy (AssemblyRefRequest.ofDefinition source)
 
-            match coded &&& 3 with
-            | 0 ->
-                if rid < 1 || rid > source.TypeDefinitions.Count then
-                    fail
-                        $"TypeDef %d{rid} is not a row of the source module, which has %d{source.TypeDefinitions.Count}"
-
-                match assemblyRefFromAssembly assemblyRequest.Value scope.Value with
-                | None ->
-                    refusal.Value <-
-                        Some (SignatureTokenRefusal.UnreferencedUnsignedAssembly assemblyRequest.Value.Name)
-
+                let refuse (refused : SignatureTokenRefusal) : int option =
+                    refusal.Value <- Some (TokenRefusal.OfOtherModule refused)
                     None
-                | Some (assemblyRef, withAssemblyRef) ->
-                    let row, translated =
-                        importTypeDef source assemblyRef (MetadataTokens.TypeDefinitionHandle rid) withAssemblyRef
 
-                    scope.Value <- translated
-                    Some ((row.Rid <<< 2) ||| 1)
-            | 1 ->
-                if rid < 1 || rid > source.TypeReferences.Count then
-                    fail $"TypeRef %d{rid} is not a row of the source module, which has %d{source.TypeReferences.Count}"
+                fun (coded : int) ->
+                    let rid = coded >>> 2
 
-                match importTypeRef source (MetadataTokens.TypeReferenceHandle rid) scope.Value with
-                | Error refused ->
-                    refusal.Value <- Some refused
+                    match coded &&& 3 with
+                    | 0 ->
+                        if rid < 1 || rid > source.TypeDefinitions.Count then
+                            fail
+                                $"TypeDef %d{rid} is not a row of the source module, which has %d{source.TypeDefinitions.Count}"
+
+                        match assemblyRefFromAssembly assemblyRequest.Value scope.Value with
+                        | None -> refuse (SignatureTokenRefusal.UnreferencedUnsignedAssembly assemblyRequest.Value.Name)
+                        | Some (assemblyRef, withAssemblyRef) ->
+                            let row, translated =
+                                importTypeDef
+                                    source
+                                    assemblyRef
+                                    (MetadataTokens.TypeDefinitionHandle rid)
+                                    withAssemblyRef
+
+                            scope.Value <- translated
+                            Some ((row.Rid <<< 2) ||| 1)
+                    | 1 ->
+                        if rid < 1 || rid > source.TypeReferences.Count then
+                            fail
+                                $"TypeRef %d{rid} is not a row of the source module, which has %d{source.TypeReferences.Count}"
+
+                        match importTypeRef source (MetadataTokens.TypeReferenceHandle rid) scope.Value with
+                        | Error refused -> refuse refused
+                        | Ok (row, translated) ->
+                            scope.Value <- translated
+                            Some ((row.Rid <<< 2) ||| 1)
+                    | 2 -> refuse (SignatureTokenRefusal.TypeSpec (MetadataTokens.TypeSpecificationHandle rid))
+                    | _ -> refuse (SignatureTokenRefusal.NoTable coded)
+            | SignatureSource.Itself ->
+                let refuse (refused : OwnSignatureRefusal) : int option =
+                    refusal.Value <- Some (TokenRefusal.OfItself refused)
                     None
-                | Ok (row, translated) ->
-                    scope.Value <- translated
-                    Some ((row.Rid <<< 2) ||| 1)
-            | 2 ->
-                refusal.Value <- Some (SignatureTokenRefusal.TypeSpec (MetadataTokens.TypeSpecificationHandle rid))
-                None
-            | _ ->
-                refusal.Value <- Some (SignatureTokenRefusal.NoTable coded)
-                None
+
+                // The scope is not extended, so each lookup is in the scope the walk was given.
+                fun (coded : int) ->
+                    let rid = coded >>> 2
+
+                    match coded &&& 3 with
+                    | 0 ->
+                        match EmitScope.tryTypeDefRid rid scope.Value with
+                        | Some _ -> Some coded
+                        | None ->
+                            fail
+                                $"TypeDef %d{rid} is not a row of the scope, which has %d{(EmitScope.typeDefs scope.Value).Count}"
+                    | 1 ->
+                        match EmitScope.tryTypeRefRid rid scope.Value with
+                        | Some _ -> Some coded
+                        | None ->
+                            fail
+                                $"TypeRef %d{rid} is not a row of the scope, which has %d{(EmitScope.typeRefs scope.Value).Count}"
+                    | 2 ->
+                        match EmitScope.tryTypeSpecRid rid scope.Value with
+                        | Some typeSpec -> refuse (OwnSignatureRefusal.TypeSpec typeSpec)
+                        | None ->
+                            fail
+                                $"TypeSpec %d{rid} is not a row of the scope, which has %d{(EmitScope.typeSpecs scope.Value).Count}"
+                    | _ -> refuse (OwnSignatureRefusal.NoTable coded)
 
         // Each returns false, as soon as it meets a token it refuses, having set `refusal`.
         let rec methodSignature () : bool =
@@ -1073,11 +1121,43 @@ module EmitScopeReferences =
             | SignatureKind.Field -> fieldSignature ()
 
         if walked then
-            SignatureImport.Imported (ImmutableArray.CreateRange output, scope.Value)
+            Ok (ImmutableArray.CreateRange output, scope.Value)
         else
             match refusal.Value with
-            | Some refusal -> SignatureImport.Refused refusal
+            | Some refusal -> Error refusal
             | None -> failwith "unreachable: the walk stopped without refusing a token"
+
+    /// The walk over a signature of another module, read by <paramref name="source"/>.
+    let private importFromOtherModule
+        (kind : SignatureKind)
+        (source : MetadataReader)
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : SignatureImport
+        =
+        match importSignature kind (SignatureSource.OtherModule source) signature scope with
+        | Ok (imported, translated) -> SignatureImport.Imported (imported, translated)
+        | Error (TokenRefusal.OfOtherModule refused) -> SignatureImport.Refused refused
+        | Error (TokenRefusal.OfItself refused) ->
+            failwith $"unreachable: the walk over another module refused %A{refused} as the scope's own token"
+
+    /// The walk over a signature of the scope's own module, which never extends the scope.
+    let private importFromItself
+        (kind : SignatureKind)
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : Result<ImmutableArray<byte>, OwnSignatureRefusal>
+        =
+        match importSignature kind SignatureSource.Itself signature scope with
+        | Ok (imported, after) ->
+            if not (Object.ReferenceEquals (after, scope)) then
+                failwith "unreachable: the walk over the scope's own signature extended the scope"
+
+            Ok imported
+        | Error (TokenRefusal.OfItself refused) -> Error refused
+        | Error (TokenRefusal.OfOtherModule refused) ->
+            failwith
+                $"unreachable: the walk over the scope's own signature refused %A{refused} as another module's token"
 
     /// <summary>
     /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
@@ -1103,7 +1183,7 @@ module EmitScopeReferences =
         (scope : EmitScope)
         : SignatureImport
         =
-        importSignature SignatureKind.Method source signature scope
+        importFromOtherModule SignatureKind.Method source signature scope
 
     /// <summary>
     /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a field signature (ECMA-335
@@ -1121,7 +1201,7 @@ module EmitScopeReferences =
         (scope : EmitScope)
         : SignatureImport
         =
-        importSignature SignatureKind.Field source signature scope
+        importFromOtherModule SignatureKind.Field source signature scope
 
     /// <summary>
     /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
@@ -1140,7 +1220,7 @@ module EmitScopeReferences =
         (scope : EmitScope)
         : Result<ImmutableArray<byte>, OwnSignatureRefusal>
         =
-        failwith "TODO: importOwnMethodSignature is not yet implemented"
+        importFromItself SignatureKind.Method signature scope
 
     /// <summary>
     /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a field signature (ECMA-335
@@ -1156,4 +1236,4 @@ module EmitScopeReferences =
         (scope : EmitScope)
         : Result<ImmutableArray<byte>, OwnSignatureRefusal>
         =
-        failwith "TODO: importOwnFieldSignature is not yet implemented"
+        importFromItself SignatureKind.Field signature scope
