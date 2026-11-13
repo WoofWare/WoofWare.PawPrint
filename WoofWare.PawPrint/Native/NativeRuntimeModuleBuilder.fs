@@ -300,7 +300,10 @@ module NativeRuntimeModuleBuilder =
             // `RegMeta::DefineMemberRef` takes any MemberRefParent. `GetMemberRefToken` passes a
             // TypeSpec for a member of a generic instantiation, a TypeRef for a generic method of
             // another module, and for a vararg call site a TypeRef (a method of another module) or a
-            // MethodDef (one of this module). A user-derived MemberInfo passes its type's token.
+            // MethodDef (one of this module). It passes this module's TypeDef for a generic method of
+            // the module's own created type reached through the created type's `MethodInfo`, since
+            // `GetMethodTokenInternal` finds that method's module is not the `ModuleBuilder`. A
+            // user-derived MemberInfo passes its type's token.
             let parent =
                 match tr >>> 24 with
                 | table when table = typeSpecTable ->
@@ -311,9 +314,12 @@ module NativeRuntimeModuleBuilder =
                     match EmitScope.tryTypeRefRid (tr &&& 0x00FFFFFF) held with
                     | Some rid -> MemberRefParent.TypeRef rid
                     | None -> failwith $"%s{operation}: the parent 0x%08x{tr} names no TypeRef row of %s{moduleName}"
+                | table when table = typeDefTable ->
+                    failwith
+                        $"TODO: %s{operation}: the parent 0x%08x{tr} is a TypeDef of %s{moduleName}: GetMemberRefToken passes one for a call through a created type's MethodInfo to an instantiation of the type's generic method, and a user-derived MemberInfo of the module's type passes one too; PawPrint does not add a reference from the module into itself"
                 | _ ->
                     failwith
-                        $"TODO: %s{operation}: the parent 0x%08x{tr} is neither a TypeRef nor a TypeSpec; a vararg call site or a user-derived MemberInfo passes another kind, and PawPrint adds only a member of another module or of a generic instantiation"
+                        $"TODO: %s{operation}: the parent 0x%08x{tr} is neither a TypeRef, a TypeSpec nor a TypeDef; a vararg call site or a user-derived MemberInfo passes another kind, and PawPrint adds only a member of another module or of a generic instantiation"
 
             let name =
                 match

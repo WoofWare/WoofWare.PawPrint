@@ -107,13 +107,14 @@ public class Program
         |> shouldContainText "would sort before the last GenericParam row, of TypeDef (TypeDefRid 2) (coded index 4)"
 
     [<Test>]
-    let ``a generic type's parameter created after its named generic method's is refused`` () : unit =
+    let ``a generic type's parameter created after its generic method's, given its token early, is refused`` () : unit =
         // `First`'s two methods and default constructor are MethodDefs 1 to 3, so `M` is MethodDef 4 (coded
-        // index 9) and `C` TypeDef 3 (coded index 6). Naming `M`'s parameter gives `M` its token, which
-        // creates `U` before `CreateType` creates `T`.
+        // index 9) and `C` TypeDef 3 (coded index 6). Asking for `M`'s token creates `U` before `CreateType`
+        // creates `T`. Naming `M`'s parameter with `DefineParameter` would too, through
+        // `TypeBuilder_SetParamInfo`, which PawPrint does not implement.
         let exc =
             runRefused
-                "GenericParamOfTypeAfterMethod.cs"
+                "GenericParamOfTypeAfterEarlyMethod.cs"
                 """
         TypeBuilder first = module.DefineType("First", TypeAttributes.Public);
         first.DefineMethod("F1", MethodAttributes.Public | MethodAttributes.Static).GetILGenerator().Emit(OpCodes.Ret);
@@ -122,10 +123,9 @@ public class Program
         TypeBuilder c = module.DefineType("C", TypeAttributes.Public);
         c.DefineGenericParameters("T");
         MethodBuilder m = c.DefineMethod("M", MethodAttributes.Public | MethodAttributes.Static);
-        GenericTypeParameterBuilder u = m.DefineGenericParameters("U")[0];
-        m.SetParameters(u);
-        m.DefineParameter(1, ParameterAttributes.None, "u");
+        m.DefineGenericParameters("U");
         m.GetILGenerator().Emit(OpCodes.Ret);
+        int token = m.MetadataToken;
         c.CreateType();"""
 
         exc.Message

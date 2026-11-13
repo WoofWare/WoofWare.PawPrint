@@ -1913,6 +1913,12 @@ Taken 2026-11-13.
   itself. 5o refuses it by name: `ModuleBuilder_GetMemberRefFromSignature`'s TODO names the case, and
   `TestTypeBuilderGenericParamRefusals` runs it. 5o's guest calls only through the `MethodBuilder`.
 
+* **A covariant or contravariant parameter of a method is refused by name at `TermCreateClass`**, of an
+  interface's method too, as 5l refuses a variant parameter of a class: CoreCLR's class loader throws
+  `TypeLoadException` from `CreateType` for it (`VLDTR_E_GP_ILLEGAL_VARIANT_MVAR`, measured on .NET 10), and
+  PawPrint models neither. `EmitScopeDefinitions.unmodelledVariance` finds it among the parameters of the type's
+  methods.
+
 The options weighed, each a strict extension of 5l's and 5m's tables: for a module whose parameters are created
 in owner order, each writes the same image, and each leaves `GenericParam` RIDs in the scope as CoreCLR's
 tokens. They differ in what the image holds and who must know.
@@ -2008,9 +2014,13 @@ nothing the index does not.
   `Caller` calling `G<int>` twice and `G<string>`; checks `X`'s token and constraint, and that the two `<int>`
   calls share one MethodSpec token, read from `Caller`'s IL; invokes `Caller`, and `G<long>` through
   reflection. Its terminal-state check reads the GenericParam, GenericParamConstraint and MethodSpec rows.
-* `TestTypeBuilderGenericParamRefusals` replaces "a generic method's parameter" with `C<T>` whose `M<U>` is given
-  a parameter name before `CreateType` after another type, refused out of order, and adds the TypeDef-parent
-  MemberRef.
+* Properties: `unmodelledVariance` finds exactly the parameter a model finds, now counting the parameters of
+  the type's methods.
+* `TestTypeBuilderGenericParamRefusals` replaces "a generic method's parameter" with two shapes refused out of
+  order: `C<T>` whose only method is `M<U>`, created without asking `M`'s token, and `C<T>` whose `M<U>` is asked
+  for its token before `CreateType`, after another type. (`DefineParameter` would give `M` its token too, but
+  reaches `TypeBuilder_SetParamInfo`, which PawPrint does not implement.) It adds a contravariant parameter of an interface's
+  method, and the TypeDef-parent MemberRef.
 * Mutants: a MethodDef owner refused again; the owner's coded index wrong for a method; a method's parameter
   counted in `AddedToCreatedType` as another type's; the handler's check that the MethodDef names a row of the
   scope removed.
@@ -2028,3 +2038,5 @@ nothing the index does not.
 * A call to an instantiation of a generic method of the module's own generic `TypeBuilder`, a MemberRef on a
   TypeSpec of it (5k).
 * A custom attribute on a method's parameter, as on a type's (5l).
+* `TypeBuilder_SetParamInfo`, which `MethodBuilder.DefineParameter` reaches, and with it a guest naming a
+  generic method's parameter.

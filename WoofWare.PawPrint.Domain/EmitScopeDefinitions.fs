@@ -432,8 +432,8 @@ module EmitScopeDefinitions =
             GenericParamDefinition.Defined (rid, scope)
 
     /// <summary>
-    /// The first generic parameter of <paramref name="typeDef"/>, in RID order, whose variance PawPrint
-    /// does not model when the type is created, if it has one.
+    /// The first generic parameter of <paramref name="typeDef"/> or of one of its methods, in RID order,
+    /// whose variance PawPrint does not model when the type is created, if it has one.
     /// </summary>
     let unmodelledVariance (typeDef : TypeDefRid) (scope : EmitScope) : UnmodelledVariance option =
         let isInterface =
@@ -444,18 +444,29 @@ module EmitScopeDefinitions =
                     (nameof typeDef)
                     $"EmitScopeDefinitions.unmodelledVariance: TypeDef %d{typeDef.Rid} is not in the scope"
 
+        // The parameter's method, if its owner is a method of the type.
+        let methodOfType (row : GenericParamRow) : MethodDefRid option =
+            match row.Owner with
+            | TypeOrMethodDef.MethodDef method when (EmitScope.methodDefs scope).[method.Rid - 1].Owner = typeDef ->
+                Some method
+            | TypeOrMethodDef.MethodDef _
+            | TypeOrMethodDef.TypeDef _ -> None
+
         EmitScope.genericParams scope
         |> Seq.indexed
         |> Seq.tryPick (fun (index, row) ->
-            if row.Owner <> TypeOrMethodDef.TypeDef typeDef then
+            let rid = GenericParamRid (index + 1)
+            let method = methodOfType row
+
+            if row.Owner <> TypeOrMethodDef.TypeDef typeDef && method.IsNone then
                 None
             else
-                match row.Flags &&& GenericParameterAttributes.VarianceMask with
-                | GenericParameterAttributes.VarianceMask ->
-                    Some (UnmodelledVariance.BothVarianceBits (GenericParamRid (index + 1)))
-                | GenericParameterAttributes.None -> None
-                | _ when isInterface -> None
-                | _ -> Some (UnmodelledVariance.VariantOfNonInterface (GenericParamRid (index + 1)))
+                match row.Flags &&& GenericParameterAttributes.VarianceMask, method with
+                | GenericParameterAttributes.VarianceMask, _ -> Some (UnmodelledVariance.BothVarianceBits rid)
+                | GenericParameterAttributes.None, _ -> None
+                | _, Some method -> Some (UnmodelledVariance.VariantOfMethod (rid, method))
+                | _, None when isInterface -> None
+                | _, None -> Some (UnmodelledVariance.VariantOfNonInterface rid)
         )
 
     /// <summary>
