@@ -2155,10 +2155,11 @@ type's `MethodInfo`. Read from `RuntimeModuleBuilder.GetMethodTokenInternal`, `G
 * A non-generic method of a created type, through its `RuntimeMethodInfo`, goes to `GetMethodTokenNoLock`, whose
   `GetMemberRefOfMethodInfo` hands back its MethodDef (5j). So does `ModuleBuilder.GetMethodMetadataToken` of the
   generic method or of an instantiation of it: the asymmetry is between `ILGenerator`'s path and the public one.
-* The same parent comes from a user-derived `MethodInfo`, `FieldInfo` or `ConstructorInfo` whose declaring type is
-  a type of the module (`GetMethodTokenNoLock`'s, `GetFieldTokenNoLock`'s and `GetMethodMetadataToken`'s last arms),
-  and from a vararg method of a created type (`GetMemberRefToken` with a sentinel), each through the same QCall.
-  The QCall cannot tell them apart.
+* The same parent comes from a user-derived `MethodInfo` whose `DeclaringType`, or a user-derived `FieldInfo` or
+  `ConstructorInfo` whose `ReflectedType`, is a type of the module (`GetMethodTokenNoLock`'s, `GetFieldTokenNoLock`'s
+  and `GetMethodMetadataToken`'s last arms, each asking `GetTypeTokenInternal` of that type), and from a vararg
+  method of a created type (`GetMemberRefToken` with a sentinel), each through the same QCall. The QCall cannot
+  tell them apart.
 * `ModuleBuilder_GetMemberRefFromSignature` calls `DefineMemberRef` with the token and the bytes as they are: no
   translation, and no reading of the parent. `RegMeta::DefineMemberRef` admits a TypeDef parent with the others
   and, under `MDDupMemberRef`, finds a row with the same parent token, name and signature bytes
@@ -2310,16 +2311,24 @@ Open questions:
   terminal-state check reads `Own`'s TypeRef rows (`object`, `RuntimeMethodHandle`: none for `D` or `K`), MemberRef
   rows (each parent, name and signature as measured) and MethodSpec rows (each parent, and the instantiation bytes
   `SignatureHelper.GetMethodSpecSigHelper` writes).
-* If the second question is answered "in 5r": `ModuleBuilderGenericMethodOfOwnGenericType.cs`, the `Gen` measurement,
-  with a terminal-state check of TypeSpec 1, MemberRefs 1 and 2 and MethodSpec 1, and no further rows after `After`.
+* The terminal-state check also reads the operand of each `call`, `ldftn`, `ldtoken`, `stsfld`, `ldsfld` and
+  `newobj` in `E`'s bodies from the scope, as the decisions below add.
+* A parked guest, `ModuleBuilderLdtokenOwnGenericMethodDefinition.cs`, for the `ldtoken` of the definition, as the
+  decisions below say.
 * `TestTypeBuilderGenericParamRefusals` drops the TypeDef-parent case and its mention in the fixture's docstring.
 * No new property: `EmitScopeGen` already draws TypeDef parents, so the round trip, `TestEmitScopeMemberRefs` and the
   extension properties cover the row.
 * Mutants, each run against the guest and the emit-scope tests: the arm refusing again; the parent recorded as a
   TypeRef of the same RID; the find skipped (a new MemberRef, and so a new MethodSpec, for the second `G<int>`); B's
-  shortcut to the MethodDef (MethodSpecs 1 and 4 merge); the scope the handler extended not kept. The handler's own
-  check that the TypeDef names a row is expected to survive at the guest level, since no managed caller passes
-  another and `EmitScope.addMemberRef` checks it again; the plan records that rather than inventing a guest for it.
+  shortcut to the MethodDef (MethodSpecs 1 and 4 merge); the scope the handler extended not kept; and the three the
+  decisions below add. The handler's own check that the TypeDef names a row is expected to survive at the guest
+  level, since no managed caller passes another and `EmitScope.addMemberRef` checks it again; the plan records that
+  rather than inventing a guest for it.
+* The "parent recorded as a TypeRef of the same RID" mutant is killed by a crash, not by an assertion: the module
+  has fewer TypeRefs than the RIDs `D` and `K` have here, so `EmitScope.addMemberRef`'s check of the parent's row
+  throws. The terminal-state check of each MemberRef's parent token kills it independently, and is the only oracle
+  that would if the RIDs happened to name TypeRef rows, since `ResolveMethod` binds a TypeDef and a TypeRef parent
+  to the same member.
 
 ### 5r: left to later stages
 
@@ -2330,3 +2339,60 @@ Open questions:
 * `ModuleBuilder_GetMemberRef` with a TypeDef parent (a user-derived builder), a nested type of the module, and a
   TypeSpec in a self-translated signature, as listed above.
 * `RuntimeMethodHandle_GetMethodBody`, which `MethodBody.GetILAsByteArray` reaches.
+* The `Gen` guest, a generic method of the module's own generic type through `TypeBuilder.GetMethod` and through the
+  created type's `MethodInfo`: a test-only PR of its own against `main`, as decided below.
+* A TypeDef parent naming a type not yet created, which a user-derived member of a `TypeBuilder` passes. CoreCLR
+  adds the row, and A adds it too, reading only the token; binding it then stops at 3b's refusal of a type that is
+  defined but not created. Not measured under PawPrint.
+* A TypeDef parent naming a generic type definition, from a user-derived `MethodInfo` of it: A adds the row, and
+  binding it stops loudly at `MethodTokenBinding`'s refusal of a MemberRef whose parent names a generic type
+  definition without an instantiation.
+
+### 5r: the decisions
+
+Taken 2026-11-13.
+
+* **A: find or add the MemberRef under the TypeDef, as `DefineMemberRef` does.** Checked against the pinned
+  source: `ModuleBuilder_GetMemberRefFromSignature` hands the token and bytes to `DefineMemberRef` unread;
+  `RegMeta::DefineMemberRef` admits `mdtTypeDef`; `MDDupDefault` contains `MDDupMemberRef` and the dynamic
+  module's dispenser sets it (vm/assembly.cpp); `FindMemberRef` compares the parent token exactly.
+  * B writes tokens that are plausible and wrong (MethodSpecs 1 and 4 merge, and every later MethodSpec is
+    renumbered), which is the failure 5o ruled out.
+  * C needs a classifier for a distinction the QCall never draws, and its refusals would be of shapes measured
+    to run. A classifier which CoreCLR does not have is one more thing that can be untruthful.
+  * Conditions on A. The arm reads nothing but the token: not the signature, not whether the type is created
+    (a user-derived member whose type is a `TypeBuilder` passes an uncreated type's TypeDef, CoreCLR adds
+    the row, and 3b's refusal is what stops PawPrint binding it), and not whether the type is generic. It
+    checks the RID against the scope as the TypeRef and TypeSpec arms do, and a miss is a PawPrint fault, not
+    a TODO. The vararg refusal stays after the parent. The fall-through arm's TODO text and the comment above
+    the match are rewritten, since "PawPrint adds only a member of another module or of a generic
+    instantiation" becomes false.
+* **The `Gen` guest (a generic method of the module's own generic type) is a test-only PR of its own**, not
+  part of 5r. It needs no implementation change and does not depend on 5r's arm, so it can go against `main`
+  at once; putting it in 5r would make 5r's diff claim coverage of a path which 5r does not touch. Its guest must
+  not resolve the MemberRefs before `C` is created: the probe measured `TypeLoadException` there.
+* **The user-derived method, field and constructor shapes go into 5r's guest.** A admits them whether
+  tested or not, and admitted-but-untested is the worse state. They are also the only cases which put a
+  non-generic method signature (`00`), a field signature (`06`) and a second TypeDef (`K`, RID 3) through the
+  arm, so they are what kills "the arm admits only `0x10`" and "the parent is always `D`". They stay in the
+  measured order in the one guest, so that the MemberRef numbers 4 to 6 are the probe's.
+* **`ldtoken` of the created type's generic method definition is pinned by a parked guest, not by a
+  replacement refusal test.** The refusal itself (`MethodTokenBinding`, decided on the method's generic
+  parameters before the parent is consulted) is already asserted by `TestLdtokenMemberTokens`' sweep, so a
+  second refusal test in a fixture about generic parameters would pin the same line under a misleading name.
+  What is not recorded anywhere executable is that Reflection.Emit reaches it and that real .NET answers `G`.
+  So: a small guest (`ldtoken created.GetMethod("G")`, then `GetMethodFromHandle` equal to `G`, exit 0 on
+  .NET 10), parked in `TestImpureCases.fs` with the `MethodTokenBinding` TODO as its reason. It
+  asserts the right behaviour for the day the typical instantiation lands, and it cannot be forgotten.
+  `TestTypeBuilderGenericParamRefusals` drops its TypeDef-parent case and the docstring's mention, with no
+  replacement there.
+* **Additions to the oracle.**
+  * The terminal-state check also reads the operand of each `call`, `ldftn`, `ldtoken`, `stsfld`, `ldsfld`
+    and `newobj` in `E`'s bodies from the scope. Without `GetILAsByteArray` the guest cannot see them, and
+    "the second `G<int>` emits MethodSpec 1 again" and "through the `MethodBuilder` emits MethodSpec 4" are
+    claims about operands; `ResolveMethod` by number gives `G<int>` for both 1 and 4 and cannot tell
+    them apart.
+  * `ResolveMethod` cannot tell a TypeDef parent from a TypeRef parent either; the row check of each
+    MemberRef's parent token is the only oracle for that, and the plan should say so.
+  * Mutants added: the arm admitting only a generic-method signature; the arm checking that the type is
+    created; the RID taken from the wrong bits (parent always TypeDef 2, which `K..ctor` kills).
