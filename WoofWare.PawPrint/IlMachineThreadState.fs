@@ -169,6 +169,9 @@ module IlMachineThreadState =
                 | ReturnValueDisposition.ResumeAsyncContexts _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of a runtime-async body's context handling"
+                | ReturnValueDisposition.ResumeSynchronizedMethod _ ->
+                    failwith
+                        $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly carried a step of a synchronized method's monitor handling"
                 | ReturnValueDisposition.ResumedAsync _ ->
                     failwith
                         $"Synthetic stack frame %s{threadStateWithSyntheticFrame.MethodState.ExecutingMethod.Name} unexpectedly claimed to be a resumed runtime-async frame"
@@ -319,6 +322,9 @@ module IlMachineThreadState =
             | ReturnValueDisposition.ResumeAsyncContexts _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of a runtime-async frame's context handling, which only a call the runtime makes for those contexts carries"
+            | ReturnValueDisposition.ResumeSynchronizedMethod _ ->
+                failwith
+                    $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame carried a step of a synchronized method's monitor handling, which only a call the runtime makes for that monitor carries"
             | ReturnValueDisposition.ResumedAsync _ ->
                 failwith
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} was constructing an object, but its frame was a resumed runtime-async frame, which no newobj makes"
@@ -367,6 +373,12 @@ module IlMachineThreadState =
                     $"logic error: %s{returningMethodState.ExecutingMethod.Name} returned a value, but its frame carried a step of the runtime's wrapping of a thrown non-exception, which only the runtime's void helpers carry"
         | ReturnValueDisposition.ResumeAsyncContexts step ->
             ReturnFrameResult.ResumeAsyncContexts (state, step, returned)
+        | ReturnValueDisposition.ResumeSynchronizedMethod step ->
+            match returned with
+            | None -> ReturnFrameResult.ResumeSynchronizedMethod (state, step)
+            | Some _ ->
+                failwith
+                    $"logic error: %s{returningMethodState.ExecutingMethod.Name} returned a value, but its frame carried a step of a synchronized method's monitor handling, which only the runtime's void monitor helpers carry"
         | ReturnValueDisposition.ResumedAsync resultLocation ->
             ReturnFrameResult.ResumedAsyncReturned (state, resultLocation, returned)
         | ReturnValueDisposition.Discard ->

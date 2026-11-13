@@ -69,6 +69,7 @@
     <Compile Include="MemoryPools.fsi" />
     <Compile Include="MemoryPools.fs" />
     <Compile Include="NativeReferenceCell.fs" />
+    <Compile Include="NativeFlagCell.fs" />
     <Compile Include="NativeInt32Cell.fs" />
     <Compile Include="CorelibEntryPoint.fs" />
     <Compile Include="CatchClauseRefusal.fs" />
@@ -136,6 +137,7 @@
     <Compile Include="AsyncSuspension.fs" />
     <Compile Include="IlMachineStateExecution.fs" />
     <Compile Include="AsyncContextSaving.fs" />
+    <Compile Include="SynchronizedMethodMonitor.fs" />
     <Compile Include="StructMarshalStub.fs" />
     <Compile Include="DelegateInvocations.fs" />
     <Compile Include="MulticastDelegateStub.fs" />

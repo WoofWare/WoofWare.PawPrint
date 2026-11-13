@@ -60,16 +60,28 @@ module AbstractMachine =
         | StateLoadResult.ThrowingTypeInitializationException state ->
             // The dispatch above already ran against this frame, so the exception's trace names
             // it. Clear the flag on whichever frame is still ours to clear: dispatch may have
-            // unwound us entirely, in which case there is nothing to do.
+            // unwound us entirely, in which case there is nothing to do. A synchronized method's
+            // frame that the unwind is parked on, to call its monitor exit helper, keeps its flag:
+            // the resumed second pass reads it to know that none of the body ran, so that none of
+            // the body's cleanup clauses runs.
             let state =
                 match state.ThreadState |> Map.tryFind thread with
                 | None -> state
                 | Some threadState ->
                     match threadState.MethodStates |> Map.tryFind threadState.ActiveMethodState with
                     | None -> state
-                    | Some _ ->
-                        state
-                        |> IlMachineState.mapFrame thread threadState.ActiveMethodState MethodState.clearPendingTypeInit
+                    | Some frame ->
+                        match frame.Synchronized with
+                        | Some (SynchronizedFrame.ExitingOnUnwind _) -> state
+                        | Some SynchronizedFrame.AwaitingEnter
+                        | Some (SynchronizedFrame.Holding _)
+                        | Some SynchronizedFrame.Exited
+                        | None ->
+                            state
+                            |> IlMachineState.mapFrame
+                                thread
+                                threadState.ActiveMethodState
+                                MethodState.clearPendingTypeInit
 
             ExecutionResult.stepped (state, WhatWeDid.ThrowingTypeInitializationException)
             |> Choice1Of2
@@ -325,6 +337,8 @@ module AbstractMachine =
                 failwith "unexpected step of a thrown non-exception's wrapping from delegate frame pop"
             | ReturnFrameResult.ResumeAsyncContexts _ ->
                 failwith "unexpected step of a runtime-async body's context handling from delegate frame pop"
+            | ReturnFrameResult.ResumeSynchronizedMethod _ ->
+                failwith "unexpected step of a synchronized method's monitor handling from delegate frame pop"
             | ReturnFrameResult.ResumedAsyncReturned _ ->
                 failwith "unexpected return of a resumed runtime-async frame from delegate frame pop"
             | ReturnFrameResult.NormalReturn state ->
@@ -703,6 +717,15 @@ module AbstractMachine =
             | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
 
         let ran =
+            // A synchronized method's call of a monitor helper is a step of its own too, and comes
+            // before the type-initialisation check: CoreCLR's JIT inserts the check into the body
+            // (`fgMorphInit`) before it wraps the body in the region the monitor guards
+            // (`fgAddSyncMethodEnterExit`). No frame is both synchronized and runtime-async, which
+            // frame creation refuses.
+            match SynchronizedMethodMonitor.beforeInstruction loggerFactory baseClassTypes thread state with
+            | Some result -> result
+            | None ->
+
             match state.ThreadState.[thread].MethodState.PendingTypeInit with
             | None -> afterPrologue state
             | Some ty ->

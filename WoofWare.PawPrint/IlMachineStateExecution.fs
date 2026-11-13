@@ -1407,6 +1407,13 @@ module IlMachineStateExecution =
                     returnInfo
             with
             | Ok frame ->
+                match frame.Synchronized, body.VmStub, body.AsyncFrame with
+                | Some _, Some _, _
+                | Some _, _, Some _ ->
+                    failwith
+                        $"TODO: %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name} is synchronized, but its frame runs a VM stub (%b{body.VmStub.IsSome}) or has runtime async's calling convention (%b{body.AsyncFrame.IsSome}); PawPrint holds a synchronized method's monitor only round a method's own IL body with the ordinary calling convention, and what CoreCLR does with the others is unmeasured"
+                | _ -> ()
+
                 state,
                 { frame with
                     VmStub = body.VmStub
@@ -1620,16 +1627,21 @@ module IlMachineStateExecution =
                 failwith
                     $"a call made through `callMethod` aborted the process (%O{fatal.Code}: %s{message}). PawPrint cannot say what should happen here: this wrapper serves the interpreter's own entries — class initialisers, constructors, chosen BCL helpers — and it is unmeasured whether CoreCLR applies the reverse-P/Invoke transition to those at all. A guest cannot produce this; hand-authored metadata can"
 
-    /// Call the static `AsyncHelpers.methodName` with `arguments` from the active frame of
-    /// `thread`, a runtime-async frame whose program counter stays where it is, as CoreCLR's JIT
-    /// calls the helpers it names for a frame's contexts and suspension (`getAsyncInfo`); `step` is
-    /// what the frame does once the helper returns.
-    and callAsyncHelper
+    /// Call the static CoreLib method `typeNamespace.typeName::methodName` with `arguments` from
+    /// the active frame of `thread`, whose program counter stays where it is, as CoreCLR's JIT calls
+    /// a helper it puts into a method's code; `disposition` says what the frame does once the
+    /// helper returns, and `escape` what happens to an exception escaping it. `purpose` says why
+    /// the runtime calls it, for diagnostics.
+    and private callRuntimeHelper
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (typeNamespace : string)
+        (typeName : string)
         (methodName : string)
         (arguments : CliType list)
-        (step : AsyncContextStep)
+        (disposition : ReturnValueDisposition)
+        (escape : ExceptionEscape)
+        (purpose : string)
         (thread : ThreadId)
         (state : IlMachineState)
         : IlMachineState * CallCommitment
@@ -1637,11 +1649,11 @@ module IlMachineStateExecution =
         let helper =
             CorelibEntryPoint.findCorelibStaticMethod
                 baseClassTypes
-                "System.Runtime.CompilerServices"
-                "AsyncHelpers"
+                typeNamespace
+                typeName
                 methodName
                 (List.length arguments)
-                "save, restore and suspend a runtime-async body's contexts as CoreCLR's JIT does"
+                purpose
 
         let state, concretized =
             ExecutionConcretization.concretizeMethodWithAllGenerics
@@ -1673,16 +1685,74 @@ module IlMachineStateExecution =
                 thread
                 state.ThreadState.[thread]
                 None
-                (ReturnValueDisposition.ResumeAsyncContexts step)
-                ExceptionEscape.AsyncContextHelper
+                disposition
+                escape
                 None
                 state
         with
         | state, CallCommitment.Committed -> state, CallCommitment.Committed
         | _, CallCommitment.Raised ->
             failwith
-                $"TODO: calling AsyncHelpers.%s{methodName} for a runtime-async body raised before it ran; what CoreCLR raises then is not modelled"
+                $"TODO: calling %s{typeNamespace}.%s{typeName}::%s{methodName} to %s{purpose} raised before it ran; what CoreCLR raises then is not modelled"
         | state, CallCommitment.Aborted fatal -> state, CallCommitment.Aborted fatal
+
+    /// Call the static `AsyncHelpers.methodName` with `arguments` from the active frame of
+    /// `thread`, a runtime-async frame whose program counter stays where it is, as CoreCLR's JIT
+    /// calls the helpers it names for a frame's contexts and suspension (`getAsyncInfo`); `step` is
+    /// what the frame does once the helper returns.
+    and callAsyncHelper
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (methodName : string)
+        (arguments : CliType list)
+        (step : AsyncContextStep)
+        (thread : ThreadId)
+        (state : IlMachineState)
+        : IlMachineState * CallCommitment
+        =
+        callRuntimeHelper
+            loggerFactory
+            baseClassTypes
+            "System.Runtime.CompilerServices"
+            "AsyncHelpers"
+            methodName
+            arguments
+            (ReturnValueDisposition.ResumeAsyncContexts step)
+            ExceptionEscape.AsyncContextHelper
+            "save, restore and suspend a runtime-async body's contexts as CoreCLR's JIT does"
+            thread
+            state
+
+    /// Call the static `Monitor.methodName`, one of `SynchronizedMethodHelpers.onRuntime`, with
+    /// the monitor `monitor` from the active frame of `thread`, a synchronized method's frame whose
+    /// program counter stays where it is, as CoreCLR's JIT calls its monitor helpers for a
+    /// synchronized method (`fgCreateMonitorTree`); `step` is what the frame does once the helper
+    /// returns.
+    and callMonitorHelper
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (methodName : string)
+        (monitor : SynchronizedMonitor)
+        (step : SynchronizedMethodStep)
+        (thread : ThreadId)
+        (state : IlMachineState)
+        : IlMachineState * CallCommitment
+        =
+        callRuntimeHelper
+            loggerFactory
+            baseClassTypes
+            "System.Threading"
+            "Monitor"
+            methodName
+            [
+                CliType.ObjectRef (Some monitor.Lock)
+                CliType.RuntimePointer (CliRuntimePointer.Managed monitor.LockTaken.Pointer)
+            ]
+            (ReturnValueDisposition.ResumeSynchronizedMethod step)
+            ExceptionEscape.SynchronizedMethodHelper
+            "take and release a synchronized method's monitor as CoreCLR's JIT does"
+            thread
+            state
 
     /// The active frame of `thread`, which has runtime async's calling convention, returns
     /// `continuation` as its hidden continuation: it suspends, runs no handler, and pushes no value

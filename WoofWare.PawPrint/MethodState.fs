@@ -221,6 +221,51 @@ type AsyncContextStep =
     /// continuation's `ExecutionContext` slot, and the frame leaves next.
     | AfterCaptureExecutionContext of suspension : PendingSuspension
 
+/// The monitor a frame running a synchronized method has called the runtime's enter helper for:
+/// what CoreCLR's JIT passes that helper and its exit helper (`fgCreateMonitorTree`,
+/// jit/flowgraph.cpp).
+type SynchronizedMonitor =
+    {
+        /// The object whose monitor the method holds: its `this`, or for a static method the
+        /// `RuntimeType` of its exact declaring type.
+        Lock : ManagedHeapAddress
+        /// The JIT's hidden local saying whether the monitor is held, which the enter helper sets
+        /// and the exit helper reads and clears.
+        LockTaken : NativeFlagCell
+    }
+
+/// How far a frame running a synchronized method (`MethodImplAttributes.Synchronized`) has got
+/// with its monitor. CoreCLR's JIT calls the runtime's enter helper before the body, inside a
+/// `try` round the whole body whose `fault` handler calls the exit helper, and calls the exit
+/// helper again before each `ret` (`fgAddSyncMethodEnterExit`, jit/flowgraph.cpp). The helpers are
+/// `SynchronizedMethodHelpers.onRuntime`.
+[<RequireQualifiedAccess>]
+type SynchronizedFrame =
+    /// The enter helper has not been called, so nothing of the frame has run, not even its
+    /// type-initialisation check, which the JIT puts inside the region the monitor guards.
+    | AwaitingEnter
+    /// The enter helper has been called, and the body runs inside the region whose fault handler
+    /// calls the exit helper.
+    | Holding of SynchronizedMonitor
+    /// The exception `unwind` describes is leaving the body, whose fault handler calls the exit
+    /// helper next; the second pass resumes once it returns.
+    | ExitingOnUnwind of
+        SynchronizedMonitor *
+        unwind : ExceptionUnwindState<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
+    /// The exit helper has returned as the frame leaves, so it leaves next.
+    | Exited
+
+/// What the runtime does once a monitor helper it called for a synchronized method's frame has
+/// returned to that frame.
+[<RequireQualifiedAccess>]
+type SynchronizedMethodStep =
+    /// The enter helper returned before the body: the body runs next.
+    | AfterEnter
+    /// The exit helper returned before the body's `ret`, which runs again and returns.
+    | AfterExitOnReturn
+    /// The exit helper returned while an exception was leaving the body, whose unwind resumes.
+    | AfterExitOnUnwind
+
 /// What `returnStackFrame` should do with a frame's product — the object it was constructing if
 /// `Constructing`, otherwise the value its signature says it returns — once it returns.
 [<RequireQualifiedAccess>]
@@ -254,6 +299,9 @@ type ReturnValueDisposition =
     /// The runtime called this CoreLib helper for the contexts of the runtime-async frame it returns
     /// to, and does `step` next, with what the helper returned.
     | ResumeAsyncContexts of step : AsyncContextStep
+    /// The runtime called this monitor helper for the synchronized method's frame it returns to,
+    /// and does `step` next. The helpers return nothing.
+    | ResumeSynchronizedMethod of step : SynchronizedMethodStep
     /// The frame is a suspended runtime-async frame that CoreLib's dispatcher resumed through
     /// `FunctionPointerTarget.AsyncResume`, whose return is a continuation. If the frame returns,
     /// its value goes through `resultLocation`, the result slot of the continuation after it, and
@@ -305,6 +353,12 @@ type ExceptionEscape =
     /// method. Nothing the helpers do raises, so PawPrint does not model an exception escaping
     /// one: exception dispatch ends the run on reaching such a frame's boundary.
     | AsyncContextHelper
+    /// The runtime calls this monitor helper for the synchronized method's frame beneath it
+    /// (`SynchronizedMethodStep`). CoreCLR's JIT makes the call inside the `try` its fault handler
+    /// guards but outside every clause of the method's own, which PawPrint's search of that frame
+    /// cannot tell from the instruction the frame is at, so exception dispatch ends the run on
+    /// reaching such a frame's boundary.
+    | SynchronizedMethodHelper
 
 /// What a native frame PawPrint implements keeps between its entries: what a C function
 /// in the runtime's native shim read from guest memory once, before a loop that makes a
@@ -434,6 +488,9 @@ and MethodState =
         /// The frame's method has runtime async's calling convention, and this is what of it the
         /// frame keeps. `None` for a method with the ordinary convention.
         AsyncFrame : AsyncFrame option
+        /// The frame's method is synchronized, and this is how far the frame has got with its
+        /// monitor. `None` for a method that is not.
+        Synchronized : SynchronizedFrame option
         /// The hidden continuation the last method with runtime async's calling convention that this
         /// frame called returned: `None` (null) when that call completed, and the continuation
         /// describing its suspension otherwise. `AsyncHelpers.AsyncCallContinuation()` reads and
@@ -566,6 +623,18 @@ and MethodState =
             failwith
                 $"BUG: %O{state.ExecutingMethod} was given the context handling %A{handling}, but its frame is %A{other}, which saves no contexts"
 
+    /// Record how far this frame's synchronized method has got with its monitor. See
+    /// `SynchronizedFrame`.
+    static member withSynchronizedFrame (progress : SynchronizedFrame) (state : MethodState) : MethodState =
+        match state.Synchronized with
+        | Some _ ->
+            { state with
+                Synchronized = Some progress
+            }
+        | None ->
+            failwith
+                $"BUG: %O{state.ExecutingMethod} was given the monitor progress %A{progress}, but its method is not synchronized"
+
     /// Keep `locals` for the call this native frame makes again. See `NativeLocals`.
     static member withNativeLocals (locals : NativeLocals option) (state : MethodState) : MethodState =
         { state with
@@ -683,6 +752,30 @@ and MethodState =
 
             CatchClauseRefusal.check baseClassTypes loadedAssemblies containingAssembly method
 
+        // CoreCLR's JIT holds a synchronized method's monitor round its whole body
+        // (`fgAddSyncMethodEnterExit`, jit/flowgraph.cpp), which the frame does by calling the same
+        // helpers at the same points (`SynchronizedMethodMonitor`). Decided here because every frame
+        // of a method, however the interpreter enters it, is made here.
+        let synchronized =
+            match method with
+            | MethodInfo.Metadata (_, facts, _) when
+                facts.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.Synchronized
+                ->
+                let declaringType =
+                    containingAssembly.TypeDefs.[method.RequiredDeclaringType.Definition.Get]
+
+                if LoadedTypeInfo.isValueType baseClassTypes loadedAssemblies declaringType then
+                    failwith
+                        $"TODO: %O{method} is a synchronized method of a value type; CoreCLR refuses to load such a type (BFA_SYNC_METHOD_IN_VT, a TypeLoadException), which PawPrint does not model"
+
+                match method.Body with
+                | MethodBody.Il _ -> Some SynchronizedFrame.AwaitingEnter
+                | body ->
+                    failwith
+                        $"TODO: %O{method} is synchronized, but its body is %A{body}; CoreCLR's JIT holds the monitor only round an IL body, and the VM refuses a synchronized P/Invoke with TypeLoadException (IDS_EE_NOSYNCHRONIZED), which PawPrint does not model"
+            | MethodInfo.Metadata _
+            | MethodInfo.Synthesised _ -> None
+
         let declaredLocals =
             match MethodInfo.tryIlBody method |> Option.bind _.LocalVars with
             | None -> 0
@@ -731,6 +824,7 @@ and MethodState =
             NativeLocals = None
             VmStub = None
             AsyncFrame = None
+            Synchronized = synchronized
             AsyncCallContinuation = None
         }
         |> Ok

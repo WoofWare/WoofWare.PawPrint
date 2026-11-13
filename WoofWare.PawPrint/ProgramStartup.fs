@@ -535,6 +535,22 @@ module internal ProgramStartup =
             (state : IlMachineState)
             : IlMachineState * StartupPhase
             =
+            // On CoreCLR the entry type's initialiser runs from `Main`'s prologue, so a
+            // synchronized `Main` runs it holding the type's monitor; here it runs in a startup
+            // phase of its own, before `Main` is installed.
+            match concretizedMainMethod with
+            | MethodInfo.Metadata (_, facts, _) when
+                facts.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.Synchronized
+                ->
+                let mainType =
+                    dumped.TypeDefs.[concretizedMainMethod.RequiredDeclaringType.Definition.Get]
+
+                if mainType.Methods |> List.exists (fun m -> m.Name = ".cctor") then
+                    failwith
+                        $"TODO: the entry point %O{concretizedMainMethod} is synchronized and its type has a type initialiser, which CoreCLR runs from Main's prologue holding the type's monitor; PawPrint runs it in a startup phase before Main, without the monitor"
+            | MethodInfo.Metadata _
+            | MethodInfo.Synthesised _ -> ()
+
             // CoreCLR compiles Main, loading what its locals name, before the entry type's
             // `.cctor` runs, so the `.cctor` already sees those assemblies.
             let state, localTypes =
