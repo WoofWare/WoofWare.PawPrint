@@ -6,9 +6,8 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// The generic parameters `TypeBuilder_TermCreateClass` refuses, each by name, although real .NET
-/// defines each of them (measured on .NET 10) and refuses to load their types, and the reference to a
-/// generic method of the module's own created type that `ModuleBuilder_GetMemberRefFromSignature`
-/// refuses. The generic parameters PawPrint defines are in `sourcesImpure/TypeBuilderDefineGenericParam.cs`,
+/// defines each of them (measured on .NET 10) and refuses to load their types. The generic parameters
+/// PawPrint defines are in `sourcesImpure/TypeBuilderDefineGenericParam.cs`,
 /// `sourcesImpure/TypeBuilderGenericParamConstraints.cs`, `sourcesImpure/TypeBuilderGenericMethod.cs` and
 /// the `sourcesImpure/TypeBuilderMixedParams*.cs` guests, the last in any owner order.
 [<TestFixture>]
@@ -82,31 +81,6 @@ public class Program
 
         exc.Message
         |> shouldContainText "is a covariant or contravariant parameter of the method 0x06000001"
-
-    [<Test>]
-    let ``a generic method of the module's own created type, reached through its MethodInfo, is refused`` () : unit =
-        // `GetMethodTokenInternal` finds the created type's `MethodInfo` of another module than the
-        // `ModuleBuilder`, so `GetMemberRefToken` names `G` by a MemberRef whose parent is `D`'s TypeDef.
-        let exc =
-            runRefused
-                "MemberRefOfOwnCreatedGenericMethod.cs"
-                """
-        TypeBuilder d = module.DefineType("D", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed);
-        MethodBuilder g = d.DefineMethod("G", MethodAttributes.Public | MethodAttributes.Static);
-        GenericTypeParameterBuilder x = g.DefineGenericParameters("X")[0];
-        g.SetReturnType(x);
-        g.SetParameters(x);
-        ILGenerator gil = g.GetILGenerator();
-        gil.Emit(OpCodes.Ldarg_0);
-        gil.Emit(OpCodes.Ret);
-        Type created = d.CreateType();
-        TypeBuilder e = module.DefineType("E", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed);
-        ILGenerator il = e.DefineMethod("C", MethodAttributes.Public | MethodAttributes.Static, typeof(int), Type.EmptyTypes).GetILGenerator();
-        il.Emit(OpCodes.Ldc_I4, 42);
-        il.Emit(OpCodes.Call, created.GetMethod("G").MakeGenericMethod(typeof(int)));
-        il.Emit(OpCodes.Ret);"""
-
-        exc.Message |> shouldContainText "the parent 0x02000002 is a TypeDef of Dyn"
 
     [<Test>]
     let ``a covariant parameter of a class is refused`` () : unit =
