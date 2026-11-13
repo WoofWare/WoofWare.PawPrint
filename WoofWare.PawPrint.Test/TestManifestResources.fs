@@ -79,8 +79,6 @@ public static class Entry
 
         match Program.prepare loggerFactory (Some sourceName) peImage (HostConfig.Default dotnetRuntimes) with
         | Program.ProgramStartResult.Ready prepared -> PreparedGuest.enterMain loggerFactory prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected program to be ready before Main, but got %O{outcome}"
 
     let private requiredTopLevelType
         (assembly : DumpedAssembly)

@@ -43,8 +43,6 @@ public static class Entry
                 (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
         with
         | Program.ProgramStartResult.Ready prepared -> prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected program to be ready before Main, got %O{outcome}"
 
     let private requiredTopLevelType
         (assembly : DumpedAssembly)

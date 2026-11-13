@@ -104,7 +104,6 @@ class CallsUnmintedCallee
             }
 
         match Program.prepare loggerFactory (Some sourceName) peImage hostConfig with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared ->
 
         let rec loop (prepared : Program.PreparedProgram) (acc : WhatWeDid list) : WhatWeDid list * int =

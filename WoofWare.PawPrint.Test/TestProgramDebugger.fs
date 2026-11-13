@@ -132,7 +132,6 @@ class Program
                         (HostConfig.Default dotnetRuntimes)
                 with
                 | Program.ProgramStartResult.Ready prepared -> stepToCompletion debuggerLoggerFactory logger prepared
-                | Program.ProgramStartResult.CompletedBeforeMain runEnd -> ExpectRun.ended runEnd
 
             outcomeSignature debuggerOutcome |> shouldEqual (outcomeSignature normalOutcome)
 

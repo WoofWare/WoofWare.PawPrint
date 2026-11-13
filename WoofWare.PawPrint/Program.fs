@@ -47,9 +47,7 @@ module Program =
                         this.Driver
             }
 
-    type ProgramStartResult =
-        | Ready of PreparedProgram
-        | CompletedBeforeMain of RunEnd
+    type ProgramStartResult = | Ready of PreparedProgram
 
     type ProgramStepOutcome =
         /// `effect` is the step's `StepEffect`, forwarded verbatim from
@@ -88,7 +86,7 @@ module Program =
             }
 
         /// The machine state as it currently stands. A driver streaming guest output reads
-        /// `Kernel.OutputLog` from here when startup ends without a `ProgramStartResult`.
+        /// `Kernel.OutputLog` from here when startup deadlocks rather than reaching `Main`.
         member this.State : IlMachineState = this.Driver.Current.State
 
     /// The result of stepping startup once. Mirrors `ProgramStepOutcome`, and for the same
@@ -336,7 +334,6 @@ module Program =
         let logger = loggerFactory.CreateLogger "Program"
 
         match prepare loggerFactory originalPath fileStream hostConfig with
-        | ProgramStartResult.CompletedBeforeMain runEnd -> runEnd
         | ProgramStartResult.Ready prepared -> pumpPrepared loggerFactory logger prepared
 
     /// A machine state sitting at a scheduler tick *boundary* whose next decision is contended:
@@ -550,8 +547,6 @@ module Program =
             match stepStartup loggerFactory logger startup with
             | StartupStepOutcome.Completed (ProgramStartResult.Ready prepared) ->
                 runToNextFork loggerFactory logger prepared
-            | StartupStepOutcome.Completed (ProgramStartResult.CompletedBeforeMain outcome) ->
-                PrefixOutcome.NeverForked outcome
             | StartupStepOutcome.Deadlocked (_, stuck) -> PrefixOutcome.DeadlockedBeforeFork stuck
             | StartupStepOutcome.Stepped (startup, ran, whatWeDid, _) ->
                 checkYieldDidNotStraddle ran whatWeDid startup.State

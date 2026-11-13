@@ -239,7 +239,6 @@ module BoundedRun =
             else
 
             match Program.stepStartup loggerFactory logger startup with
-            | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.CompletedBeforeMain runEnd) -> runEnd
             // The budget is shared, not per-phase: `Main` resumes the count startup left off at,
             // so the bound is a statement about the whole run. Startup is cheap enough for that
             // to cost nothing — lazy class initialisation means a trivial guest reaches `Main`

@@ -47,8 +47,6 @@ public static class Entry
             Program.prepare loggerFactory (Some "StackTraceHandlerGuest.cs") peImage (HostConfig.Default dotnetRuntimes)
         with
         | Program.ProgramStartResult.Ready prepared -> PreparedGuest.enterMain loggerFactory prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected guest to be ready before Main, but got %O{outcome}"
 
     let private requiredTopLevelType
         (assembly : DumpedAssembly)

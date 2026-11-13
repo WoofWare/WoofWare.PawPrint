@@ -36,8 +36,6 @@ public static class Entry
 
         match Program.prepare loggerFactory (Some "WaitOneCoreTest.cs") peImage (HostConfig.Default dotnetRuntimes) with
         | Program.ProgramStartResult.Ready prepared -> prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected program to be ready before Main, got %O{outcome}"
 
     let private waitOneCoreMethod
         (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)

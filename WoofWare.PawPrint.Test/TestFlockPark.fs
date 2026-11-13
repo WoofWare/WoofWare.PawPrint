@@ -98,7 +98,6 @@ class Program
             }
 
         match Program.prepare loggerFactory (Some name) peImage config with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared -> prepared
 
     /// The lock each parked thread is waiting for.

@@ -131,7 +131,6 @@ public static class Program
                 peImage
                 (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
         with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared ->
 
         let processId = prepared.State.Kernel.ProcessId

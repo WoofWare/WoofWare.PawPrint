@@ -75,7 +75,6 @@ module TestStepEffectStreaming =
         use peImage = new MemoryStream (image)
 
         match Program.prepare loggerFactory (Some sourceName) peImage (HostConfig.Default dotnetRuntimes) with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome -> failwith $"guest completed before Main: %O{outcome}"
         | Program.ProgramStartResult.Ready prepared ->
 
         let beforeMain = prepared.State.Kernel.OutputLog.Length
@@ -267,8 +266,6 @@ class Program
             | Program.StartupStepOutcome.WorkerTerminated (startup, _)
             | Program.StartupStepOutcome.PhaseAdvanced startup -> pumpStartup startup acc
             | Program.StartupStepOutcome.Deadlocked (_, stuck) -> failwith $"startup deadlocked: %s{stuck}"
-            | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.CompletedBeforeMain outcome) ->
-                failwith $"guest completed before Main: %O{outcome}"
             | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.Ready prepared) -> List.rev acc, prepared
 
         let startupEffects, prepared =

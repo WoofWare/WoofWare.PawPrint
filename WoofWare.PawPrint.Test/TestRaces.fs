@@ -348,9 +348,6 @@ module TestRaces =
                     PctSeed = seed
                 }
         with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith
-                $"%s{sourceName} (seed=%A{seed}) completed before Main ran (%A{outcome}); the race is between two threads inside Main"
         | Program.ProgramStartResult.Ready prepared ->
             let rec loop (prepared : Program.PreparedProgram) (blocked : int) : int * int =
                 match Program.stepPrepared loggerFactory logger prepared with

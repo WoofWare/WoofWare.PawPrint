@@ -94,8 +94,6 @@ static unsafe class Futex
 
         let prepared =
             match Program.prepare loggerFactory (Some name) peImage config with
-            | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-                failwith $"guest completed before Main: %O{outcome}"
             | Program.ProgramStartResult.Ready prepared -> prepared
 
         let rec loop (prepared : Program.PreparedProgram) (steps : int64) (most : int) : Journey =

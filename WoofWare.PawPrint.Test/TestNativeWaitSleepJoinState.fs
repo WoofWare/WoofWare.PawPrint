@@ -46,8 +46,6 @@ public static class Entry
             Program.prepare loggerFactory (Some "WaitSleepJoinStateTest.cs") peImage (HostConfig.Default dotnetRuntimes)
         with
         | Program.ProgramStartResult.Ready prepared -> prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected program to be ready before Main, got %O{outcome}"
 
     /// The `System.Threading.Thread` method whose QCall entry point is `entryPoint`, concretised.
     let private threadQCall

@@ -102,8 +102,6 @@ public static class Entry
 
         match Program.prepare loggerFactory (Some "NativeEnumTest.cs") peImage (HostConfig.Default dotnetRuntimes) with
         | Program.ProgramStartResult.Ready prepared -> PreparedGuest.enterMain loggerFactory prepared
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            failwith $"expected enum test program to be ready before Main, got %O{outcome}"
 
     let private requiredTopLevelType
         (assembly : DumpedAssembly)

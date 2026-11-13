@@ -154,15 +154,6 @@ module TestScheduleFork =
             }
 
         match Program.prepare loggerFactory (Some sourceName) peImage hostConfig with
-        | Program.ProgramStartResult.CompletedBeforeMain outcome ->
-            {
-                Steps = []
-                Ending = $"completedBeforeMain %s{describeOutcome outcome}"
-                FinalStepCounter = (terminalStateOf outcome).Kernel.StepCounter
-                FinalClockTicks = (terminalStateOf outcome).Kernel.VirtualClockTicks
-                Stdout = bytesOf FileDescriptorRole.StandardOutput (terminalStateOf outcome)
-                Stderr = bytesOf FileDescriptorRole.StandardError (terminalStateOf outcome)
-            }
         | Program.ProgramStartResult.Ready prepared -> traceFrom loggerFactory prepared
 
     /// Compute the shared prefix once, failing the test if the guest does not actually fork —

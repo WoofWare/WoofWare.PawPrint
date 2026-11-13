@@ -319,8 +319,6 @@ module AppProgram =
                     pumpStartup startup
                 | Program.StartupStepOutcome.WorkerTerminated (startup, _terminatingThread) -> pumpStartup startup
                 | Program.StartupStepOutcome.PhaseAdvanced startup -> pumpStartup startup
-                | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.CompletedBeforeMain (RunEnd.Ended outcome)) ->
-                    onOutcome outcome
                 | Program.StartupStepOutcome.Completed (Program.ProgramStartResult.Ready prepared) ->
                     // Startup's own bookkeeping (installing the `Main` frame, allocating argv)
                     // performs no guest writes, so this is normally a no-op; it keeps the
