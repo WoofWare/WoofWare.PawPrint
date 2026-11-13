@@ -132,6 +132,11 @@ module TestEmitScopeImage =
         let pe, reader = readImage image
         use _ = pe
 
+        let genericParamOwners =
+            match GenericParamOwnerIndex.ofReader reader with
+            | Ok index -> index
+            | Error error -> failwith $"the image's generic parameters are misnumbered: %A{error}"
+
         let moduleRow = EmitScope.moduleRow scope
         let moduleDefinition = reader.GetModuleDefinition ()
         moduleDefinition.Generation |> shouldEqual 0
@@ -266,7 +271,10 @@ module TestEmitScopeImage =
                 |> List.ofSeq
             )
 
-            actual.GetGenericParameters ()
+            genericParamOwners
+            |> GenericParamOwnerIndex.parametersOf
+                reader
+                (GenericParamOwner.TypeDef (MetadataTokens.TypeDefinitionHandle i))
             |> Seq.map MetadataTokens.GetRowNumber
             |> List.ofSeq
             |> shouldEqual (genericParamsOwnedBy (TypeOrMethodDef.TypeDef (TypeDefRid i)) scope)
@@ -310,7 +318,10 @@ module TestEmitScopeImage =
             |> List.ofSeq
             |> shouldEqual (paramsOf i paramOrder)
 
-            actual.GetGenericParameters ()
+            genericParamOwners
+            |> GenericParamOwnerIndex.parametersOf
+                reader
+                (GenericParamOwner.MethodDef (MetadataTokens.MethodDefinitionHandle i))
             |> Seq.map MetadataTokens.GetRowNumber
             |> List.ofSeq
             |> shouldEqual (genericParamsOwnedBy (TypeOrMethodDef.MethodDef (MethodDefRid i)) scope)

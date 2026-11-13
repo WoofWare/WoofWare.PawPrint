@@ -1381,28 +1381,24 @@ public class MarshalShapes
         (typeHandle : TypeDefinitionHandle)
         : GenericParameterHandle
         =
-        let mr = assembly.PeReader.GetMetadataReader ()
-        let typeDef = mr.GetTypeDefinition typeHandle
-        let genericParams = typeDef.GetGenericParameters ()
+        let genericParams = assembly.TypeDefs.[typeHandle].Generics
 
-        if genericParams.Count = 0 then
+        if genericParams.IsEmpty then
             failwith "expected at least one generic parameter on type"
 
-        genericParams.[0]
+        (fst genericParams.[0]).Handle.Get
 
     let private firstGenericParameterOfMethod
         (assembly : DumpedAssembly)
         (methodHandle : MethodDefinitionHandle)
         : GenericParameterHandle
         =
-        let mr = assembly.PeReader.GetMetadataReader ()
-        let methodDef = mr.GetMethodDefinition methodHandle
-        let genericParams = methodDef.GetGenericParameters ()
+        let genericParams = assembly.Methods.[methodHandle].Generics
 
-        if genericParams.Count = 0 then
+        if genericParams.IsEmpty then
             failwith "expected at least one generic parameter on method"
 
-        genericParams.[0]
+        (fst genericParams.[0]).Handle.Get
 
     let private firstParameterOfMethod
         (assembly : DumpedAssembly)

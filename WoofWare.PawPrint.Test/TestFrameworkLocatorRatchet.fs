@@ -146,6 +146,18 @@ module TestFrameworkLocatorRatchet =
                 Reason = "locates the test assembly's directory, which holds the F# guests"
             }
             {
+                File = "TestGenericParamOwnerOracle.fs"
+                Locator = "Location"
+                Count = 1
+                Reason = "locates the test assembly's directory, whose images the oracle sweeps"
+            }
+            {
+                File = "TestGenericParamOwnerRatchet.fs"
+                Locator = "Location"
+                Count = 1
+                Reason = "locates each of PawPrint's non-test assemblies, whose IL it scans"
+            }
+            {
                 File = "TestImpureCases.fs"
                 Locator = "Location"
                 Count = 1
