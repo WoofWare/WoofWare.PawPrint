@@ -26,8 +26,8 @@ type EmitScopeExtensionViolation =
     | HeapEntryChanged of heap : HeapIndex * entry : int
 
     /// A row the later scope adds is a member of a type already created: a field or method it
-    /// declares, a parameter of one of its methods, or one of its interface implementations or
-    /// method impls.
+    /// declares, a parameter of one of its methods, one of its interface implementations or method
+    /// impls, or a generic parameter of it or of one of its methods.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
     /// A row of the earlier scope differs in the later one only in a column the emitter fills in after
@@ -224,6 +224,19 @@ module EmitScopeExtension =
             | None -> ()
 
             yield! rewritten TableIndex.AssemblyRef (EmitScope.assemblyRefs before) (EmitScope.assemblyRefs after)
+            yield! rewritten TableIndex.GenericParam (EmitScope.genericParams before) (EmitScope.genericParams after)
+
+            yield!
+                addedToCreated
+                    TableIndex.GenericParam
+                    (EmitScope.genericParams before).Count
+                    (EmitScope.genericParams after)
+                    (fun row ->
+                        match row.Owner with
+                        | TypeOrMethodDef.TypeDef typeDef -> typeDef
+                        | TypeOrMethodDef.MethodDef method -> methodOwner method
+                    )
+
             yield! rewritten TableIndex.MethodSpec (EmitScope.methodSpecs before) (EmitScope.methodSpecs after)
 
             yield! heapRewritten HeapIndex.String (=) (EmitScope.strings before) (EmitScope.strings after)

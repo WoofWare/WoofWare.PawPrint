@@ -398,14 +398,56 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : GenericParamDefinition
         =
-        failwith "TODO: stage 5l: EmitScopeDefinitions.defineGenericParam is not implemented yet"
+        match EmitScope.genericParamOrderConflict owner scope with
+        | Some last -> GenericParamDefinition.OutOfOrder (owner, last)
+        | None ->
+            // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
+            let name, scope = EmitScope.internString name scope
+
+            let flags =
+                if flags = -1 then
+                    enum<GenericParameterAttributes> 0
+                else
+                    enum<GenericParameterAttributes> (flags &&& 0xFFFF)
+
+            let rid, scope =
+                EmitScope.addGenericParam
+                    {
+                        Number = number
+                        Flags = flags
+                        Owner = owner
+                        Name = name
+                    }
+                    scope
+
+            GenericParamDefinition.Defined (rid, scope)
 
     /// <summary>
     /// The first generic parameter of <paramref name="typeDef"/>, in RID order, whose variance PawPrint
     /// does not model when the type is created, if it has one.
     /// </summary>
     let unmodelledVariance (typeDef : TypeDefRid) (scope : EmitScope) : UnmodelledVariance option =
-        failwith "TODO: stage 5l: EmitScopeDefinitions.unmodelledVariance is not implemented yet"
+        let isInterface =
+            match EmitScope.tryTypeDefRid typeDef.Rid scope with
+            | Some _ -> (EmitScope.typeDefs scope).[typeDef.Rid - 1].Flags.HasFlag TypeAttributes.Interface
+            | None ->
+                invalidArg
+                    (nameof typeDef)
+                    $"EmitScopeDefinitions.unmodelledVariance: TypeDef %d{typeDef.Rid} is not in the scope"
+
+        EmitScope.genericParams scope
+        |> Seq.indexed
+        |> Seq.tryPick (fun (index, row) ->
+            if row.Owner <> TypeOrMethodDef.TypeDef typeDef then
+                None
+            else
+                match row.Flags &&& GenericParameterAttributes.VarianceMask with
+                | GenericParameterAttributes.VarianceMask ->
+                    Some (UnmodelledVariance.BothVarianceBits (GenericParamRid (index + 1)))
+                | GenericParameterAttributes.None -> None
+                | _ when isInterface -> None
+                | _ -> Some (UnmodelledVariance.VariantOfNonInterface (GenericParamRid (index + 1)))
+        )
 
     /// <summary>
     /// Set a method's implementation flags, as <c>RegMeta::SetMethodImplFlags</c> does: the low 16

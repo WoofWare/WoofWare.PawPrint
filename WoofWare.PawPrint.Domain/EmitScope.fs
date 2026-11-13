@@ -391,6 +391,7 @@ type EmitScope =
             TypeSpecs : ImmutableList<TypeSpecRow>
             MethodImpls : ImmutableList<MethodImplRow>
             MethodSpecs : ImmutableList<MethodSpecRow>
+            GenericParams : ImmutableList<GenericParamRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -635,6 +636,7 @@ module EmitScope =
                 TypeSpecs = ImmutableList.Empty
                 MethodImpls = ImmutableList.Empty
                 MethodSpecs = ImmutableList.Empty
+                GenericParams = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -876,7 +878,16 @@ module EmitScope =
     /// hold the new row at the RID the scope would give it; <c>None</c> if it would not.
     /// </summary>
     let genericParamOrderConflict (owner : TypeOrMethodDef) (scope : EmitScope) : TypeOrMethodDef option =
-        failwith "TODO: stage 5l: EmitScope.genericParamOrderConflict is not implemented yet"
+        // The rows are in owner order already, so the last has the greatest owner.
+        if scope.GenericParams.IsEmpty then
+            None
+        else
+            let last = scope.GenericParams.[scope.GenericParams.Count - 1].Owner
+
+            if owner.CodedIndex < last.CodedIndex then
+                Some last
+            else
+                None
 
     /// <summary>
     /// Add a <c>GenericParam</c> row, at the next RID, which is the token CoreCLR hands out for it.
@@ -887,7 +898,38 @@ module EmitScope =
     /// a row the new one would sort before.
     /// </exception>
     let addGenericParam (row : GenericParamRow) (scope : EmitScope) : GenericParamRid * EmitScope =
-        failwith "TODO: stage 5l: EmitScope.addGenericParam is not implemented yet"
+        let operation = "EmitScope.addGenericParam"
+
+        match row.Owner with
+        | TypeOrMethodDef.TypeDef rid -> requireRid operation "TypeDef" scope.TypeDefs.Count rid.Rid
+        | TypeOrMethodDef.MethodDef rid -> requireRid operation "MethodDef" scope.MethodDefs.Count rid.Rid
+
+        requireString operation scope row.Name
+
+        if int row.Flags < 0 || int row.Flags > 0xFFFF then
+            invalidArg (nameof row) $"%s{operation}: the flags 0x%x{int row.Flags} do not fit the column's two bytes"
+
+        let siblings =
+            scope.GenericParams
+            |> Seq.filter (fun other -> other.Owner = row.Owner)
+            |> Seq.length
+
+        if int row.Number <> siblings then
+            invalidArg
+                (nameof row)
+                $"%s{operation}: parameter %d{row.Number} of %O{row.Owner}, which has %d{siblings}; CoreCLR's managed callers create an owner's parameters once each, in position order"
+
+        match genericParamOrderConflict row.Owner scope with
+        | Some last ->
+            invalidArg
+                (nameof row)
+                $"%s{operation}: a parameter of %O{row.Owner} (coded index %d{row.Owner.CodedIndex}) would sort before the last row's owner %O{last} (coded index %d{last.CodedIndex}), so the image could not hold it at the RID the scope would give it"
+        | None -> ()
+
+        GenericParamRid (scope.GenericParams.Count + 1),
+        { scope with
+            GenericParams = scope.GenericParams.Add row
+        }
 
     /// Adds a `MethodImpl` row. Nothing hands out its RID: the image sorts the table by class.
     let addMethodImpl (row : MethodImplRow) (scope : EmitScope) : EmitScope =
@@ -938,7 +980,7 @@ module EmitScope =
     let standAloneSigs (scope : EmitScope) : ImmutableList<StandAloneSigRow> = scope.StandAloneSigs
     let typeSpecs (scope : EmitScope) : ImmutableList<TypeSpecRow> = scope.TypeSpecs
     let methodSpecs (scope : EmitScope) : ImmutableList<MethodSpecRow> = scope.MethodSpecs
-    let genericParams (scope : EmitScope) : ImmutableList<GenericParamRow> = ImmutableList.Empty
+    let genericParams (scope : EmitScope) : ImmutableList<GenericParamRow> = scope.GenericParams
 
     /// In the order they were added, which is not the image's: the image sorts them by class.
     let interfaceImpls (scope : EmitScope) : ImmutableList<InterfaceImplRow> = scope.InterfaceImpls
