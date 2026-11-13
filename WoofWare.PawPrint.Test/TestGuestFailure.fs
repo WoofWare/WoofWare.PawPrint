@@ -138,7 +138,7 @@ class CallsMissingNative
     let ``a failure in post-step scheduler bookkeeping is annotated too`` () : unit =
         ParkedOn.check
             [ EmulatedRuntime.Net11 ]
-            "On .NET 11 the guest's abandoned `Monitor.Enter` is a thin lock in the object's header word, which a dying thread leaves set as real .NET does, so the scheduler has nothing to refuse (measured on 11.0.0-rc.1); an abandoned `Mutex` raises nothing either, since .NET 11's managed `WaitSubsystem` handles it (measured). The scheduler's refusals at a thread's end concern what PawPrint keeps for .NET 10, and the annotation this checks is the driver's on every runtime, so the .NET 10 run covers it. Nothing to un-park."
+            "On .NET 11 the guest's abandoned `Monitor.Enter` is a thin lock in the object's header word, which a dying thread leaves set as real .NET does, so the scheduler has nothing to refuse (measured on 11.0.0-rc.1 and rc.3); an abandoned `Mutex` raises nothing either, since .NET 11's managed `WaitSubsystem` handles it (measured). The scheduler's refusals at a thread's end concern what PawPrint keeps for .NET 10, and the annotation this checks is the driver's on every runtime, so the .NET 10 run covers it. Nothing to un-park."
 
         let source =
             """
