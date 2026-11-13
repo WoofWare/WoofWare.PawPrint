@@ -2884,3 +2884,85 @@ Taken 2026-11-13.
   * A base type's method as an accessor, until measured.
   * The plan's item "whichever of questions 2 and 3 is not taken up" is replaced by the two items above and by
     whatever `TypeBuilderPropertyForeignAccessor.cs` is parked on.
+
+### 5s: as built
+
+Built 2026-11-13 as decided above, after the measurements the decisions asked for (recorded under "5s: a
+TypeBuilder's properties"), which agree with the reading: the reversal is from exactly 25 rows, wherever the property's
+rows are.
+
+* `EmitScope` holds `PropertyRow`s (owner, flags, name, signature; `PropertyRid` in definition order) and
+  `MethodSemanticsRow`s (semantics, `MethodDefRid`, and a `HasSemantics` whose one case is `Property`).
+  `EmitScopeDefinitions.defineProperty` stores the flags as `_SetPropertyProps` does and searches for nothing;
+  `defineMethodSemantics` adds a row per call. `EmitScopeImage` derives the PropertyMap (first-property order) and the
+  PropertyPtr (`pointerTable` over each property's map position), and sorts MethodSemantics stably on the coded
+  index, its `Sorted` bit clear. `EmitScopeExtension` refuses a Property row of a created type and a MethodSemantics
+  row whose property is of one, keyed on the property's owner alone.
+* The read rule is `ReadWriteMetadataLookup.rowsOfKey`, in Domain: it takes the table's row count and one key's rows in
+  RID order, and is named for what it models rather than for properties, since CoreCLR's read-write metadata applies
+  the same hash to MethodImpl and CustomAttribute (the user asked for that shape, for the MethodImpl stage that
+  follows). Only `methodSemanticsForAssociation` calls it in 5s, for an assembly that `TryDynamicScope` knows; its
+  docstring now says which reader CoreCLR has for each kind of image.
+* `TypeBuilder_DefineProperty` and `TypeBuilder_DefineMethodSemantics` are as decided. The refusals of an accessor
+  token (a RID beyond the module's MethodDefs, a nil token, another table) are TODO failures naming CoreCLR's
+  behaviour; the refusal test (`TestTypeBuilderPropertyRefusals`) pins the RID beyond, with probe 2's `y2`.
+* `TypeBuilderDefineProperty.cs` is the first probe in the measured order, with the decisions' additions: `SetGetMethod`
+  after `CreateType`; `X`'s `Wild` with `y0`; the empty name, last in `Props`; and modules either side of the
+  threshold. Beyond the decisions, each added after the first mutant run let a mutant through: it reads each
+  `PropertyBuilder`'s token from its private `m_tkProperty` (the probe's way, since `MetadataToken` throws); it gives
+  `Other` (TypeDef 9) a property, with flags of `-1`, before `Named` (TypeDef 8) gets its own, so that the PropertyMap's
+  first-property order and the PropertyPtr differ from TypeDef order; and it reads a 24-row module, `Fewer`, beside the
+  25-row `Many`. It also has a method of `Caller` calling `P1`'s accessors. The guest happens not to invoke any method through
+  reflection twice, so whether the plan's caution about a second invocation is stale (#2180) was not checked here.
+* `TypeBuilderPropertyForeignAccessor.cs` exits 0 under PawPrint as on .NET 10: `FA.GetProperty` throws
+  `ArgumentException` from CoreLib's own `RuntimeType.GetMethodBase`, and `Derived`'s property with `Base`'s getter
+  (measured: it resolves, and gives 9) reads back. It is registered as passing.
+* `TestEmitScopeProperties` holds the Domain models, the read rule's property, and the differential property against
+  real .NET's `TypeBuilder` in the test host (`RunAndCollect`, abstract types, every method's token forced first).
+  Its model of reflection includes `PopulateProperties`' vtable-slot rule, which lists a property only if no earlier
+  property's public getter (or else setter) shares its slot: generated properties often share an accessor. Its fixed
+  sample reaches 25 rows with a repeated semantics 56 times, below 25 rows 67 times, and a PropertyPtr 66 times.
+* `TestFabricatedPropertyAccessorOrder` is the decisions' on-disk image: `PersistedAssemblyBuilder` writes a property
+  with three other methods among 25 MethodSemantics rows, and both runtimes list them in RID order.
+* `TestEmitScopeImage`'s round trip reads each Property row, each type's properties, each property's accessors, and
+  the PropertyMap and PropertyPtr against `EmitScopeGen.propertyMapReplay`, a replay of `AddChildRowDirectForParent`
+  one property at a time. `TestEmitScopeExtension`'s generated property compares each created type's properties and
+  their accessors too.
+* `DispatchProxy`, run once with the two throwaway edits (`RuntimeTypeHandle_IsVisible` answering true, `MetadataImport.Enum`
+  of events answering none), reverted: over an interface with a property it exits 0 (`Value=42`), as it does over one
+  with a method; the DTO of the survey exits 0 without them.
+* Each mutant was run against the emit-scope tests, `TestTypeBuilderPropertyRefusals`,
+  `TestFabricatedPropertyAccessorOrder` and both guests:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The property's token one RID too high (handler) | the guest; the refusal test, whose accessor call then names no property |
+  | The token's table byte `0x18`, emitted and accepted back alike | the guest's read of `m_tkProperty`, once added; before it, survived |
+  | The reserved flags kept | the guest (`Q1`); the Domain model; the differential property |
+  | A search for an existing property | the guest (`Dup`); the Domain model |
+  | No PropertyPtr | the guest; the round trip; the differential property; the generated extension property |
+  | The PropertyMap in TypeDef order | the terminal-state check, once `Other` and `Named` were added (before, survived, the order being the same); the round trip's replay |
+  | MethodSemantics not sorted | the guest (SRM: "Metadata table MethodSemantics not sorted"); the round trip and every image-reading property |
+  | The sort keyed on (association, method) | the guest; the round trip; the differential property |
+  | Getter and setter swapped | the guest |
+  | The association written with an Event's tag | the guest; the round trip; the differential property |
+  | `HASTHIS` added to the stored signature | the terminal-state check |
+  | `DefineMethodSemantics`' extended scope not kept | the guest |
+  | The extension check not refusing a property of a created type | `TestEmitScopeExtension` alone, since the managed caller refuses first |
+  | The threshold at 24 | the guest's `Fewer`, once added; the read rule's property; the differential property |
+  | The threshold at 26 | the guest's `Many`; the read rule's property; the differential property |
+  | The reversal never applied | the guest's `Many` |
+  | The reversal applied to an image on disk too | `TestFabricatedPropertyAccessorOrder` |
+  | `-1` masked rather than zeroed | the guest's `Other.O`, once added; the Domain model; the differential property |
+  | The extension rule also keyed on the accessor's owner | `TypeBuilderPropertyForeignAccessor.cs` (`FB` is created before its method becomes `FA`'s accessor); `TestEmitScopeExtension` |
+  | The PropertyPtr keyed on the owner's TypeDef RID | the guest, once `Other` and `Named` were added; the round trip; the differential property |
+  | The sort on the property's RID, the tag dropped | survives, as the decisions expected: nothing tells it from the coded index until the Event case exists. The events stage must kill it |
+  | An empty name refused | the guest |
+  | `DefineProperty` reading a nil parent as `<Module>` | survives: no managed caller passes a nil parent, and the handler's refusal of one is a PawPrint fault, not a guest's behaviour |
+
+* Suites at the tip, built from the whole solution: the default suite (5564 passed, 38 skipped), `Guest` (235),
+  `GuestSolo` (2), `GuestPure` (1179) and `GuestImpure` (274), each run on its own, all passing.
+* Left to later stages, besides those above: `GenericParam` and `GenericParamConstraint` go through the same lookup hash
+  (`FindGenericParamHelper`, md/enc/metamodelrw.cpp), so from 25 rows CoreCLR enumerates an owner's parameters in reverse
+  RID order too; whether anything a guest sees depends on that order is not known, and wants measuring alongside
+  MethodImpl's.
