@@ -231,6 +231,16 @@ type SignatureImport =
     /// The signature names a type by a token the translation does not handle yet, and nothing is added.
     | Refused of SignatureTokenRefusal
 
+/// A token in a dynamic module's own signature that <c>EmitScopeReferences.importOwnMethodSignature</c> or
+/// <c>importOwnFieldSignature</c> does not translate into the module itself, the first the walk meets.
+[<RequireQualifiedAccess>]
+type OwnSignatureRefusal =
+    /// A TypeSpec of the scope, whose signature CoreCLR translates in turn and finds or adds by its
+    /// translated bytes.
+    | TypeSpec of TypeSpecRid
+    /// A token whose tag names no table (<c>mdtBaseType</c>), given as the encoded token.
+    | NoTable of coded : int
+
 /// <summary>
 /// The references CoreCLR's emitter adds to a dynamic module's scope, each found among the rows the
 /// scope already has before one is added, as the emitter checks for duplicates in a dynamic module.
@@ -1112,3 +1122,38 @@ module EmitScopeReferences =
         : SignatureImport
         =
         importSignature SignatureKind.Field source signature scope
+
+    /// <summary>
+    /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a method signature (ECMA-335
+    /// II.23.2.1) of that module itself, walking it as <c>importMethodSignature</c> does. CoreCLR's
+    /// <c>ImportTypeDef</c> and <c>ImportTypeRef</c> recognise the source as the emitting scope and keep
+    /// each TypeDef and TypeRef token, so nothing is added to the scope. A TypeSpec, or a token whose tag
+    /// names no table, is refused. Of the rest, the index of a type or method parameter is written in its
+    /// shortest form, every other byte is copied, and bytes after the signature's last type are dropped.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The signature is empty, ends early, is not a method signature, holds an element type the emitter
+    /// refuses, or names a TypeDef, TypeRef or TypeSpec the scope does not have.
+    /// </exception>
+    let importOwnMethodSignature
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : Result<ImmutableArray<byte>, OwnSignatureRefusal>
+        =
+        failwith "TODO: importOwnMethodSignature is not yet implemented"
+
+    /// <summary>
+    /// What <c>TranslateSigWithScope</c> writes into a dynamic module for a field signature (ECMA-335
+    /// II.23.2.4) of that module itself: its calling convention in its shortest form, then its type,
+    /// translated as <c>importOwnMethodSignature</c> translates a parameter's.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The signature is empty, ends early, is not a field signature, holds an element type the emitter
+    /// refuses, or names a TypeDef, TypeRef or TypeSpec the scope does not have.
+    /// </exception>
+    let importOwnFieldSignature
+        (signature : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : Result<ImmutableArray<byte>, OwnSignatureRefusal>
+        =
+        failwith "TODO: importOwnFieldSignature is not yet implemented"
