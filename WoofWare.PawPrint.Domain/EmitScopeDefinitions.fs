@@ -46,6 +46,11 @@ type UnmodelledVariance =
     /// <c>TypeLoadException</c> from <c>CreateType</c> for a class, and loads a delegate.
     /// </summary>
     | VariantOfNonInterface of GenericParamRid
+    /// <summary>
+    /// The parameter is covariant or contravariant, and belongs to a method of the type: CoreCLR raises
+    /// <c>TypeLoadException</c> from <c>CreateType</c> for it, of an interface's method too.
+    /// </summary>
+    | VariantOfMethod of GenericParamRid * MethodDefRid
 
 /// What an exception clause's handler is (ECMA-335 II.19), as <c>TypeBuilder_SetMethodIL</c> writes the
 /// clause's flags and its class token or filter offset.

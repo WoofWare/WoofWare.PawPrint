@@ -901,6 +901,9 @@ module NativeRuntimeTypeBuilder =
             | Some (UnmodelledVariance.VariantOfNonInterface parameter) ->
                 failwith
                     $"TODO: %s{operation}: GenericParam 0x%08x{0x2A000000 ||| parameter.Rid} of %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName} is covariant or contravariant, and the type is not an interface; CoreCLR throws TypeLoadException from CreateType for a class and loads a delegate, and PawPrint models neither"
+            | Some (UnmodelledVariance.VariantOfMethod (parameter, method)) ->
+                failwith
+                    $"TODO: %s{operation}: GenericParam 0x%08x{0x2A000000 ||| parameter.Rid} is a covariant or contravariant parameter of the method 0x%08x{0x06000000 ||| method.Rid} of %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName}; CoreCLR throws TypeLoadException from CreateType for it, and PawPrint does not model that"
             | None -> ()
 
             let isGeneric =
