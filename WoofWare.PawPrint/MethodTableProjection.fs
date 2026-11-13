@@ -349,6 +349,10 @@ module internal MethodTableProjection =
     /// (array.cpp:358-366) because <c>ComponentSize</c> is a <c>UInt16</c>.
     let maxValueClassSizeInArray : int = int UInt16.MaxValue
 
+    /// The most dimensions an array type may have: CoreCLR's <c>MAX_RANK</c> (vm/array.h), which
+    /// <c>ClassLoader::CreateTypeHandleForTypeKey</c> enforces when it builds the type.
+    let maxArrayRank : int = 32
+
     let private componentSize
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)

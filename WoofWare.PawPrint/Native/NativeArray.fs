@@ -44,9 +44,6 @@ module NativeArray =
             IlMachineState.readManagedByref baseClassTypes state (ManagedPointerSource.requireAddressed ptr)
             |> int32OfCliType operation $"%s{argName}[%d{index}]"
 
-    /// CoreCLR's `MAX_RANK` (vm/array.h): the most dimensions an array type can have.
-    let private maxRank = 32
-
     /// CoreCLR's `CheckElementType` (classlibnative/bcltype/arraynative.cpp): the element
     /// types no array can be made of, each carrying the message the `NotSupportedException`
     /// CoreCLR throws renders from its resource string. `None` means the element is allowed.
@@ -135,12 +132,12 @@ module NativeArray =
 
             if rank = 1 then
                 Ok (ConcreteTypeHandle.OneDimArrayZero typeHandle, typeHandle)
-            elif rank > maxRank then
+            elif rank > MethodTableProjection.maxArrayRank then
                 // `ClassLoader::LoadArrayTypeThrowing` refuses the type itself with
                 // IDS_CLASSLOAD_RANK_TOOLARGE, so the guest sees a TypeLoadException naming
                 // the array type and its assembly.
                 failwith
-                    $"TODO: %s{operation} for rank %d{rank}, above CoreCLR's MAX_RANK of %d{maxRank}; should raise TypeLoadException"
+                    $"TODO: %s{operation} for rank %d{rank}, above CoreCLR's MAX_RANK of %d{MethodTableProjection.maxArrayRank}; should raise TypeLoadException"
             else
                 Ok (ConcreteTypeHandle.Array (typeHandle, rank), typeHandle)
 

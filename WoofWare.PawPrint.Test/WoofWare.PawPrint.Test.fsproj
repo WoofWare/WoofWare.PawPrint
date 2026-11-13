@@ -296,7 +296,7 @@
     <Compile Include="TestConstraintSatisfaction.fs" />
     <Compile Include="TestOpenDeclaringConstraintSatisfaction.fs" />
     <Compile Include="TestCompositeTypeVariableCasts.fs" />
-    <Compile Include="TestMakeSZArrayRefusal.fs" />
+    <Compile Include="TestMakeTypeRefusal.fs" />
     <Compile Include="TestGcHandleRegistry.fs" />
     <Compile Include="TestSha256.fs" />
     <Compile Include="TestEvpDigestRegistry.fs" />

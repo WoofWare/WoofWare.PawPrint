@@ -114,7 +114,7 @@ static class Program
         // same object as the definition's own type parameter. (An open *construction*,
         // `typeof(Nested<>).MakeGenericType(variable)`, is a legal element too, but reaching it
         // needs `RuntimeTypeHandle_Instantiate` to accept a type variable, which PawPrint's does
-        // not yet; `TestMakeSZArrayRefusal.fs` covers that element against the host.)
+        // not yet; `TestMakeTypeRefusal.fs` covers that element against the host.)
         Type listDefinition = typeof(List<>);
         Type openArray = listDefinition.MakeArrayType();
         if (openArray.Name != "List`1[]") return 36;
@@ -168,8 +168,6 @@ static class Program
         if (typeof(BigFieldClass).MakeArrayType() != typeof(BigFieldClass[])) return 252;
         unsafe
         {
-            // Spelled with `typeof` rather than `MakePointerType()`, which is the separate and
-            // still-unimplemented `RuntimeTypeHandle_MakePointer` QCall.
             if (typeof(OverLimit*).MakeArrayType() != typeof(OverLimit*[])) return 253;
         }
 
