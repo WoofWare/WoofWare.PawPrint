@@ -2052,6 +2052,51 @@ module TestImpureCases =
                 owner 4, 0us, System.Reflection.GenericParameterAttributes.Covariant, "V"
             ]
 
+    /// `TypeBuilderGenericParamConstraints.cs` has created `Box<T, U, V, W>` (TypeDef 4), whose parameters
+    /// are GenericParam rows 1 to 4: one GenericParamConstraint row for each constraint, each parameter's
+    /// interfaces' and then its base type's, in parameter order, as .NET 10 numbers and fills them. A
+    /// TypeRef is shown by its name and a TypeSpec by its signature.
+    let private assertGenericParamConstraintRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        let describe (target : TypeDefOrRef) : string =
+            match target with
+            | TypeDefOrRef.TypeDef rid -> $"TypeDef %d{rid.Rid}"
+            | TypeDefOrRef.TypeRef rid ->
+                let row = (EmitScope.typeRefs scope).[rid.Rid - 1]
+
+                $"TypeRef %d{rid.Rid} %s{EmitScope.stringAt row.Namespace scope}.%s{EmitScope.stringAt row.Name scope}"
+            | TypeDefOrRef.TypeSpec rid ->
+                let row = (EmitScope.typeSpecs scope).[rid.Rid - 1]
+
+                let bytes =
+                    EmitScope.blobAt row.Signature scope
+                    |> Seq.map (sprintf "%02X")
+                    |> String.concat " "
+
+                $"TypeSpec %d{rid.Rid} %s{bytes}"
+
+        EmitScope.genericParamConstraints scope
+        |> Seq.map (fun row -> row.Owner.Rid, describe row.Constraint)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                // T : IComparable<T>: GENERICINST CLASS TypeRef 2 (IComparable`1), one argument, VAR 0.
+                1, "TypeSpec 2 15 12 09 01 13 00"
+                // U : Stream, IDisposable, IAsyncDisposable: the base type set first, and its row last.
+                2, "TypeRef 3 System.IDisposable"
+                2, "TypeRef 4 System.IAsyncDisposable"
+                2, "TypeRef 5 System.IO.Stream"
+                // V : Base, IMark.
+                3, "TypeDef 2"
+                3, "TypeDef 3"
+                // W : T, which is VAR 0.
+                4, "TypeSpec 1 13 00"
+            ]
+
     /// `ModuleBuilderMemberRefOfBuilder.cs` has named `DynLib`'s `Lib.Thing` and four of its members from
     /// `DynUser`: one TypeRef scoped by an AssemblyRef for `DynLib`, and one MemberRef per member, each
     /// under that TypeRef with the signature translated from `DynLib`, `Instance`'s naming `Thing` by the
@@ -5859,6 +5904,45 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertGenericParamRows
+            }
+            {
+                // A generic TypeBuilder's parameters' constraints, which `TypeBuilder_DefineGenericParam`
+                // adds as GenericParamConstraint rows, naming a TypeDef, TypeRefs and TypeSpecs; the
+                // created type reports them, an instantiation satisfying them runs, and a method calls
+                // through `T : IComparable<T>`. `assertGenericParamConstraintRows` reads the rows.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0
+                // on real .NET 10.
+                FileName = "TypeBuilderGenericParamConstraints.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertGenericParamConstraintRows
+            }
+            {
+                // `MakeGenericType` refuses an instantiation of a created dynamic type whose arguments
+                // break its parameters' constraints, as for any other type. Dynamic-code switch
+                // overridden to true like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "TypeBuilderGenericParamConstraintViolated.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
             }
             {
                 // Issue #2091's guest, the acceptance case of `docs/plans/2026-11-04-type-builder.md`: it

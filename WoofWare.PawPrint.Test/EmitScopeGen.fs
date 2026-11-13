@@ -57,8 +57,9 @@ module EmitScopeGen =
         /// of no type arguments.
         | MethodSpec of method : int * arguments : int list
         /// A generic parameter of a type or method already in the scope whose row would not sort before
-        /// the scope's last `GenericParam` row, if it has one, numbered after its owner's others.
-        | GenericParam of owner : int * name : string * flags : int
+        /// the scope's last `GenericParam` row, if it has one, numbered after its owner's others, with a
+        /// constraint for each of `constraints` naming a TypeDef, TypeRef or TypeSpec of the scope.
+        | GenericParam of owner : int * name : string * flags : int * constraints : int list
 
     type private Applied =
         {
@@ -246,7 +247,8 @@ module EmitScopeGen =
                     let! owner = choice
                     let! name = genName
                     let! flags = choice
-                    return Op.GenericParam (owner, name, flags)
+                    let! constraints = Gen.listOfLength 4 choice |> Gen.bind Gen.subListOf
+                    return Op.GenericParam (owner, name, flags, List.ofSeq constraints)
                 }
             ]
 
@@ -674,7 +676,7 @@ module EmitScopeGen =
                     withScope (EmitScope.setMethodBody method filled applied.Scope) applied
                 | Some _
                 | None -> applied
-        | Op.GenericParam (ownerChoice, name, flags) ->
+        | Op.GenericParam (ownerChoice, name, flags, constraintChoices) ->
             match pick ownerChoice (genericParamOwners scope) with
             | None -> applied
             | Some owner ->
@@ -688,7 +690,11 @@ module EmitScopeGen =
                         Name = name
                     }
 
-                withScope (EmitScope.addGenericParam row [] applied.Scope |> snd) applied
+                // Choices may repeat a target, as CoreCLR's emitter adds a row for each token given.
+                let constraints =
+                    constraintChoices |> List.choose (fun c -> pick c (typeDefOrRefs applied.Scope))
+
+                withScope (EmitScope.addGenericParam row constraints applied.Scope |> snd) applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
@@ -799,6 +805,16 @@ module EmitScopeGen =
             for i in 1 .. reader.GetTableRowCount TableIndex.GenericParam do
                 let r = reader.GetGenericParameter (MetadataTokens.GenericParameterHandle i)
                 yield (TableIndex.GenericParam, i), box (token r.Parent, r.Index, r.Attributes, heap r.Name)
+            for i in 1 .. reader.GetTableRowCount TableIndex.GenericParamConstraint do
+                let r =
+                    reader.GetGenericParameterConstraint (MetadataTokens.GenericParameterConstraintHandle i)
+
+                yield
+                    (TableIndex.GenericParamConstraint, i),
+                    box (
+                        MetadataTokens.GetRowNumber (GenericParameterHandle.op_Implicit r.Parameter : EntityHandle),
+                        token r.Type
+                    )
         ]
         |> Map.ofList
 
