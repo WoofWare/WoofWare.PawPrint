@@ -78,16 +78,11 @@ module TestAwaitSiteBinding =
         }
         |> Gen.filter (callsAbstractDirectly >> not)
 
-    /// Whether the site dispatches: a `callvirt` of a method that is virtual and not final.
-    let private dispatches (facts : AwaitSiteFacts) : bool =
-        facts.Opcode = AwaitedCall.Callvirt && facts.NamedDispatchesVirtually
-
     /// Whether `reason` holds of `facts`.
     let private holds (facts : AwaitSiteFacts) (reason : AwaitNotYetBound) : bool =
         match reason with
         | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.Pattern = MatchedPattern.Await true
         | AwaitNotYetBound.Constrained -> facts.Constrained
-        | AwaitNotYetBound.CalleeDispatches -> dispatches facts
 
     [<Test>]
     let ``A site binds exactly when stage 4d's three conditions hold, and continues as its pattern says`` () : unit =
@@ -183,7 +178,12 @@ module TestAwaitSiteBinding =
     /// finds the receiver's implementation through the ordinary sibling (decision 19).
     [<Test>]
     let ``A site that dispatches binds, whatever variant the named method has`` () : unit =
-        for body in [ AsyncVariantBody.RuntimeAsyncIl ; AsyncVariantBody.AsyncVersion ; AsyncVariantBody.Abstract ] do
+        for body in
+            [
+                AsyncVariantBody.RuntimeAsyncIl
+                AsyncVariantBody.AsyncVersion
+                AsyncVariantBody.Abstract
+            ] do
             for pattern in [ MatchedPattern.Await false ; MatchedPattern.TailShape ] do
                 let facts : AwaitSiteFacts =
                     {

@@ -182,6 +182,7 @@ public class Asks : IAsks
     /// the method whose variant dispatch must choose.
     let cases : TestCaseData list =
         [
+            "Base", "Base", "M", "Base"
             "Derived", "Base", "M", "Derived"
             "Leaf", "Base", "M", "Derived"
             "Leaf", "Base", "V", "Derived"
@@ -210,12 +211,6 @@ public class Asks : IAsks
             | other -> failwith $"dispatch chose %O{found.Definition}, the %A{other}, rather than its async variant"
         | _, _, other -> failwith $"expected dispatch to choose %s{chosenName}'s method, got %A{other}"
 
-    [<Test>]
-    let ``dispatch of a variant on a receiver that does not override it runs the variant named`` () : unit =
-        match dispatch "Base" "Base" "M" with
-        | _, _, VirtualImplementation.NotOverridden -> ()
-        | _, _, other -> failwith $"expected the named variant to run, got %A{other}"
-
     /// `Covariant.C` returns `Task<int>` for `Base.C`'s `Task`: CoreCLR's builder gives the override's
     /// variant slot a thunk that drops the `int`, which PawPrint does not model.
     [<Test>]
@@ -223,7 +218,9 @@ public class Asks : IAsks
         ()
         : unit
         =
-        let e = Assert.Throws<Exception> (fun () -> dispatch "Covariant" "Base" "C" |> ignore)
+        let e =
+            Assert.Throws<Exception> (fun () -> dispatch "Covariant" "Base" "C" |> ignore)
+
         e.Message |> shouldContainText "TODO"
         e.Message |> shouldContainText "return-dropping thunk"
 

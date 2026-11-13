@@ -82,8 +82,6 @@ type AwaitNotYetBound =
     | ContinuesOnCapturedContext
     /// The call has a `constrained.` prefix.
     | Constrained
-    /// The call is a `callvirt` of a method that dispatches.
-    | CalleeDispatches
 
 /// Decision 13's classification of a matched await site: an await in a user's runtime-async body,
 /// or a tail shape in an async version.
@@ -107,7 +105,9 @@ module AwaitSiteBinding =
 
     /// What a matched await site binds, from `facts`. An unmodelled variant is named before any
     /// reason the site is not yet bound; of those, the first of these is named: the captured
-    /// context, the `constrained.` prefix, dispatch.
+    /// context, the `constrained.` prefix. A site that dispatches binds the named method's variant,
+    /// whose implementation on the receiver dispatch finds through its ordinary sibling (decision 19
+    /// of `docs/plans/2026-11-11-runtime-async.md`).
     ///
     /// The named method may be abstract only where the call dispatches, or a `constrained.` prefix
     /// resolves it; CoreCLR's JIT refuses to compile a call naming one otherwise
@@ -136,21 +136,21 @@ module AwaitSiteBinding =
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.ContinuesOnCapturedContext
         elif facts.Constrained then
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.Constrained
-        elif dispatches then
-            AwaitSiteBinding.NotYetBound AwaitNotYetBound.CalleeDispatches
         else
 
-        match body, facts.Pattern with
-        | AsyncVariantBody.Abstract, MatchedPattern.Await _
-        | AsyncVariantBody.Abstract, MatchedPattern.TailShape ->
+        match body with
+        | AsyncVariantBody.Abstract when not dispatches ->
             failwith "logic error: an abstract method named by a call that does not dispatch was refused above"
-        | AsyncVariantBody.RuntimeAsyncIl, MatchedPattern.Await _
-        | AsyncVariantBody.AsyncVersion, MatchedPattern.Await _ ->
+        | AsyncVariantBody.Abstract
+        | AsyncVariantBody.RuntimeAsyncIl
+        | AsyncVariantBody.AsyncVersion ->
+
+        match facts.Pattern with
+        | MatchedPattern.Await _ ->
             // `ConfigureAwait(false)` (`PREFIX_TASK_AWAIT_CONTINUE_ON_CAPTURED_CONTEXT` unset,
             // `impSetupAsyncCall`, importercalls.cpp).
             AwaitSiteBinding.BindsVariant ContinuationContextHandling.ContinueOnThreadPool
-        | AsyncVariantBody.RuntimeAsyncIl, MatchedPattern.TailShape
-        | AsyncVariantBody.AsyncVersion, MatchedPattern.TailShape ->
+        | MatchedPattern.TailShape ->
             // A tail shape is no task await (`PREFIX_IS_TASK_AWAIT` unset), so its call's handling
             // stays `None`.
             AwaitSiteBinding.BindsVariant ContinuationContextHandling.NoPreference
