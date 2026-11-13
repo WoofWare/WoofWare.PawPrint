@@ -421,6 +421,55 @@ module TestEmitScopeImage =
 
             token actual.Type |> shouldEqual (typeDefOrRefToken expected.Constraint)
 
+        // Every property at the RID the scope gave it, each type's in definition order; the map and the
+        // pointer table as CoreCLR's read-write metadata holds them, replayed from its source, since no API
+        // shows a dynamic module's.
+        let properties = EmitScope.properties scope
+        reader.GetTableRowCount TableIndex.Property |> shouldEqual properties.Count
+
+        for i in 1 .. properties.Count do
+            let expected = properties.[i - 1]
+            let actual = reader.GetPropertyDefinition (MetadataTokens.PropertyDefinitionHandle i)
+            actual.Attributes |> shouldEqual expected.Flags
+            checkString scope reader expected.Name actual.Name
+            checkBlob scope reader expected.Signature actual.Signature
+
+        for i in 1 .. typeDefs.Count do
+            (reader.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle i)).GetProperties ()
+            |> Seq.map (fun h -> MetadataTokens.GetRowNumber (PropertyDefinitionHandle.op_Implicit h : EntityHandle))
+            |> List.ofSeq
+            |> shouldEqual (ridsOwnedBy i (properties |> Seq.map _.Owner.Rid))
+
+        let mapRows, ptrRows =
+            properties |> Seq.map _.Owner.Rid |> List.ofSeq |> propertyMapReplay
+
+        propertyMapRows pe reader |> shouldEqual mapRows
+        propertyPtrRows pe reader |> shouldEqual ptrRows
+
+        // Each property's accessors in the order added, the table sorted by association.
+        let semantics = EmitScope.methodSemantics scope
+        let imageSemantics = methodSemanticsRows pe reader
+        imageSemantics.Length |> shouldEqual semantics.Count
+
+        imageSemantics
+        |> List.map (fun (_, _, association) -> association)
+        |> List.pairwise
+        |> List.forall (fun (a, b) -> a <= b)
+        |> shouldEqual true
+
+        for i in 1 .. properties.Count do
+            let association = (i <<< 1) ||| 1
+
+            imageSemantics
+            |> List.filter (fun (_, _, a) -> a = association)
+            |> List.map (fun (semantics, method, _) -> semantics, method)
+            |> shouldEqual (
+                semantics
+                |> Seq.filter (fun row -> row.Association.CodedIndex = association)
+                |> Seq.map (fun row -> int row.Semantics, row.Method.Rid)
+                |> List.ofSeq
+            )
+
         // Nothing the scope cannot hold.
         for table in
             [
@@ -428,7 +477,6 @@ module TestEmitScopeImage =
                 TableIndex.CustomAttribute
                 TableIndex.ModuleRef
                 TableIndex.NestedClass
-                TableIndex.Property
                 TableIndex.Event
             ] do
             reader.GetTableRowCount table |> shouldEqual 0
@@ -533,6 +581,34 @@ module TestEmitScopeImage =
         |> Seq.filter (fun s -> not (grouped (EmitScope.methodImpls s |> Seq.map _.Class.Rid)))
         |> Seq.length
         |> shouldBeGreaterThan 20
+
+        // And properties whose owners need a pointer table; properties that need none although a later
+        // map's parent has a lower TypeDef RID, which tells first-property order from TypeDef order; and
+        // properties with two accessors of one semantics.
+        let propertyOwners (s : EmitScope) =
+            EmitScope.properties s |> Seq.map _.Owner.Rid |> List.ofSeq
+
+        scopes
+        |> Seq.filter (fun s -> (propertyMapReplay (propertyOwners s) |> snd).IsSome)
+        |> Seq.length
+        |> shouldBeGreaterThan 20
+
+        scopes
+        |> Seq.filter (fun s ->
+            let maps, ptr = propertyMapReplay (propertyOwners s)
+            ptr.IsNone && not (grouped (maps |> List.map fst))
+        )
+        |> Seq.length
+        |> shouldBeGreaterThan 5
+
+        scopes
+        |> Seq.filter (fun s ->
+            EmitScope.methodSemantics s
+            |> Seq.countBy (fun row -> row.Association, row.Semantics)
+            |> Seq.exists (fun (_, n) -> n > 1)
+        )
+        |> Seq.length
+        |> shouldBeGreaterThan 10
 
         // And generic parameters of types, of methods, and of both in one scope.
         let ownedBy (isType : bool) (s : EmitScope) =

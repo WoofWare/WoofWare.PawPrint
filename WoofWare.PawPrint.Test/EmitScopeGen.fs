@@ -60,6 +60,12 @@ module EmitScopeGen =
         /// owner's others, with a constraint for each of `constraints` naming a TypeDef, TypeRef or
         /// TypeSpec of the scope. The rows are in creation order, which need not be owner order.
         | GenericParam of owner : int * name : string * flags : int * constraints : int list
+        /// A property of a type already in the scope, of the element type this chooses; its owner need not
+        /// own the scope's last property, as CoreCLR's tokens are in definition order across the module.
+        | Property of owner : int * name : string * flags : int * propertyType : int
+        /// An accessor of a property already in the scope, which may be any method of the scope, if it has
+        /// both; in the order added, with no search, as `_DefineMethodSemantics` adds them.
+        | MethodSemantics of property : int * semantics : int * method : int
 
     type private Applied =
         {
@@ -152,6 +158,21 @@ module EmitScopeGen =
             GenericParameterAttributes.ReferenceTypeConstraint
             ||| GenericParameterAttributes.DefaultConstructorConstraint
             GenericParameterAttributes.NotNullableValueTypeConstraint
+        ]
+
+    let propertyFlagChoices : PropertyAttributes list =
+        [
+            PropertyAttributes.None
+            PropertyAttributes.SpecialName
+            // Every bit outside `prReservedMask`.
+            enum<PropertyAttributes> 0x0BFF
+        ]
+
+    let semanticsChoices : MethodSemanticsAttributes list =
+        [
+            MethodSemanticsAttributes.Getter
+            MethodSemanticsAttributes.Setter
+            MethodSemanticsAttributes.Other
         ]
 
     let genBody : Gen<BodyShape> =
@@ -250,6 +271,15 @@ module EmitScopeGen =
                     let! constraints = Gen.listOfLength 4 choice |> Gen.bind Gen.subListOf
                     return Op.GenericParam (owner, name, flags, List.ofSeq constraints)
                 }
+                2,
+                gen {
+                    let! owner = choice
+                    let! name = genName
+                    let! flags = choice
+                    let! propertyType = choice
+                    return Op.Property (owner, name, flags, propertyType)
+                }
+                3, Gen.map3 (fun p s m -> Op.MethodSemantics (p, s, m)) choice choice choice
             ]
 
     let pick (choice : int) (items : 'a list) : 'a option =
@@ -685,6 +715,41 @@ module EmitScopeGen =
                     constraintChoices |> List.choose (fun c -> pick c (typeDefOrRefs applied.Scope))
 
                 withScope (EmitScope.addGenericParam row constraints applied.Scope |> snd) applied
+        | Op.Property (owner, name, flags, propertyType) ->
+            let name, applied = intern name applied
+
+            // The header `GetPropertySigHelper` writes, with `HASTHIS` for some.
+            let signature, applied =
+                internBlob
+                    (ImmutableArray.CreateRange (
+                        (if flags % 2 = 0 then 0x08uy else 0x28uy) :: 0x00uy :: elementType scope propertyType
+                    ))
+                    applied
+
+            let row : PropertyRow =
+                {
+                    Owner = TypeDefRid (owner % typeDefCount + 1)
+                    Flags = (pick flags propertyFlagChoices).Value
+                    Name = name
+                    Signature = signature
+                }
+
+            withScope (EmitScope.addProperty row applied.Scope |> snd) applied
+        | Op.MethodSemantics (propertyChoice, semantics, methodChoice) ->
+            let propertyCount = (EmitScope.properties scope).Count
+
+            if propertyCount = 0 || methodCount = 0 then
+                applied
+            else
+                let row : MethodSemanticsRow =
+                    {
+                        Semantics = (pick semantics semanticsChoices).Value
+                        Method = MethodDefRid (methodChoice % methodCount + 1)
+                        Association =
+                            HasSemantics.Property (EmitScope.tryPropertyRid (propertyChoice % propertyCount + 1) scope).Value
+                    }
+
+                withScope (EmitScope.addMethodSemantics row applied.Scope) applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
@@ -825,3 +890,85 @@ module EmitScopeGen =
             else
                 row
         )
+
+    /// <summary>
+    /// The `PropertyMap` rows (each parent's TypeDef RID and its list's start) and the `PropertyPtr`
+    /// contents CoreCLR's read-write metadata holds after adding properties of these owners (TypeDef RIDs, in
+    /// definition order), replayed one property at a time as <c>RegMeta::DefineProperty</c> and
+    /// <c>CMiniMdRW::AddPropertyToPropertyMap</c> add them: a map row at an owner's first property; the
+    /// property appended directly to its map's run while that map is the last and no pointer table has
+    /// started (<c>AddChildRowDirectForParent</c>), and otherwise through a <c>PropertyPtr</c> at the end of
+    /// its map's run (<c>AddChildRowIndirectForParent</c>). <c>None</c> when no pointer table started.
+    /// </summary>
+    let propertyMapReplay (owners : int list) : (int * int) list * int list option =
+        // Each map's parent and its run of property RIDs, in map order.
+        let mutable maps : (int * int list) list = []
+        let mutable indirect = false
+
+        owners
+        |> List.iteri (fun index owner ->
+            let rid = index + 1
+
+            match maps |> List.tryFindIndex (fun (parent, _) -> parent = owner) with
+            | None -> maps <- maps @ [ owner, [ rid ] ]
+            | Some position ->
+                if position <> maps.Length - 1 then
+                    indirect <- true
+
+                maps <- maps |> List.mapi (fun i (parent, run) -> if i = position then parent, run @ [ rid ] else parent, run)
+        )
+
+        let starts =
+            maps
+            |> List.mapFold (fun next (parent, run) -> (parent, next), next + run.Length) 1
+            |> fst
+
+        starts, (if indirect then Some (maps |> List.collect snd) else None)
+
+    /// The raw rows of one of the image's small tables, each as its columns' values: `widths` gives each
+    /// column's size in bytes, which must add up to the table's row size.
+    let rawRows (pe : PEReader) (reader : MetadataReader) (table : TableIndex) (widths : int list) : int list list =
+        let count = reader.GetTableRowCount table
+        let rowSize = reader.GetTableRowSize table
+
+        if count > 0 && rowSize <> List.sum widths then
+            failwith $"%O{table}'s rows are %d{rowSize} bytes, not the %d{List.sum widths} the columns %A{widths} make"
+
+        let offset = reader.GetTableMetadataOffset table
+        let block = pe.GetMetadata().GetContent (offset, count * rowSize)
+
+        [
+            for row in 0 .. count - 1 do
+                let mutable at = row * rowSize
+
+                yield
+                    [
+                        for width in widths do
+                            let value =
+                                if width = 2 then
+                                    int block.[at] ||| (int block.[at + 1] <<< 8)
+                                else
+                                    BitConverter.ToInt32 (block.AsSpan (at, 4))
+
+                            at <- at + width
+                            yield value
+                    ]
+        ]
+
+    /// The image's `PropertyMap` rows, each its parent's TypeDef RID and its list's start, for an image
+    /// whose tables are small enough for two-byte columns.
+    let propertyMapRows (pe : PEReader) (reader : MetadataReader) : (int * int) list =
+        rawRows pe reader TableIndex.PropertyMap [ 2 ; 2 ]
+        |> List.map (fun row -> row.[0], row.[1])
+
+    /// The image's `PropertyPtr` contents, or `None` when it has none.
+    let propertyPtrRows (pe : PEReader) (reader : MetadataReader) : int list option =
+        match rawRows pe reader TableIndex.PropertyPtr [ 2 ] with
+        | [] -> None
+        | rows -> Some (rows |> List.map List.head)
+
+    /// The image's `MethodSemantics` rows in image order: each its semantics, its method's RID and its
+    /// association's HasSemantics coded value.
+    let methodSemanticsRows (pe : PEReader) (reader : MetadataReader) : (int * int * int) list =
+        rawRows pe reader TableIndex.MethodSemantics [ 2 ; 2 ; 2 ]
+        |> List.map (fun row -> row.[0], row.[1], row.[2])

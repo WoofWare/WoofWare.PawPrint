@@ -1659,6 +1659,79 @@ module TestImpureCases =
                 4, "second", 0x0006, [ 0x06uy ; 0x0Euy ]
             ]
 
+    /// `TypeBuilderDefineProperty.cs` has defined thirteen properties in module `Props`, of `A` (TypeDef 2), `B`
+    /// (3), `D` (4), `C` (6) and `Named` (8), and twelve accessors. This checks each Property row's owner, name,
+    /// flags and signature, and each MethodSemantics row in the order added, as real .NET 10 reports the
+    /// created properties; and, from the image, the PropertyMap in first-property order and the PropertyPtr
+    /// that `A`'s interleaved properties need, as CoreCLR's read-write metadata holds them (read from its
+    /// source: no API shows them).
+    let private assertPropertyRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Props, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Props is not loaded")
+
+        let int32 = [ 0x08uy ; 0x00uy ; 0x08uy ]
+
+        EmitScope.properties scope
+        |> Seq.map (fun row ->
+            row.Owner.Rid,
+            EmitScope.stringAt row.Name scope,
+            int row.Flags,
+            EmitScope.blobAt row.Signature scope |> List.ofSeq
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                2, "P1", 0, int32
+                3, "Q1", 0x0200, [ 0x08uy ; 0x00uy ; 0x0Euy ]
+                2, "P2", 0, [ 0x28uy ; 0x00uy ; 0x0Auy ]
+                2, "Dup", 0, int32
+                2, "Dup", 0, int32
+                2, "S", 0, int32
+                2, "Item", 0, [ 0x08uy ; 0x02uy ; 0x08uy ; 0x08uy ; 0x0Euy ]
+                2, "Self", 0, [ 0x08uy ; 0x01uy ; 0x12uy ; 0x08uy ; 0x12uy ; 0x0Cuy ]
+                4, "X", 0, int32
+                6, "V", 0, [ 0x08uy ; 0x00uy ; 0x13uy ; 0x00uy ]
+                8, "First", 0, int32
+                8, "", 0, int32
+                8, "Last", 0, int32
+            ]
+
+        EmitScope.methodSemantics scope
+        |> Seq.map (fun row ->
+            let property =
+                match row.Association with
+                | HasSemantics.Property property -> property.Rid
+
+            int row.Semantics, row.Method.Rid, property
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                2, 1, 2
+                1, 3, 1
+                2, 2, 1
+                2, 4, 3
+                4, 7, 3
+                2, 5, 3
+                4, 6, 3
+                4, 8, 3
+                2, 9, 6
+                2, 10, 7
+                2, 13, 9
+                2, 14, 10
+            ]
+
+        let pe, reader = EmitScopeGen.readImage (EmitScopeImage.write scope)
+        use _ = pe
+
+        EmitScopeGen.propertyMapRows pe reader
+        |> shouldEqual [ 2, 1 ; 3, 8 ; 4, 9 ; 6, 10 ; 8, 11 ]
+
+        EmitScopeGen.propertyPtrRows pe reader
+        |> shouldEqual (Some [ 1 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 2 ; 9 ; 10 ; 11 ; 12 ; 13 ])
+
     /// `ModuleBuilderStringConstant.cs` has asked for six strings, `"hello"` twice. This checks the
     /// module's `#US` entries, each as its UTF-16 code units and its final byte: the space the heap
     /// starts with, whose final byte is 0, then each distinct string once, in the order asked for, with
@@ -6186,6 +6259,44 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertFieldRows
+            }
+            {
+                // `TypeBuilder_DefineProperty` and `TypeBuilder_DefineMethodSemantics`: properties of several
+                // types, their accessors, and a module past the 25 MethodSemantics rows from which CoreCLR
+                // finds a property's accessors in reverse; `assertPropertyRows` reads `Props`' rows.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0 on
+                // real .NET 10.
+                FileName = "TypeBuilderDefineProperty.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertPropertyRows
+            }
+            {
+                // A property whose accessor is a method of another type of the module: reflection throws
+                // ArgumentException for an unrelated type, and resolves a base type's method. Dynamic-code
+                // switch overridden to true like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "TypeBuilderPropertyForeignAccessor.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
             }
             {
                 // `ModuleBuilder_GetStringConstant`, through `ldstr` and `GetStringMetadataToken`: the
