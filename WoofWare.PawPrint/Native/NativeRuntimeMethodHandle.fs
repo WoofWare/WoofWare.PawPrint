@@ -1770,7 +1770,7 @@ module NativeRuntimeMethodHandle =
                         ImmutableArray.CreateRange methodInstantiation
                     ))
                     methodInfo.Generics
-                    methodInstantiation
+                    (methodInstantiation |> List.map RuntimeTypeHandleTarget.Closed)
 
             match constraintViolation with
             | Some violation ->
@@ -1795,7 +1795,7 @@ module NativeRuntimeMethodHandle =
                     NativeRuntimeTypeHelpers.methodConstraintsViolationMessage
                         (render declaringTarget)
                         methodInfo.Name
-                        (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                        (render violation.Argument)
                         (render formalParameter)
 
                 NativeHandlerResult.raiseExceptionWithMessage

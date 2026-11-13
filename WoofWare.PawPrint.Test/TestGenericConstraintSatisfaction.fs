@@ -295,7 +295,12 @@ public class H2_BaseThenMarker<A, B> where A : BaseType where B : IMarker { }
         let argHandles = List.rev argHandles
 
         let state, violation =
-            NativeRuntimeTypeHelpers.validateConstraints loggerFactory bct state (guestType holder) argHandles
+            NativeRuntimeTypeHelpers.validateConstraints
+                loggerFactory
+                bct
+                state
+                (guestType holder)
+                (argHandles |> List.map RuntimeTypeHandleTarget.Closed)
 
         state, violation |> Option.map (fun violation -> violation.Parameter.SequenceNumber)
 
@@ -431,7 +436,12 @@ public class H2_BaseThenMarker<A, B> where A : BaseType where B : IMarker { }
                             defn
 
                     let state', actual =
-                        NativeRuntimeTypeHelpers.validateConstraints loggerFactory bct state' holder [ handle ]
+                        NativeRuntimeTypeHelpers.validateConstraints
+                            loggerFactory
+                            bct
+                            state'
+                            holder
+                            [ RuntimeTypeHandleTarget.Closed handle ]
 
                     state <- state'
 

@@ -420,7 +420,7 @@ public class D_Self<T> where T : class { public void M_Self<U>() where U : D_Sel
                 (ReflectedTypeTarget.ReflectionVariableBinding.Open formals)
                 (ReflectedTypeTarget.ReflectionVariableBinding.Bound (ImmutableArray.Create argHandle))
                 method.Generics
-                [ argHandle ]
+                [ RuntimeTypeHandleTarget.Closed argHandle ]
 
         state, violation.IsNone
 
