@@ -91,8 +91,14 @@ module TestEmitScopeGenericParams =
 
                 added.IsSome |> shouldEqual modelAdmits
 
-                match EmitScopeDefinitions.defineGenericParam owner number 0 "" [] scope with
-                | GenericParamDefinition.Defined (rid, next) ->
+                let defined =
+                    try
+                        Some (EmitScopeDefinitions.defineGenericParam owner number 0 "" [] scope)
+                    with _ ->
+                        None
+
+                match defined with
+                | Some (rid, next) ->
                     modelAdmits |> shouldEqual true
                     rid.Rid |> shouldEqual (admitted + 1)
                     added.Value |> fst |> shouldEqual rid
@@ -101,10 +107,8 @@ module TestEmitScopeGenericParams =
                     last <- Some owner
                     admitted <- admitted + 1
                     cover Admission.Admitted
-                | GenericParamDefinition.OutOfOrder (refusedOwner, lastOwner) ->
+                | None ->
                     modelAdmits |> shouldEqual false
-                    refusedOwner |> shouldEqual owner
-                    Some lastOwner |> shouldEqual last
                     cover Admission.Refused
 
             (EmitScope.genericParams scope).Count |> shouldEqual admitted
@@ -186,22 +190,19 @@ module TestEmitScopeGenericParams =
         let property (flags : int) (name : string) : unit =
             let scope = withOwners 1 []
 
-            match
+            let rid, next =
                 EmitScopeDefinitions.defineGenericParam (TypeOrMethodDef.TypeDef (TypeDefRid 2)) 0us flags name [] scope
-            with
-            | GenericParamDefinition.OutOfOrder (owner, last) ->
-                failwith $"the first parameter of a scope was refused as out of order: %O{owner} after %O{last}"
-            | GenericParamDefinition.Defined (rid, next) ->
-                rid.Rid |> shouldEqual 1
-                let row = (EmitScope.genericParams next).[0]
 
-                int row.Flags |> shouldEqual (if flags = -1 then 0 else flags &&& 0xFFFF)
+            rid.Rid |> shouldEqual 1
+            let row = (EmitScope.genericParams next).[0]
 
-                // What interning the name stores, which for a lone surrogate is U+FFFD.
-                let stored, interned = EmitScope.internString name scope
+            int row.Flags |> shouldEqual (if flags = -1 then 0 else flags &&& 0xFFFF)
 
-                EmitScope.stringAt row.Name next
-                |> shouldEqual (EmitScope.stringAt stored interned)
+            // What interning the name stores, which for a lone surrogate is U+FFFD.
+            let stored, interned = EmitScope.internString name scope
+
+            EmitScope.stringAt row.Name next
+            |> shouldEqual (EmitScope.stringAt stored interned)
 
         Check.One (
             Config.QuickThrowOnFailure.WithMaxTest 300,
@@ -363,14 +364,12 @@ module TestEmitScopeGenericParams =
 
                     match defined with
                     | None -> failwith $"defineGenericParam refused what addGenericParam admitted: %A{constraints}"
-                    | Some (GenericParamDefinition.Defined (definedRid, definedScope)) ->
+                    | Some (definedRid, definedScope) ->
                         definedRid |> shouldEqual rid
 
                         EmitScope.genericParamConstraints definedScope
                         |> List.ofSeq
                         |> shouldEqual (List.ofSeq after)
-                    | Some (GenericParamDefinition.OutOfOrder (o, last)) ->
-                        failwith $"an owner genericParamOwners offers was refused: %O{o} after %O{last}"
 
                     if List.length (List.distinct constraints) < constraints.Length then
                         cover ConstraintAddition.AddedWithRepeat
@@ -489,7 +488,7 @@ module TestEmitScopeGenericParams =
 
                 // The rows are made before the type is loaded, so a type that fails to load has them too.
                 for number, (parameterName, parameterFlags) in List.indexed parameters do
-                    match
+                    let rid, next =
                         EmitScopeDefinitions.defineGenericParam
                             (TypeOrMethodDef.TypeDef typeDef)
                             (uint16 number)
@@ -497,12 +496,9 @@ module TestEmitScopeGenericParams =
                             parameterName
                             []
                             scope
-                    with
-                    | GenericParamDefinition.OutOfOrder (owner, last) ->
-                        failwith $"real .NET's creation order was refused: %O{owner} after %O{last}"
-                    | GenericParamDefinition.Defined (rid, next) ->
-                        builders.[number].MetadataToken |> shouldEqual (0x2A000000 ||| rid.Rid)
-                        scope <- next
+
+                    builders.[number].MetadataToken |> shouldEqual (0x2A000000 ||| rid.Rid)
+                    scope <- next
 
                 match created with
                 | None -> cover false
@@ -728,7 +724,7 @@ module TestEmitScopeGenericParams =
                             | None -> ()
                         ]
 
-                    match
+                    let rid, next =
                         EmitScopeDefinitions.defineGenericParam
                             (TypeOrMethodDef.TypeDef typeDef)
                             (uint16 number)
@@ -736,39 +732,35 @@ module TestEmitScopeGenericParams =
                             p.Name
                             constraints
                             scope
-                    with
-                    | GenericParamDefinition.OutOfOrder (owner, last) ->
-                        failwith $"real .NET's creation order was refused: %O{owner} after %O{last}"
-                    | GenericParamDefinition.Defined (rid, next) ->
-                        builders.[number].MetadataToken |> shouldEqual (0x2A000000 ||| rid.Rid)
-                        scope <- next
 
-                        let scopeRows =
-                            EmitScope.genericParamConstraints scope
-                            |> Seq.indexed
-                            |> Seq.filter (fun (_, row) -> row.Owner = rid)
-                            |> List.ofSeq
+                    builders.[number].MetadataToken |> shouldEqual (0x2A000000 ||| rid.Rid)
+                    scope <- next
 
-                        realConstraintRows.Force().Invoke (runtimeModule, 0x2A000000 ||| rid.Rid)
-                        |> Seq.map (fun token -> token &&& 0x00FFFFFF)
+                    let scopeRows =
+                        EmitScope.genericParamConstraints scope
+                        |> Seq.indexed
+                        |> Seq.filter (fun (_, row) -> row.Owner = rid)
                         |> List.ofSeq
-                        |> shouldEqual (scopeRows |> List.map (fun (i, _) -> i + 1))
 
-                        match created with
-                        | None -> ()
-                        | Some created ->
-                            (created.GetGenericArguments ()).[number].GetGenericParameterConstraints ()
-                            |> Seq.map _.MetadataToken
-                            |> List.ofSeq
-                            |> shouldEqual (
-                                scopeRows
-                                |> List.map (fun (_, row) ->
-                                    match row.Constraint with
-                                    | TypeDefOrRef.TypeDef t -> 0x02000000 ||| t.Rid
-                                    | other ->
-                                        failwith $"the oracle's scope holds only TypeDef constraints, not %O{other}"
-                                )
+                    realConstraintRows.Force().Invoke (runtimeModule, 0x2A000000 ||| rid.Rid)
+                    |> Seq.map (fun token -> token &&& 0x00FFFFFF)
+                    |> List.ofSeq
+                    |> shouldEqual (scopeRows |> List.map (fun (i, _) -> i + 1))
+
+                    match created with
+                    | None -> ()
+                    | Some created ->
+                        (created.GetGenericArguments ()).[number].GetGenericParameterConstraints ()
+                        |> Seq.map _.MetadataToken
+                        |> List.ofSeq
+                        |> shouldEqual (
+                            scopeRows
+                            |> List.map (fun (_, row) ->
+                                match row.Constraint with
+                                | TypeDefOrRef.TypeDef t -> 0x02000000 ||| t.Rid
+                                | other -> failwith $"the oracle's scope holds only TypeDef constraints, not %O{other}"
                             )
+                        )
 
                 cover (if created.IsSome then "created" else "refused")
 

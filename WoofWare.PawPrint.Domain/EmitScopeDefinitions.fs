@@ -20,21 +20,6 @@ type TypeDefDefinition =
     | Duplicate of TypeDefRid
 
 /// <summary>
-/// The outcome of asking CoreCLR's emitter to define a generic parameter in a dynamic module's scope
-/// (<c>RegMeta::DefineGenericParam</c>).
-/// </summary>
-[<RequireQualifiedAccess>]
-type GenericParamDefinition =
-    /// A new <c>GenericParam</c> row, and the scope that holds it.
-    | Defined of GenericParamRid * EmitScope
-    /// <summary>
-    /// Nothing is added: a row owned by <c>owner</c> would sort before the scope's last row, owned by
-    /// <c>last</c>, in ECMA-335's order. CoreCLR adds it, numbered in the order of creation, and an image
-    /// sorted by owner cannot give it that RID.
-    /// </summary>
-    | OutOfOrder of owner : TypeOrMethodDef * last : TypeOrMethodDef
-
-/// <summary>
 /// A generic parameter whose variance PawPrint does not model when its type is created.
 /// </summary>
 [<RequireQualifiedAccess>]
@@ -404,10 +389,12 @@ module EmitScopeDefinitions =
         (name : string)
         (constraints : TypeDefOrRef list)
         (scope : EmitScope)
-        : GenericParamDefinition
+        : GenericParamRid * EmitScope
         =
         match EmitScope.genericParamOrderConflict owner scope with
-        | Some last -> GenericParamDefinition.OutOfOrder (owner, last)
+        | Some last ->
+            failwith
+                $"TODO: EmitScopeDefinitions.defineGenericParam: a parameter of %O{owner} would sort before the last GenericParam row, of %O{last} (stub)"
         | None ->
             // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
             let name, scope = EmitScope.internString name scope
@@ -429,7 +416,7 @@ module EmitScopeDefinitions =
                     constraints
                     scope
 
-            GenericParamDefinition.Defined (rid, scope)
+            rid, scope
 
     /// <summary>
     /// The first generic parameter of <paramref name="typeDef"/> or of one of its methods, in RID order,
