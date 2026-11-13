@@ -452,6 +452,9 @@
     <Compile Include="TestInternedStringWrites.fs" />
     <Compile Include="TestDescriptorBoundRefusal.fs" />
     <Compile Include="TestDynamicAssemblyImage.fs" />
+    <Compile Include="TestGenericParamOwnerIndex.fs" />
+    <Compile Include="TestGenericParamOwnerOracle.fs" />
+    <Compile Include="TestGenericParamOwnerRatchet.fs" />
     <Compile Include="TestEmitScopeImage.fs" />
     <Compile Include="TestEmitScopeExtension.fs" />
     <Compile Include="TestEmitScopeReferences.fs" />

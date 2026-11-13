@@ -227,8 +227,11 @@ module FieldInfo =
             | None -> false
         )
 
+    /// The field `handle`, whose row is `def`, of `mr`; `genericParamOwners` must have been built from
+    /// `mr`.
     let make
         (mr : MetadataReader)
+        (genericParamOwners : GenericParamOwnerIndex)
         (assembly : AssemblyName)
         (handle : FieldDefinitionHandle)
         (def : FieldDefinition)
@@ -242,7 +245,7 @@ module FieldInfo =
         let decType = mr.GetTypeDefinition declaringType
 
         let typeGenerics =
-            decType.GetGenericParameters () |> GenericParameter.readAll assembly mr
+            GenericParameter.readAll assembly mr genericParamOwners (GenericParamOwner.TypeDef declaringType)
 
         let declaringTypeNamespace = mr.GetString decType.Namespace
         let declaringTypeName = mr.GetString decType.Name

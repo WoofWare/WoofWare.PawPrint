@@ -30,7 +30,13 @@ module TestEmitScopeExtension =
 
     /// A type's or method's generic parameters as the image holds them: each row's RID, which is its
     /// token, its columns, and its constraints, each constraint row's RID and the type it names.
-    let private genericParamsView (reader : MetadataReader) (parameters : GenericParameterHandleCollection) =
+    let private genericParamsView
+        (reader : MetadataReader)
+        (index : GenericParamOwnerIndex)
+        (owner : GenericParamOwner)
+        =
+        let parameters = GenericParamOwnerIndex.parametersOf reader owner index
+
         [
             for p in parameters do
                 let row = reader.GetGenericParameter p
@@ -53,8 +59,13 @@ module TestEmitScopeExtension =
     /// move as rows of lower classes are added; the runtime keeps no handle into them, only what each
     /// row names.
     let private typeView (pe : PEReader) (reader : MetadataReader) (typeDef : TypeDefRid) =
-        let definition =
-            reader.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle typeDef.Rid)
+        let handle = MetadataTokens.TypeDefinitionHandle typeDef.Rid
+        let definition = reader.GetTypeDefinition handle
+
+        let genericParamOwners =
+            match GenericParamOwnerIndex.ofReader reader with
+            | Ok index -> index
+            | Error error -> failwith $"the image's generic parameters are misnumbered: %A{error}"
 
         let methods =
             [
@@ -83,7 +94,7 @@ module TestEmitScopeExtension =
                         rowNumber (MethodDefinitionHandle.op_Implicit m),
                         (reader.GetMethodDefinition m).ImplAttributes,
                         parameters,
-                        genericParamsView reader ((reader.GetMethodDefinition m).GetGenericParameters ()),
+                        genericParamsView reader genericParamOwners (GenericParamOwner.MethodDef m),
                         body
             ]
 
@@ -107,7 +118,7 @@ module TestEmitScopeExtension =
             ]
 
         token definition.BaseType,
-        genericParamsView reader (definition.GetGenericParameters ()),
+        genericParamsView reader genericParamOwners (GenericParamOwner.TypeDef handle),
         methods,
         fields,
         interfaces,

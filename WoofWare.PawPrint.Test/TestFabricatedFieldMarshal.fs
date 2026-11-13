@@ -374,9 +374,14 @@ public static class Driver
         let mr = peReader.GetMetadataReader ()
         let assembly = AssemblyName "FieldMarshal"
 
+        let genericParamOwners =
+            match GenericParamOwnerIndex.ofReader mr with
+            | Ok index -> index
+            | Error error -> failwith $"the fabricated image's generic parameters are misnumbered: %A{error}"
+
         mr.FieldDefinitions
         |> Seq.map (fun handle ->
-            (FieldInfo.make mr assembly handle (mr.GetFieldDefinition handle)).MarshallingDescriptor
+            (FieldInfo.make mr genericParamOwners assembly handle (mr.GetFieldDefinition handle)).MarshallingDescriptor
         )
         |> List.ofSeq
 

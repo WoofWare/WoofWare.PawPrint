@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -2028,7 +2028,7 @@ nothing the index does not.
 ### 5o: left to later stages
 
 * **5p: PawPrint's own index of each owner's generic parameters**, with no change in behaviour, as decided
-  above.
+  above: in progress on this branch, recorded under "5p" below.
 * **5q: parameters out of owner order**, as decided above. Its guests are the mixed shapes measured above that
   the order rule refuses (`C<T>.M<U>` both ways, `A<TA>.M<U>` then `B<TB>`, `P.G<X>` then `Q<T>`), each checking
   the tokens real .NET reports and running an instantiation.
@@ -2040,3 +2040,37 @@ nothing the index does not.
 * A custom attribute on a method's parameter, as on a type's (5l).
 * `TypeBuilder_SetParamInfo`, which `MethodBuilder.DefineParameter` reaches, and with it a guest naming a
   generic method's parameter.
+
+### 5p: PawPrint's own index of each owner's generic parameters
+
+Built 2026-11-13 as decided under "5o: the decisions", with no change in behaviour: the writer, its `Sorted`
+bit and the order rule are untouched, and every image PawPrint reads is still sorted.
+
+* `GenericParamOwnerIndex` (`WoofWare.PawPrint.Domain/GenericParamOwnerIndex.fs`) holds the `MetadataReader`
+  it was built from and each owner's rows in RID order. Its core, `group`, takes `GenericParamOwnerRow`s
+  (a `GenericParameterHandle`, a `GenericParamOwner`, which is a TypeDef or MethodDef handle, and the
+  `Number` column), which must be the whole table from RID 1 in order, and returns each owner's rows or the
+  first `GenericParamNumberingError`. `ofReader` reads each row's `Parent` and `Index` by RID and hands them to
+  `group`; `parametersOf` answers an owner's rows, empty if it has none, and fails unless asked through the
+  very reader the index was built from.
+* `GenericParamOwner` is new rather than `EmitScope`'s `TypeOrMethodDef`, which names RIDs of an emit scope,
+  not handles of an image, and is compiled after `GenericParameter.fs`.
+* `Assembly.read` builds the index before it reads any type, and refuses the image on a numbering error.
+  `TypeInfo.read`, `MethodInfo.read`, `FieldInfo.make` and `GenericParameter.readAll` take it; the last takes
+  it and an owner in place of a `GenericParameterHandleCollection`.
+* The oracle, `TestGenericParamOwnerOracle`, found the index equal to SRM's `GetGenericParameters` for every
+  TypeDef and MethodDef, and no image tripping the numbering assertion, over the .NET 10.0.12 shared
+  framework (172 images; 2,057 generic types and 4,707 generic methods), its linux-x64 pack (172; 2,067;
+  4,756), ASP.NET Core (141; 1,246; 1,285) and the test assembly's directory (41; 4,432; 6,448). It refuses
+  to compare an image whose GenericParam table is not sorted by owner, so 5q's creation-order images are
+  outside it, as expected.
+* The ratchet, `TestGenericParamOwnerRatchet`: an IL scan of every PawPrint assembly the test assembly
+  references that is not a test, finding each instruction naming a MemberRef `GetGenericParameters` on
+  `System.Reflection.Metadata.TypeDefinition` or `MethodDefinition` and allowing it only inside the index's
+  module (`WoofWare.PawPrint.GenericParamOwnerIndexModule`, nested closures included), which itself calls
+  neither; and a text scan of the test project allowing the name only in the oracle's file, an exact count.
+  `TestNativeMetadataImport` now takes a parameter's handle from the parsed `TypeInfo` and `MethodInfo`, so it
+  needs no allowance.
+* `MetadataBuilder` refuses to serialise an owner's parameters unless their numbers increase, as well as out
+  of owner order, so the adapter's test writes each owner's rows numbered 0, 1, ... and then overwrites the
+  `Number` column in the bytes.

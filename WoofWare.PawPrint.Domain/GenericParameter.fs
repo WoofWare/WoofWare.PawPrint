@@ -128,13 +128,16 @@ module GenericParameter =
             && metadata.GetString typeDef.Name = "ValueType"
         | _ -> false
 
+    /// `owner`'s generic parameters in `metadata`, in order. `owners` must have been built from
+    /// `metadata`.
     let readAll
         (assemblyName : AssemblyName)
         (metadata : MetadataReader)
-        (param : GenericParameterHandleCollection)
+        (owners : GenericParamOwnerIndex)
+        (owner : GenericParamOwner)
         : GenericParamFromMetadata ImmutableArray
         =
-        param
+        GenericParamOwnerIndex.parametersOf metadata owner owners
         |> Seq.map (fun paramHandle ->
             let param = metadata.GetGenericParameter paramHandle
 
