@@ -2324,11 +2324,11 @@ Open questions:
   decisions below add. The handler's own check that the TypeDef names a row is expected to survive at the guest
   level, since no managed caller passes another and `EmitScope.addMemberRef` checks it again; the plan records that
   rather than inventing a guest for it.
-* The "parent recorded as a TypeRef of the same RID" mutant is killed by a crash, not by an assertion: the module
-  has fewer TypeRefs than the RIDs `D` and `K` have here, so `EmitScope.addMemberRef`'s check of the parent's row
-  throws. The terminal-state check of each MemberRef's parent token kills it independently, and is the only oracle
-  that would if the RIDs happened to name TypeRef rows, since `ResolveMethod` binds a TypeDef and a TypeRef parent
-  to the same member.
+* The "parent recorded as a TypeRef of the same RID" mutant is killed by a crash, not by an assertion: when `G<int>`
+  is emitted the module has one TypeRef, so no TypeRef has `D`'s RID 2, and the mutant cannot make one (a RID's
+  case is internal to the Domain, so the handler gets a `TypeRefRid` only from `EmitScope.tryTypeRefRid`). The
+  terminal-state check of each MemberRef's parent token is the oracle that would remain if such a RID named a
+  TypeRef row, since `ResolveMethod` binds a TypeDef and a TypeRef parent to the same member.
 
 ### 5r: left to later stages
 
@@ -2341,9 +2341,9 @@ Open questions:
 * `RuntimeMethodHandle_GetMethodBody`, which `MethodBody.GetILAsByteArray` reaches.
 * The `Gen` guest, a generic method of the module's own generic type through `TypeBuilder.GetMethod` and through the
   created type's `MethodInfo`: a test-only PR of its own against `main`, as decided below.
-* A TypeDef parent naming a type not yet created, which a user-derived member of a `TypeBuilder` passes. CoreCLR
-  adds the row, and A adds it too, reading only the token; binding it then stops at 3b's refusal of a type that is
-  defined but not created. Not measured under PawPrint.
+* Binding a MemberRef whose TypeDef parent names a type not yet created, which a user-derived member of a
+  `TypeBuilder` passes. CoreCLR adds the row, and A adds it too (the guest emits one, measured on .NET 10); binding it
+  is expected to stop at 3b's refusal of a type that is defined but not created. Not measured under PawPrint.
 * A TypeDef parent naming a generic type definition, from a user-derived `MethodInfo` of it: A adds the row, and
   binding it stops loudly at `MethodTokenBinding`'s refusal of a MemberRef whose parent names a generic type
   definition without an instantiation.
@@ -2396,3 +2396,52 @@ Taken 2026-11-13.
     MemberRef's parent token is the only oracle for that, and the plan should say so.
   * Mutants added: the arm admitting only a generic-method signature; the arm checking that the type is
     created; the RID taken from the wrong bits (parent always TypeDef 2, which `K..ctor` kills).
+
+### 5r: as built
+
+Built 2026-11-13 as decided above.
+
+* `ModuleBuilder_GetMemberRefFromSignature`'s TypeDef arm checks the token's RID against the scope
+  (`EmitScope.tryTypeDefRid`), failing as a PawPrint fault on a miss, and hands `MemberRefParent.TypeDef` to
+  `EmitScopeReferences.defineMemberRef`. It reads nothing else. The comment above the match and the fall-through's
+  TODO, which a vararg call site of a `MethodBuilder` (a MethodDef parent) is now the only thing to reach, are
+  rewritten. No public signature changed.
+* `ModuleBuilderMemberRefOfOwnTypeDef.cs` is the measurement, in the measured order. Its check of MemberRef 5 by
+  `ResolveField` is left out: `ModuleHandle_ResolveField` is not implemented, which is a QCall of its own. The
+  terminal-state check reads that row, and `E`'s `stsfld` and `ldsfld` run through it.
+* The guest also emits, last, a call through a user-derived method `M` of `U` (TypeDef 5), which is never created,
+  into a body of `U` that never runs: MemberRef 7 under `U`'s TypeDef, `00 00 08`, as measured on .NET 10. The
+  decisions did not list it; it is there so that an arm consulting whether the type is created is caught.
+* `ModuleBuilderLdtokenOwnGenericMethodDefinition.cs` exits 0 on .NET 10 and is parked everywhere; run on purpose
+  under PawPrint, it stops at the `MethodTokenBinding` TODO its reason quotes.
+* Probed under PawPrint with the arm in place, each of which real .NET answers with an exception the guest catches
+  from `Invoke`:
+  * A user-derived member naming nothing (a method `Nope` of `D`, a field `Nope` of `D`): the MemberRefs are added,
+    and binding them is a host failure, not a guest exception: "binds to no method, so CoreCLR throws
+    MissingMethodException; that is not modelled", and for the field "PawPrint cannot vouch for every type
+    CoreCLR's load of its parent reaches (D is not declared by CoreLib), so cannot tell which exception binding
+    throws; TODO". Real .NET throws `MissingMethodException` and `MissingFieldException` at JIT time.
+  * `Emit(OpCodes.Call, created.GetMethod("G"))`, the definition with `useMethodDef` false, from a non-generic
+    method: the emitter writes a MethodSpec under `G`'s MemberRef whose instantiation is `G`'s own `MVAR 0`, which
+    real .NET refuses at JIT time with `BadImageFormatException`. PawPrint emits it and then stops with a host
+    failure ("CoreCLR refuses a signature with BadImageFormatException: it names the method parameter !!0, and its
+    context instantiates 0"). Left out of the guest, since PawPrint does not raise it.
+* Each mutant was run against the emit-scope tests, `TestTypeBuilderGenericParamRefusals`, `TestGuestParking` and
+  every `ModuleBuilder` and `TypeBuilder` guest:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The arm refusing again | the guest |
+  | The parent a TypeRef of the same RID | the guest, by the mutant's own failure: no TypeRef has RID 2 when `G<int>` is emitted |
+  | The parent TypeRef 1 (`object`) | the guest, binding `G` under `object` ("binds to no method"), before the terminal-state check |
+  | The find skipped for a TypeDef parent (in `defineMemberRef`) | the guest, and `TestEmitScopeMemberRefs`' model property and its refusal test |
+  | B's shortcut to a MethodDef of the same name | the guest |
+  | The extended scope not kept for a TypeDef parent | the guest |
+  | The arm admitting only a generic method signature | the guest (`N`, `F`, `K..ctor`) |
+  | The arm admitting only a created type | the guest (`U`), once the uncreated shape was added; before it, survived |
+  | The RID always 2 | the guest (`K..ctor`, `U.M`) |
+  | The arm's RID check dropped | not expressible: the handler can make a `TypeDefRid` only through `EmitScope.tryTypeDefRid` |
+
+* Left to later stages, besides those above: `ModuleHandle_ResolveField`; a guest exception
+  (`MissingMethodException`, `MissingFieldException`) for a MemberRef that binds to nothing; and the
+  `BadImageFormatException` for a call to a generic method definition.
