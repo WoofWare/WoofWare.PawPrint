@@ -198,6 +198,7 @@
     <Compile Include="TestTypeLoad.fs" />
     <Compile Include="TestJitTypeLoads.fs" />
     <Compile Include="TestDispatchReadsNoBody.fs" />
+    <Compile Include="TestAsyncVariantDispatch.fs" />
     <Compile Include="TestGcReferences.fs" />
     <Compile Include="TestFieldBlittability.fs" />
     <Compile Include="TestStructLayoutFacts.fs" />
