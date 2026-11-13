@@ -285,12 +285,9 @@ module Program =
                 },
                 onlyStuck stuck
             )
-        // The process ended before `Main` was installed, in the class-initialisation phase: the
-        // driver fails loudly on an end in an earlier phase (`RunningProgram.runEnd`). The CLR
-        // tears the process down, and the guest-level diagnostic is the run's end, rather than a
-        // host `failwith` that would mask it.
-        | MultiStepOutcome.Finished (ends, _) ->
-            StartupStepOutcome.Completed (ProgramStartResult.CompletedBeforeMain (onlyEnd ends))
+        | MultiStepOutcome.Finished _ ->
+            failwith
+                "Program.stepStartup: the process ended before Main was installed, but the driver fails loudly on an end during startup (`RunningProgram.runEnd`) rather than finishing (this is a bug in PawPrint)."
         | MultiStepOutcome.Stepped (_, pid, ProgramEvent.Ended _) ->
             failwith
                 $"Program.stepStartup: process %O{pid} ended and the driver ran on, but a driver of one program finishes when its program ends (this is a bug in PawPrint)."

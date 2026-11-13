@@ -168,21 +168,8 @@ module NativeStackTrace =
             id
         | Some (SynthesisedMethod.DynamicMethod handle) -> state, handle.GetRegistryId ()
         | Some SynthesisedMethod.EntryPointPlaceholder ->
-            // The frame the entry thread carries while startup runs class initialisers, before
-            // `Main` is installed. It is shaped like the entry point but deliberately carries no
-            // MethodDef handle, so that nothing resolves its IL offsets against the real `Main`'s
-            // debug information and reports source lines for code that has not executed
-            // (`SynthesisedMethod.EntryPointPlaceholder`).
-            //
-            // Real .NET has no equivalent moment — its class initialisers are lazy, so the closest
-            // scenario, an entry type whose initialiser runs from `Main`'s first static access,
-            // does have a real `Main` frame and reports it (measured). Answering that here means
-            // naming the placeholder as `Main`, which reintroduces exactly the hazard that
-            // docstring exists to prevent: the placeholder's own body is a bare `ret`, so its
-            // offset 0 is a real position in `Main` that a consumer could map to a source line.
-            // Deciding between those is not this handler's to make, so it says so instead.
             failwith
-                $"%s{operation}: a captured frame is the entry-point placeholder for %s{frame.Method.Name}, which carries no method handle by construction. This is reachable from a class initialiser that captures a stack trace during startup, before Main is installed. Deciding what such a frame should report — the entry point's own handle, or no frame at all — needs the question in SynthesisedMethod.EntryPointPlaceholder's docstring settled first."
+                $"%s{operation}: a captured frame is the entry-point placeholder for %s{frame.Method.Name}, which the first phase of startup replaces before the entry thread runs a step, so no frame can be above it. This is an interpreter bug."
         | Some kind ->
             failwith
                 $"%s{operation}: a captured frame runs the synthesised method %s{frame.Method.Name} (%O{kind}), which has no MethodDef row and no registry id to name it. Reporting a null handle instead is not an option: CalculateFramesToSkip counts a null-method frame as skippable, so the frame would silently vanish from the guest's trace."

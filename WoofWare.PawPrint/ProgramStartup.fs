@@ -255,13 +255,9 @@ module internal ProgramStartup =
                     findCoreLibraryAssemblyFromGeneric
                     findCoreLibraryAssemblyFromResolved
 
-        /// The frame the entry thread runs during startup: the entry point's *signature* with
-        /// its body replaced by a bare `ret`. Pushing cctors underneath it and pumping until
-        /// it returns is how `prepare` drives static initialisation without entering Main.
-        ///
-        /// Rebuildable rather than built once, because seeding AppContext also has to pump
-        /// the entry thread to completion, which consumes this frame; the seed then puts a
-        /// fresh one back for the cctor pump that follows.
+        /// The frame the entry thread is created with: the entry point's *signature* with its
+        /// body replaced by a bare `ret`. The first phase of startup replaces it before the
+        /// thread runs a step, so it never runs.
         let buildStartupFrame
             (baseTypes : BaseClassTypes<DumpedAssembly>)
             (state : IlMachineState)
@@ -389,10 +385,8 @@ module internal ProgramStartup =
         // `CorHost2::CreateAppDomainWithManager`, before any managed code at all; the deadline
         // that actually bites is that BCL feature switches latch on first read into a
         // `static readonly` (`EventSource.IsSupported` is the motivating one), so seeding has
-        // to precede the entry type's cctor pump below, not merely precede Main.
+        // to precede every initialiser a guest's code can trigger, the entry type's included.
         //
-        // This runs the entry thread to completion, which consumes its startup frame; a fresh
-        // one goes back afterwards so the cctor pump that follows is unaffected.
         // The host's properties sit on top of PawPrint's own runtime baseline, which is how
         // "this runtime does not support dynamic code" reaches every guest without each host
         // having to remember to say so. Applied here rather than in `HostConfig.Default` so
@@ -400,39 +394,23 @@ module internal ProgramStartup =
         // `AppContext` wholesale with the guest's `runtimeconfig.json` — cannot drop it.
         let propertiesToSeed = AppContextProperties.withRuntimeBaseline launch.AppContext
 
-        let rec loadInitialState (state : IlMachineState) =
-            match
-                state
-                |> IlMachineStateExecution.loadClass loggerFactory baseClassTypes mainTypeHandle mainThread
-            with
-            | StateLoadResult.NothingToDo ilMachineState -> ilMachineState
-            | StateLoadResult.FirstLoadThis ilMachineState -> loadInitialState ilMachineState
-            | StateLoadResult.ThrowingTypeInitializationException _
-            | StateLoadResult.UnhandledTypeInitializationException _ ->
-                // Unreachable at startup: `loadClass` only pushes cctor frames, and no cctor has
-                // run yet, so the entry type cannot already have failed.
-                failwith
-                    "logic error: initial loadClass for entry point type observed an already-failed class initialiser"
-            | StateLoadResult.Blocked _ ->
-                // Unreachable at startup: only the entry thread exists, so no other thread can
-                // be mid-cctor on the entry type.
-                failwith
-                    "logic error: initial loadClass for entry point cannot block on another thread (no other threads exist yet)"
-
         /// Put the call of `Main`, whose locals are `localTypes`, on the entry thread, to give it
-        /// `mainArgs` once class initialisation has returned, and say how it calls `Main`.
+        /// `mainArgs`, and say how it calls `Main`.
         let installMain
             (localTypes : ImmutableArray<ConcreteTypeHandle>)
             (mainArgs : ImmutableArray<CliType>)
             (state : IlMachineState)
             : IlMachineState * MainCall
             =
-            logger.LogInformation "Main method class now initialised"
+            logger.LogInformation "Installing the call of Main"
 
-            // The bottom frame, the call it makes, and the types whose initialisers a call of it
-            // would arm, in the order a call would arm them: the bottom frame is entered without
-            // a call, so arming them is left to us.
-            let state, bottomFrame, call, armed =
+            // The bottom frame, the call it makes, and the type whose initialisation its prologue
+            // runs: the bottom frame is entered without a call, so arming it is left to us, and
+            // any call it makes arms its callee as every call does. On .NET 10 the bottom frame
+            // is `Main`, so `Main`'s prologue runs the entry type's initialiser, as CoreCLR's
+            // does: a synchronized `Main` takes its monitor first, and the initialiser sees `Main`
+            // on the stack.
+            let state, bottomFrame, call, bottomFrameType =
                 match MainCaller.ofRuntime (EmulatedRuntime.ofCoreLib baseClassTypes.Corelib) with
                 | MainCaller.Vm ->
                     let methodState =
@@ -451,7 +429,7 @@ module internal ProgramStartup =
                         | Ok s -> s
                         | Error _ -> failwith "TODO: I'd be surprised if this could ever happen in a valid program"
 
-                    state, methodState, MainCall.Direct entry.Returns, [ mainTypeHandle ]
+                    state, methodState, MainCall.Direct entry.Returns, mainTypeHandle
                 | MainCaller.CallEntryPoint ->
                     let state, frame, environmentType, call =
                         EntryPointCall.buildFrame
@@ -462,18 +440,15 @@ module internal ProgramStartup =
                             entry.Returns
                             state
 
-                    // `CallEntryPoint`'s `calli` arms the entry type itself; that type's
-                    // initialiser has run by now, so arming it here as well changes nothing, and
-                    // keeps the check below of the two runtimes alike.
-                    state, frame, call, [ environmentType ; mainTypeHandle ]
+                    // `CallEntryPoint`'s `calli` arms the entry type.
+                    state, frame, call, environmentType
 
-            // Now that BCL initialisation has taken place and the user-code classes are constructed,
-            // overwrite the main thread completely. The entry thread Terminated during the cctor
-            // pump (its onlyRet body hit `ret`); we're resurrecting it to call Main, so restore
-            // Status to Runnable before the scheduler is asked to pick again.
+            // The entry thread's last startup call returned past its bottom frame; we're
+            // resurrecting the thread to call Main, so restore Status to Runnable before the
+            // scheduler is asked to pick again.
             let threadState =
                 state.ThreadState.[mainThread]
-                |> ThreadState.replaceFrames bottomFrame
+                |> ThreadState.replaceFrames (bottomFrame |> MethodState.withPendingTypeInit bottomFrameType)
                 |> fun threadState ->
                     { threadState with
                         Status = ThreadStatus.Runnable
@@ -484,79 +459,21 @@ module internal ProgramStartup =
                     ThreadState = state.ThreadState |> Map.add mainThread threadState
                 }
 
-            let arm (state : IlMachineState) (typeHandle : ConcreteTypeHandle) : IlMachineState =
-                let state, init =
-                    IlMachineStateExecution.ensureTypeInitialised
-                        loggerFactory
-                        baseClassTypes
-                        mainThread
-                        typeHandle
-                        state
+            state, call
 
-                match init with
-                | WhatWeDid.Aborted fatal ->
-                    // Triggered when initialising the type tears the process down. Startup has no
-                    // `RunOutcome` to hand back at this point -- it is still assembling the
-                    // machine -- so the abort cannot be reported as one; surface it rather than
-                    // installing Main on a state whose process has already died.
-                    let message = fatal.Message |> Option.defaultValue "<no message>"
-
-                    failwith
-                        $"TODO: initialising %O{typeHandle} as Main was installed aborted the process (%O{fatal.Code}): %s{message}"
-                | WhatWeDid.SuspendedForClassInit ->
-                    failwith
-                        $"TODO: %O{typeHandle} had yet to be initialised when Main was installed, and running its initialiser then is not implemented"
-                | WhatWeDid.SuspendedForManagedCall ->
-                    failwith "logic error: ensureTypeInitialised cannot suspend for an arbitrary managed call"
-                | WhatWeDid.BlockedOnClassInit _ ->
-                    failwith "logic error: surely this thread can't be blocked on class init"
-                | WhatWeDid.ThrowingTypeInitializationException
-                | WhatWeDid.UnhandledException _ ->
-                    // A failing initialiser ends the run during the class-initialisation phase,
-                    // as `RunOutcome.GuestUnhandledException`, before Main is ever installed.
-                    failwith
-                        $"logic error: the class initialiser of %O{typeHandle} had already failed when Main was installed"
-                | WhatWeDid.VoluntaryYield _ ->
-                    // ensureTypeInitialised drives cctor execution, which has no path to a
-                    // yield primitive: voluntary yields are produced by native handlers like
-                    // `ThreadNative_YieldThread`, never by a synthetic cctor step. If this
-                    // arm ever fires, the cctor pipeline has acquired a producer we didn't
-                    // anticipate, and the entry-point sequencer needs to decide explicitly
-                    // whether to honour the yield before running Main.
-                    failwith "logic error: ensureTypeInitialised cannot produce a VoluntaryYield"
-                | WhatWeDid.Executed -> state
-
-            List.fold arm state armed, call
-
-        /// Load the entry class, so that the class-initialisation phase has its `.cctor` to
-        /// pump. Runs no guest instructions of its own — `loadClass` only pushes cctor frames.
-        let enterClassInit
+        /// Put the call of `Main` on the entry thread, to give it `mainArgs`.
+        let enterMain
             (mainArgs : ImmutableArray<CliType>)
             (state : IlMachineState)
-            : IlMachineState * StartupPhase
+            : IlMachineState * AfterStartupCall
             =
-            // On CoreCLR the entry type's initialiser runs from `Main`'s prologue, so a
-            // synchronized `Main` runs it holding the type's monitor; here it runs in a startup
-            // phase of its own, before `Main` is installed.
-            match concretizedMainMethod with
-            | MethodInfo.Metadata (_, facts, _) when
-                facts.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.Synchronized
-                ->
-                let mainType =
-                    dumped.TypeDefs.[concretizedMainMethod.RequiredDeclaringType.Definition.Get]
-
-                if mainType.Methods |> List.exists (fun m -> m.Name = ".cctor") then
-                    failwith
-                        $"TODO: the entry point %O{concretizedMainMethod} is synchronized and its type has a type initialiser, which CoreCLR runs from Main's prologue holding the type's monitor; PawPrint runs it in a startup phase before Main, without the monitor"
-            | MethodInfo.Metadata _
-            | MethodInfo.Synthesised _ -> ()
-
-            // CoreCLR compiles Main, loading what its locals name, before the entry type's
-            // `.cctor` runs, so the `.cctor` already sees those assemblies.
+            // CoreCLR compiles Main, loading what its locals name, before Main's prologue runs the
+            // entry type's `.cctor`, so the `.cctor` already sees those assemblies.
             let state, localTypes =
                 ExecutionConcretization.concretizeLocals loggerFactory baseClassTypes concretizedMainMethod state
 
-            loadInitialState state, StartupPhase.InitialisingClasses (installMain localTypes mainArgs)
+            let state, call = installMain localTypes mainArgs state
+            state, AfterStartupCall.Main call
 
         let atPhase (state : IlMachineState) (phase : StartupPhase) : RunningProgram =
             {
@@ -568,8 +485,7 @@ module internal ProgramStartup =
             }
 
         /// Run `methodState` on the entry thread in place of whatever frame it currently holds.
-        /// Every phase that pumps a call installs it this way, and every such call consumes the
-        /// frame by terminating the thread, so `reinstateStartupFrame` is its counterpart.
+        /// Every phase that pumps a call installs it this way.
         let installCall (methodState : MethodState) (state : IlMachineState) : IlMachineState =
             let threadState =
                 state.ThreadState.[mainThread]
@@ -583,15 +499,6 @@ module internal ProgramStartup =
                 ThreadState = state.ThreadState |> Map.add mainThread threadState
             }
 
-        /// Put a fresh startup frame on the entry thread, which a pumped call consumed by
-        /// running the thread to completion.
-        ///
-        /// The invariant every phase-entry function below relies on: on entry, the entry thread
-        /// holds a startup frame. `computeState` establishes it, and each `onReturn` restores it.
-        let reinstateStartupFrame (state : IlMachineState) : IlMachineState =
-            let state, startupFrame = buildStartupFrame baseClassTypes state
-            installCall startupFrame state
-
         /// Install the guest's command line, the way `CorHost2::ExecuteAssembly` does
         /// immediately before it runs `Main`. The array CoreLib returns is the one `Main`
         /// receives, so there is no second construction of it to disagree.
@@ -601,7 +508,7 @@ module internal ProgramStartup =
 
             logger.LogInformation "Installing the guest's command line"
 
-            let onInitialised (state : IlMachineState) : IlMachineState * StartupPhase =
+            let onInitialised (state : IlMachineState) : IlMachineState * AfterStartupCall =
                 // `InitializeCommandLineArgs` returns the arguments `Main` is to be given,
                 // having just built `s_commandLineArgs` from the same input in the same
                 // pass. The entry thread has terminated, so its eval stack holds the return
@@ -626,7 +533,7 @@ module internal ProgramStartup =
                         // simply not passed on.
                         ImmutableArray.Empty
 
-                state |> reinstateStartupFrame |> enterClassInit mainArgs
+                enterMain mainArgs state
 
             installCall initFrame state, StartupPhase.InitialisingCommandLine onInitialised
 
@@ -639,13 +546,15 @@ module internal ProgramStartup =
         | Some (state, setupFrame, readBack) ->
             logger.LogInformation "Seeding AppContext from the host's configuration properties"
 
-            let onSeeded (state : IlMachineState) : IlMachineState * StartupPhase =
+            let onSeeded (state : IlMachineState) : IlMachineState * AfterStartupCall =
                 // An exception `Setup` stored rather than let escape is one the VM rethrows, which
                 // fails the launch; it gets the same loud failure as one that escaped.
                 match AppContextSeed.caught readBack state with
                 | Some exn ->
                     failwith
                         $"Seeding AppContext threw an exception, which Setup caught and stored for the host to rethrow:\n%s{UnhandledExceptionReport.describeStored state exn}"
-                | None -> state |> reinstateStartupFrame |> enterCommandLineInit
+                | None ->
+                    let state, phase = enterCommandLineInit state
+                    state, AfterStartupCall.Phase phase
 
             atPhase (installCall setupFrame state) (StartupPhase.SeedingAppContext onSeeded)

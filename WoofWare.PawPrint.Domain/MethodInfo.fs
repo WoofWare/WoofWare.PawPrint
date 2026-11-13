@@ -459,14 +459,15 @@ type SynthesisedMethod =
     | MulticastDelegateInvokeStub
 
     /// <summary>
-    /// The placeholder frame the entry thread carries before <c>Main</c> is installed.
+    /// The placeholder frame the entry thread is created with, before startup's first call
+    /// replaces it.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <c>Program.buildStartupFrame</c> needs a frame on the entry thread while startup runs
-    /// class initialisers, and shapes it like the entry point — same name, declaring type and
-    /// signature — so that everything reading a frame sees something sensible. Its *body*,
-    /// though, is a bare <c>ret</c>: `Main` has not run and must not.
+    /// <c>Program.buildStartupFrame</c> needs a frame to create the entry thread with, and shapes
+    /// it like the entry point — same name, declaring type and signature — so that everything
+    /// reading a frame sees something sensible. Its *body*, though, is a bare <c>ret</c>: `Main`
+    /// has not run and must not.
     /// </para>
     /// <para>
     /// Synthesised rather than metadata-flavoured precisely because of that substitution. Its

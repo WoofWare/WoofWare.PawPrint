@@ -205,8 +205,8 @@ module Scheduler =
     ///
     ///   * a thread's *final* step leaves the driver as `ExecutionResult.Terminated`, though it
     ///     is the step that most conclusively satisfies "I am waiting to see you run";
-    ///   * the entry thread's synthetic `onlyRet` frame reports `NormalExit` even in the
-    ///     pre-`Main` pump, after which that same thread is resurrected and keeps running.
+    ///   * the final `ret` of each call startup pumps on the entry thread arrives as
+    ///     `Terminated` too, after which that same thread is resurrected and keeps running.
     ///
     /// Missing either does not break correctness, because `candidates` filters debts against the
     /// live Runnable set — but it breaks the discharge lemma that `candidates`' non-emptiness
