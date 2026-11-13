@@ -103,6 +103,24 @@ public class Below<X, W> where X : W
 {
 }
 
+// Each class below is named by one constraint and nothing else, so deciding a check is the first
+// time the interpreter loads it.
+public class FreshForNew
+{
+}
+
+public class FreshForStruct
+{
+}
+
+public class OfFreshForNew<F> where F : FreshForNew
+{
+}
+
+public class OfFreshForStruct<F> where F : FreshForStruct
+{
+}
+
 public static class Program
 {
     public static void StructMethod<Q>() where Q : struct
@@ -181,6 +199,10 @@ public static class Program
 
         // Variance.
         if (!Admits(typeof(NeedsObjects<>), Formal(typeof(OfStrings<>)))) return 33;
+
+        // A class constraint loaded for the first time by the check itself.
+        if (Admits(typeof(NeedsNew<>), Formal(typeof(OfFreshForNew<>)))) return 35;
+        if (Admits(typeof(NeedsStruct<>), Formal(typeof(OfFreshForStruct<>)))) return 36;
 
         // An admitted construction names the variable itself.
         Type made = typeof(NeedsStruct<>).MakeGenericType(s);
