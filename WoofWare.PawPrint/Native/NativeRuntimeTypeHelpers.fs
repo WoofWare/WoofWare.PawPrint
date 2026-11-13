@@ -1975,8 +1975,11 @@ module NativeRuntimeTypeHelpers =
             | CompositeShape.Pointer -> "*"
             | CompositeShape.OneDimArrayZero -> "[]"
             | CompositeShape.Array rank ->
-                let dims = if rank <= 1 then "*" else System.String (',', rank - 1)
-                $"[%s{dims}]"
+                // `TypeNameBuilder::AddArray` (typestring.cpp:355): above rank 64, which only a
+                // refused array type can have, the rank is spelled as a numeral.
+                if rank <= 1 then "[*]"
+                elif rank > 64 then $"[%d{rank}]"
+                else $"""[%s{System.String (',', rank - 1)}]"""
 
         // CoreCLR's TypeString::AppendType for FnPtrType emits the signature only when
         // FormatNamespace is set, and the empty string otherwise. This matches user-visible
