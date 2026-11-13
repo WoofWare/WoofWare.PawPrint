@@ -2029,7 +2029,8 @@ nothing the index does not.
 
 * **5p: PawPrint's own index of each owner's generic parameters**, with no change in behaviour, as decided
   above: in progress on this branch, recorded under "5p" below.
-* **5q: parameters out of owner order**, as decided above. Its guests are the mixed shapes measured above that
+* **5q: parameters out of owner order**, as decided above: built on this branch, recorded under "5q"
+  below. Its guests are the mixed shapes measured above that
   the order rule refuses (`C<T>.M<U>` both ways, `A<TA>.M<U>` then `B<TB>`, `P.G<X>` then `Q<T>`), each checking
   the tokens real .NET reports and running an instantiation.
 * A MemberRef whose parent is the module's own TypeDef, for a generic method reached through the created
@@ -2074,3 +2075,60 @@ bit and the order rule are untouched, and every image PawPrint reads is still so
 * `MetadataBuilder` refuses to serialise an owner's parameters unless their numbers increase, as well as out
   of owner order, so the adapter's test writes each owner's rows numbered 0, 1, ... and then overwrites the
   `Number` column in the bytes.
+
+### 5q: generic parameters in creation order
+
+Built 2026-11-13 as decided under "5o: the decisions": option F's conditions (iii) and (iv), on 5p's index
+and ratchet, which met (i) and (ii).
+
+* `EmitScopeImage` writes `GenericParam` in the scope's order, which is creation order, and sets the
+  table's bit of the header's `Sorted` mask unconditionally, every other bit staying clear.
+  `requireGenericParamsSorted` is gone; `requireGenericParamConstraintsSorted` stays, since
+  `GenericParamConstraint` is genuinely sorted by its owner's RID. The false declaration is documented on
+  `EmitScopeImage` and on `DumpedAssembly.PeReader`.
+* `EmitScope.genericParamOrderConflict` is deleted, and `EmitScope.addGenericParam` admits a row of any
+  owner of the scope. With nothing left to refuse, `GenericParamDefinition` would have had one case, so it
+  is deleted too: `EmitScopeDefinitions.defineGenericParam` returns the new `GenericParamRid` and scope,
+  and the handler's TODO for an out-of-order parameter went with the case. These three are the public
+  breaks to `WoofWare.PawPrint.Domain`.
+* The generator (`EmitScopeGen.genericParamOwners`) draws a parameter's owner from every type and method
+  of the scope, so generated scopes hold rows out of owner order, and every property over them (the
+  round trip, the extension check, the image's extension property) now covers creation order.
+* Condition (iii) is `TestSrmCreationOrderGenericParams`: over generated scopes whose parameters are
+  interleaved over their owners or in one run per owner in a random owner order (as CoreCLR makes them),
+  the header declares `GenericParam` sorted and nothing else (read from where SRM puts the `Module`
+  table's rows, and checked against the `Valid` mask there); `GetGenericParameter` by RID gives each row's
+  `Parent`, `Index`, `Name` and `Attributes`; `GetConstraints` gives exactly the parameter's constraint
+  rows; `GetGenericParameterConstraint` by RID gives each row's `Parameter` and `Type`; and
+  `GenericParamOwnerIndex` gives each TypeDef's and MethodDef's rows as the scope has them. Its fixed
+  sample reaches 441 interleaved and 420 contiguous images out of owner order, and 1,414 parameters out of
+  place with constraints.
+* Four guests, each run on .NET 10.0.12 first, where each exits 0, and then under PawPrint, where each
+  passed with no change beyond removing the order rule:
+
+  | Guest | Owners | GenericParam rows, by RID |
+  |---|---|---|
+  | `TypeBuilderMixedParamsMethodAfterType.cs` | `C<T>` TypeDef 2, `M<U>` MethodDef 1 | `T`, `U` |
+  | `TypeBuilderMixedParamsMethodBeforeType.cs` | `First` TypeDef 2, `C<T>` TypeDef 3, `M<U>` MethodDef 4, its token asked before `CreateType` | `U`, `T` |
+  | `TypeBuilderMixedParamsLaterGenericType.cs` | `A<TA>` TypeDef 3, `M<U>` MethodDef 4, `B<TB>` TypeDef 4 | `TA`, `U`, `TB` |
+  | `TypeBuilderMixedParamsGenericMethodThenType.cs` | `P` TypeDef 2, `G<X>` MethodDef 4, `Q<T>` TypeDef 3 | `X`, `T` |
+
+  Each checks the builders' and the created types' tokens, each parameter's owner and position, and runs
+  an instantiation: `M<U>` boxes a type's and a method's parameter through TypeSpecs, and `Q<T>.Call` calls
+  `G<T>` through a MethodSpec whose parent is `G`'s MethodDef and whose instantiation is `VAR 0`
+  (`0A 01 13 00`), which the last guest's terminal check reads with the rows.
+* Nothing else assumed a sorted table. The ratchet passes, so only the index's module calls SRM's lookup;
+  `TestGenericParamOwnerOracle` reads only images on disk, which a dynamic module never is, and refuses an
+  unsorted one; `TypeLoad`'s read of a parameter's constraints is by RID; and `EmitScopeExtension` compares
+  `GenericParam` rows by position, which is their RID, in any order.
+* Mutants, each run against the emit-scope, SRM, index and refusal tests and the TypeBuilder guests:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The `GenericParam` bit not set | SRM refuses every out-of-order image: the SRM property, the round trip, the extension properties, `Assembly.read`, the four guests (27 tests) |
+  | The `InterfaceImpl` bit set too | the SRM property's header check alone: the writer sorts that table, so SRM reads the same |
+  | The `GenericParamConstraint` bit set too | the SRM property's header check alone, likewise |
+  | The constraints' sortedness check dropped | survives: `EmitScope`'s record is private and only `addGenericParam` appends constraint rows, each owned by the row it adds, so no scope reaches the check |
+  | The writer sorting `GenericParam` by owner | the SRM property, the round trip, the extension properties, the four guests (23 tests) |
+  | The generator in owner order again | the SRM property's coverage, and the generator's coverage test |
+  | `EmitScopeExtension` comparing `GenericParam` rows in owner order | the out-of-order extension test, the extension properties, the four guests |
