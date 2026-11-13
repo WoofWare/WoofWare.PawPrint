@@ -882,32 +882,16 @@ module EmitScope =
         }
 
     /// <summary>
-    /// The owner of the scope's last <c>GenericParam</c> row, if a row owned by <paramref name="owner"/>
-    /// would sort before it in ECMA-335's order (by the owner's coded index), so that the image could not
-    /// hold the new row at the RID the scope would give it; <c>None</c> if it would not.
-    /// </summary>
-    let genericParamOrderConflict (owner : TypeOrMethodDef) (scope : EmitScope) : TypeOrMethodDef option =
-        // The rows are in owner order already, so the last has the greatest owner.
-        if scope.GenericParams.IsEmpty then
-            None
-        else
-            let last = scope.GenericParams.[scope.GenericParams.Count - 1].Owner
-
-            if owner.CodedIndex < last.CodedIndex then
-                Some last
-            else
-                None
-
-    /// <summary>
     /// Add a <c>GenericParam</c> row, at the next RID, which is the token CoreCLR hands out for it, and
     /// then one <c>GenericParamConstraint</c> row owned by it for each of <paramref name="constraints"/>,
-    /// in that order, as <c>RegMeta::DefineGenericParam</c> does. A parameter's constraints are added
-    /// only with it, so the constraint rows are in owner order.
+    /// in that order, as <c>RegMeta::DefineGenericParam</c> does. The row may be owned by any type or
+    /// method of the scope, whatever owns the rows before it, as CoreCLR numbers parameters in the order
+    /// they are created. A parameter's constraints are added only with it, so the constraint rows are in
+    /// owner order.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The scope lacks the owner, the name or a constraint; the flags do not fit the column's two bytes;
-    /// the row's number is not the count of rows its owner already has; or
-    /// <c>genericParamOrderConflict</c> finds a row the new one would sort before.
+    /// or the row's number is not the count of rows its owner already has.
     /// </exception>
     let addGenericParam
         (row : GenericParamRow)
@@ -935,13 +919,6 @@ module EmitScope =
             invalidArg
                 (nameof row)
                 $"%s{operation}: parameter %d{row.Number} of %O{row.Owner}, which has %d{siblings}; CoreCLR's managed callers create an owner's parameters once each, in position order"
-
-        match genericParamOrderConflict row.Owner scope with
-        | Some last ->
-            invalidArg
-                (nameof row)
-                $"%s{operation}: a parameter of %O{row.Owner} (coded index %d{row.Owner.CodedIndex}) would sort before the last row's owner %O{last} (coded index %d{last.CodedIndex}), so the image could not hold it at the RID the scope would give it"
-        | None -> ()
 
         for target in constraints do
             requireTypeDefOrRef operation scope target
@@ -1012,6 +989,8 @@ module EmitScope =
     let standAloneSigs (scope : EmitScope) : ImmutableList<StandAloneSigRow> = scope.StandAloneSigs
     let typeSpecs (scope : EmitScope) : ImmutableList<TypeSpecRow> = scope.TypeSpecs
     let methodSpecs (scope : EmitScope) : ImmutableList<MethodSpecRow> = scope.MethodSpecs
+
+    /// In RID order, which is the order they were created, and need not be ECMA-335's order by owner.
     let genericParams (scope : EmitScope) : ImmutableList<GenericParamRow> = scope.GenericParams
 
     /// In RID order, which is owner order.

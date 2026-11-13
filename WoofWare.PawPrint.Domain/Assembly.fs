@@ -316,6 +316,14 @@ type DumpedAssembly =
         /// The PE reader for the underlying assembly file.
         /// TODO: work out how to render all the strings up front, then drop this.
         /// </summary>
+        /// <remarks>
+        /// For a dynamic module's image (<c>EmitScopeImage</c>), the header declares the
+        /// <c>GenericParam</c> table sorted by owner whether or not it is, and it need not be: its rows
+        /// are in the order the parameters were created. Read an owner's generic parameters through
+        /// <c>GenericParamOwnerIndex</c>, never through the reader's
+        /// <c>TypeDefinition.GetGenericParameters</c> or <c>MethodDefinition.GetGenericParameters</c>,
+        /// which trust the declaration. A row read by its handle is right.
+        /// </remarks>
         PeReader : PEReader
 
         /// <summary>

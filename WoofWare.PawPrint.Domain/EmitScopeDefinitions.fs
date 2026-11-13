@@ -379,8 +379,8 @@ module EmitScopeDefinitions =
     /// set): a new row, at the next RID, holding the name, and the flags as
     /// <c>_SetGenericParamProps</c> stores them, 0 for <c>-1</c> and otherwise their low 16 bits; then one
     /// <c>GenericParamConstraint</c> row for each of <paramref name="constraints"/>, in that order,
-    /// repeats included. Nothing is added if the row would sort before the scope's last
-    /// (<c>EmitScope.genericParamOrderConflict</c>).
+    /// repeats included. The new row's RID is the token CoreCLR gives the parameter, in the order of
+    /// creation, whatever owns the rows before it.
     /// </summary>
     let defineGenericParam
         (owner : TypeOrMethodDef)
@@ -391,32 +391,24 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : GenericParamRid * EmitScope
         =
-        match EmitScope.genericParamOrderConflict owner scope with
-        | Some last ->
-            failwith
-                $"TODO: EmitScopeDefinitions.defineGenericParam: a parameter of %O{owner} would sort before the last GenericParam row, of %O{last} (stub)"
-        | None ->
-            // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
-            let name, scope = EmitScope.internString name scope
+        // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
+        let name, scope = EmitScope.internString name scope
 
-            let flags =
-                if flags = -1 then
-                    enum<GenericParameterAttributes> 0
-                else
-                    enum<GenericParameterAttributes> (flags &&& 0xFFFF)
+        let flags =
+            if flags = -1 then
+                enum<GenericParameterAttributes> 0
+            else
+                enum<GenericParameterAttributes> (flags &&& 0xFFFF)
 
-            let rid, scope =
-                EmitScope.addGenericParam
-                    {
-                        Number = number
-                        Flags = flags
-                        Owner = owner
-                        Name = name
-                    }
-                    constraints
-                    scope
-
-            rid, scope
+        EmitScope.addGenericParam
+            {
+                Number = number
+                Flags = flags
+                Owner = owner
+                Name = name
+            }
+            constraints
+            scope
 
     /// <summary>
     /// The first generic parameter of <paramref name="typeDef"/> or of one of its methods, in RID order,
