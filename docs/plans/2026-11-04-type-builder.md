@@ -979,8 +979,9 @@ A call to an instantiation of a generic method, such as `Array.Empty<int>`, name
   `DefineMethodSpec` does, and the image and the extension carrying the table as they carry TypeSpec.
 * **`GetMemberRefFromSignature` accepts a TypeRef or a TypeSpec parent for a signature that is not
   vararg**, and refuses a vararg signature whatever its parent, and a TypeDef or MethodDef parent. A
-  MethodDef parent is valid only for a vararg call site (ECMA-335 II.22.25), and no CoreLib path passes
-  a TypeDef; both would be untested.
+  MethodDef parent is valid only for a vararg call site (ECMA-335 II.22.25). This decision held that no
+  CoreLib path passes a TypeDef; 5o measured one, a call through a created type's `MethodInfo` to an
+  instantiation of its generic method, which stays refused by name for a later stage.
 * **`TypeBuilder_DefineMethodSpec` accepts a MethodDef parent as well as a MemberRef**, as
   `DefineMethodSpec` does, under the same rule. No guest reaches the MethodDef case yet: a generic
   `MethodBuilder` needs `TypeBuilder_DefineGenericParam` and a GenericParam table, which PawPrint does not
@@ -1835,7 +1836,7 @@ then `E` calling `G<int>` through `G`'s `MethodBuilder` and `G<int>` and `G<long
   `MethodInfo` add a MemberRef (2) named `G` whose parent is `D`'s TypeDef `0x02000002`, and MethodSpecs 3
   (`<int>`) and 4 (`<long>`) whose parent is that MemberRef: `GetMethodTokenInternal` finds that a
   `RuntimeMethodInfo`'s module is not the `ModuleBuilder` and asks `GetMemberRefToken`, which asks
-  `GetMemberRefFromSignature` with the type's TypeDef. 5f's decision says no CoreLib path passes a TypeDef
+  `GetMemberRefFromSignature` with the type's TypeDef. 5f's decision said no CoreLib path passes a TypeDef
   parent there, and refuses one; this is such a path, and it is a reference from the module into itself.
 * `C<T>` with `Caller` calling `M<int>` through `TypeBuilder.GetMethod(C<int>, M)` and `C<T>`: MemberRefs 1
   and 2 with TypeSpec parents 1 and 2, MethodSpecs 1 and 2 with those MemberRefs as parents, and neither call
@@ -1870,11 +1871,53 @@ System.Reflection.Metadata, read from the .NET 10.0.12 `System.Reflection.Metada
 
 ### 5o: the decisions
 
-Not taken. Each option below is a strict extension of 5l's and 5m's tables: for a module whose parameters are
-created in owner order, each writes the same image, and each leaves `GenericParam` RIDs in the scope as
-CoreCLR's tokens. They differ in what the image holds and who must know.
+Taken 2026-11-13.
 
-**R. Keep the order rule, and admit a method owner wherever the rule admits it.** The handler stops refusing a
+* **R now, then F; B is ruled out.** 5o admits a method owner wherever the order rule admits it, and two later
+  stages, 5p and 5q, write creation order with PawPrint's own owner index.
+  * B brings back, for one table, both things the top-level decision rejected: two token spaces for one
+    module, and a created type's handles shifting when a later row is added. Its failure, a missed crossing,
+    is a plausible token that is wrong, which nothing detects.
+  * F is CoreCLR's own model: `CMiniMdRW` keeps `GenericParam` in creation order and finds an owner's rows
+    through a virtual sort. It keeps option A's property that a handle in an old image means the same in the
+    new one.
+  * A private metadata stream carrying the order, and an honest unsorted table with its bit clear, were
+    considered and rejected: SRM's reader constructor is the only gate, and it refuses an unsorted table whose
+    bit is clear, so the choice is between the bit and B.
+  * F's false `Sorted` bit is acceptable only if nothing is left relying on it, under four conditions, all
+    required: (i) one index path for every assembly, not one for dynamic modules alone; (ii) a mechanical ban
+    on `TypeDefinition.GetGenericParameters` and `MethodDefinition.GetGenericParameters`, by a scan of the
+    built non-test assemblies' MemberRefs allowing only the index's module, and a text-scan ratchet in the test
+    project allowing only the oracle's file; (iii) a checked-in property of SRM's by-RID behaviour on
+    creation-order images (`GetGenericParameter`'s `Parent`, `Index`, `Name` and `Attributes`,
+    `GetConstraints`, and `GetGenericParameterConstraint`), so that an SRM bump that breaks it fails CI; (iv)
+    the bit set unconditionally in an emit image, and documented on `EmitScopeImage` and on
+    `DumpedAssembly.PeReader`, every other table's bit staying clear.
+* **5p's index is explicit in the Domain API and serves every assembly.** An opaque `GenericParamOwnerIndex`
+  with a private constructor, built once in `Assembly.read` by one pass over the rows by RID: a pure core over
+  `(rid, owner coded index, number)` rows, tested against a model, and a thin `MetadataReader` adapter. It keeps
+  the reader it was built from and asserts reference equality with the reader it is used with. The public
+  breaks are `MethodInfo.read`, `FieldInfo.make` and `GenericParameter.readAll`, which takes the index and an
+  owner in place of a `GenericParameterHandleCollection`. Building it asserts that each owner's Numbers are
+  0 to n-1 in RID order, and refuses the image otherwise; if the oracle's sweep ever trips that on a real
+  assembly, the stage stops for a decision. Rejected: a side table keyed on the reader (global mutable state);
+  a scan per call (quadratic over CoreLib); generics read beforehand and passed in by the caller.
+* **Three PRs.** 5o is R. 5p is the index, the API changes, the oracle (the index equals SRM's
+  `GetGenericParameters` over the framework under test and the test assemblies, which can be checked only while
+  every image is sorted) and the ratchet, with no change in behaviour; it also moves `TestEmitScopeImage.fs`
+  and `TestEmitScopeExtension.fs` to the index. 5q sets `GenericParam`'s bit in the writer and drops
+  `requireGenericParamsSorted` (keeping the constraints' check), deletes `genericParamOrderConflict` and
+  `OutOfOrder`, moves the generator to creation order, adds the SRM by-RID property, and adds guests for the
+  mixed shapes.
+* **The TypeDef-parent MemberRef is a later stage**, with 5j's and 5k's references from the module into
+  itself. 5o refuses it by name: `ModuleBuilder_GetMemberRefFromSignature`'s TODO names the case, and
+  `TestTypeBuilderGenericParamRefusals` runs it. 5o's guest calls only through the `MethodBuilder`.
+
+The options weighed, each a strict extension of 5l's and 5m's tables: for a module whose parameters are created
+in owner order, each writes the same image, and each leaves `GenericParam` RIDs in the scope as CoreCLR's
+tokens. They differ in what the image holds and who must know.
+
+**R. Keep the order rule, and admit a method owner wherever the rule admits it (chosen for 5o).** The handler stops refusing a
 MethodDef owner; everything else stays.
 
 * Correctness: exact where it runs, and loud otherwise, by the existing refusal naming both owners.
@@ -1889,7 +1932,7 @@ MethodDef owner; everything else stays.
   mixed shape.
 * Oracle: 5l's, plus the guest below.
 
-**B. Translate the token.** The scope keeps creation order. The writer sorts `GenericParam` stably by owner,
+**B. Translate the token (rejected).** The scope keeps creation order. The writer sorts `GenericParam` stably by owner,
 remaps `GenericParamConstraint`'s owner column to the image RIDs and re-sorts it, and a dynamic module's
 `DumpedAssembly` carries the permutation (from the scope, since the image cannot say what order its rows were
 created in), and every place a GenericParam token crosses into or out of the guest translates it.
@@ -1918,7 +1961,7 @@ created in), and every place a GenericParam token crosses into or out of the gue
 * Oracle: a property that the writer's permutation and the scope's are inverse, over generated creation
   orders; real .NET's emitter in the test host for each crossing, over generated mixed shapes; the guests below.
 
-**F. Write creation order, and find an owner's parameters ourselves.** The image holds `GenericParam` in the
+**F. Write creation order, and find an owner's parameters ourselves (chosen for 5p and 5q).** The image holds `GenericParam` in the
 scope's order, with the table's `Sorted` bit set so that SRM opens it, and PawPrint stops asking SRM for an
 owner's parameters: `Assembly.read` builds, in one pass over the table by RID, an index from each owner to its
 rows in RID order, and `GenericParameter.readAll` takes that index's rows where it now takes SRM's
@@ -1958,48 +2001,27 @@ A fourth shape, the scope supplying `Assembly.read` with each owner's parameters
 reading them from the image, is F with a second input to `Assembly.read` for a dynamic module only; it buys
 nothing the index does not.
 
-**Recommendation: R now, then F.** R is a strict prefix of both, needs no decision, and puts 5f's
-MethodDef-parent MethodSpec into a guest. Of B and F, F keeps option A's founding property, that the log only
-appends and a handle in an old image means the same in the new one, where B gives it up for `GenericParam`
-exactly in the table whose RIDs a guest sees; F has no crossings to miss; and its one untruthful bit is
-guarded by a ratchet and read by nothing else. B's advantage, a conformant image, matters only if something
-other than PawPrint reads these bytes, and nothing does.
-
-So 5o splits in three, each its own PR:
-
-1. **5o: method owners under the order rule.** The handler admits a MethodDef owner; nothing else changes.
-2. **5p: PawPrint's own index of each owner's generic parameters, with no behaviour change** (under F; under B,
-   the permutation and the translations instead). The index, the threading, the ratchet, and the oracle
-   against SRM over real assemblies.
-3. **5q: parameters out of owner order.** The writer sets `GenericParam`'s bit and stops asserting its order;
-   the scope stops refusing; the round-trip tests and the generator move to creation order.
-
 ### 5o: the oracle
 
-For the first PR:
-
 * The generator already draws MethodDef owners; the properties of 5l and 5m stand.
-* Real .NET's emitter, in the test host, over generated modules of non-generic types with generic methods,
-  some given their tokens early (by `MetadataToken` or `DefineParameter`) and some at `CreateType`: each
-  parameter's token, owner, position, name and attributes, and its constraint rows, are the scope's rows, and
-  no shape is refused, since methods' parameters are created in MethodDef order.
-* `TypeBuilderGenericMethod.cs`, which should exit 0 on .NET 10: `D` with `G<X> where X : IComparable` and
+* `TypeBuilderGenericMethod.cs`, which exits 0 on .NET 10: `D` with `G<X> where X : IComparable` and
   `Caller` calling `G<int>` twice and `G<string>`; checks `X`'s token and constraint, and that the two `<int>`
   calls share one MethodSpec token, read from `Caller`'s IL; invokes `Caller`, and `G<long>` through
-  reflection. Its
-  terminal-state check reads the GenericParam, GenericParamConstraint and MethodSpec rows.
+  reflection. Its terminal-state check reads the GenericParam, GenericParamConstraint and MethodSpec rows.
 * `TestTypeBuilderGenericParamRefusals` replaces "a generic method's parameter" with `C<T>` whose `M<U>` is given
-  a parameter name before `CreateType` after another type, refused out of order.
-* Mutants: the owner's coded index tag wrong for a MethodDef; the owner taken as the declaring type; the
-  MethodDef token's RID off by one; the MethodSpec parent tag wrong for a MethodDef.
-
-For the second and third, as under F above; the third's guests are the mixed shapes measured above that the
-order rule refuses (`C<T>.M<U>` both ways, `A<TA>.M<U>` then `B<TB>`, `P.G<X>` then `Q<T>`), each checking
-the tokens real .NET reports and running an instantiation.
+  a parameter name before `CreateType` after another type, refused out of order, and adds the TypeDef-parent
+  MemberRef.
+* Mutants: a MethodDef owner refused again; the owner's coded index wrong for a method; a method's parameter
+  counted in `AddedToCreatedType` as another type's; the handler's check that the MethodDef names a row of the
+  scope removed.
 
 ### 5o: left to later stages
 
-* The choice between B and F, to be put to a decider before the second PR.
+* **5p: PawPrint's own index of each owner's generic parameters**, with no change in behaviour, as decided
+  above.
+* **5q: parameters out of owner order**, as decided above. Its guests are the mixed shapes measured above that
+  the order rule refuses (`C<T>.M<U>` both ways, `A<TA>.M<U>` then `B<TB>`, `P.G<X>` then `Q<T>`), each checking
+  the tokens real .NET reports and running an instantiation.
 * A MemberRef whose parent is the module's own TypeDef, for a generic method reached through the created
   type's `MethodInfo` (measured above), which 5f refuses; a reference from the module into itself, alongside
   5k's and 5j's.
