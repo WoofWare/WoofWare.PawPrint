@@ -456,6 +456,7 @@
     <Compile Include="TestGenericParamOwnerOracle.fs" />
     <Compile Include="TestGenericParamOwnerRatchet.fs" />
     <Compile Include="TestEmitScopeImage.fs" />
+    <Compile Include="TestSrmCreationOrderGenericParams.fs" />
     <Compile Include="TestEmitScopeExtension.fs" />
     <Compile Include="TestEmitScopeReferences.fs" />
     <Compile Include="TestEmitScopeDefinitions.fs" />

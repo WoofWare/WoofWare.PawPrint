@@ -56,9 +56,9 @@ module EmitScopeGen =
         /// An instantiation of a method or method reference already in the scope, if it has any; never
         /// of no type arguments.
         | MethodSpec of method : int * arguments : int list
-        /// A generic parameter of a type or method already in the scope whose row would not sort before
-        /// the scope's last `GenericParam` row, if it has one, numbered after its owner's others, with a
-        /// constraint for each of `constraints` naming a TypeDef, TypeRef or TypeSpec of the scope.
+        /// A generic parameter of a type or method already in the scope, if it has any, numbered after its
+        /// owner's others, with a constraint for each of `constraints` naming a TypeDef, TypeRef or
+        /// TypeSpec of the scope. The rows are in creation order, which need not be owner order.
         | GenericParam of owner : int * name : string * flags : int * constraints : int list
 
     type private Applied =
@@ -348,25 +348,15 @@ module EmitScopeGen =
             |> ImmutableArray.CreateRange
             |> Some
 
-    /// The owners a new `GenericParam` row may have: every type and method of the scope whose row would
-    /// not sort before the scope's last `GenericParam` row.
+    /// The owners a new `GenericParam` row may have: every type and method of the scope, whatever owns
+    /// the scope's earlier rows.
     let genericParamOwners (scope : EmitScope) : TypeOrMethodDef list =
-        let last =
-            EmitScope.genericParams scope
-            |> Seq.tryLast
-            |> Option.map (fun row -> row.Owner.CodedIndex)
-
         [
             for i in 1 .. (EmitScope.typeDefs scope).Count do
                 yield TypeOrMethodDef.TypeDef (TypeDefRid i)
             for i in 1 .. (EmitScope.methodDefs scope).Count do
                 yield TypeOrMethodDef.MethodDef (MethodDefRid i)
         ]
-        |> List.filter (fun owner ->
-            match last with
-            | None -> true
-            | Some last -> owner.CodedIndex >= last
-        )
 
     /// How many `GenericParam` rows the scope gives this owner.
     let genericParamCount (owner : TypeOrMethodDef) (scope : EmitScope) : int =

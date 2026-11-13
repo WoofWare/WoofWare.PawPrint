@@ -2172,6 +2172,76 @@ module TestImpureCases =
                 MethodDefOrRef.MethodDef (methodDef 2), [ 0x0Auy ; 0x01uy ; 0x0Euy ]
             ]
 
+    /// The guest's dynamic module `Dyn` has these GenericParam rows, each given as its owner, number and
+    /// name, in RID order: the order CoreCLR created them in, which need not be owner order.
+    let private assertGenericParamOwners
+        (expected : (TypeOrMethodDef * uint16 * string) list)
+        (state : IlMachineState)
+        : unit
+        =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.genericParams scope
+        |> Seq.map (fun row -> row.Owner, row.Number, EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual expected
+
+    /// `TypeBuilderMixedParamsMethodAfterType.cs` has created `C<T>` (TypeDef 2), whose `M<U>` (MethodDef 1)
+    /// `CreateType` gave its token after creating `T`, as .NET 10 numbers them.
+    let private assertMixedParamsMethodAfterType : IlMachineState -> unit =
+        assertGenericParamOwners
+            [
+                TypeOrMethodDef.TypeDef (TypeDefRid 2), 0us, "T"
+                TypeOrMethodDef.MethodDef (MethodDefRid 1), 0us, "U"
+            ]
+
+    /// `TypeBuilderMixedParamsMethodBeforeType.cs` has asked `C<T>.M<U>` (MethodDef 4) for its token, and
+    /// then created `C` (TypeDef 3), as .NET 10 numbers them.
+    let private assertMixedParamsMethodBeforeType : IlMachineState -> unit =
+        assertGenericParamOwners
+            [
+                TypeOrMethodDef.MethodDef (MethodDefRid 4), 0us, "U"
+                TypeOrMethodDef.TypeDef (TypeDefRid 3), 0us, "T"
+            ]
+
+    /// `TypeBuilderMixedParamsLaterGenericType.cs` has created `A<TA>` (TypeDef 3), with `M<U>` (MethodDef
+    /// 4), and then `B<TB>` (TypeDef 4), as .NET 10 numbers them.
+    let private assertMixedParamsLaterGenericType : IlMachineState -> unit =
+        assertGenericParamOwners
+            [
+                TypeOrMethodDef.TypeDef (TypeDefRid 3), 0us, "TA"
+                TypeOrMethodDef.MethodDef (MethodDefRid 4), 0us, "U"
+                TypeOrMethodDef.TypeDef (TypeDefRid 4), 0us, "TB"
+            ]
+
+    /// `TypeBuilderMixedParamsGenericMethodThenType.cs` has created `P` (TypeDef 2), with `G<X>` (MethodDef
+    /// 4), and then `Q<T>` (TypeDef 3), whose `Call` calls `G<T>`: the GenericParam rows as .NET 10 numbers
+    /// them, and one MethodSpec, whose parent is `G`'s MethodDef and whose instantiation is `Q`'s `T`.
+    let private assertMixedParamsGenericMethodThenType (state : IlMachineState) : unit =
+        assertGenericParamOwners
+            [
+                TypeOrMethodDef.MethodDef (MethodDefRid 4), 0us, "X"
+                TypeOrMethodDef.TypeDef (TypeDefRid 3), 0us, "T"
+            ]
+            state
+
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.methodSpecs scope
+        |> Seq.map (fun row -> row.Method, EmitScope.blobAt row.Instantiation scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                // GENERICINST, one argument, VAR 0.
+                MethodDefOrRef.MethodDef (MethodDefRid 4), [ 0x0Auy ; 0x01uy ; 0x13uy ; 0x00uy ]
+            ]
+
     /// `ModuleBuilderMemberRefOfBuilder.cs` has named `DynLib`'s `Lib.Thing` and four of its members from
     /// `DynUser`: one TypeRef scoped by an AssemblyRef for `DynLib`, and one MemberRef per member, each
     /// under that TypeRef with the signature translated from `DynLib`, `Instance`'s naming `Thing` by the
@@ -6118,6 +6188,84 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertGenericMethodRows
+            }
+            {
+                // A generic method of a generic type that `CreateType` gives its token: its parameter's
+                // GenericParam row follows the type's, out of owner order, and an instantiation runs.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0
+                // on real .NET 10.
+                FileName = "TypeBuilderMixedParamsMethodAfterType.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMixedParamsMethodAfterType
+            }
+            {
+                // A generic method of a generic type given its token before `CreateType`: its
+                // parameter's GenericParam row precedes the type's, out of owner order, and an
+                // instantiation runs.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0
+                // on real .NET 10.
+                FileName = "TypeBuilderMixedParamsMethodBeforeType.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMixedParamsMethodBeforeType
+            }
+            {
+                // A generic method of a generic type, and a generic type created after it whose
+                // parameter's GenericParam row is out of owner order; an instantiation of each runs.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0
+                // on real .NET 10.
+                FileName = "TypeBuilderMixedParamsLaterGenericType.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMixedParamsLaterGenericType
+            }
+            {
+                // A generic method of a type that is not generic, and a generic type created after it
+                // whose parameter's GenericParam row is out of owner order, calling the method with its
+                // own parameter as the argument; both run.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0
+                // on real .NET 10.
+                FileName = "TypeBuilderMixedParamsGenericMethodThenType.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertMixedParamsGenericMethodThenType
             }
             {
                 // `MakeGenericType` refuses an instantiation of a created dynamic type whose arguments

@@ -803,6 +803,41 @@ module TestEmitScopeExtension =
             ]
 
     [<Test>]
+    let ``a generic parameter added out of owner order is an extension unless its type is created`` () : unit =
+        // MethodDef 1 (coded index 3) sorts before `Owner` (TypeDef 2, coded index 4), which owns the
+        // scope's only row, so the new row is out of owner order, at RID 2 as CoreCLR numbers it.
+        let before, ofMethod, _ =
+            withGenericParam Reflection.GenericParameterAttributes.None []
+
+        let owner = TypeDefRid 2
+
+        let outOfOrder =
+            { ofMethod with
+                Owner = TypeOrMethodDef.MethodDef (MethodDefRid 1)
+            }
+
+        outOfOrder.Owner.CodedIndex
+        |> shouldBeSmallerThan (EmitScope.genericParams before).[0].Owner.CodedIndex
+
+        let rid, after =
+            EmitScope.addGenericParam outOfOrder [ TypeDefOrRef.TypeDef (TypeDefRid 1) ] before
+
+        rid |> shouldEqual (GenericParamRid 2)
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 1)) before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create owner) before after
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParam, 2, owner)
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParamConstraint, 1, owner)
+            ]
+
+    [<Test>]
     let ``a changed generic parameter is reported at its RID`` () : unit =
         let before, _, _ = withGenericParam Reflection.GenericParameterAttributes.None []
 

@@ -5,12 +5,12 @@ open FsUnitTyped
 open NUnit.Framework
 open WoofWare.PawPrint
 
-/// The generic parameters `TypeBuilder_DefineGenericParam` and `TypeBuilder_TermCreateClass` refuse,
-/// each by name, although real .NET defines each of them (measured on .NET 10, but for the types it
-/// refuses to load), and the reference to a generic method of the module's own created type that
-/// `ModuleBuilder_GetMemberRefFromSignature` refuses. `sourcesImpure/TypeBuilderDefineGenericParam.cs`,
-/// `sourcesImpure/TypeBuilderGenericParamConstraints.cs` and `sourcesImpure/TypeBuilderGenericMethod.cs`
-/// are the ones they define.
+/// The generic parameters `TypeBuilder_TermCreateClass` refuses, each by name, although real .NET
+/// defines each of them (measured on .NET 10) and refuses to load their types, and the reference to a
+/// generic method of the module's own created type that `ModuleBuilder_GetMemberRefFromSignature`
+/// refuses. The generic parameters PawPrint defines are in `sourcesImpure/TypeBuilderDefineGenericParam.cs`,
+/// `sourcesImpure/TypeBuilderGenericParamConstraints.cs`, `sourcesImpure/TypeBuilderGenericMethod.cs` and
+/// the `sourcesImpure/TypeBuilderMixedParams*.cs` guests, the last in any owner order.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestTypeBuilderGenericParamRefusals =
@@ -65,75 +65,6 @@ public class Program
             |> ExpectRun.ended
             |> ignore<RunOutcome>
         )
-
-    [<Test>]
-    let ``a type created after one with a higher TypeDef RID is refused`` () : unit =
-        let exc =
-            runRefused
-                "GenericParamOutOfOrder.cs"
-                """
-        TypeBuilder a = module.DefineType("A", TypeAttributes.Public);
-        TypeBuilder b = module.DefineType("B", TypeAttributes.Public);
-        a.DefineGenericParameters("T");
-        b.DefineGenericParameters("U");
-        b.CreateType();
-        a.CreateType();"""
-
-        exc.Message
-        |> shouldContainText "T of TypeDef (TypeDefRid 2) (coded index 4) of Dyn, Version=0.0.0.0"
-
-        exc.Message
-        |> shouldContainText "would sort before the last GenericParam row, of TypeDef (TypeDefRid 3) (coded index 6)"
-
-    [<Test>]
-    let ``a generic method's parameter created after its generic type's is refused`` () : unit =
-        // `M` is MethodDef 1 (coded index 3) and `C` TypeDef 2 (coded index 4). `CreateType` creates `T`
-        // and only then gives `M` its token, which creates `U`.
-        let exc =
-            runRefused
-                "GenericParamOfMethodAfterType.cs"
-                """
-        TypeBuilder c = module.DefineType("C", TypeAttributes.Public);
-        c.DefineGenericParameters("T");
-        MethodBuilder m = c.DefineMethod("M", MethodAttributes.Public | MethodAttributes.Static);
-        m.DefineGenericParameters("U");
-        m.GetILGenerator().Emit(OpCodes.Ret);
-        c.CreateType();"""
-
-        exc.Message
-        |> shouldContainText "U of MethodDef (MethodDefRid 1) (coded index 3) of Dyn, Version=0.0.0.0"
-
-        exc.Message
-        |> shouldContainText "would sort before the last GenericParam row, of TypeDef (TypeDefRid 2) (coded index 4)"
-
-    [<Test>]
-    let ``a generic type's parameter created after its generic method's, given its token early, is refused`` () : unit =
-        // `First`'s two methods and default constructor are MethodDefs 1 to 3, so `M` is MethodDef 4 (coded
-        // index 9) and `C` TypeDef 3 (coded index 6). Asking for `M`'s token creates `U` before `CreateType`
-        // creates `T`. Naming `M`'s parameter with `DefineParameter` would too, through
-        // `TypeBuilder_SetParamInfo`, which PawPrint does not implement.
-        let exc =
-            runRefused
-                "GenericParamOfTypeAfterEarlyMethod.cs"
-                """
-        TypeBuilder first = module.DefineType("First", TypeAttributes.Public);
-        first.DefineMethod("F1", MethodAttributes.Public | MethodAttributes.Static).GetILGenerator().Emit(OpCodes.Ret);
-        first.DefineMethod("F2", MethodAttributes.Public | MethodAttributes.Static).GetILGenerator().Emit(OpCodes.Ret);
-        first.CreateType();
-        TypeBuilder c = module.DefineType("C", TypeAttributes.Public);
-        c.DefineGenericParameters("T");
-        MethodBuilder m = c.DefineMethod("M", MethodAttributes.Public | MethodAttributes.Static);
-        m.DefineGenericParameters("U");
-        m.GetILGenerator().Emit(OpCodes.Ret);
-        int token = m.MetadataToken;
-        c.CreateType();"""
-
-        exc.Message
-        |> shouldContainText "T of TypeDef (TypeDefRid 3) (coded index 6) of Dyn, Version=0.0.0.0"
-
-        exc.Message
-        |> shouldContainText
-            "would sort before the last GenericParam row, of MethodDef (MethodDefRid 4) (coded index 9)"
 
     [<Test>]
     let ``a variant parameter of a method is refused`` () : unit =

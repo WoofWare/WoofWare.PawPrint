@@ -11,9 +11,8 @@ open WoofWare.PawPrint
 open WoofWare.PawPrint.Test.EmitScopeGen
 
 /// The generic parameters CoreCLR's emitter defines in a dynamic module for
-/// `TypeBuilder_DefineGenericParam`: each a new row, numbered in the order of creation, refused when the
-/// image's owner order could not hold it at that RID; and which parameters' variance PawPrint refuses
-/// when their type is created.
+/// `TypeBuilder_DefineGenericParam`: each a new row, numbered in the order of creation, whatever its
+/// owner; and which parameters' variance PawPrint refuses when their type is created.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestEmitScopeGenericParams =
@@ -46,33 +45,26 @@ module TestEmitScopeGenericParams =
             return withOwners types (List.ofSeq methods)
         }
 
-    /// What `defineGenericParam` answered for one request, compared with the model.
+    /// Where an added row's owner sorts against the owner of the row before it, for coverage.
     [<RequireQualifiedAccess>]
-    type private Admission =
-        | Admitted
-        | Refused
+    type private AddedOwner =
+        | First
+        | InOwnerOrder
+        | BeforePrevious
 
-    /// The model of the order rule: a row is admitted when the scope has none, or when its owner's coded
-    /// index is at least that of the last row admitted.
+    /// CoreCLR numbers a dynamic module's generic parameters in the order they are created, whatever
+    /// their owners: each request is a new row at the next RID, the table is the rows in request order,
+    /// and the primitive and the definition agree.
     [<Test>]
-    let ``the order rule admits exactly the rows a model admits`` () : unit =
-        let property (cover : Admission -> unit) (scope : EmitScope) (requests : int list) : unit =
+    let ``a parameter of any owner is added at the next RID, in the order of creation`` () : unit =
+        let property (cover : AddedOwner -> unit) (scope : EmitScope) (requests : int list) : unit =
             let owners = allOwners scope
             let mutable scope = scope
-            let mutable last : TypeOrMethodDef option = None
-            let mutable admitted = 0
+            let mutable expected : GenericParamRow list = []
 
             for request in requests do
                 let owner = (pick request owners).Value
                 let number = uint16 (genericParamCount owner scope)
-
-                let modelAdmits =
-                    match last with
-                    | None -> true
-                    | Some last -> owner.CodedIndex >= last.CodedIndex
-
-                EmitScope.genericParamOrderConflict owner scope
-                |> shouldEqual (if modelAdmits then None else last)
 
                 let row : GenericParamRow =
                     {
@@ -82,36 +74,21 @@ module TestEmitScopeGenericParams =
                         Name = StringOffset 0
                     }
 
-                // The primitive refuses what the definition refuses, loudly.
-                let added =
-                    try
-                        Some (EmitScope.addGenericParam row [] scope)
-                    with :? ArgumentException ->
-                        None
+                let addedRid, added = EmitScope.addGenericParam row [] scope
+                let rid, next = EmitScopeDefinitions.defineGenericParam owner number 0 "" [] scope
 
-                added.IsSome |> shouldEqual modelAdmits
+                rid.Rid |> shouldEqual (expected.Length + 1)
+                addedRid |> shouldEqual rid
+                EmitScope.genericParams added |> List.ofSeq |> shouldEqual (expected @ [ row ])
+                EmitScope.genericParams next |> List.ofSeq |> shouldEqual (expected @ [ row ])
 
-                let defined =
-                    try
-                        Some (EmitScopeDefinitions.defineGenericParam owner number 0 "" [] scope)
-                    with _ ->
-                        None
+                match List.tryLast expected with
+                | None -> cover AddedOwner.First
+                | Some previous when owner.CodedIndex < previous.Owner.CodedIndex -> cover AddedOwner.BeforePrevious
+                | Some _ -> cover AddedOwner.InOwnerOrder
 
-                match defined with
-                | Some (rid, next) ->
-                    modelAdmits |> shouldEqual true
-                    rid.Rid |> shouldEqual (admitted + 1)
-                    added.Value |> fst |> shouldEqual rid
-                    (EmitScope.genericParams next).[admitted] |> shouldEqual row
-                    scope <- next
-                    last <- Some owner
-                    admitted <- admitted + 1
-                    cover Admission.Admitted
-                | None ->
-                    modelAdmits |> shouldEqual false
-                    cover Admission.Refused
-
-            (EmitScope.genericParams scope).Count |> shouldEqual admitted
+                expected <- expected @ [ row ]
+                scope <- next
 
         let coverage =
             CoverageSample.check
@@ -125,8 +102,9 @@ module TestEmitScopeGenericParams =
                 ))
                 (fun cover (scope, requests) -> property cover scope requests)
 
-        coverage.Count Admission.Admitted |> shouldBeGreaterThan 100
-        coverage.Count Admission.Refused |> shouldBeGreaterThan 100
+        coverage.Count AddedOwner.First |> shouldBeGreaterThan 100
+        coverage.Count AddedOwner.InOwnerOrder |> shouldBeGreaterThan 100
+        coverage.Count AddedOwner.BeforePrevious |> shouldBeGreaterThan 100
 
     [<Test>]
     let ``a parameter's number must be the count of its owner's parameters`` () : unit =
