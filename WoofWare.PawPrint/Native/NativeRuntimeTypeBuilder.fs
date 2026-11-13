@@ -793,7 +793,8 @@ module NativeRuntimeTypeBuilder =
             let ownerToken = NativeCall.int32Argument operation instruction.Arguments.[2]
 
             // `RuntimeTypeBuilder.CreateTypeNoLock` passes the declaring type's TypeDef token for a type's
-            // parameter, and the declaring method's MethodDef token for a method's.
+            // parameter, and the declaring method's MethodDef token for a method's, which
+            // `RuntimeMethodBuilder.GetTokenNoLock` has just defined.
             let owner =
                 match ownerToken >>> 24 &&& 0xFF with
                 | 0x02 ->
@@ -803,8 +804,11 @@ module NativeRuntimeTypeBuilder =
                         failwith
                             $"%s{operation}: the owner 0x%08x{ownerToken} names no TypeDef row of the module's scope"
                 | 0x06 ->
-                    failwith
-                        $"TODO: %s{operation}: %s{name} is a parameter of the method 0x%08x{ownerToken} of %s{moduleName}, which a generic MethodBuilder adds when it is given its token; PawPrint adds only a generic type's parameters"
+                    match EmitScope.tryMethodDefRid (ownerToken &&& 0x00FFFFFF) held with
+                    | Some method -> TypeOrMethodDef.MethodDef method
+                    | None ->
+                        failwith
+                            $"%s{operation}: the owner 0x%08x{ownerToken} names no MethodDef row of the module's scope"
                 | _ ->
                     failwith
                         $"%s{operation}: the owner 0x%08x{ownerToken} is neither a TypeDef nor a MethodDef token, and the managed caller passes only its builder's"
@@ -892,8 +896,8 @@ module NativeRuntimeTypeBuilder =
             let typeInfo =
                 assembly.TypeDefs.[System.Reflection.Metadata.Ecma335.MetadataTokens.TypeDefinitionHandle created.Rid]
 
-            // CoreCLR's class loader checks each parameter's variance when it loads the type, which
-            // PawPrint's loader does not.
+            // CoreCLR's class loader checks the variance of each parameter of the type and of its methods
+            // when it loads the type, which PawPrint's loader does not.
             match EmitScopeDefinitions.unmodelledVariance created held with
             | Some (UnmodelledVariance.BothVarianceBits parameter) ->
                 failwith
@@ -901,6 +905,9 @@ module NativeRuntimeTypeBuilder =
             | Some (UnmodelledVariance.VariantOfNonInterface parameter) ->
                 failwith
                     $"TODO: %s{operation}: GenericParam 0x%08x{0x2A000000 ||| parameter.Rid} of %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName} is covariant or contravariant, and the type is not an interface; CoreCLR throws TypeLoadException from CreateType for a class and loads a delegate, and PawPrint models neither"
+            | Some (UnmodelledVariance.VariantOfMethod (parameter, method)) ->
+                failwith
+                    $"TODO: %s{operation}: GenericParam 0x%08x{0x2A000000 ||| parameter.Rid} is a covariant or contravariant parameter of the method 0x%08x{0x06000000 ||| method.Rid} of %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName}; CoreCLR throws TypeLoadException from CreateType for it, and PawPrint does not model that"
             | None -> ()
 
             let isGeneric =

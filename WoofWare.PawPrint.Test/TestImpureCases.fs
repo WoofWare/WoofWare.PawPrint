@@ -2123,6 +2123,55 @@ module TestImpureCases =
                 4, "TypeSpec 1 13 00"
             ]
 
+    /// `TypeBuilderGenericMethod.cs` has given `D.G<X>` (MethodDef 2) its token by emitting `Caller`'s calls to
+    /// `G<int>`, twice, and `G<string>`, and then created `D` and `E`, whose `Pick<V, W>` (MethodDef 3) `CreateType`
+    /// gave its token: one GenericParam row for each method's parameter, in the order each method was given
+    /// its token, `X`'s constraint as a GenericParamConstraint row, and one MethodSpec for each distinct
+    /// instantiation of `G`, whose parent is `G`'s MethodDef, as .NET 10 numbers them. The bytes are those
+    /// `SignatureHelper.GetMethodSpecSigHelper` writes for each instantiation.
+    let private assertGenericMethodRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        let methodDef (rid : int) =
+            (EmitScope.tryMethodDefRid rid scope).Value
+
+        EmitScope.genericParams scope
+        |> Seq.map (fun row -> row.Owner, row.Number, row.Flags, EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                TypeOrMethodDef.MethodDef (methodDef 2), 0us, System.Reflection.GenericParameterAttributes.None, "X"
+                TypeOrMethodDef.MethodDef (methodDef 3), 0us, System.Reflection.GenericParameterAttributes.None, "V"
+                TypeOrMethodDef.MethodDef (methodDef 3), 1us, System.Reflection.GenericParameterAttributes.None, "W"
+            ]
+
+        EmitScope.genericParamConstraints scope
+        |> Seq.map (fun row ->
+            match row.Constraint with
+            | TypeDefOrRef.TypeRef rid ->
+                let target = (EmitScope.typeRefs scope).[rid.Rid - 1]
+
+                row.Owner.Rid,
+                $"%s{EmitScope.stringAt target.Namespace scope}.%s{EmitScope.stringAt target.Name scope}"
+            | other -> failwith $"X's constraint is IComparable, a TypeRef, not %O{other}"
+        )
+        |> List.ofSeq
+        |> shouldEqual [ 1, "System.IComparable" ]
+
+        EmitScope.methodSpecs scope
+        |> Seq.map (fun row -> row.Method, EmitScope.blobAt row.Instantiation scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                // GENERICINST, one argument, I4.
+                MethodDefOrRef.MethodDef (methodDef 2), [ 0x0Auy ; 0x01uy ; 0x08uy ]
+                // GENERICINST, one argument, STRING.
+                MethodDefOrRef.MethodDef (methodDef 2), [ 0x0Auy ; 0x01uy ; 0x0Euy ]
+            ]
+
     /// `ModuleBuilderMemberRefOfBuilder.cs` has named `DynLib`'s `Lib.Thing` and four of its members from
     /// `DynUser`: one TypeRef scoped by an AssemblyRef for `DynLib`, and one MemberRef per member, each
     /// under that TypeRef with the signature translated from `DynLib`, `Instance`'s naming `Thing` by the
@@ -6049,6 +6098,26 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertGenericParamConstraintRows
+            }
+            {
+                // A generic MethodBuilder's parameters, which `TypeBuilder_DefineGenericParam` adds when
+                // the method is given its token, and `TypeBuilder_DefineMethodSpec` with a MethodDef
+                // parent for calls to its instantiations; `assertGenericMethodRows` reads the rows.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0
+                // on real .NET 10.
+                FileName = "TypeBuilderGenericMethod.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertGenericMethodRows
             }
             {
                 // `MakeGenericType` refuses an instantiation of a created dynamic type whose arguments

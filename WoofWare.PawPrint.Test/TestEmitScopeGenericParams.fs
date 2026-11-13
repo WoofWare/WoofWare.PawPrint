@@ -208,8 +208,8 @@ module TestEmitScopeGenericParams =
             Prop.forAll (Arb.fromGen (Gen.zip genFlags genName)) (fun (flags, name) -> property flags name)
         )
 
-    /// The model of `unmodelledVariance`: the first parameter of the type, in RID order, with both
-    /// variance bits, or with either if the type is not an interface.
+    /// The model of `unmodelledVariance`: the first parameter of the type or of one of its methods, in RID
+    /// order, with both variance bits, or with either if it is a method's or the type is not an interface.
     [<Test>]
     let ``the variance PawPrint does not model is found for exactly the parameters a model finds`` () : unit =
         // `cover` names which answer the sample gave.
@@ -220,19 +220,32 @@ module TestEmitScopeGenericParams =
                 let isInterface =
                     (EmitScope.typeDefs scope).[t - 1].Flags.HasFlag TypeAttributes.Interface
 
+                let methodOf (row : GenericParamRow) : MethodDefRid option =
+                    match row.Owner with
+                    | TypeOrMethodDef.MethodDef method when
+                        (EmitScope.methodDefs scope).[method.Rid - 1].Owner = typeDef
+                        ->
+                        Some method
+                    | _ -> None
+
                 let expected =
                     EmitScope.genericParams scope
                     |> Seq.indexed
-                    |> Seq.filter (fun (_, row) -> row.Owner = TypeOrMethodDef.TypeDef typeDef)
+                    |> Seq.filter (fun (_, row) -> row.Owner = TypeOrMethodDef.TypeDef typeDef || (methodOf row).IsSome)
                     |> Seq.tryPick (fun (i, row) ->
                         let variance = int row.Flags &&& 3
 
                         if variance = 3 then
                             Some (UnmodelledVariance.BothVarianceBits (GenericParamRid (i + 1)))
-                        elif variance <> 0 && not isInterface then
-                            Some (UnmodelledVariance.VariantOfNonInterface (GenericParamRid (i + 1)))
-                        else
+                        elif variance = 0 then
                             None
+                        else
+                            match methodOf row with
+                            | Some method ->
+                                Some (UnmodelledVariance.VariantOfMethod (GenericParamRid (i + 1), method))
+                            | None when not isInterface ->
+                                Some (UnmodelledVariance.VariantOfNonInterface (GenericParamRid (i + 1)))
+                            | None -> None
                     )
 
                 let actual = EmitScopeDefinitions.unmodelledVariance typeDef scope
@@ -242,6 +255,7 @@ module TestEmitScopeGenericParams =
                 | None -> cover "none"
                 | Some (UnmodelledVariance.BothVarianceBits _) -> cover "both"
                 | Some (UnmodelledVariance.VariantOfNonInterface _) -> cover "non-interface"
+                | Some (UnmodelledVariance.VariantOfMethod _) -> cover "method"
 
                 // A variant parameter of an interface is modelled.
                 if
@@ -257,7 +271,7 @@ module TestEmitScopeGenericParams =
         let coverage =
             CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 300) (Arb.fromGen genScope) property
 
-        for label in [ "none" ; "both" ; "non-interface" ; "variant interface" ] do
+        for label in [ "none" ; "both" ; "non-interface" ; "variant interface" ; "method" ] do
             coverage.Count label |> shouldBeGreaterThan 20
 
     /// What adding one parameter with constraints did, for coverage.
