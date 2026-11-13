@@ -460,6 +460,22 @@ module TestImpureCases =
             currentDirectoryCase "/héllo/中文/🐶",
             """A *short* non-ASCII directory, parked for an unrelated reason: it fits the stackalloc, so `SystemNative_GetCwd` succeeds and ERANGE never enters into it, but decoding the bytes back with `Marshal.PtrToStringUTF8` takes CoreLib's non-ASCII UTF-8 path, which stops in `Utf8Utility.GetPointerToFirstInvalidByte` at a `cgt.un` between two byrefs into one stackalloc block ("refusing cgt.un: no structural order between byrefs"). The ASCII siblings in `cases` cover the same handler; what is missing is byref ordering, not anything about the current directory. `TestAbsoluteUnixPath` covers the UTF-8 encoding of such a path directly in the meantime."""
             {
+                FileName = "ModuleBuilderLdtokenOwnGenericMethodDefinition.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`ldtoken` of a created type's generic method definition, emitted through the created type's `MethodInfo`, measured on .NET 10 to exit 0: the operand is a MemberRef `G` under the type's TypeDef, and the handle names `G`. The emit succeeds (stage 5r); the `ldtoken` then stops at `MethodTokenBinding`'s refusal, which a MemberRef with any parent reaches: "TODO: ldtoken of a bare MemberReference to generic method G names the typical instantiation, which needs open generic RuntimeMethodHandle support". Un-parked by an open generic `RuntimeMethodHandle` for a generic method definition."""
+            {
                 FileName = "TypeBuilderDefinePInvokeMethod.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -2381,6 +2397,137 @@ module TestImpureCases =
                 spec 3, "Version", [ 0x06uy ; 0x12uy ; 0x09uy ]
                 spec 4, "Partner", [ 0x06uy ; 0x12uy ; 0x08uy ]
             ]
+
+    /// `ModuleBuilderMemberRefOfOwnTypeDef.cs` has named members of its own created types `D` (TypeDef 2) and `K`
+    /// (TypeDef 3) from `E`'s bodies: `G<X>`'s and `H<Y>`'s instantiations through the created type's `MethodInfo`s,
+    /// each a MemberRef under `D`'s TypeDef with a MethodSpec under it, `G<int>` through the `MethodBuilder` a
+    /// MethodSpec under `G`'s MethodDef, `N` by its MethodDef, and `N`, `F` and `K..ctor` through user-derived
+    /// members, each a MemberRef under its type's TypeDef; each found again when asked again; and a user-derived
+    /// method of `U` (TypeDef 5), never created, under `U`'s TypeDef; all as .NET 10 numbers them, and no TypeRef
+    /// added for any of the types. The operands are read from `E`'s bodies, since the
+    /// guest cannot see them, and resolving a token cannot tell MethodSpecs 1 and 4 apart, nor a TypeDef parent
+    /// from a TypeRef one.
+    let private assertOwnTypeDefMemberRefRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "System", "Object" ; "System", "RuntimeMethodHandle" ]
+
+        let objectRef = MemberRefParent.TypeRef (EmitScope.tryTypeRefRid 1 scope).Value
+
+        let typeDef (rid : int) =
+            MemberRefParent.TypeDef (EmitScope.tryTypeDefRid rid scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                objectRef, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                // GENERIC, one type parameter, one parameter; MVAR 0 returned and taken.
+                typeDef 2, "G", [ 0x10uy ; 0x01uy ; 0x01uy ; 0x1Euy ; 0x00uy ; 0x1Euy ; 0x00uy ]
+                // GENERIC, one type parameter, two parameters; I4 returned; CLASS `D` (TypeDef 2 as a
+                // TypeDefOrRef coded index) and MVAR 0 taken.
+                typeDef 2, "H", [ 0x10uy ; 0x01uy ; 0x02uy ; 0x08uy ; 0x12uy ; 0x08uy ; 0x1Euy ; 0x00uy ]
+                typeDef 2, "N", [ 0x00uy ; 0x01uy ; 0x08uy ; 0x08uy ]
+                typeDef 2, "F", [ 0x06uy ; 0x08uy ]
+                typeDef 3, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                // `U`, never created.
+                typeDef 5, "M", [ 0x00uy ; 0x00uy ; 0x08uy ]
+            ]
+
+        let memberRef (rid : int) =
+            MethodDefOrRef.MemberRef (EmitScope.tryMemberRefRid rid scope).Value
+
+        EmitScope.methodSpecs scope
+        |> Seq.map (fun row -> row.Method, EmitScope.blobAt row.Instantiation scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                // GENERICINST, one argument: I4, STRING, I8.
+                memberRef 2, [ 0x0Auy ; 0x01uy ; 0x08uy ]
+                memberRef 3, [ 0x0Auy ; 0x01uy ; 0x0Euy ]
+                memberRef 2, [ 0x0Auy ; 0x01uy ; 0x0Auy ]
+                MethodDefOrRef.MethodDef (EmitScope.tryMethodDefRid 1 scope).Value, [ 0x0Auy ; 0x01uy ; 0x08uy ]
+                memberRef 2, [ 0x0Auy ; 0x01uy ; 0x0Euy ]
+            ]
+
+        // The token operands of a body `E` holds, each with its instruction, read from the IL the guest emitted.
+        let operands (name : string) : (string * int) list =
+            let e =
+                EmitScope.typeDefs scope
+                |> Seq.findIndex (fun row -> EmitScope.stringAt row.Name scope = "E")
+                |> fun index -> index + 1
+
+            let body =
+                EmitScope.methodDefs scope
+                |> Seq.filter (fun row -> row.Owner.Rid = e && EmitScope.stringAt row.Name scope = name)
+                |> Seq.exactlyOne
+                |> fun row -> row.Body.Value
+
+            // A tiny header holds the code's length in its top six bits; a fat one is 12 bytes, with the length at 4.
+            let code =
+                match body.[0] &&& 0x03uy with
+                | 0x02uy -> body.AsSpan().Slice(1, int body.[0] >>> 2).ToArray ()
+                | 0x03uy -> body.AsSpan().Slice(12, int (BitConverter.ToUInt32 (body.AsSpan().Slice (4, 4)))).ToArray ()
+                | other -> failwith $"%s{name}'s body has no method header (0x%02x{other})"
+
+            let token (at : int) = BitConverter.ToInt32 (code, at)
+
+            let rec scan (at : int) (found : (string * int) list) : (string * int) list =
+                if at = code.Length then
+                    List.rev found
+                else
+                    match code.[at] with
+                    // ldnull, ldc.i4.m1 to ldc.i4.8, pop, add, conv.i4, ret
+                    | 0x14uy
+                    | 0x26uy
+                    | 0x58uy
+                    | 0x69uy
+                    | 0x2Auy -> scan (at + 1) found
+                    | op when op >= 0x15uy && op <= 0x1Euy -> scan (at + 1) found
+                    // ldc.i4.s, ldc.i4, ldc.i8, ldstr
+                    | 0x1Fuy -> scan (at + 2) found
+                    | 0x20uy
+                    | 0x72uy -> scan (at + 5) found
+                    | 0x21uy -> scan (at + 9) found
+                    | 0x28uy -> scan (at + 5) (("call", token (at + 1)) :: found)
+                    | 0x73uy -> scan (at + 5) (("newobj", token (at + 1)) :: found)
+                    | 0x7Euy -> scan (at + 5) (("ldsfld", token (at + 1)) :: found)
+                    | 0x80uy -> scan (at + 5) (("stsfld", token (at + 1)) :: found)
+                    | 0xD0uy -> scan (at + 5) (("ldtoken", token (at + 1)) :: found)
+                    | 0xFEuy when code.[at + 1] = 0x06uy -> scan (at + 6) (("ldftn", token (at + 2)) :: found)
+                    | op -> failwith $"%s{name} holds the opcode 0x%02x{op} at %d{at}, which the guest does not emit"
+
+            scan 0 []
+
+        operands "Calls"
+        |> shouldEqual
+            [
+                "call", 0x2B000001
+                "call", 0x2B000001
+                "call", 0x06000002
+                "call", 0x2B000002
+                "call", 0x2B000003
+                "call", 0x2B000004
+            ]
+
+        operands "ThroughDerivedMethod"
+        |> shouldEqual [ "call", 0x0A000004 ; "call", 0x0A000004 ]
+
+        operands "ThroughDerivedFieldAndConstructor"
+        |> shouldEqual [ "stsfld", 0x0A000005 ; "newobj", 0x0A000006 ; "ldsfld", 0x0A000005 ]
+
+        operands "AgainInAnother" |> shouldEqual [ "call", 0x2B000001 ]
+        operands "FunctionPointer" |> shouldEqual [ "ldftn", 0x2B000001 ]
+        operands "TokenOfInstantiation" |> shouldEqual [ "ldtoken", 0x2B000005 ]
 
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
@@ -6109,6 +6256,27 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertSelfReferenceRows
+            }
+            {
+                // A dynamic module's references to members of its own created types under the types' TypeDefs:
+                // instantiations of a created type's generic methods through its `MethodInfo`s, and a method, a
+                // field and a constructor through user-derived members, each found again, through which a
+                // third type's methods then run; `assertOwnTypeDefMemberRefRows` reads the rows and operands.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit 0 on real
+                // .NET 10.
+                FileName = "ModuleBuilderMemberRefOfOwnTypeDef.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertOwnTypeDefMemberRefRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
