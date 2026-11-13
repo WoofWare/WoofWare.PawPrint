@@ -87,9 +87,6 @@ module TestRaces =
                 $"%s{sourceName} ran to completion without ever having two threads Runnable at the same tick, so every seed produces the same execution and the sweep characterises nothing."
         | Program.PrefixOutcome.DeadlockedBeforeFork stuck ->
             failwith $"%s{sourceName} wedged before any scheduling choice arose; stuck threads: %s{stuck}"
-        | Program.PrefixOutcome.ForkedDuringStartup contenders ->
-            failwith
-                $"%s{sourceName} first contends during startup (contenders: %A{contenders}), which `Program.runToFirstFork` refuses to snapshot; the race is supposed to be between two threads inside Main."
 
     /// Sweep `pctSeedSweep` over one guest under `config`, and return how each seed's run
     /// ended: its exit code, or what it failed with.

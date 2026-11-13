@@ -198,9 +198,6 @@ module TestConcurrencyBugs =
         | Program.PrefixOutcome.DeadlockedBeforeFork stuck ->
             failwith
                 $"%s{scenario.SourceName}: every thread blocked before any scheduling choice arose (stuck: %s{stuck}), so the guest wedges under every seed rather than under a bad interleaving."
-        | Program.PrefixOutcome.ForkedDuringStartup contenders ->
-            failwith
-                $"%s{scenario.SourceName}: a static initialiser started a thread, so the first contended decision happens during startup (contenders: %A{contenders}) and `Program.runToFirstFork` refuses to snapshot it. Start the guest's threads from Main."
 
     /// Resume the shared prefix under one PCT seed, returning a host-level
     /// summary of where the run ended up.

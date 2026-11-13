@@ -396,19 +396,6 @@ module Program =
         | NeverForked of RunEnd
         /// Every thread blocked before any choice arose. Like `NeverForked`, seed-independent.
         | DeadlockedBeforeFork of stuckThreads : string
-        /// A class initialiser started a thread, so the first contended decision happens during
-        /// startup rather than in `Main`.
-        ///
-        /// Detected and refused rather than snapshotted. Snapshotting it is possible — the
-        /// detector finds the exact point — but resuming it means handing the caller a
-        /// half-finished `Startup` rather than a `PreparedProgram`, so `resumeFork` would have to
-        /// return a two-shape value and every caller would have to drive both phases. No guest in
-        /// this repository does it, so refuse loudly rather than build the surface. To lift the
-        /// restriction, give `ForkSnapshot` a startup arm — nothing else here has to change.
-        ///
-        /// Carries the contenders rather than a rendered message, so a caller can decide what to
-        /// do about the refusal (report it, fall back to per-seed runs).
-        | ForkedDuringStartup of contenders : ThreadId list
 
     /// Guard against a yield retiring at a tick we classified as forced whose *post*-step state is
     /// contended.
@@ -527,22 +514,24 @@ module Program =
             }
 
         let rec goStartup (startup : Startup) : PrefixOutcome =
-            // Probe startup with the same predicate `runToNextFork` uses, so a `.cctor` that
-            // starts a thread is reported rather than silently mistaken for a forced prefix. The
+            // Startup runs only the runtime's own calls on the entry thread (the AppContext seed and
+            // the command line), none of which starts a thread, so every decision in it is forced.
+            // Probe it with the same predicate `runToNextFork` uses anyway, so that a contended
+            // decision there crashes rather than being silently mistaken for a forced prefix. The
             // preamble runs twice per startup tick here, once for the probe and once inside
             // `stepStartup`; that is a handful of map operations against `executeOneStep`, and it
             // is paid once for a whole sweep rather than once per seed.
-            let contenders =
-                match
-                    MultiProgram.annotating startup.State (fun () -> MultiProgram.advance loggerFactory startup.Driver)
-                with
-                | Advanced.Decide (probed, _) -> Scheduler.tryContenders probed.Current.State
-                // `stepStartup` runs the same preamble, and ends or deadlocks the same way.
-                | Advanced.Settled _ -> None
-
-            match contenders with
-            | Some contenders -> PrefixOutcome.ForkedDuringStartup contenders
-            | None ->
+            match
+                MultiProgram.annotating startup.State (fun () -> MultiProgram.advance loggerFactory startup.Driver)
+            with
+            | Advanced.Decide (probed, _) ->
+                match Scheduler.tryContenders probed.Current.State with
+                | Some contenders ->
+                    failwith
+                        $"Program.runToFirstFork: threads %A{contenders} contend during startup, which runs only the runtime's own calls on the entry thread and starts no thread (this is a bug in PawPrint)."
+                | None -> ()
+            // `stepStartup` runs the same preamble, and ends or deadlocks the same way.
+            | Advanced.Settled _ -> ()
 
             match stepStartup loggerFactory logger startup with
             | StartupStepOutcome.Completed (ProgramStartResult.Ready prepared) ->
