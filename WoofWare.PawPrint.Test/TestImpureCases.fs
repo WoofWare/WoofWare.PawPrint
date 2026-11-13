@@ -539,6 +539,38 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
+            {
+                FileName = "DispatchProxyMethodInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`DispatchProxy.Create` over an interface with methods only, measured on .NET 10 to exit 0. It stops before the proxy type is emitted: "Unimplemented native method (PInvokeImpl QCall!RuntimeTypeHandle_IsVisible)" (measured, on both runtimes). With that answered by a throwaway edit, it stops at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002", the interface's events; with both answered, it exits 0 (measured). Un-parked by implementing `RuntimeTypeHandle_IsVisible` and `MetadataImport.Enum` of a type's events."""
+            {
+                FileName = "DispatchProxyPropertyInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, measured on .NET 10 to exit 0. It stops first where `DispatchProxyMethodInterface.cs` does: "Unimplemented native method (PInvokeImpl QCall!RuntimeTypeHandle_IsVisible)" (measured, on both runtimes). With that and `MetadataImport.Enum` of the interface's events answered by throwaway edits, it stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineProperty)" (measured), as the proxy type redeclares the interface's property. Un-parked by those two and `TypeBuilder_DefineProperty`, with whatever the property's accessors then reach."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
