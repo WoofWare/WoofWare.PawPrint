@@ -71,6 +71,25 @@ module NativeRuntimeModuleBuilder =
             failwith
                 $"%s{operation}: the signature of %s{described} names a TypeDef of the unsigned assembly %s{assembly}, which %s{moduleName} has no AssemblyRef for, though the managed caller asks for the declaring type's TypeRef, which makes one, first"
 
+    /// The signature of <paramref name="described"/>, of <paramref name="moduleName"/> itself, as
+    /// <c>TranslateSigWithScope</c> writes it into the module, which keeps each TypeDef and TypeRef token and
+    /// adds no row; or a TODO naming the token it refused.
+    let private ownSignature
+        (operation : string)
+        (described : string)
+        (moduleName : string)
+        (import : Result<System.Collections.Immutable.ImmutableArray<byte>, OwnSignatureRefusal>)
+        : System.Collections.Immutable.ImmutableArray<byte>
+        =
+        match import with
+        | Ok imported -> imported
+        | Error (OwnSignatureRefusal.TypeSpec typeSpec) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} names TypeSpec 0x%08x{(typeSpecTable <<< 24) ||| typeSpec.Rid} of %s{moduleName} itself, which CoreCLR translates in turn and finds or adds by its translated bytes; PawPrint translates only a TypeDef or TypeRef of the module itself"
+        | Error (OwnSignatureRefusal.NoTable coded) ->
+            failwith
+                $"TODO: %s{operation}: the signature of %s{described} holds the encoded token 0x%x{coded}, whose tag names no table; CoreCLR copies it as an mdtBaseType, which no compiler writes"
+
     /// The row of <paramref name="moduleName"/>'s scope that the parent token <paramref name="tr"/> names, for
     /// a TypeRef or TypeSpec token; or `None` for a token of another table, which each handler answers in its
     /// own way. A TypeRef or TypeSpec token naming no row is PawPrint's fault, since an earlier QCall handed
@@ -484,10 +503,6 @@ module NativeRuntimeModuleBuilder =
             let tr = NativeCall.int32Argument operation instruction.Arguments.[2]
             let defToken = NativeCall.int32Argument operation instruction.Arguments.[3]
 
-            if refedName = moduleName then
-                failwith
-                    $"TODO: %s{operation}: member 0x%08x{defToken} is of %s{moduleName} itself, under the parent 0x%08x{tr}, as for a member of an instantiation of one of its own generic TypeBuilders; CoreCLR translates its signature from the module into itself, where ImportTypeDef keeps each TypeDef token, and PawPrint translates only from another module"
-
             let refed =
                 state.LoadedAssembly refedName
                 |> Option.defaultWith (fun () -> failwith $"%s{operation}: %s{refedName} is not loaded")
@@ -495,9 +510,10 @@ module NativeRuntimeModuleBuilder =
             let reader = refed.PeReader.GetMetadataReader ()
             let rid = defToken &&& 0x00FFFFFF
 
-            // The member's name and signature, as CoreCLR reads them from the defining module: a MethodDef's for
-            // a MethodDef token, and a FieldDef's for any other.
-            let name, declaringTypeHandle, import =
+            // The member's name and signature, as CoreCLR reads them from the module the managed caller names
+            // as the defining one: a MethodDef's for a MethodDef token, and a FieldDef's for any other. For a
+            // `FieldBuilder` of a generic type that is the referring module, even when the field is another's.
+            let name, declaringTypeHandle, signature, importOther, importOwn =
                 if
                     defToken >>> 24 = methodDefTable
                     && rid >= 1
@@ -508,7 +524,9 @@ module NativeRuntimeModuleBuilder =
 
                     reader.GetString definition.Name,
                     definition.GetDeclaringType (),
-                    EmitScopeReferences.importMethodSignature reader (reader.GetBlobContent definition.Signature) held
+                    reader.GetBlobContent definition.Signature,
+                    EmitScopeReferences.importMethodSignature reader,
+                    EmitScopeReferences.importOwnMethodSignature
                 elif
                     defToken >>> 24 = fieldDefTable
                     && rid >= 1
@@ -519,7 +537,9 @@ module NativeRuntimeModuleBuilder =
 
                     reader.GetString definition.Name,
                     definition.GetDeclaringType (),
-                    EmitScopeReferences.importFieldSignature reader (reader.GetBlobContent definition.Signature) held
+                    reader.GetBlobContent definition.Signature,
+                    EmitScopeReferences.importFieldSignature reader,
+                    EmitScopeReferences.importOwnFieldSignature
                 else
                     failwith
                         $"TODO: %s{operation}: 0x%08x{defToken} names no MethodDef or FieldDef row of %s{refedName}; the managed callers pass a builder's own token, so only a user-derived builder passes another, for which CoreCLR's metadata lookup fails and the QCall throws, which PawPrint does not raise"
@@ -531,7 +551,14 @@ module NativeRuntimeModuleBuilder =
 
             // No assembly PawPrint loads is collectible, so the emitter's collectible-assembly check never
             // applies.
-            let translated = import |> translatedSignature operation described moduleName
+            let translated =
+                if refedName = moduleName then
+                    // A member of an instantiation of the module's own generic type, whose signature
+                    // `ImportTypeDef` and `ImportTypeRef` translate into the module itself, recognising its scope
+                    // by its MVID.
+                    importOwn signature held |> ownSignature operation described moduleName, held
+                else
+                    importOther signature held |> translatedSignature operation described moduleName
 
             let parent =
                 match typeRefOrSpecParent operation described moduleName held tr with
@@ -705,10 +732,6 @@ module NativeRuntimeModuleBuilder =
                                 state
                                 (instruction.Arguments.[2] |> EvalStackValue.ofCliType))
 
-                    if declaringName = moduleName then
-                        failwith
-                            $"TODO: %s{operation}: field 0x%08x{tkField} of %s{moduleName} itself has the parent 0x%08x{tr}, which is not a TypeDef, as for an instantiation of a created generic type; CoreCLR translates its signature into the module it came from, where ImportTypeDef keeps each TypeDef token, and an emit scope has no GenericParam table yet, so no generic type of it can be created"
-
                     let declaring =
                         state.LoadedAssembly declaringName
                         |> Option.defaultWith (fun () -> failwith $"%s{operation}: %s{declaringName} is not loaded")
@@ -728,14 +751,21 @@ module NativeRuntimeModuleBuilder =
                     let described =
                         $"%s{reader.GetString declaringType.Namespace}.%s{reader.GetString declaringType.Name}::%s{name} of %s{declaringName}"
 
+                    let signature = reader.GetBlobContent definition.Signature
+
                     // No assembly PawPrint loads is collectible, so the emitter's collectible-assembly check
                     // never applies.
                     let translated =
-                        EmitScopeReferences.importFieldSignature
-                            reader
-                            (reader.GetBlobContent definition.Signature)
+                        if declaringName = moduleName then
+                            // A field of an instantiation of the module's own created generic type, whose
+                            // signature `ImportTypeDef` and `ImportTypeRef` translate into the module itself,
+                            // recognising its scope by its MVID.
+                            EmitScopeReferences.importOwnFieldSignature signature held
+                            |> ownSignature operation described moduleName,
                             held
-                        |> translatedSignature operation described moduleName
+                        else
+                            EmitScopeReferences.importFieldSignature reader signature held
+                            |> translatedSignature operation described moduleName
 
                     let parent =
                         match typeRefOrSpecParent operation described moduleName held tr with

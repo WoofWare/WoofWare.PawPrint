@@ -1539,6 +1539,305 @@ module TestEmitScopeMemberRefs =
         coverage.Count FieldSignatureOutcome.Refused |> shouldBeGreaterThan 100
         coverage.Count FieldSignatureOutcome.OverlongHeader |> shouldBeGreaterThan 200
 
+    /// A dynamic module's scope holding `typeDefs` TypeDefs after `<Module>`, `typeRefs` TypeRefs and
+    /// `typeSpecs` TypeSpecs, which a signature of the module itself may name.
+    let private ownScope (typeDefs : int) (typeRefs : int) (typeSpecs : int) : EmitScope =
+        let scope = EmitScopeGen.emptyScope Guid.Empty
+
+        let scope =
+            [ 1..typeDefs ]
+            |> List.fold
+                (fun scope i ->
+                    let name, scope = EmitScope.internString $"T%d{i}" scope
+
+                    EmitScope.addTypeDef
+                        {
+                            Flags = TypeAttributes.Public
+                            Name = name
+                            Namespace = StringOffset 0
+                            Extends = None
+                        }
+                        scope
+                    |> snd
+                )
+                scope
+
+        let scope =
+            [ 1..typeRefs ]
+            |> List.fold
+                (fun scope i ->
+                    let name, scope = EmitScope.internString $"R%d{i}" scope
+
+                    EmitScope.addTypeRef
+                        {
+                            ResolutionScope = ResolutionScope.Module
+                            Name = name
+                            Namespace = StringOffset 0
+                        }
+                        scope
+                    |> snd
+                )
+                scope
+
+        [ 1..typeSpecs ]
+        |> List.fold
+            (fun scope i ->
+                EmitScopeReferences.defineTypeSpec (ImmutableArray.Create<byte> [| 0x1Duy ; byte i |]) scope
+                |> snd
+            )
+            scope
+
+    /// The scope `ownScope` makes, by its three counts.
+    type private OwnScope =
+        {
+            TypeDefs : int
+            TypeRefs : int
+            TypeSpecs : int
+        }
+
+    let private genOwnScope : Gen<OwnScope> =
+        Gen.map3
+            (fun typeDefs typeRefs typeSpecs ->
+                {
+                    TypeDefs = typeDefs
+                    TypeRefs = typeRefs
+                    TypeSpecs = typeSpecs
+                }
+            )
+            (Gen.choose (0, 4))
+            (Gen.choose (1, 4))
+            (Gen.choose (1, 3))
+
+    /// Tokens for a signature of the module `own` describes: mostly its TypeDefs, `<Module>` among them, and
+    /// its TypeRefs; sometimes its TypeSpecs, a token tagged as no table, or a TypeDef, TypeRef or TypeSpec
+    /// RID it does not have.
+    let private ownTokens (own : OwnScope) : TokenGens =
+        let missing (count : int) (tag : int) : Gen<int> =
+            Gen.elements [ 0 ; count + 1 ; count + 7 ]
+            |> Gen.map (fun rid -> (rid <<< 2) ||| tag)
+
+        let token =
+            Gen.frequency
+                [
+                    20, Gen.choose (1, own.TypeDefs + 1) |> Gen.map (fun rid -> rid <<< 2)
+                    20, Gen.choose (1, own.TypeRefs) |> Gen.map (fun rid -> (rid <<< 2) ||| 1)
+                    1, Gen.choose (1, own.TypeSpecs) |> Gen.map (fun rid -> (rid <<< 2) ||| 2)
+                    1, Gen.choose (0, 9) |> Gen.map (fun rid -> (rid <<< 2) ||| 3)
+                    1, missing (own.TypeDefs + 1) 0
+                    1, missing own.TypeRefs 1
+                    1, missing own.TypeSpecs 2
+                ]
+
+        {
+            Named = token
+            Modifier = token
+        }
+
+    /// What the self-translation does with the first of `tokens` it does not keep: `None` if it keeps
+    /// them all, `Some (Ok refusal)` if it refuses one, and `Some (Error ())` if one names no row of the
+    /// scope `own` describes.
+    let private modelOwnTranslation
+        (own : OwnScope)
+        (scope : EmitScope)
+        (tokens : int list)
+        : Result<OwnSignatureRefusal, unit> option
+        =
+        tokens
+        |> List.tryPick (fun token ->
+            let rid = token >>> 2
+
+            match token &&& 3 with
+            | 0 ->
+                if rid >= 1 && rid <= own.TypeDefs + 1 then
+                    None
+                else
+                    Some (Error ())
+            | 1 ->
+                if rid >= 1 && rid <= own.TypeRefs then
+                    None
+                else
+                    Some (Error ())
+            | 2 ->
+                match EmitScope.tryTypeSpecRid rid scope with
+                | Some typeSpec -> Some (Ok (OwnSignatureRefusal.TypeSpec typeSpec))
+                | None -> Some (Error ())
+            | _ -> Some (Ok (OwnSignatureRefusal.NoTable token))
+        )
+
+    /// What one self-translation gave: its answer, or the `ArgumentException` it threw.
+    let private attemptOwn
+        (import : ImmutableArray<byte> -> EmitScope -> Result<ImmutableArray<byte>, OwnSignatureRefusal>)
+        (signature : byte list)
+        (scope : EmitScope)
+        : Result<Result<byte list, OwnSignatureRefusal>, ArgumentException>
+        =
+        try
+            import (ImmutableArray.CreateRange signature) scope
+            |> Result.map List.ofSeq
+            |> Ok
+        with :? ArgumentException as e ->
+            Error e
+
+    /// What translating one signature of a module into itself did.
+    [<RequireQualifiedAccess>]
+    type private OwnSignatureOutcome =
+        /// Already in the form the walk writes, so translated to itself.
+        | Unchanged
+        /// Re-encoded shorter, or trailing bytes dropped.
+        | Reencoded
+        /// Kept at least one TypeDef and one TypeRef token.
+        | KeptBoth
+        | RefusedTypeSpec
+        | RefusedNoTable
+        | Threw
+
+    [<Test>]
+    let ``a module's own signature translates into itself with every token kept, refusing a TypeSpec or a token of no table``
+        ()
+        : unit
+        =
+        let property
+            (cover : OwnSignatureOutcome -> unit)
+            (own : OwnScope)
+            (signature : MethodShape)
+            (trailing : byte list)
+            : unit
+            =
+            let scope = ownScope own.TypeDefs own.TypeRefs own.TypeSpecs
+            let input = encodeMethod false signature @ trailing
+            let tokens = methodTokensOf signature
+            let actual = attemptOwn EmitScopeReferences.importOwnMethodSignature input scope
+
+            match modelOwnTranslation own scope tokens, actual with
+            | None, Ok (Ok written) ->
+                // Every token kept, and every integer the walk shortens in its shortest form.
+                written |> shouldEqual (encodeMethod true signature)
+
+                // Translating the result again changes nothing.
+                attemptOwn EmitScopeReferences.importOwnMethodSignature written scope
+                |> shouldEqual (Ok (Ok written))
+
+                if written = input then
+                    cover OwnSignatureOutcome.Unchanged
+                else
+                    cover OwnSignatureOutcome.Reencoded
+
+                if
+                    tokens |> List.exists (fun token -> token &&& 3 = 0)
+                    && tokens |> List.exists (fun token -> token &&& 3 = 1)
+                then
+                    cover OwnSignatureOutcome.KeptBoth
+            | Some (Ok refusal), Ok (Error actual) ->
+                actual |> shouldEqual refusal
+
+                match refusal with
+                | OwnSignatureRefusal.TypeSpec _ -> cover OwnSignatureOutcome.RefusedTypeSpec
+                | OwnSignatureRefusal.NoTable _ -> cover OwnSignatureOutcome.RefusedNoTable
+            | Some (Error ()), Error _ -> cover OwnSignatureOutcome.Threw
+            | expected, actual -> failwith $"expected %A{expected}, but the translation gave %A{actual}"
+
+        let arb =
+            gen {
+                let! own = genOwnScope
+                let! withTokens = Gen.frequency [ 3, Gen.constant true ; 1, Gen.constant false ]
+
+                let! signature =
+                    Gen.sized (fun size ->
+                        genMethod (if withTokens then Some (ownTokens own) else None) (min size 12) true
+                    )
+
+                // Mostly none, so that a signature already in the walk's form is drawn often.
+                let! trailing =
+                    Gen.frequency
+                        [
+                            2, Gen.constant []
+                            1,
+                            Gen.nonEmptyListOf (Gen.elements [ 0x00uy ; 0x08uy ; 0x80uy ])
+                            |> Gen.map (List.truncate 2)
+                        ]
+
+                return own, signature, trailing
+            }
+            |> Arb.fromGen
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 2000)
+                arb
+                (fun cover (own, signature, trailing) -> property cover own signature trailing)
+
+        coverage.Count OwnSignatureOutcome.Unchanged |> shouldBeGreaterThan 50
+        coverage.Count OwnSignatureOutcome.Reencoded |> shouldBeGreaterThan 100
+        coverage.Count OwnSignatureOutcome.KeptBoth |> shouldBeGreaterThan 100
+        coverage.Count OwnSignatureOutcome.RefusedTypeSpec |> shouldBeGreaterThan 30
+        coverage.Count OwnSignatureOutcome.RefusedNoTable |> shouldBeGreaterThan 30
+        coverage.Count OwnSignatureOutcome.Threw |> shouldBeGreaterThan 30
+
+    [<Test>]
+    let ``a module's own field signature translates as its method signature taking the field's type does, with the field's calling convention shortest``
+        ()
+        : unit
+        =
+        let property
+            (cover : FieldSignatureOutcome -> unit)
+            (own : OwnScope)
+            (shape : Shape)
+            (headerWidth : int)
+            : unit
+            =
+            let scope = ownScope own.TypeDefs own.TypeRefs own.TypeSpecs
+            let fieldType = encode false shape
+
+            // `void M(T)`, and a field of type `T` whose calling convention may be overlong.
+            let asMethod =
+                attemptOwn EmitScopeReferences.importOwnMethodSignature ([ 0x00uy ; 0x01uy ; 0x01uy ] @ fieldType) scope
+
+            let asField =
+                attemptOwn EmitScopeReferences.importOwnFieldSignature (overlong 0x06 headerWidth @ fieldType) scope
+
+            if headerWidth > 1 then
+                cover FieldSignatureOutcome.OverlongHeader
+
+            match asMethod, asField with
+            | Ok (Error fromMethod), Ok (Error fromField) ->
+                cover FieldSignatureOutcome.Refused
+                fromField |> shouldEqual fromMethod
+            | Ok (Ok methodBytes), Ok (Ok fieldBytes) ->
+                cover FieldSignatureOutcome.Imported
+                fieldBytes |> shouldEqual (0x06uy :: List.skip 3 methodBytes)
+            | Error _, Error _ -> ()
+            | asMethod, asField -> failwith $"as a method %A{asMethod}, but as a field %A{asField}"
+
+        let arb =
+            gen {
+                let! own = genOwnScope
+                let! shape = Gen.sized (fun size -> genShape (Some (ownTokens own)) (min size 12))
+                let! headerWidth = Gen.elements [ 1 ; 1 ; 2 ; 4 ]
+                return own, shape, headerWidth
+            }
+            |> Arb.fromGen
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 1000)
+                arb
+                (fun cover (own, shape, headerWidth) -> property cover own shape headerWidth)
+
+        coverage.Count FieldSignatureOutcome.Imported |> shouldBeGreaterThan 200
+        coverage.Count FieldSignatureOutcome.Refused |> shouldBeGreaterThan 50
+        coverage.Count FieldSignatureOutcome.OverlongHeader |> shouldBeGreaterThan 200
+
+        // The calling convention is checked before the walk meets any token.
+        let scope = ownScope 1 1 1
+
+        attemptOwn EmitScopeReferences.importOwnFieldSignature [ 0x00uy ; 0x00uy ; 0x01uy ] scope
+        |> Result.isError
+        |> shouldEqual true
+
+        attemptOwn EmitScopeReferences.importOwnMethodSignature [ 0x06uy ; 0x08uy ] scope
+        |> Result.isError
+        |> shouldEqual true
+
     /// Every method and constructor `assembly` declares on a type that is neither generic nor nested in
     /// a generic type, so that the parent a dynamic module's reference names is a `TypeRef`.
     let private methodsOf (assembly : Assembly) : MethodBase list =

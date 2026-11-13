@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1282,7 +1282,7 @@ module's own types. Read from `ModuleBuilder_GetTypeRef`, `ModuleBuilder_GetMemb
 ### 5j: left to later stages
 
 * A nested type of the module, once `DefineNestedType` adds `NestedClass` rows, and a field of an
-  instantiation of a created generic type, once the scope has `GenericParam` rows.
+  instantiation of a created generic type, once the scope has `GenericParam` rows (5n).
 
 ### 5k: a reference to a member of another module's builder
 
@@ -1342,7 +1342,7 @@ it (vm/commodule.cpp) and its callers in `RuntimeModuleBuilder.cs`:
 ### 5k: left to later stages
 
 * A member of an instantiation of the module's own generic `TypeBuilder`, once `CreateType` can add its
-  `GenericParam` rows.
+  `GenericParam` rows (5n).
 
 ### 5l: a generic type's parameters
 
@@ -1505,7 +1505,7 @@ refusal is a deletion.
     sorted bit untruthful, and SRM's by-RID accessors on a table declared sorted but not sorted must be
     measured before choosing it (only `GetGenericParameters` was measured, and it gives wrong rows).
 * A reference from a module into itself: 5k's member of an instantiation of the module's own generic
-  `TypeBuilder` and 5j's field of an instantiation of a created generic type, now able to run.
+  `TypeBuilder` and 5j's field of an instantiation of a created generic type, now able to run (5n).
 * Types created out of TypeDef order, which the order rule refuses.
 * A variant parameter of a class or a delegate, and both variance bits.
 * A custom attribute on a parameter, which `CreateType` writes with the parameter's token straight after
@@ -1637,3 +1637,126 @@ Taken 2026-11-13.
   constraint rows' owners move with them.
 * The `struct` flag's constraints, reported as the rows the metadata holds, which un-parks
   `TypeBuilderGenericParamStructFlag.cs`.
+
+### 5n: a dynamic module's references into itself
+
+5l lets a generic `TypeBuilder` be created, so 5k's member of an instantiation of the module's own generic
+`TypeBuilder` and 5j's field of an instantiation of its created generic type can now be run through. Each
+is refused by name. Read from `ModuleBuilder_GetMemberRef`, `ModuleBuilder_GetMemberRefOfFieldInfo` and
+`ModuleBuilder_GetMemberRefOfMethodInfo` (vm/commodule.cpp), `MDInternalRW::TranslateSigWithScope`
+(md/enc), `ImportHelper`'s `MergeUpdateTokenInSig`, `MergeUpdateTokenInFieldSig`, `ImportTypeDef` and
+`ImportTypeRef` (md/compiler/importhelper.cpp), and `GetFieldTokenNoLock`, `GetMethodTokenNoLock`,
+`GetMethodMetadataToken(ConstructorInfo)`, `GetMethodTokenInternal` and `GetMemberRefToken`
+(RuntimeModuleBuilder.cs):
+
+* The walk is 3d's and 5g's. Before each TypeDef or TypeRef token, `ImportTypeDef` and `ImportTypeRef`
+  compare the MVIDs of the source's assembly and module scopes with the emitting ones'. A dynamic assembly
+  has one module, whose emit scope is the assembly's too, so translating from it into itself finds both
+  pairs equal. `ImportTypeDef`, which the walk calls asking for the TypeDef back, then answers the source
+  TypeDef token; `ImportTypeRef` reads the source TypeRef's chain and answers the source TypeRef token.
+  Neither adds or looks for a row, so no TypeRef or AssemblyRef is added.
+* A TypeSpec token's signature is translated in turn and looked for among the emitting scope's TypeSpecs
+  (`FindTypeSpec`), and added if absent. Translated into its own scope, a TypeSpec whose signature is in
+  its shortest form finds itself, or an earlier row with the same bytes. A token tagged as no table
+  (`mdtBaseType`) is copied.
+* Otherwise the translation is the walk's: a field's calling convention, a type or method parameter's
+  index and an instantiation's argument count in their shortest forms, everything else copied, and bytes
+  after the last type dropped. So a signature the module's own `SignatureHelper` wrote, which is in that
+  form already and names no TypeSpec, translates into itself unchanged.
+* `ModuleBuilder_GetMemberRef` reads the member from the module the managed caller names as the defining
+  one, which is the referring module for a `FieldOnTypeBuilderInstantiation` or
+  `ConstructorOnTypeBuilderInstantiation` of its own generic `TypeBuilder` and for any `FieldBuilder` of
+  a generic type, its own or another module's. Each passes the instantiation's TypeSpec as the parent.
+  `ILGenerator` never asks for a constructor of a generic type through it: `GetMethodTokenInternal` sends
+  every method and constructor of a generic type, a `TypeBuilder` instantiation's or a created type's,
+  through `GetMemberRefToken`, which makes the signature itself and calls
+  `ModuleBuilder_GetMemberRefFromSignature`, as 5e describes. `ModuleBuilder.GetMethodMetadataToken` of a
+  `ConstructorOnTypeBuilderInstantiation` does reach it.
+* `ModuleBuilder_GetMemberRefOfFieldInfo` with a TypeSpec parent reads the field from the module of its
+  declaring type, which for an instantiation of the module's own created type is the module itself.
+* `ModuleBuilder_GetMemberRefOfMethodInfo` already hands back the MethodDef of any method whose
+  `MethodTable`'s module is the emitting module, which is so for a method or constructor of an
+  instantiation of the module's own created generic type, whatever parent it was given. 5j implements
+  that, so nothing new is reachable there.
+
+Measured on .NET 10 with a throwaway probe, in one module `Dyn` with `Thing` (TypeDef 2), `Box<T>`
+(TypeDef 3) holding `T Content`, `Thing Partner` and `Version Version` (TypeRef 2, after `object`), a
+default constructor and `T Get()`, and `User` (TypeDef 4); the tokens are read back with
+`ResolveSignature` and `ResolveMember`:
+
+* `Get`'s body reading `Content` adds TypeSpec 1, `Box<!0>` (`15 12 0C 01 13 00`), and MemberRef 2,
+  `Content` under it with `06 13 00`.
+* Before `Box` is created, `Box<int>` (TypeSpec 2) and `Box<Thing>` (TypeSpec 3, `15 12 0C 01 12 08`): each
+  field and constructor is a new MemberRef under its TypeSpec. `Partner`'s signature is `06 12 08`, naming
+  `Thing` by its TypeDef, and `Version`'s `06 12 09`, by its TypeRef. A method is a MemberRef made from
+  `20 00 13 00`. Asked again, a field and a constructor find their rows.
+* After `Box` is created, `Box<int>`'s and `Box<Thing>`'s `RuntimeFieldInfo`s find the builders' rows, and
+  one not yet named (`Box<Thing>.Version`) is a new MemberRef under TypeSpec 3. The created type's
+  constructor and `Get`, through `GetMethodMetadataToken`, are MethodDefs 2 and 3, as CoreCLR's reading
+  says.
+* No TypeRef or AssemblyRef is added: `Random`, asked for last, is TypeRef 3, and the assembly references
+  only `System.Private.CoreLib`.
+* `User.Before`, emitted before `Box` is created, constructs a `Box<int>`, stores to its `Content` and
+  calls `Get` through the `TypeBuilder` instantiation's members; `User.After`, emitted after, does as much
+  for `Box<Thing>` through the created type's. Neither adds a row, and both return 42.
+* A `FieldBuilder` of `DynLib`'s generic `Pair<T>`, its FieldDef 2, asked for from `Dyn`: the MemberRef is
+  under `Pair<!0>`'s TypeSpec, and its signature is `06 12 08`, which is `Dyn`'s own FieldDef 2,
+  `Partner`. A FieldDef that `Dyn` does not have throws `BadImageFormatException` ("Index not found").
+
+### 5n: the decisions
+
+Taken 2026-11-13.
+
+* **The self-translation is the walk's second source, a TypeDef or TypeRef token kept, behind entry points
+  of its own that return bytes alone.** The walk's source becomes a private union: another module, read
+  through its `MetadataReader`, or the emitting scope itself. Of the latter, a TypeDef or TypeRef token is
+  kept after checking that the scope has that row, and a TypeSpec or a token tagged as no table is
+  refused. `EmitScopeReferences.importOwnMethodSignature` and `importOwnFieldSignature` take only the
+  scope and the bytes, and give the translated bytes or the refusal; no scope comes back, so that "adds
+  no rows" is the type's to say. The handlers choose them exactly when the module the QCall reads the
+  member from is the referring module. Three options were weighed:
+  * *A, this one.* Correct for every token CoreCLR handles without adding a row, refusing the rest; the
+    walk stays one walk, the token map a case of data; the Domain change is additive; and the return type
+    preserves that nothing was added.
+  * *B, the existing entry points compare MVIDs as CoreCLR does*, keeping each token when the source
+    reader's module is the scope's. No new API and CoreCLR's own test, but which translation runs is
+    decided by data the call site does not show, and the published `importMethodSignature` changes
+    meaning for a reader it used to translate into TypeRefs.
+  * *C, no translation*: the handler copies the member's signature from the scope as it is. Right for
+    every signature `SignatureHelper` writes, but the claim that the walk would give the same bytes is
+    then unchecked: an overlong encoding, trailing bytes, or a TypeSpec would diverge silently.
+  B hides the choice and changes a published function; C trades a loud refusal for a silent divergence.
+* **A TypeSpec token is refused by name, with a TODO.** CoreCLR translates its signature and finds or adds
+  a TypeSpec, which can add a row when the signature is not in its shortest form. Only a custom modifier
+  naming a generic instantiation puts a TypeSpec in a signature `SignatureHelper` writes.
+* **The refusal is its own union, `OwnSignatureRefusal`, of a TypeSpec (as the scope's `TypeSpecRid`)
+  and a token tagged as no table.** The cross-module refusals cannot arise from the scope itself. A token
+  naming no row of the scope is an `ArgumentException`, as 5g's walk throws for one naming no row of the
+  source.
+* **The defining module is the one the QCall names**, so a `FieldBuilder` of another module's generic type
+  is read as the referring module's FieldDef with its RID, as CoreCLR reads it (measured), and a RID the
+  module lacks stays refused with 5k's TODO, where CoreCLR throws.
+* **5k's TypeDef parent stays refused.** The managed callers of `ModuleBuilder_GetMemberRef` pass a
+  TypeSpec for a member of the module itself, and only a user-derived builder passes a TypeDef.
+
+### 5n: the oracle
+
+* Properties of the self-translation, over signatures generated from the ECMA-335 grammar (5g's
+  generator) whose tokens name the scope's TypeDefs and TypeRefs: each translates to its bytes with every
+  integer the walk shortens in its shortest form, trailing bytes dropped and every token kept, which is
+  the identity on a signature already in that form; translating the result again changes nothing; a field
+  signature translates as the method signature taking its type does, with the field's calling convention
+  shortest; and a TypeSpec or a token tagged as no table is refused at the first such token, while a
+  TypeDef, TypeRef or TypeSpec naming no row of the scope throws.
+* `ModuleBuilderSelfReferences.cs`, the measurement above, exits 0 on .NET 10, with a terminal-state check
+  of `Dyn`'s AssemblyRef, TypeRef, TypeSpec and MemberRef rows.
+* Each mutant is caught: a TypeDef translated to a TypeRef (the handler calling 5g's import with the
+  module's own reader, and the walk tagging a kept TypeDef as a TypeRef); a token kept without checking
+  its row; a TypeSpec kept; the signature copied unwalked; the MemberRef added without the find; the wrong
+  parent; and the scope the handler extended not kept.
+
+### 5n: left to later stages
+
+* A TypeSpec token in a signature translated from the module into itself, which CoreCLR finds or adds by
+  its translated bytes, and in one translated from another module (5g).
+* A TypeDef parent for a member of the module itself, which only a user-derived builder passes.

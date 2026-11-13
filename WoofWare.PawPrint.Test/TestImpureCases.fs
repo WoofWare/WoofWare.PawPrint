@@ -2184,6 +2184,85 @@ module TestImpureCases =
                 boxOfInt, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
             ]
 
+    /// `ModuleBuilderSelfReferences.cs` has named members of `Box<int>`, `Box<Thing>` and `Box<!0>` from its
+    /// own module, `Box<T>` being TypeDef 3 and `Thing` TypeDef 2: each a MemberRef under the instantiation's
+    /// TypeSpec, with the member's signature as the module holds it, `Thing` named by its TypeDef and
+    /// `Version` by its TypeRef. The created type's fields found the same rows, and no TypeRef or
+    /// AssemblyRef was added until `Random` and `DynLib`'s `Pair`. Last, `Pair<!0>`'s `Second`, FieldDef 2 of
+    /// `DynLib`, was named as the module's own FieldDef 2, `Partner`; all as .NET 10 numbers them.
+    let private assertSelfReferenceRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.assemblyRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "System.Private.CoreLib" ; "DynLib" ]
+
+        let corelib =
+            ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid 1 scope).Value
+
+        let dynLib = ResolutionScope.AssemblyRef (EmitScope.tryAssemblyRefRid 2 scope).Value
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row ->
+            row.ResolutionScope, EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                corelib, "System", "Object"
+                corelib, "System", "Version"
+                corelib, "System", "Random"
+                dynLib, "Lib", "Pair"
+            ]
+
+        // GENERICINST CLASS, a TypeDefOrRef coded index (TypeDef 3 is 0x0C, TypeRef 4 is 0x11), one argument.
+        EmitScope.typeSpecs scope
+        |> Seq.map (fun row -> EmitScope.blobAt row.Signature scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                // `Box<!0>`
+                [ 0x15uy ; 0x12uy ; 0x0Cuy ; 0x01uy ; 0x13uy ; 0x00uy ]
+                // `Box<int>`
+                [ 0x15uy ; 0x12uy ; 0x0Cuy ; 0x01uy ; 0x08uy ]
+                // `Box<Thing>`, `Thing` being TypeDef 2
+                [ 0x15uy ; 0x12uy ; 0x0Cuy ; 0x01uy ; 0x12uy ; 0x08uy ]
+                // `Pair<!0>`
+                [ 0x15uy ; 0x12uy ; 0x11uy ; 0x01uy ; 0x13uy ; 0x00uy ]
+            ]
+
+        let objectRef = MemberRefParent.TypeRef (EmitScope.tryTypeRefRid 1 scope).Value
+
+        let spec (rid : int) =
+            MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid rid scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, List.ofSeq (EmitScope.blobAt row.Signature scope)
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                objectRef, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                spec 1, "Content", [ 0x06uy ; 0x13uy ; 0x00uy ]
+                spec 2, "Content", [ 0x06uy ; 0x13uy ; 0x00uy ]
+                // CLASS, then TypeDef 2 as a TypeDefOrRef coded index.
+                spec 2, "Partner", [ 0x06uy ; 0x12uy ; 0x08uy ]
+                // CLASS, then TypeRef 2 as a TypeDefOrRef coded index.
+                spec 2, "Version", [ 0x06uy ; 0x12uy ; 0x09uy ]
+                spec 2, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                spec 2, "Get", [ 0x20uy ; 0x00uy ; 0x13uy ; 0x00uy ]
+                spec 3, "Content", [ 0x06uy ; 0x13uy ; 0x00uy ]
+                spec 3, ".ctor", [ 0x20uy ; 0x00uy ; 0x01uy ]
+                spec 3, "Get", [ 0x20uy ; 0x00uy ; 0x13uy ; 0x00uy ]
+                spec 3, "Version", [ 0x06uy ; 0x12uy ; 0x09uy ]
+                spec 4, "Partner", [ 0x06uy ; 0x12uy ; 0x08uy ]
+            ]
+
     /// `UnlinkReapSeeded.cs` has removed the last name of three inodes: one it
     /// never opened, one it opened and closed, and one it still holds. The first
     /// two must be gone — freed by the `unlink` and by the `close` respectively,
@@ -5892,6 +5971,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertMemberRefOfBuilderRows
+            }
+            {
+                // A dynamic module's references to members of instantiations of its own generic type, before
+                // and after it is created, through which a second type's methods then run, and to another
+                // module's generic FieldBuilder; `assertSelfReferenceRows` reads the rows. Dynamic-code
+                // switch overridden to true like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderSelfReferences.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertSelfReferenceRows
             }
             {
                 // `TypeBuilder.CreateType` called again after it threw partway, once `SetMethodIL` has
