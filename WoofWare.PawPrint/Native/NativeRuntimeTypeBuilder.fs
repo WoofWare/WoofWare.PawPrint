@@ -68,6 +68,44 @@ module NativeRuntimeTypeBuilder =
         | Some target -> Some target
         | None -> failwith $"%s{operation}: %s{what} 0x%08x{token} names no row of the module's scope"
 
+    /// The types a managed array of `TypeDefOrRef` tokens names, up to the first token whose RID is 0, as
+    /// `RegMeta::_SetImplements` and `_SetGenericParamProps` read one; each token is read as
+    /// `typeDefOrRef` reads it.
+    let private typeTokensUntilNil
+        (operation : string)
+        (what : string)
+        (ctx : NativeCallContext)
+        (tokens : ManagedPointerSource)
+        (scope : EmitScope)
+        : TypeDefOrRef list
+        =
+        let state = ctx.State
+
+        let int32Type =
+            AllConcreteTypes.findExistingNonGenericConcreteType
+                state.TypeSystem.ConcreteTypes
+                ctx.BaseClassTypes.Int32.Identity
+            |> Option.defaultWith (fun () -> failwith $"%s{operation}: System.Int32 is not concretized")
+
+        let rec read (index : int) (acc : TypeDefOrRef list) : TypeDefOrRef list =
+            // The managed array holds one token for each of a type's interfaces, or of a parameter's
+            // constraints, and a type or parameter with this many has been refused long before.
+            if index > 0xFFFF then
+                failwith $"%s{operation}: no nil token among the first %d{index} %s{what} tokens"
+
+            let token =
+                int32AtPointer
+                    operation
+                    ctx.BaseClassTypes
+                    state
+                    (ManagedPointerByteView.addByteOffset state int32Type (index * 4) tokens)
+
+            match typeDefOrRef operation $"%s{what} %d{index}" token scope with
+            | None -> List.rev acc
+            | Some target -> read (index + 1) (target :: acc)
+
+        read 0 []
+
     /// The method a `MethodDef` or `MemberRef` token names in `scope`, which is what the managed
     /// callers hand out for a method (`GetMethodMetadataToken`, `GetMemberRefToken`).
     let private methodDefOrRef (operation : string) (what : string) (token : int) (scope : EmitScope) : MethodDefOrRef =
@@ -149,31 +187,7 @@ module NativeRuntimeTypeBuilder =
                     NativeCall.managedPointerOfPointerArgument operation "interfaceTokens" instruction.Arguments.[5]
                 with
                 | ManagedPointerSource.Null -> []
-                | tokens ->
-                    let int32Type =
-                        AllConcreteTypes.findExistingNonGenericConcreteType
-                            state.TypeSystem.ConcreteTypes
-                            ctx.BaseClassTypes.Int32.Identity
-                        |> Option.defaultWith (fun () -> failwith $"%s{operation}: System.Int32 is not concretized")
-
-                    let rec read (index : int) (acc : TypeDefOrRef list) : TypeDefOrRef list =
-                        // The managed array holds one token for each of a type's interfaces, and a
-                        // type with this many has been refused long before.
-                        if index > 0xFFFF then
-                            failwith $"%s{operation}: no nil token among the first %d{index} interface tokens"
-
-                        let token =
-                            int32AtPointer
-                                operation
-                                ctx.BaseClassTypes
-                                state
-                                (ManagedPointerByteView.addByteOffset state int32Type (index * 4) tokens)
-
-                        match typeDefOrRef operation $"interface %d{index}" token held with
-                        | None -> List.rev acc
-                        | Some target -> read (index + 1) (target :: acc)
-
-                    read 0 []
+                | tokens -> typeTokensUntilNil operation "interface" ctx tokens held
 
             match EmitScopeDefinitions.defineTopLevelTypeDef fullName attributes parent interfaces held with
             | TypeDefDefinition.Duplicate _ ->
@@ -804,20 +818,16 @@ module NativeRuntimeTypeBuilder =
 
             // The managed caller passes the constraints' tokens, the interfaces' then the base type's,
             // ended by a nil token, and the nil token alone for a parameter without constraints.
-            match
-                NativeCall.managedPointerOfPointerArgument operation "pConstraintTokens" instruction.Arguments.[5]
-            with
-            | ManagedPointerSource.Null ->
-                failwith
-                    $"TODO: %s{operation}: %s{name} has a null constraint array, which RegMeta::_SetGenericParamProps reads as leaving the constraints as they are; the managed caller passes a nil-terminated array, and PawPrint does not model a null one"
-            | constraints ->
-                let first = int32AtPointer operation ctx.BaseClassTypes state constraints
-
-                if first &&& 0x00FFFFFF <> 0 then
+            let constraints =
+                match
+                    NativeCall.managedPointerOfPointerArgument operation "pConstraintTokens" instruction.Arguments.[5]
+                with
+                | ManagedPointerSource.Null ->
                     failwith
-                        $"TODO: %s{operation}: %s{name} of %s{moduleName} has the constraint 0x%08x{first}, for which CoreCLR adds a GenericParamConstraint row; an emit scope has no GenericParamConstraint table yet"
+                        $"TODO: %s{operation}: %s{name} has a null constraint array, which RegMeta::_SetGenericParamProps reads as leaving the constraints as they are; the managed caller passes a nil-terminated array, and PawPrint does not model a null one"
+                | tokens -> typeTokensUntilNil operation "constraint" ctx tokens held
 
-            match EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name [] held with
+            match EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name constraints held with
             | GenericParamDefinition.OutOfOrder (owner, last) ->
                 failwith
                     $"TODO: %s{operation}: %s{name} of %O{owner} (coded index %d{owner.CodedIndex}) of %s{moduleName} would sort before the last GenericParam row, of %O{last} (coded index %d{last.CodedIndex}); CoreCLR numbers generic parameters in the order they are created, and an image sorted by owner cannot hold this one at that RID"

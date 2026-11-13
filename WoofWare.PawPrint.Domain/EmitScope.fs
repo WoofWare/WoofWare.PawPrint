@@ -399,6 +399,7 @@ type EmitScope =
             MethodImpls : ImmutableList<MethodImplRow>
             MethodSpecs : ImmutableList<MethodSpecRow>
             GenericParams : ImmutableList<GenericParamRow>
+            GenericParamConstraints : ImmutableList<GenericParamConstraintRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -644,6 +645,7 @@ module EmitScope =
                 MethodImpls = ImmutableList.Empty
                 MethodSpecs = ImmutableList.Empty
                 GenericParams = ImmutableList.Empty
+                GenericParamConstraints = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -915,9 +917,6 @@ module EmitScope =
         =
         let operation = "EmitScope.addGenericParam"
 
-        if not constraints.IsEmpty then
-            failwith "TODO: stage 5m: EmitScope.addGenericParam does not add constraints yet"
-
         match row.Owner with
         | TypeOrMethodDef.TypeDef rid -> requireRid operation "TypeDef" scope.TypeDefs.Count rid.Rid
         | TypeOrMethodDef.MethodDef rid -> requireRid operation "MethodDef" scope.MethodDefs.Count rid.Rid
@@ -944,9 +943,24 @@ module EmitScope =
                 $"%s{operation}: a parameter of %O{row.Owner} (coded index %d{row.Owner.CodedIndex}) would sort before the last row's owner %O{last} (coded index %d{last.CodedIndex}), so the image could not hold it at the RID the scope would give it"
         | None -> ()
 
-        GenericParamRid (scope.GenericParams.Count + 1),
+        for target in constraints do
+            requireTypeDefOrRef operation scope target
+
+        let rid = GenericParamRid (scope.GenericParams.Count + 1)
+
+        let constraintRows =
+            constraints
+            |> List.map (fun target ->
+                {
+                    Owner = rid
+                    Constraint = target
+                }
+            )
+
+        rid,
         { scope with
             GenericParams = scope.GenericParams.Add row
+            GenericParamConstraints = scope.GenericParamConstraints.AddRange constraintRows
         }
 
     /// Adds a `MethodImpl` row. Nothing hands out its RID: the image sorts the table by class.
@@ -1002,7 +1016,7 @@ module EmitScope =
 
     /// In RID order, which is owner order.
     let genericParamConstraints (scope : EmitScope) : ImmutableList<GenericParamConstraintRow> =
-        failwith "TODO: stage 5m: EmitScope.genericParamConstraints is not implemented yet"
+        scope.GenericParamConstraints
 
     /// In the order they were added, which is not the image's: the image sorts them by class.
     let interfaceImpls (scope : EmitScope) : ImmutableList<InterfaceImplRow> = scope.InterfaceImpls

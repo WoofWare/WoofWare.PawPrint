@@ -27,7 +27,7 @@ type EmitScopeExtensionViolation =
 
     /// A row the later scope adds is a member of a type already created: a field or method it
     /// declares, a parameter of one of its methods, one of its interface implementations or method
-    /// impls, or a generic parameter of it or of one of its methods.
+    /// impls, or a generic parameter of it or of one of its methods, or a constraint of one.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
     /// A row of the earlier scope differs in the later one only in a column the emitter fills in after
@@ -158,6 +158,12 @@ module EmitScopeExtension =
         let methodOwner (method : MethodDefRid) : TypeDefRid =
             (EmitScope.methodDefs after).[method.Rid - 1].Owner
 
+        // The type a generic parameter belongs to: its owner, or its owner's declaring type.
+        let genericParamOwner (parameter : GenericParamRow) : TypeDefRid =
+            match parameter.Owner with
+            | TypeOrMethodDef.TypeDef typeDef -> typeDef
+            | TypeOrMethodDef.MethodDef method -> methodOwner method
+
         [
             if EmitScope.moduleRow before <> EmitScope.moduleRow after then
                 yield EmitScopeExtensionViolation.RowChanged (TableIndex.Module, 1)
@@ -231,13 +237,22 @@ module EmitScopeExtension =
                     TableIndex.GenericParam
                     (EmitScope.genericParams before).Count
                     (EmitScope.genericParams after)
-                    (fun row ->
-                        match row.Owner with
-                        | TypeOrMethodDef.TypeDef typeDef -> typeDef
-                        | TypeOrMethodDef.MethodDef method -> methodOwner method
-                    )
+                    genericParamOwner
 
             yield! rewritten TableIndex.MethodSpec (EmitScope.methodSpecs before) (EmitScope.methodSpecs after)
+
+            yield!
+                rewritten
+                    TableIndex.GenericParamConstraint
+                    (EmitScope.genericParamConstraints before)
+                    (EmitScope.genericParamConstraints after)
+
+            yield!
+                addedToCreated
+                    TableIndex.GenericParamConstraint
+                    (EmitScope.genericParamConstraints before).Count
+                    (EmitScope.genericParamConstraints after)
+                    (fun row -> genericParamOwner (EmitScope.genericParams after).[row.Owner.Rid - 1])
 
             yield! heapRewritten HeapIndex.String (=) (EmitScope.strings before) (EmitScope.strings after)
 
