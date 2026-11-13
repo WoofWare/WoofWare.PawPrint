@@ -468,6 +468,7 @@
     <Compile Include="TestDynamicAssemblyRefusals.fs" />
     <Compile Include="TestTypeBuilderGenericParamRefusals.fs" />
     <Compile Include="TestTypeBuilderPropertyRefusals.fs" />
+    <Compile Include="TestFabricatedPropertyAccessorOrder.fs" />
     <Compile Include="TestNextCallReturnAddressRefusal.fs" />
     <Compile Include="TestFabricatedCallArgumentCoercion.fs" />
     <Compile Include="TestFabricatedTypedReferenceInstantiation.fs" />
