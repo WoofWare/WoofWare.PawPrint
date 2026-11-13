@@ -2683,3 +2683,213 @@ module IlMachineRuntimeMetadata =
                 anyMatch state chain
 
         canCast Set.empty state source target
+
+    /// One of the flag-style generic constraints, which CoreCLR's
+    /// `SatisfiesSpecialConstraintRecursive` asks about one at a time.
+    [<RequireQualifiedAccess>]
+    type SpecialConstraint =
+        /// `where T : struct`, the `NotNullableValueTypeConstraint` flag.
+        | NotNullableValueType
+        /// `where T : class`, the `ReferenceTypeConstraint` flag.
+        | ReferenceType
+        /// `where T : new()`, the `DefaultConstructorConstraint` flag.
+        | DefaultConstructor
+
+    /// CoreCLR's `SatisfiesSpecialConstraintRecursive` (typedesc.cpp:1256): whether the declared
+    /// constraints of the type variable `variable`, standing as a generic argument, prove the
+    /// special constraint `constraint` of the parameter it instantiates.
+    ///
+    /// `struct` is proved by the variable's own `struct` flag, by that of a variable constraining
+    /// it, or by a constraint that is a value type other than `Nullable<T>`. `class` is proved by
+    /// the variable's own `class` flag, but not a constraining variable's, or by a class constraint
+    /// other than `Object`, `ValueType` and `Enum`. `new()` is proved by the variable's own `new()`
+    /// flag, but not a constraining variable's, by `struct` on it or a constraining variable, or by
+    /// a value-type constraint. An interface constraint proves nothing.
+    let typeVariableSatisfiesSpecialConstraint
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (required : SpecialConstraint)
+        (variable : RuntimeTypeHandleTarget)
+        : IlMachineState * bool
+        =
+        let isTypeVariable (target : RuntimeTypeHandleTarget) : bool =
+            match target with
+            | RuntimeTypeHandleTarget.GenericParameter _
+            | RuntimeTypeHandleTarget.MethodGenericParameter _ -> true
+            | _ -> false
+
+        // `TypeHandle::IsValueType` of a constraint that is neither a variable nor an interface.
+        let isValueTypeConstraint (target : RuntimeTypeHandleTarget) : bool =
+            match target with
+            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle) ->
+                match tryGetConcreteTypeInfo state handle with
+                | Some (_, typeInfo) ->
+                    LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
+                | None -> failwith $"logic error: tryGetConcreteTypeInfo refused the Concrete handle %O{handle}"
+            | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity
+            | RuntimeTypeHandleTarget.OpenConstructed (identity, _) ->
+                LoadedTypeInfo.isValueType
+                    baseClassTypes
+                    state.TypeSystem._LoadedAssemblies
+                    (typeInfoOfIdentity state identity)
+            | RuntimeTypeHandleTarget.Closed _
+            | RuntimeTypeHandleTarget.Composite _
+            | RuntimeTypeHandleTarget.FunctionPointer _
+            | RuntimeTypeHandleTarget.DynamicMethodsClass _ -> false
+            | RuntimeTypeHandleTarget.GenericParameter _
+            | RuntimeTypeHandleTarget.MethodGenericParameter _ ->
+                failwith $"logic error: isValueTypeConstraint asked about the type variable %O{target}"
+
+        let isNullableConstraint (target : RuntimeTypeHandleTarget) : bool =
+            match nominalInstantiation state target with
+            | Some (identity, _) -> identity = baseClassTypes.Nullable.Identity
+            | None -> false
+
+        // `visited` is CoreCLR's `pVisitedVars`: the constraining variables walked to reach
+        // `current`, empty at the argument itself, which is where the `class` and `new()` flags
+        // count.
+        let rec satisfies
+            (state : IlMachineState)
+            (visited : RuntimeTypeHandleTarget list)
+            (current : RuntimeTypeHandleTarget)
+            : IlMachineState * bool
+            =
+            let state, metadata, constraints =
+                ReflectedTypeTarget.declaredConstraintTargets
+                    loggerFactory
+                    baseClassTypes
+                    "typeVariableSatisfiesSpecialConstraint"
+                    state
+                    current
+
+            let atArgument = List.isEmpty visited
+
+            let byFlags =
+                match required with
+                | SpecialConstraint.NotNullableValueType -> metadata.RequiresNonNullableValueType
+                | SpecialConstraint.ReferenceType -> atArgument && metadata.RequiresReferenceType
+                | SpecialConstraint.DefaultConstructor ->
+                    (atArgument && metadata.RequiresParameterlessConstructor)
+                    || metadata.RequiresNonNullableValueType
+
+            if byFlags then
+                state, true
+            else
+
+            ((state, false), constraints)
+            ||> List.fold (fun (state, found) constraintTarget ->
+                if found then
+                    state, true
+                elif isTypeVariable constraintTarget then
+                    // A cycle of variables constraining each other is refused when the type
+                    // loads; CoreCLR only stops the walk from looping, and so does this.
+                    if List.contains constraintTarget visited then
+                        state, false
+                    else
+                        satisfies state (constraintTarget :: visited) constraintTarget
+                elif isInterfaceTarget state constraintTarget then
+                    state, false
+                else
+                    // The argument is only known to derive from this type.
+                    match required with
+                    | SpecialConstraint.NotNullableValueType ->
+                        state,
+                        isValueTypeConstraint constraintTarget
+                        && not (isNullableConstraint constraintTarget)
+                    | SpecialConstraint.ReferenceType ->
+                        // CoreCLR excludes `Object`, `ValueType` and any class with `ValueType` among
+                        // its ancestors, and `Enum` is the only class other than `ValueType` itself
+                        // that has.
+                        state,
+                        isObjRefTarget baseClassTypes state constraintTarget
+                        && not (isClosedNonGeneric state baseClassTypes.Object constraintTarget)
+                        && not (isClosedNonGeneric state baseClassTypes.ValueType constraintTarget)
+                        && not (isClosedNonGeneric state baseClassTypes.Enum constraintTarget)
+                    | SpecialConstraint.DefaultConstructor ->
+                        // `HasExplicitOrImplicitPublicDefaultConstructor` holds for every value type.
+                        state, isValueTypeConstraint constraintTarget
+            )
+
+        satisfies state [] variable
+
+    /// CoreCLR's general-constraint check for a generic argument that is a type variable
+    /// (`TypeVarTypeDesc::SatisfiesConstraints`, typedesc.cpp:1583-1724): whether `variable` meets
+    /// every one of `constraints`, the general constraints of the parameter it instantiates, each
+    /// already read under the instantiation being made.
+    ///
+    /// What the argument is known to be assignable to is the variable itself and everything
+    /// `GatherConstraintsRecursive` collects: its declared constraints, and transitively those of
+    /// each variable among them. A constraint is met if it is `System.Object`, or if one of those
+    /// is a variable equal to it, a variable carrying `struct` when it is `System.ValueType`, or
+    /// anything else that casts to it (`isRuntimeTypeHandleTargetAssignableTo`). CoreCLR's
+    /// static-virtual refinement for an abstract argument does not apply to a variable argument.
+    let typeVariableSatisfiesGeneralConstraints
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (variable : RuntimeTypeHandleTarget)
+        (constraints : RuntimeTypeHandleTarget list)
+        : IlMachineState * bool
+        =
+        let isTypeVariable (target : RuntimeTypeHandleTarget) : bool =
+            match target with
+            | RuntimeTypeHandleTarget.GenericParameter _
+            | RuntimeTypeHandleTarget.MethodGenericParameter _ -> true
+            | _ -> false
+
+        let facts (state : IlMachineState) (current : RuntimeTypeHandleTarget) =
+            ReflectedTypeTarget.declaredConstraintTargets
+                loggerFactory
+                baseClassTypes
+                "typeVariableSatisfiesGeneralConstraints"
+                state
+                current
+
+        // `GatherConstraintsRecursive`: `visited` holds the variables already gathered, which is
+        // what stops a cycle of variables constraining each other (refused when the type loads)
+        // from looping.
+        let rec gather
+            (state : IlMachineState)
+            (visited : RuntimeTypeHandleTarget list)
+            (current : RuntimeTypeHandleTarget)
+            (acc : RuntimeTypeHandleTarget list)
+            : IlMachineState * RuntimeTypeHandleTarget list
+            =
+            let state, _, declared = facts state current
+
+            ((state, acc), declared)
+            ||> List.fold (fun (state, acc) constraintTarget ->
+                if not (isTypeVariable constraintTarget) then
+                    state, constraintTarget :: acc
+                elif List.contains constraintTarget visited then
+                    state, acc
+                else
+                    gather state (constraintTarget :: visited) constraintTarget (constraintTarget :: acc)
+            )
+
+        let state, gathered = gather state [] variable []
+        let candidates = variable :: gathered
+
+        let meets (state : IlMachineState) (required : RuntimeTypeHandleTarget) : IlMachineState * bool =
+            if isClosedNonGeneric state baseClassTypes.Object required then
+                state, true
+            else
+                ((state, false), candidates)
+                ||> List.fold (fun (state, found) candidate ->
+                    if found then
+                        state, true
+                    elif isTypeVariable candidate then
+                        if candidate = required then
+                            state, true
+                        elif isClosedNonGeneric state baseClassTypes.ValueType required then
+                            let state, metadata, _ = facts state candidate
+                            state, metadata.RequiresNonNullableValueType
+                        else
+                            state, false
+                    else
+                        isRuntimeTypeHandleTargetAssignableTo loggerFactory baseClassTypes state candidate required
+                )
+
+        ((state, true), constraints)
+        ||> List.fold (fun (state, allMet) required -> if allMet then meets state required else state, false)
