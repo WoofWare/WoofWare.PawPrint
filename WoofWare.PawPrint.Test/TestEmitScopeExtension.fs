@@ -28,9 +28,18 @@ module TestEmitScopeExtension =
 
     let private rowNumber (handle : EntityHandle) : int = MetadataTokens.GetRowNumber handle
 
+    /// A type's or method's generic parameters as the image holds them: each row's RID, which is its
+    /// token, and its columns.
+    let private genericParamsView (reader : MetadataReader) (parameters : GenericParameterHandleCollection) =
+        [
+            for p in parameters do
+                let row = reader.GetGenericParameter p
+                yield rowNumber (GenericParameterHandle.op_Implicit p), row.Index, row.Attributes, row.Name
+        ]
+
     /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its
-    /// methods with their implementation flags, parameters and bodies, and its fields, as handles into
-    /// the image, and its interface
+    /// generic parameters, its methods with their implementation flags, parameters, generic parameters
+    /// and bodies, and its fields, as handles into the image, and its interface
     /// implementations and method impls in table order. Those two tables are sorted, so their RIDs
     /// move as rows of lower classes are added; the runtime keeps no handle into them, only what each
     /// row names.
@@ -65,6 +74,7 @@ module TestEmitScopeExtension =
                         rowNumber (MethodDefinitionHandle.op_Implicit m),
                         (reader.GetMethodDefinition m).ImplAttributes,
                         parameters,
+                        genericParamsView reader ((reader.GetMethodDefinition m).GetGenericParameters ()),
                         body
             ]
 
@@ -87,7 +97,12 @@ module TestEmitScopeExtension =
                     yield token row.MethodBody, token row.MethodDeclaration
             ]
 
-        token definition.BaseType, methods, fields, interfaces, impls
+        token definition.BaseType,
+        genericParamsView reader (definition.GetGenericParameters ()),
+        methods,
+        fields,
+        interfaces,
+        impls
 
     let private createdTypeNamed (violation : EmitScopeExtensionViolation) : TypeDefRid option =
         match violation with
@@ -677,6 +692,130 @@ module TestEmitScopeExtension =
             [
                 EmitScopeExtensionViolation.FilledInCreatedType (TableIndex.MethodDef, 1, TypeDefRid 1)
             ]
+
+    /// A scope with a type, `Owner` (TypeDef 2), and a method of it (MethodDef 1), and a generic parameter
+    /// of each.
+    let private withGenericParams () : EmitScope * GenericParamRow * GenericParamRow =
+        let scope = apply Guid.Empty []
+        let name, scope = EmitScope.internString "Owner" scope
+
+        let owner, scope =
+            EmitScope.addTypeDef
+                {
+                    Flags = Reflection.TypeAttributes.Public
+                    Name = name
+                    Namespace = StringOffset 0
+                    Extends = None
+                }
+                scope
+
+        let signature, scope =
+            EmitScope.internBlob (ImmutableArray.Create<byte> [| 0uy ; 0uy ; 1uy |]) scope
+
+        let method, scope =
+            EmitScope.addMethodDef
+                {
+                    Owner = owner
+                    Body = None
+                    ImplFlags = Reflection.MethodImplAttributes.IL
+                    Flags = Reflection.MethodAttributes.Public ||| Reflection.MethodAttributes.Static
+                    Name = name
+                    Signature = signature
+                }
+                scope
+
+        let parameter (owner : TypeOrMethodDef) (number : uint16) : GenericParamRow =
+            {
+                Number = number
+                Flags = Reflection.GenericParameterAttributes.None
+                Owner = owner
+                Name = name
+            }
+
+        let ofMethod = parameter (TypeOrMethodDef.MethodDef method)
+        let ofType = parameter (TypeOrMethodDef.TypeDef owner)
+        let scope = EmitScope.addGenericParam (ofMethod 0us) scope |> snd
+        let scope = EmitScope.addGenericParam (ofType 0us) scope |> snd
+        scope, ofMethod 1us, ofType 1us
+
+    [<Test>]
+    let ``a generic parameter added to a created type or one of its methods is refused`` () : unit =
+        let before, ofMethod, ofType = withGenericParams ()
+        let owner = TypeDefRid 2
+        let created = ImmutableHashSet.Create owner
+        let toMethod = EmitScope.addGenericParam ofMethod before |> snd
+        let toType = EmitScope.addGenericParam ofType before |> snd
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty before toType
+        |> shouldEqual []
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty before toMethod
+        |> shouldEqual []
+
+        // Another type's being created does not fix this one's parameters.
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 1)) before toType
+        |> shouldEqual []
+
+        EmitScopeExtension.violations created before toType
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParam, 3, owner)
+            ]
+
+        // A method's parameter belongs to the method's declaring type.
+        EmitScopeExtension.violations created before toMethod
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParam, 3, owner)
+            ]
+
+    [<Test>]
+    let ``a changed generic parameter is reported at its RID`` () : unit =
+        let before, _, _ = withGenericParams ()
+        let rows = EmitScope.genericParams before
+
+        // The same rows but the second's flags, built afresh from the scope without them.
+        let scope = apply Guid.Empty []
+        let name, scope = EmitScope.internString "Owner" scope
+
+        let rebuilt =
+            let _, scope =
+                EmitScope.addTypeDef
+                    {
+                        Flags = Reflection.TypeAttributes.Public
+                        Name = name
+                        Namespace = StringOffset 0
+                        Extends = None
+                    }
+                    scope
+
+            let signature, scope =
+                EmitScope.internBlob (ImmutableArray.Create<byte> [| 0uy ; 0uy ; 1uy |]) scope
+
+            let _, scope =
+                EmitScope.addMethodDef
+                    {
+                        Owner = TypeDefRid 2
+                        Body = None
+                        ImplFlags = Reflection.MethodImplAttributes.IL
+                        Flags = Reflection.MethodAttributes.Public ||| Reflection.MethodAttributes.Static
+                        Name = name
+                        Signature = signature
+                    }
+                    scope
+
+            let scope = EmitScope.addGenericParam rows.[0] scope |> snd
+
+            EmitScope.addGenericParam
+                { rows.[1] with
+                    Flags = Reflection.GenericParameterAttributes.Covariant
+                }
+                scope
+            |> snd
+
+        for createdTypes in [ ImmutableHashSet.Empty ; ImmutableHashSet.Create (TypeDefRid 2) ] do
+            EmitScopeExtension.violations createdTypes before rebuilt
+            |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.GenericParam, 2) ]
 
     [<Test>]
     let ``a user string added is an extension, and one rewritten is refused`` () : unit =

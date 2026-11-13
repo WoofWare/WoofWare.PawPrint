@@ -32,6 +32,19 @@ module TestEmitScopeImage =
         | MethodDefOrRef.MethodDef rid -> 0x06000000 ||| rid.Rid
         | MethodDefOrRef.MemberRef rid -> 0x0A000000 ||| rid.Rid
 
+    let private typeOrMethodDefToken (owner : TypeOrMethodDef) : int =
+        match owner with
+        | TypeOrMethodDef.TypeDef rid -> 0x02000000 ||| rid.Rid
+        | TypeOrMethodDef.MethodDef rid -> 0x06000000 ||| rid.Rid
+
+    /// The RIDs of the scope's `GenericParam` rows that this owner owns, in RID order.
+    let private genericParamsOwnedBy (owner : TypeOrMethodDef) (scope : EmitScope) : int list =
+        EmitScope.genericParams scope
+        |> Seq.indexed
+        |> Seq.filter (fun (_, row) -> row.Owner = owner)
+        |> Seq.map (fun (i, _) -> i + 1)
+        |> List.ofSeq
+
     let private checkString
         (scope : EmitScope)
         (reader : MetadataReader)
@@ -245,6 +258,11 @@ module TestEmitScopeImage =
                 |> List.ofSeq
             )
 
+            actual.GetGenericParameters ()
+            |> Seq.map MetadataTokens.GetRowNumber
+            |> List.ofSeq
+            |> shouldEqual (genericParamsOwnedBy (TypeOrMethodDef.TypeDef (TypeDefRid i)) scope)
+
         reader.GetTableRowCount TableIndex.Field |> shouldEqual fields.Count
 
         for i in 1 .. fields.Count do
@@ -283,6 +301,11 @@ module TestEmitScopeImage =
             |> Seq.map MetadataTokens.GetRowNumber
             |> List.ofSeq
             |> shouldEqual (paramsOf i paramOrder)
+
+            actual.GetGenericParameters ()
+            |> Seq.map MetadataTokens.GetRowNumber
+            |> List.ofSeq
+            |> shouldEqual (genericParamsOwnedBy (TypeOrMethodDef.MethodDef (MethodDefRid i)) scope)
 
         reader.GetTableRowCount TableIndex.Param |> shouldEqual parameters.Count
 
@@ -340,6 +363,20 @@ module TestEmitScopeImage =
             token actual.Method |> shouldEqual (methodDefOrRefToken expected.Method)
             checkBlob scope reader expected.Instantiation actual.Signature
 
+        // The scope holds its rows in owner order already, so every row is at the RID the scope gave it.
+        let genericParams = EmitScope.genericParams scope
+
+        reader.GetTableRowCount TableIndex.GenericParam
+        |> shouldEqual genericParams.Count
+
+        for i in 1 .. genericParams.Count do
+            let expected = genericParams.[i - 1]
+            let actual = reader.GetGenericParameter (MetadataTokens.GenericParameterHandle i)
+            actual.Index |> shouldEqual (int expected.Number)
+            actual.Attributes |> shouldEqual expected.Flags
+            token actual.Parent |> shouldEqual (typeOrMethodDefToken expected.Owner)
+            checkString scope reader expected.Name actual.Name
+
         // Nothing the scope cannot hold.
         for table in
             [
@@ -347,7 +384,7 @@ module TestEmitScopeImage =
                 TableIndex.CustomAttribute
                 TableIndex.ModuleRef
                 TableIndex.NestedClass
-                TableIndex.GenericParam
+                TableIndex.GenericParamConstraint
                 TableIndex.Property
                 TableIndex.Event
             ] do
@@ -451,6 +488,23 @@ module TestEmitScopeImage =
 
         scopes
         |> Seq.filter (fun s -> not (grouped (EmitScope.methodImpls s |> Seq.map _.Class.Rid)))
+        |> Seq.length
+        |> shouldBeGreaterThan 20
+
+        // And generic parameters of types, of methods, and of both in one scope.
+        let ownedBy (isType : bool) (s : EmitScope) =
+            EmitScope.genericParams s
+            |> Seq.exists (fun row ->
+                match row.Owner with
+                | TypeOrMethodDef.TypeDef _ -> isType
+                | TypeOrMethodDef.MethodDef _ -> not isType
+            )
+
+        scopes |> Seq.filter (ownedBy true) |> Seq.length |> shouldBeGreaterThan 20
+        scopes |> Seq.filter (ownedBy false) |> Seq.length |> shouldBeGreaterThan 20
+
+        scopes
+        |> Seq.filter (fun s -> ownedBy true s && ownedBy false s)
         |> Seq.length
         |> shouldBeGreaterThan 20
 

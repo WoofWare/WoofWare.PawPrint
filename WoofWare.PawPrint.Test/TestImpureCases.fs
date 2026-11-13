@@ -2026,6 +2026,32 @@ module TestImpureCases =
                 objectRef, "ToString", [ 0x20uy ; 0x00uy ; 0x0Euy ]
             ]
 
+    /// `TypeBuilderDefineGenericParam.cs` has created `Box<T, U>` (TypeDef 3) and then `IOut<out V>`
+    /// (TypeDef 4): one GenericParam row for each parameter, in the order `CreateType` made them, each
+    /// with its number, flags and name, as .NET 10 numbers them.
+    let private assertGenericParamRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        let owner (rid : int) =
+            TypeOrMethodDef.TypeDef (EmitScope.tryTypeDefRid rid scope).Value
+
+        EmitScope.genericParams scope
+        |> Seq.map (fun row -> row.Owner, row.Number, row.Flags, EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                owner 3, 0us, System.Reflection.GenericParameterAttributes.None, "T"
+                owner 3,
+                1us,
+                System.Reflection.GenericParameterAttributes.ReferenceTypeConstraint
+                ||| System.Reflection.GenericParameterAttributes.DefaultConstructorConstraint,
+                "U"
+                owner 4, 0us, System.Reflection.GenericParameterAttributes.Covariant, "V"
+            ]
+
     /// `ModuleBuilderMemberRefOfBuilder.cs` has named `DynLib`'s `Lib.Thing` and four of its members from
     /// `DynUser`: one TypeRef scoped by an AssemblyRef for `DynLib`, and one MemberRef per member, each
     /// under that TypeRef with the signature translated from `DynLib`, `Instance`'s naming `Thing` by the
@@ -5814,6 +5840,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
+            }
+            {
+                // A generic TypeBuilder's parameters, which `TypeBuilder_DefineGenericParam` adds when
+                // `CreateType` runs, the created generic type definition, and an instantiation of it;
+                // `assertGenericParamRows` reads the rows. Dynamic-code switch overridden to true like its
+                // siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "TypeBuilderDefineGenericParam.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertGenericParamRows
             }
             {
                 // Issue #2091's guest, the acceptance case of `docs/plans/2026-11-04-type-builder.md`: it
