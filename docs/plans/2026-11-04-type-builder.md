@@ -1510,3 +1510,113 @@ refusal is a deletion.
 * A variant parameter of a class or a delegate, and both variance bits.
 * A custom attribute on a parameter, which `CreateType` writes with the parameter's token straight after
   its row; an emit scope has no CustomAttribute table yet.
+
+### 5m: a generic type's parameter constraints
+
+5l refuses a generic parameter with a constraint. Read from `RuntimeTypeBuilder.CreateTypeNoLock`,
+`SetParentCore` and `SetInterfaces`, `RuntimeGenericTypeParameterBuilder.SetBaseTypeConstraintCore` and
+`SetInterfaceConstraintsCore`, `TypeBuilder_DefineGenericParam` (vm/comdynamic.cpp),
+`RegMeta::_SetGenericParamProps` (md/compiler/emit.cpp), `CMiniMdRW::PutToken` (md/enc/metamodelrw.cpp)
+and `CMiniMdBase::encodeToken` (md/runtime/metamodel.cpp):
+
+* A parameter's builder is a `RuntimeTypeBuilder`, and its constraints are that builder's parent and
+  interfaces. `SetBaseTypeConstraint` is `SetParent`, which refuses an interface (`ArgumentException`,
+  measured) and stores `object` for `null`, since a parameter's builder has no `Interface` flag.
+  `SetInterfaceConstraints` replaces the interface list.
+* `CreateTypeNoLock`, for a parameter, asks `GetTypeTokenInternal` for each interface's token and the
+  parent's, which finds or adds the TypeRef or TypeSpec each names, or gives a `TypeBuilder` of the
+  module its TypeDef token. It passes the interfaces' tokens in the order they were set, then the
+  parent's if there is one, then a nil token.
+* `_SetGenericParamProps`, given a non-null array, first gives each existing constraint row of the
+  parameter the owner 0, and a parameter just added has none. It then adds one `GenericParamConstraint`
+  row for each token before the first whose RID is 0, owned by the parameter's RID, in the order given.
+  Nothing looks for a duplicate: `MDDupGenericParamConstraint` is declared in corhdr.h and never read.
+* The Constraint column is a `TypeDefOrRef` coded index. `PutToken` encodes a token of any other kind as
+  0 in a release build (`encodeToken` returns `mdTokenNil`); no managed caller passes one.
+* So, in a dynamic module, where `TypeBuilder_DefineGenericParam` is the only caller, a parameter's
+  constraint rows are added straight after its own row, and the table is in owner order whatever the
+  order of the parameters.
+
+Measured on .NET 10 with a throwaway probe, reading each parameter's `GenericParamConstraint` RIDs
+through CoreLib's internal `MetadataImport.Enum` and the token each constraint names through
+`ModuleBuilder.GetTypeMetadataToken`:
+
+* `Box<T, U, V, W>` (TypeDef 4), after `IMark` (TypeDef 2) and `Base : IMark` (TypeDef 3), with
+  `T : struct, IComparable<T>`, `U : Stream, IDisposable, IAsyncDisposable, new()` (the base type set
+  first), `V : class, Base, IMark` and `W : T`: rows 1 to 7, `T`'s 1, `U`'s 2 to 4, `V`'s 5 and 6, `W`'s 7.
+  `GetGenericParameterConstraints` reports each parameter's in RID order: `IComparable<T>` (TypeSpec 2),
+  `IDisposable`, `IAsyncDisposable`, `Stream` (TypeRefs 3 to 5), `IMark`, `Base` (TypeDefs 2 and 3), and
+  `T` (TypeSpec 1, `!0`), so the interfaces come first however the calls were ordered. The special
+  constraints are only flags.
+* `SetBaseTypeConstraint(null)` adds a row naming `object` (TypeRef 1). `SetInterfaceConstraints` with
+  `IDisposable` twice adds two rows, and the type loads. An interface constraint naming `string` loads.
+  Setting the interface constraints twice keeps the second list.
+* `MakeGenericType` checks the constraints of a created dynamic type as of any other: `Cmp<T>` with
+  `T : IComparable<T>` takes `int` and `string` and refuses `object`; `Two<A, B>` with `B : A` takes
+  `(Exception, ArgumentException)` and refuses the reverse, each with `ArgumentException`. With a
+  `TypeBuilder` among the arguments it checks nothing, building a `TypeBuilderInstantiation` instead.
+
+### 5m: the decisions
+
+Taken 2026-11-13.
+
+* **The scope gains a `GenericParamConstraint` table, whose rows are added only with their parameter.**
+  A `GenericParamConstraintRow` holds its owner's `GenericParamRid` and a `TypeDefOrRef` with
+  ECMA-335's three cases. `EmitScope.addGenericParam` takes the parameter's constraints, checks that each
+  names a row of the scope, and appends the parameter's row and then one constraint row for each, in the
+  order given. A constraint row's owner is then always the scope's last parameter when it is added, so
+  the table is in owner order by construction, needs no order rule of its own, and its RIDs are
+  CoreCLR's. The writer asserts the order, as it does `GenericParam`'s. Two alternatives were rejected:
+  * a separate primitive adding one constraint row, with a rule that its owner is at least the last
+    row's: a second order rule, guarding a state no CoreCLR caller reaches;
+  * the constraints held on `GenericParamRow` and the table derived by the writer: its RIDs would be the
+    same, but the extension check could report a changed constraint only as a changed parameter, and a
+    later stage that names a constraint row (a custom attribute on one, which `HasCustomAttribute` can
+    name) would change the published row type again.
+* **`TypeBuilder_DefineGenericParam` reads the tokens up to the first whose RID is 0**, each a TypeDef,
+  TypeRef or TypeSpec of the module's scope, with the reader `TypeBuilder_DefineType` uses for its
+  interface tokens, which follows the same rule. A token of another kind, or one naming no row, fails
+  loudly: no managed caller passes one, and CoreCLR would store a nil constraint. A null array stays
+  refused by name, as 5l refuses it.
+* **No duplicate check, and no check of what a constraint names**: a token given twice is two rows, and
+  `object` for a null base type is a row, as measured. The managed caller decides what the tokens are.
+* **The extension check gets `RowChanged` and `AddedToCreatedType` for the table**, a constraint counting
+  as a member of the type that owns its parameter, or of the method's declaring type for a method's
+  parameter.
+
+### 5m: the oracle
+
+* The generator draws, with each generic parameter, constraints naming TypeDefs, TypeRefs and TypeSpecs
+  of the scope, repeats included, so the image's round trip (each row by RID, and each parameter's
+  `GetConstraints` in order) and the extension properties cover the table.
+* Properties: `addGenericParam` appends exactly the given constraints after the parameter, in order,
+  and refuses loudly a constraint naming no row; `defineGenericParam` passes them on; and every
+  generated scope's constraint rows are in owner order.
+* Real .NET's emitter, in the test host, over generated generic interfaces whose parameters carry
+  constraints drawn from non-generic interfaces and classes the module defines first, repeats included:
+  each parameter's constraint RIDs, read through CoreLib's internal `MetadataImport` as the probe read
+  them, and the types reflection reports, are the scope's rows. TypeRef and TypeSpec constraints are
+  left to the guest: the scope would need every TypeRef and TypeSpec row real .NET's emitter adds first.
+* `TestEmitScopeExtension`: a parameter with constraints added to a created type, or to one of its
+  methods, makes each constraint row `AddedToCreatedType`, and a changed constraint row is `RowChanged`
+  at its RID.
+* `TypeBuilderGenericParamConstraints.cs`, the measurement's `Box<T, U, V, W>`, exits 0 on .NET 10: it
+  checks the tokens, each parameter's constraints and flags, makes `Box<int, MemoryStream, Base, int>`,
+  and calls a method comparing two `T`s through `constrained. !0 callvirt IComparable<!0>::CompareTo`.
+  Its terminal-state check reads the GenericParamConstraint rows.
+* `TypeBuilderGenericParamConstraintViolated.cs` asks `MakeGenericType` for instantiations of created
+  dynamic types that break a TypeRef, a TypeDef and a TypeSpec constraint, and expects
+  `ArgumentException` for each.
+* `TestTypeBuilderGenericParamRefusals` loses its constraint case.
+* Each mutant is caught: the constraints dropped or reversed, the coded index's tag wrong, the owner off
+  by one, the extension arms removed, the writer's columns swapped, and the handler stopping at the
+  first token rather than the nil.
+
+### 5m: left to later stages
+
+* A null constraint array, which `_SetGenericParamProps` reads as leaving the constraints as they are;
+  no managed caller passes one.
+* A generic method's parameters' constraints, which come with a generic `MethodBuilder`; the table
+  already takes them.
+* If a later stage writes `GenericParam` rows out of creation order (5l's options B and F), the
+  constraint rows' owners move with them.
