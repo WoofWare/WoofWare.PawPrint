@@ -139,9 +139,9 @@ module MethodTableLayout =
     /// A *synthesised* method has no MethodDef row, so it is not a declared method at all. The
     /// vtable walk excludes them only incidentally (a synthesised method is never `IsVirtual`);
     /// beyond the vtable, placing one would shift every later method's slot number by one. No test
-    /// can cover the filter: nothing today puts a synthesised method into a `TypeInfo` (the
-    /// construction sites in `Program.buildStartupFrame` and `StructMarshalStub` both build one for
-    /// immediate execution), but `TypeInfo.Methods` is typed to hold either kind.
+    /// can cover the filter: nothing today puts a synthesised method into a `TypeInfo` (each
+    /// construction site builds one for immediate execution), but `TypeInfo.Methods` is typed to
+    /// hold either kind.
     ///
     /// A COM *vtable-gap marker* names empty slots in the COM interface vtable rather than declaring
     /// a method. `EnumerateClassMethods` recognises it by `IsMdRTSpecialName` plus a `_VtblGap` name

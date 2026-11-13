@@ -620,7 +620,7 @@ public abstract class Holder
             |> Seq.find (fun m -> m.Name = "ToString" && m.RequiredDeclaringType.Name = "Object")
 
         let synthesised =
-            MethodInfo.Synthesised (metadata.Core, SynthesisedMethod.EntryPointPlaceholder)
+            MethodInfo.Synthesised (metadata.Core, SynthesisedMethod.StructMarshalStub)
 
         synthesised.TryVariant |> shouldEqual None
 

@@ -157,13 +157,13 @@ module internal ProgramStartup =
                 IlMachineState
                     -> TypeInfo<GenericParamFromMetadata, TypeDefn>
                     -> DumpedAssembly
-                    -> IlMachineState * BaseClassTypes<DumpedAssembly> option)
+                    -> IlMachineState * BaseClassTypes<DumpedAssembly>)
             (continueWithResolved :
                 IlMachineState
                     -> TypeInfo<TypeDefn, TypeDefn>
                     -> DumpedAssembly
-                    -> IlMachineState * BaseClassTypes<DumpedAssembly> option)
-            : IlMachineState * BaseClassTypes<DumpedAssembly> option
+                    -> IlMachineState * BaseClassTypes<DumpedAssembly>)
+            : IlMachineState * BaseClassTypes<DumpedAssembly>
             =
             match baseTypeInfo with
             | BaseTypeInfo.TypeRef typeRefHandle ->
@@ -229,7 +229,7 @@ module internal ProgramStartup =
             match currentType.BaseType with
             | None ->
                 // We've reached the root (System.Object), so this assembly contains the core library
-                state, Some (coreLibBaseTypes currentAssembly)
+                state, coreLibBaseTypes currentAssembly
             | Some baseTypeInfo ->
                 handleBaseTypeInfo
                     state
@@ -246,7 +246,7 @@ module internal ProgramStartup =
             match currentType.BaseType with
             | None ->
                 // We've reached the root (System.Object), so this assembly contains the core library
-                state, Some (coreLibBaseTypes currentAssembly)
+                state, coreLibBaseTypes currentAssembly
             | Some baseTypeInfo ->
                 handleBaseTypeInfo
                     state
@@ -255,102 +255,13 @@ module internal ProgramStartup =
                     findCoreLibraryAssemblyFromGeneric
                     findCoreLibraryAssemblyFromResolved
 
-        /// The frame the entry thread is created with: the entry point's *signature* with its
-        /// body replaced by a bare `ret`. The first phase of startup replaces it before the
-        /// thread runs a step, so it never runs.
-        let buildStartupFrame
-            (baseTypes : BaseClassTypes<DumpedAssembly>)
-            (state : IlMachineState)
-            : IlMachineState * MethodState
-            =
-            // Use the original method from metadata, but convert FakeUnit to TypeDefn
-            let rawMainMethod =
-                mainMethodFromMetadata
-                |> MethodInfo.mapTypeGenerics (fun (i, _) -> TypeDefn.GenericTypeParameter i.SequenceNumber)
+        let state, baseClassTypes =
+            let mainMethodType =
+                dumped.TypeDefs.[mainMethodFromMetadata.RequiredDeclaringType.Definition.Get]
 
-            let state, concretizedMainMethodResult =
-                ExecutionConcretization.concretizeMethodWithTypeGenerics
-                    loggerFactory
-                    baseTypes
-                    ImmutableArray.Empty // No type generics for main method's declaring type
-                    // Synthesised, not the entry point with its body swapped: the substituted
-                    // body is not what `Main`'s MethodDef row describes, so carrying that row's
-                    // identity would let anything keyed by it — debug information above all —
-                    // describe this frame as though `Main` were running. It is not; `Main` has
-                    // not been installed yet.
-                    (MethodInfo.Synthesised (
-                        { rawMainMethod.Core with
-                            Body = MethodBody.Il (MethodInstructions.onlyRet ())
-                            // The body returns nothing, so the signature must say so: every
-                            // frame's stack is checked against its signature at `ret`, the
-                            // bottom frame's included, and `Main`'s own return type would
-                            // have an `int Main`'s placeholder refused as invalid CIL.
-                            Signature =
-                                { rawMainMethod.Core.Signature with
-                                    ReturnType = MethodReturnType.Void
-                                }
-                        },
-                        SynthesisedMethod.EntryPointPlaceholder
-                    ))
-                    None
-                    dumped.DefinitionFullName
-                    ImmutableArray.Empty
-                    state
+            findCoreLibraryAssemblyFromGeneric state mainMethodType dumped
 
-            let concretizedMainMethod, _ = BindingStop.bound concretizedMainMethodResult
-
-            // Create the method state with the concretized method.
-            // The body has been replaced with onlyRet, so these are placeholders whose
-            // length must match the method's parameter count.
-            let placeholderArgs =
-                if mainTakesStringArrayArg then
-                    ImmutableArray.CreateRange [ CliType.ObjectRef None ]
-                else
-                    ImmutableArray.Empty
-
-            // The placeholder's body is a bare `ret`, which declares no locals.
-            match
-                MethodState.Empty
-                    state.TypeSystem.ConcreteTypes
-                    baseTypes
-                    state.TypeSystem._LoadedAssemblies
-                    dumped
-                    concretizedMainMethod
-                    ImmutableArray.Empty
-                    ImmutableArray.Empty
-                    placeholderArgs
-                    None
-            with
-            | Ok concretizedMeth -> state, concretizedMeth
-            | Error _ -> failwith "Unexpected failure creating method state with concretized method"
-
-        let rec computeState (baseClassTypes : BaseClassTypes<DumpedAssembly> option) (state : IlMachineState) =
-            match baseClassTypes with
-            | Some baseTypes ->
-                // We already have base class types, can directly create the concretized method
-                let state, concretizedMeth = buildStartupFrame baseTypes state
-                IlMachineState.addThread concretizedMeth state, Some baseTypes
-            | None ->
-                // We need to discover the core library by traversing the type hierarchy
-                let mainMethodType =
-                    dumped.TypeDefs.[mainMethodFromMetadata.RequiredDeclaringType.Definition.Get]
-
-                let state, baseTypes =
-                    findCoreLibraryAssemblyFromGeneric state mainMethodType dumped
-
-                computeState baseTypes state
-
-        let (state, mainThread), baseClassTypes = state |> computeState None
-
-        let baseClassTypes =
-            match baseClassTypes with
-            | Some c -> c
-            | None -> failwith "Expected base class types to be available at this point"
-
-        let state =
-            IlMachineState.seedManagedThreadId loggerFactory baseClassTypes mainThread state
-
-        // Now that we have base class types, concretize the main method for use in the rest of the function
+        // Concretize the main method for use in the rest of the function
         let state, concretizedMainMethodResult =
             let rawMainMethod =
                 mainMethodFromMetadata
@@ -393,6 +304,31 @@ module internal ProgramStartup =
         // that a host which builds its `HostConfig` some other way — the App, which replaces
         // `AppContext` wholesale with the guest's `runtimeconfig.json` — cannot drop it.
         let propertiesToSeed = AppContextProperties.withRuntimeBaseline launch.AppContext
+
+        /// Build the call that installs the guest's command line, the way
+        /// `CorHost2::ExecuteAssembly` does immediately before it runs `Main`.
+        let prepareCommandLineInit (state : IlMachineState) : IlMachineState * MethodState =
+            logger.LogInformation "Installing the guest's command line"
+            CommandLineArgsInit.prepareCall loggerFactory baseClassTypes exePath argv state
+
+        // The first call of startup, which the entry thread is created with. Building it runs no
+        // guest code, so it needs no thread; `None` in `seeding` means there was nothing to seed,
+        // and the first call is the one that installs the command line.
+        let state, firstFrame, seeding =
+            match AppContextSeed.prepareCall loggerFactory baseClassTypes propertiesToSeed state with
+            | Some (state, setupFrame, readBack) ->
+                logger.LogInformation "Seeding AppContext from the host's configuration properties"
+                state, setupFrame, Some readBack
+            | None ->
+                let state, initFrame = prepareCommandLineInit state
+                state, initFrame, None
+
+        let state, mainThread = IlMachineState.addThread firstFrame state
+
+        // The VM gives a thread its managed thread id when the thread starts, before it runs
+        // managed code.
+        let state =
+            IlMachineState.seedManagedThreadId loggerFactory baseClassTypes mainThread state
 
         /// Put the call of `Main`, whose locals are `localTypes`, on the entry thread, to give it
         /// `mainArgs`, and say how it calls `Main`.
@@ -485,7 +421,8 @@ module internal ProgramStartup =
             }
 
         /// Run `methodState` on the entry thread in place of whatever frame it currently holds.
-        /// Every phase that pumps a call installs it this way.
+        /// Every phase after the first installs its call this way; the first phase's call is the
+        /// frame the entry thread is created with.
         let installCall (methodState : MethodState) (state : IlMachineState) : IlMachineState =
             let threadState =
                 state.ThreadState.[mainThread]
@@ -499,15 +436,9 @@ module internal ProgramStartup =
                 ThreadState = state.ThreadState |> Map.add mainThread threadState
             }
 
-        /// Install the guest's command line, the way `CorHost2::ExecuteAssembly` does
-        /// immediately before it runs `Main`. The array CoreLib returns is the one `Main`
-        /// receives, so there is no second construction of it to disagree.
-        let enterCommandLineInit (state : IlMachineState) : IlMachineState * StartupPhase =
-            let state, initFrame =
-                CommandLineArgsInit.prepareCall loggerFactory baseClassTypes exePath argv state
-
-            logger.LogInformation "Installing the guest's command line"
-
+        /// The phase that runs the call `prepareCommandLineInit` builds. The array CoreLib returns
+        /// is the one `Main` receives, so there is no second construction of it to disagree.
+        let initialisingCommandLine : StartupPhase =
             let onInitialised (state : IlMachineState) : IlMachineState * AfterStartupCall =
                 // `InitializeCommandLineArgs` returns the arguments `Main` is to be given,
                 // having just built `s_commandLineArgs` from the same input in the same
@@ -535,17 +466,11 @@ module internal ProgramStartup =
 
                 enterMain mainArgs state
 
-            installCall initFrame state, StartupPhase.InitialisingCommandLine onInitialised
+            StartupPhase.InitialisingCommandLine onInitialised
 
-        match AppContextSeed.prepareCall loggerFactory baseClassTypes propertiesToSeed state with
-        | None ->
-            // Nothing to seed, so there is no first phase to pump. The startup frame
-            // `computeState` installed is still in place, never having been consumed.
-            let state, phase = enterCommandLineInit state
-            atPhase state phase
-        | Some (state, setupFrame, readBack) ->
-            logger.LogInformation "Seeding AppContext from the host's configuration properties"
-
+        match seeding with
+        | None -> atPhase state initialisingCommandLine
+        | Some readBack ->
             let onSeeded (state : IlMachineState) : IlMachineState * AfterStartupCall =
                 // An exception `Setup` stored rather than let escape is one the VM rethrows, which
                 // fails the launch; it gets the same loud failure as one that escaped.
@@ -554,7 +479,7 @@ module internal ProgramStartup =
                     failwith
                         $"Seeding AppContext threw an exception, which Setup caught and stored for the host to rethrow:\n%s{UnhandledExceptionReport.describeStored state exn}"
                 | None ->
-                    let state, phase = enterCommandLineInit state
-                    state, AfterStartupCall.Phase phase
+                    let state, initFrame = prepareCommandLineInit state
+                    installCall initFrame state, AfterStartupCall.Phase initialisingCommandLine
 
-            atPhase (installCall setupFrame state) (StartupPhase.SeedingAppContext onSeeded)
+            atPhase state (StartupPhase.SeedingAppContext onSeeded)
