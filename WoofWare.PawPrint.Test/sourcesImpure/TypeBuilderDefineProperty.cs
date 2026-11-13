@@ -8,9 +8,10 @@ using System.Reflection.Emit;
 // defined interleaved, so that their tokens are in definition order across the module; the flags the emitter keeps;
 // the signatures each calling convention gives; a duplicate, which the emitter does not look for; a property with
 // two getters and three other methods; the tokens `SetGetMethod` gives methods; a property of a generic type; and,
-// last, on a type of its own, a name the managed caller refuses only after the row is written. In module `Many`, the
-// same two getters and three other methods once the module holds 25 MethodSemantics rows, from which CoreCLR's
-// read-write metadata finds a property's rows through a hash, in reverse. Then an interface's property, a getter
+// last, flags of -1 on one type, and on another of lower TypeDef RID a name the managed caller refuses only after the
+// row is written. In modules `Fewer` and `Many`, the same two getters and three other methods once the module holds
+// 24 and 25 MethodSemantics rows: from 25, CoreCLR's read-write metadata finds a property's rows through a hash, in
+// reverse. Then an interface's property, a getter
 // that is a `MethodBuilder` of another module whose token names a method of this one, and the calls the managed
 // side refuses once a type is created. The test's terminal-state check reads `Props`' rows. Measured on .NET 10 to
 // exit 0.
@@ -43,6 +44,39 @@ public static class Program
 
     static string Names (MethodInfo[] methods) => string.Join (",", methods.Select (m => m.Name));
 
+    /// The token `TypeBuilder_DefineProperty` handed back, which `PropertyBuilder` keeps privately: it does
+    /// not override `MetadataToken`, which throws.
+    static int Token (PropertyBuilder property) =>
+        (int) property.GetType ().GetField ("m_tkProperty", BindingFlags.NonPublic | BindingFlags.Instance).GetValue (property);
+
+    /// A module whose property `P` has two getters and three other methods, and enough other properties of
+    /// one getter each that the module has `rows` MethodSemantics rows. Returns `P`'s getter and accessors.
+    static string Accessors (string name, int rows)
+    {
+        ModuleBuilder module = NewModule (name);
+        TypeBuilder m = module.DefineType ("M", TypeAttributes.Public);
+        PropertyBuilder p = m.DefineProperty ("P", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
+        MethodBuilder g1 = Constant (m, "g1", 1);
+        MethodBuilder o1 = Constant (m, "o1", 2);
+        MethodBuilder g2 = Constant (m, "g2", 3);
+        MethodBuilder o2 = Constant (m, "o2", 4);
+        MethodBuilder o3 = Constant (m, "o3", 5);
+        p.SetGetMethod (g1);
+        p.AddOtherMethod (o1);
+        p.SetGetMethod (g2);
+        p.AddOtherMethod (o2);
+        p.AddOtherMethod (o3);
+
+        for (int i = 0; i < rows - 5; i++)
+        {
+            PropertyBuilder filler = m.DefineProperty ("F" + i, PropertyAttributes.None, typeof (int), Type.EmptyTypes);
+            filler.SetGetMethod (Constant (m, "get_F" + i, i));
+        }
+
+        PropertyInfo info = m.CreateType ().GetProperty ("P");
+        return info.GetGetMethod (true).Name + ":" + Names (info.GetAccessors (true));
+    }
+
     public static int Main ()
     {
         ModuleBuilder props = NewModule ("Props");
@@ -61,7 +95,10 @@ public static class Program
             Type.EmptyTypes);
         PropertyBuilder p2 = a.DefineProperty ("P2", PropertyAttributes.None, CallingConventions.HasThis, typeof (long), Type.EmptyTypes);
 
-        if (q1.Attributes != (PropertyAttributes.SpecialName | PropertyAttributes.RTSpecialName | PropertyAttributes.HasDefault))
+        if (q1.Attributes != (PropertyAttributes.SpecialName | PropertyAttributes.RTSpecialName | PropertyAttributes.HasDefault)
+            || Token (p1) != 0x17000001
+            || Token (q1) != 0x17000002
+            || Token (p2) != 0x17000003)
         {
             return 1;
         }
@@ -114,8 +151,13 @@ public static class Program
         p2.AddOtherMethod (o3);
 
         // Properties 4 and 5: the emitter does not look for an existing row.
-        a.DefineProperty ("Dup", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
-        a.DefineProperty ("Dup", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
+        PropertyBuilder dup1 = a.DefineProperty ("Dup", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
+        PropertyBuilder dup2 = a.DefineProperty ("Dup", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
+
+        if (Token (dup1) != 0x17000004 || Token (dup2) != 0x17000005)
+        {
+            return 24;
+        }
 
         // Properties 6 to 8: a static property, an indexer, and one whose types are the module's own.
         FieldBuilder sField = a.DefineField ("s", typeof (int), FieldAttributes.Private | FieldAttributes.Static);
@@ -289,9 +331,20 @@ public static class Program
         {
         }
 
-        // Properties 11 to 13. The QCall reads the name to its first NUL and writes the row; the managed caller then
-        // refuses the name, but the row and its token stay.
+        // Property 11, of `Other` (TypeDef 9), with flags of -1, which `_SetPropertyProps` leaves unset; then
+        // properties 12 to 14, of `Named` (TypeDef 8), whose PropertyMap row therefore follows `Other`'s. The QCall
+        // reads the second name to its first NUL and writes the row; the managed caller then refuses the name, but
+        // the row and its token stay.
         TypeBuilder named = props.DefineType ("Named", TypeAttributes.Public);
+        TypeBuilder other = props.DefineType ("Other", TypeAttributes.Public);
+        PropertyBuilder allFlags = other.DefineProperty ("O", (PropertyAttributes) (-1), typeof (int), Type.EmptyTypes);
+        Type otherCreated = other.CreateType ();
+
+        if (Token (allFlags) != 0x1700000B || otherCreated.GetProperty ("O", All).Attributes != PropertyAttributes.None)
+        {
+            return 25;
+        }
+
         named.DefineProperty ("First", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
 
         try
@@ -307,41 +360,19 @@ public static class Program
         Type namedCreated = named.CreateType ();
 
         if (string.Join (",", namedCreated.GetProperties (All).Select (p => "'" + p.Name + "'@" + p.MetadataToken.ToString ("X8")))
-            != "'First'@1700000B,''@1700000C,'Last'@1700000D")
+            != "'First'@1700000C,''@1700000D,'Last'@1700000E")
         {
             return 18;
         }
 
-        // Module `Many`: P's five rows first, then twenty others, one getter each, making 25.
-        ModuleBuilder many = NewModule ("Many");
-        TypeBuilder m = many.DefineType ("M", TypeAttributes.Public);
-        PropertyBuilder mp = m.DefineProperty ("P", PropertyAttributes.None, typeof (int), Type.EmptyTypes);
-        MethodBuilder mg1 = Constant (m, "g1", 1);
-        MethodBuilder mo1 = Constant (m, "o1", 2);
-        MethodBuilder mg2 = Constant (m, "g2", 3);
-        MethodBuilder mo2 = Constant (m, "o2", 4);
-        MethodBuilder mo3 = Constant (m, "o3", 5);
-        mp.SetGetMethod (mg1);
-        mp.AddOtherMethod (mo1);
-        mp.SetGetMethod (mg2);
-        mp.AddOtherMethod (mo2);
-        mp.AddOtherMethod (mo3);
-
-        for (int i = 0; i < 20; i++)
-        {
-            PropertyBuilder filler = m.DefineProperty ("F" + i, PropertyAttributes.None, typeof (int), Type.EmptyTypes);
-            filler.SetGetMethod (Constant (m, "get_F" + i, i));
-        }
-
-        Type mCreated = m.CreateType ();
-        PropertyInfo mpInfo = mCreated.GetProperty ("P");
-
-        if (mpInfo.GetGetMethod (true).Name != "g1" || Names (mpInfo.GetAccessors (true)) != "g1,o3,o2,o1")
+        // Modules `Fewer` and `Many`, with 24 and 25 MethodSemantics rows: from 25, CoreCLR finds a property's rows
+        // through a hash, in reverse, so the first getter added is kept and the other methods are listed backwards.
+        if (Accessors ("Fewer", 24) != "g2:g2,o1,o2,o3")
         {
             return 19;
         }
 
-        if (mCreated.GetProperty ("F19").GetGetMethod ().Name != "get_F19")
+        if (Accessors ("Many", 25) != "g1:g1,o3,o2,o1")
         {
             return 20;
         }
