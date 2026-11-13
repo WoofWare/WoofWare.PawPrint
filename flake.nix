@@ -51,21 +51,21 @@
       runtimes = {
         net10 = {
           runtime = pkgs.dotnetCorePackages.runtime_10_0;
-          expectedRuntimeVersion = "10.0.12";
-          sourceRev = "4271d88e0aebf3d04f188f1334c2220d80555ef6"; # v10.0.12
-          sourceHash = "sha256-rSa1KZND+LRcz3iVLq0rzZx4KBmxFJ5tkj+Ums3cOOM=";
+          expectedRuntimeVersion = "10.0.14";
+          sourceRev = "6aa72daa24f66c01c3d7b6a32519e9d21396deec"; # v10.0.14
+          sourceHash = "sha256-LrCB4OS2gt1o1vs8VAQ4F6vlcY4Ki5Q5tLqGIFTV8IQ=";
           frameworkPackTfm = "net10.0";
-          linuxFrameworkHash = "sha256-iGni+5dLyBD/5AuPuOGLf/sdGgPlKglMgEZoxNeTsa4=";
-          osxFrameworkHash = "sha256-Lw5y/feerZHQ4a1JYOo6m966G3ywhGfj6tCkJ9H9Lgg=";
+          linuxFrameworkHash = "sha256-vNQNixJZ3HuIqItjiv8foVsVY9LPI3fqn3ZQ68QAXUA=";
+          osxFrameworkHash = "sha256-nBUUbXD+sj3httJwdFOTgPh3Bs8pOqwXMZAQWlW9ruc=";
         };
         net11 = {
           runtime = pkgs.dotnetCorePackages.runtime_11_0;
-          expectedRuntimeVersion = "11.0.0-rc.1.26425.128";
-          sourceRev = "ab19415702aa8139d5369e47c73edb47343c34ad"; # v11.0.0-rc.1.26425.128
-          sourceHash = "sha256-q9OZEYDuXnbTdi81CDsObuL+DyyOioRi7RqHIxYTjoA=";
+          expectedRuntimeVersion = "11.0.0-rc.3.26522.148";
+          sourceRev = "474ed963699fc29809015392738a15231aaae2de"; # v11.0.0-rc.3.26522.148
+          sourceHash = "sha256-FtLE/u+rAIDEngpvBlYvE6ya7c5sqBvbqsZ9AxKZazY=";
           frameworkPackTfm = "net11.0";
-          linuxFrameworkHash = "sha256-+oYmT/VOyfRO84M5ZnmQerKBlPSbXf4DIT8VoqGSJLY=";
-          osxFrameworkHash = "sha256-DNGYmohVcVwXZv4oJIhqiRC/jFhJdCORLIvJ1VrCIsM=";
+          linuxFrameworkHash = "sha256-bL4R72Q5zdk/z66LIxtQWfV13EoQxzn8V2Y/AjlACb0=";
+          osxFrameworkHash = "sha256-d2Yp46+6PhdAzXalW6YGTalQBFWdajcx7ZiZ2A4AioA=";
           aspNetCore = pkgs.dotnetCorePackages.aspnetcore_11_0;
         };
       };
