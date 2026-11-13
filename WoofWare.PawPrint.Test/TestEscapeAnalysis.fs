@@ -6138,123 +6138,17 @@ public static class Cases
         if not failures.IsEmpty then
             failures |> String.concat Environment.NewLine |> failwith
 
-    /// Whether the test host is a linux-x64 machine, whose own CoreLib is then the pinned linux-x64
-    /// one (`on a linux-x64 host, the host's CoreLib is the pinned linux-x64 one` checks it).
-    let private hostIsLinuxX64 : bool =
-        Runtime.InteropServices.RuntimeInformation.IsOSPlatform Runtime.InteropServices.OSPlatform.Linux
-        && Runtime.InteropServices.RuntimeInformation.ProcessArchitecture = Runtime.InteropServices.Architecture.X64
-
     /// The CoreLibs the CoreLib-wide tests read, the host's and the pinned linux-x64 one, each with
     /// the CPUs they answer for: one with no instruction sets, and one with every instruction set
-    /// whose class in that CoreLib is a placeholder. On a linux-x64 host the two CoreLibs are one,
-    /// so the host's alone is read.
+    /// whose class in that CoreLib is a placeholder. Both are read on every host: even on a
+    /// linux-x64 host, the host's CoreLib need not be the pinned one's build (nixpkgs builds .NET
+    /// from source).
     let coreLibsAndProfiles : TestCaseData list =
         [
-            for coreLib in
-                (if hostIsLinuxX64 then
-                     [ "host" ]
-                 else
-                     [ "host" ; "linux-x64" ]) do
+            for coreLib in [ "host" ; "linux-x64" ] do
                 for profile in [ "scalar-only" ; "every instruction set" ] do
                     TestCaseData(coreLib, profile).SetArgDisplayNames ($"%s{coreLib} CoreLib", $"%s{profile} CPU")
         ]
-
-    /// Everything the analysis can read of the CoreLib image at `path`: its metadata, each method's
-    /// body, and each field's initial data. The metadata has its MVID and every RVA zeroed, since two
-    /// builds of one CoreLib place their bodies and data differently.
-    let private coreLibContent (path : string) : byte[] * byte[] list * byte[] list =
-        use pe = new PEReader (File.OpenRead path)
-        let metadata = pe.GetMetadataReader ()
-        let block = pe.GetMetadata().GetContent().AsSpan().ToArray ()
-
-        let mvid = metadata.GetGuid(metadata.GetModuleDefinition().Mvid).ToByteArray ()
-
-        let mvidAt = block.AsSpan().IndexOf (ReadOnlySpan<byte> mvid)
-
-        if mvidAt < 0 then
-            failwith $"%s{path}'s metadata does not hold its own MVID"
-
-        Array.fill block mvidAt mvid.Length 0uy
-
-        // The RVA is the first column of both tables.
-        for table in [ TableIndex.MethodDef ; TableIndex.FieldRva ] do
-            let offset = metadata.GetTableMetadataOffset table
-            let rowSize = metadata.GetTableRowSize table
-
-            for row in 0 .. metadata.GetTableRowCount table - 1 do
-                Array.fill block (offset + row * rowSize) 4 0uy
-
-        let bytesAt (rva : int) (length : int) : byte[] =
-            pe.GetSectionData(rva).GetContent(0, length).AsSpan().ToArray ()
-
-        let bodies =
-            [
-                for handle in metadata.MethodDefinitions do
-                    let rva = metadata.GetMethodDefinition(handle).RelativeVirtualAddress
-
-                    if rva <> 0 then
-                        yield bytesAt rva (pe.GetMethodBody rva).Size
-            ]
-
-        // A field with initial data is of a primitive type or of a struct with an explicit size.
-        let dataSize (field : FieldDefinition) : int =
-            let mutable signature = metadata.GetBlobReader field.Signature
-            signature.ReadSignatureHeader () |> ignore<SignatureHeader>
-
-            match signature.ReadSignatureTypeCode () with
-            | SignatureTypeCode.Boolean
-            | SignatureTypeCode.SByte
-            | SignatureTypeCode.Byte -> 1
-            | SignatureTypeCode.Char
-            | SignatureTypeCode.Int16
-            | SignatureTypeCode.UInt16 -> 2
-            | SignatureTypeCode.Int32
-            | SignatureTypeCode.UInt32
-            | SignatureTypeCode.Single -> 4
-            | SignatureTypeCode.Int64
-            | SignatureTypeCode.UInt64
-            | SignatureTypeCode.Double -> 8
-            | SignatureTypeCode.TypeHandle ->
-                match signature.ReadTypeHandle () with
-                | handle when handle.Kind = HandleKind.TypeDefinition ->
-                    metadata.GetTypeDefinition(TypeDefinitionHandle.op_Explicit handle).GetLayout().Size
-                | handle -> failwith $"%s{path}: a field with initial data is of %A{handle.Kind}, not a TypeDef"
-            | other -> failwith $"%s{path}: a field with initial data is of %A{other}"
-
-        let data =
-            [
-                for handle in metadata.FieldDefinitions do
-                    let field = metadata.GetFieldDefinition handle
-                    let rva = field.GetRelativeVirtualAddress ()
-
-                    if rva <> 0 then
-                        yield bytesAt rva (dataSize field)
-            ]
-
-        block, bodies, data
-
-    /// What lets `coreLibsAndProfiles` read the host's CoreLib alone on a linux-x64 host.
-    [<Test>]
-    let ``on a linux-x64 host, the host's CoreLib is the pinned linux-x64 one`` () : unit =
-        if not hostIsLinuxX64 then
-            Assert.Ignore "The host is not linux-x64, so the CoreLib-wide tests read both CoreLibs."
-
-        let linux =
-            Path.Combine (FrameworkUnderTest.requireLinuxFrameworkDirectory (), "System.Private.CoreLib.dll")
-
-        let host =
-            Path.Combine (FrameworkUnderTest.sharedFrameworkDirectory (), "System.Private.CoreLib.dll")
-
-        let hostMetadata, hostBodies, hostData = coreLibContent host
-        let linuxMetadata, linuxBodies, linuxData = coreLibContent linux
-
-        // Not vacuous: CoreLib has tens of thousands of bodies, and some initial data.
-        hostBodies.Length |> shouldBeGreaterThan 10000
-        hostData.Length |> shouldBeGreaterThan 0
-
-        (hostMetadata = linuxMetadata) |> shouldEqual true
-        (hostBodies = linuxBodies) |> shouldEqual true
-        (hostData = linuxData) |> shouldEqual true
 
     /// A CoreLib the CoreLib-wide tests read, where to load the rest of its framework from, and the
     /// JIT target it was built for.

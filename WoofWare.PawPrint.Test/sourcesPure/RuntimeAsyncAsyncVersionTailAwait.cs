@@ -21,9 +21,9 @@ using System.Threading.Tasks;
 // between them, and `WriteAsyncInternal` at the offset of its `call Await`. Were the await of the
 // task the ordinary variant returns, the awaiter's `GetResult` would come between the two.
 //
-// Which of the awaiter's frames come before the local function depends on what the JIT inlined, so
-// the guest checks that a frame of `RuntimeAsyncTaskContinuation.GetResult` comes last before it,
-// and the trace from there onward.
+// The formatted trace hides the awaiter's frames and the dispatcher's, so it begins with the local
+// function; among the frames, the last the formatted trace hides before it, past the dispatcher's,
+// is a `RuntimeAsyncTaskContinuation.GetResult`.
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
@@ -84,6 +84,19 @@ public class Program
         }
     }
 
+    // Whether the frames before `resumed`, past the dispatcher's, end with the awaiter's `GetResult`.
+    // All of these are hidden from a formatted trace.
+    private static bool AwaiterResumes (StackFrame[] frames, int resumed)
+    {
+        int i = resumed - 1;
+        while (i >= 0 && (frames[i].GetMethod ().Name == "DispatchContinuations" || frames[i].GetMethod ().Name == "ResumeTaskContinuation"))
+            i--;
+
+        if (i < 0) return false;
+        var method = frames[i].GetMethod ();
+        return method.DeclaringType.FullName == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation" && method.Name == "GetResult";
+    }
+
     private static string Describe (StackFrame[] frames)
     {
         var text = new StringBuilder ();
@@ -100,8 +113,6 @@ public class Program
         "System.IO.StreamWriter::<FlushAsyncInternal>g__Core|82_0\n"
         + "System.IO.StreamWriter::WriteAsyncInternal\n"
         + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
-
-    private const string FormattedAwaiterNet11 = "   at System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation.GetResult";
 
     private const string FormattedNet11 =
         "   at System.IO.StreamWriter.<FlushAsyncInternal>g__Core|82_0(Boolean flushStream, Boolean flushEncoder, CancellationToken cancellationToken)\n"
@@ -138,15 +149,10 @@ public class Program
             // The frame of `WriteAsyncInternal` is at its `call Await`.
             if (frames[frames.Length - 2].GetILOffset () != 0x10B) return 9;
 
-            string newLine = Environment.NewLine;
             string formatted = new StackTrace (failure, false).ToString ().TrimEnd ();
-            string ending = newLine + FormattedNet11.Replace ("\n", newLine);
-            if (!formatted.EndsWith (ending, StringComparison.Ordinal)) return 10;
+            if (formatted != FormattedNet11.Replace ("\n", Environment.NewLine)) return 10;
 
-            string beforeEnding = formatted.Substring (0, formatted.Length - ending.Length);
-            int lastLine = beforeEnding.LastIndexOf (newLine, StringComparison.Ordinal);
-            string awaiter = lastLine < 0 ? beforeEnding : beforeEnding.Substring (lastLine + newLine.Length);
-            if (!awaiter.StartsWith (FormattedAwaiterNet11, StringComparison.Ordinal)) return 11;
+            if (!AwaiterResumes (frames, frames.Length - 3)) return 11;
         }
 
         return 0;

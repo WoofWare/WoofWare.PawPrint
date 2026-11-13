@@ -21,10 +21,16 @@
       pname = "WoofWare.PawPrint";
       version = "0.6";
       # Each runtime PawPrint emulates, and what the flake pins for it. The oldest one is the one
-      # the test host and every executable run on, and it alone supplies the SDK; a newer one is
-      # only ever a framework a guest runs on. See docs/plans/2026-09-10-multi-runtime-support.md.
+      # the test host and every executable run on; a newer one is only ever a framework a guest
+      # runs on. The newest one's SDK builds everything. See
+      # docs/plans/2026-09-10-multi-runtime-support.md.
       #
       # - `runtime` is nixpkgs's shared framework for that major.
+      # - `sdk` is nixpkgs's SDK for that major. It carries the runtime's shared frameworks
+      #   (`Microsoft.NETCore.App` and `Microsoft.AspNetCore.App`, which guests that run ASP.NET
+      #   Core bind) and its targeting and runtime packs, which the newest SDK builds against when
+      #   a project targets that major. Each of its frameworks' versions must equal
+      #   `expectedRuntimeVersion` too.
       # - `expectedRuntimeVersion` is the version we emulate. It must equal `runtime.version`
       #   (enforced by the `runtime-version-pin-<name>` checks below). For each runtime
       #   `EmulatedRuntime` has a case for, the same build is pinned in
@@ -45,40 +51,39 @@
       # - `frameworkPackTfm`, `linuxFrameworkHash` and `osxFrameworkHash` describe its linux-x64
       #   and osx-arm64 runtime packs (`frameworkPack` below). The TFM tracks the major version;
       #   each hash tracks `expectedRuntimeVersion`, so bump both in the same commit.
-      # - `aspNetCore`, on a runtime newer than the oldest, is nixpkgs's ASP.NET Core shared
-      #   framework at that runtime's version, which guests that run ASP.NET Core bind. The oldest
-      #   runtime's comes with the SDK. Its version must equal `expectedRuntimeVersion` too.
       runtimes = {
         net10 = {
           runtime = pkgs.dotnetCorePackages.runtime_10_0;
-          expectedRuntimeVersion = "10.0.12";
-          sourceRev = "4271d88e0aebf3d04f188f1334c2220d80555ef6"; # v10.0.12
-          sourceHash = "sha256-rSa1KZND+LRcz3iVLq0rzZx4KBmxFJ5tkj+Ums3cOOM=";
+          sdk = pkgs.dotnetCorePackages.sdk_10_0;
+          expectedRuntimeVersion = "10.0.14";
+          sourceRev = "6aa72daa24f66c01c3d7b6a32519e9d21396deec"; # v10.0.14
+          sourceHash = "sha256-LrCB4OS2gt1o1vs8VAQ4F6vlcY4Ki5Q5tLqGIFTV8IQ=";
           frameworkPackTfm = "net10.0";
-          linuxFrameworkHash = "sha256-iGni+5dLyBD/5AuPuOGLf/sdGgPlKglMgEZoxNeTsa4=";
-          osxFrameworkHash = "sha256-Lw5y/feerZHQ4a1JYOo6m966G3ywhGfj6tCkJ9H9Lgg=";
+          linuxFrameworkHash = "sha256-vNQNixJZ3HuIqItjiv8foVsVY9LPI3fqn3ZQ68QAXUA=";
+          osxFrameworkHash = "sha256-nBUUbXD+sj3httJwdFOTgPh3Bs8pOqwXMZAQWlW9ruc=";
         };
         net11 = {
           runtime = pkgs.dotnetCorePackages.runtime_11_0;
-          expectedRuntimeVersion = "11.0.0-rc.1.26425.128";
-          sourceRev = "ab19415702aa8139d5369e47c73edb47343c34ad"; # v11.0.0-rc.1.26425.128
-          sourceHash = "sha256-q9OZEYDuXnbTdi81CDsObuL+DyyOioRi7RqHIxYTjoA=";
+          sdk = pkgs.dotnetCorePackages.sdk_11_0;
+          expectedRuntimeVersion = "11.0.0-rc.3.26522.148";
+          sourceRev = "474ed963699fc29809015392738a15231aaae2de"; # v11.0.0-rc.3.26522.148
+          sourceHash = "sha256-FtLE/u+rAIDEngpvBlYvE6ya7c5sqBvbqsZ9AxKZazY=";
           frameworkPackTfm = "net11.0";
-          linuxFrameworkHash = "sha256-+oYmT/VOyfRO84M5ZnmQerKBlPSbXf4DIT8VoqGSJLY=";
-          osxFrameworkHash = "sha256-DNGYmohVcVwXZv4oJIhqiRC/jFhJdCORLIvJ1VrCIsM=";
-          aspNetCore = pkgs.dotnetCorePackages.aspnetcore_11_0;
+          linuxFrameworkHash = "sha256-bL4R72Q5zdk/z66LIxtQWfV13EoQxzn8V2Y/AjlACb0=";
+          osxFrameworkHash = "sha256-d2Yp46+6PhdAzXalW6YGTalQBFWdajcx7ZiZ2A4AioA=";
         };
       };
+      # Every runtime's SDK, newest first: `combinePackages` takes its `dotnet` muxer and so its
+      # SDK from the first, and every runtime's shared frameworks and packs from all of them. The
+      # Nix build and the devshell both use it, so the same muxer runs the test host and a guest
+      # on any runtime. It resolves the newest `hostfxr` present, so net10 apps start through
+      # net11's; `hostfxr` is the version-agnostic half of the host, which only selects a
+      # framework directory.
+      dotnet-sdk = pkgs.dotnetCorePackages.combinePackages [runtimes.net11.sdk runtimes.net10.sdk];
       # The oldest runtime, which the test host, the package and every executable run on.
-      dotnet-sdk = pkgs.dotnetCorePackages.sdk_10_0;
       dotnet-runtime = runtimes.net10.runtime;
       # Self-contained publishing targets, matching the flake's supported platforms.
       publishRids = ["linux-x64" "linux-arm64" "osx-arm64"];
-      # The devshell's one `dotnet`: the oldest runtime's SDK, with every newer runtime's shared
-      # frameworks beside it, so the same muxer runs the test host and a guest on any runtime. It
-      # resolves the newest `hostfxr` present, so net10 apps start through net11's; `hostfxr` is
-      # the version-agnostic half of the host, which only selects a framework directory.
-      dotnet-devshell = pkgs.dotnetCorePackages.combinePackages [dotnet-sdk runtimes.net11.runtime runtimes.net11.aspNetCore];
       # The Nix build's pinned packages and SDK packs for every supported publishing target.
       # NuGet can read these directly as a fallback folder without extracting them into
       # a writable cache. The source contains the metadata needed for version resolution.
@@ -346,9 +351,9 @@
                 echo "Bump ${name}'s sourceRev (to the public v<new> tag commit), sourceHash, expectedRuntimeVersion, linuxFrameworkHash and osxFrameworkHash, and EmulatedRuntime.pin in WoofWare.PawPrint.Domain/EmulatedRuntime.fs, together." >&2
                 exit 1
               ''
-              else if pin ? aspNetCore && pin.aspNetCore.version != pin.expectedRuntimeVersion
+              else if pin.sdk.runtime.version != pin.expectedRuntimeVersion || pin.sdk.aspnetcore.version != pin.expectedRuntimeVersion
               then ''
-                echo "ASP.NET Core pin drift for ${name}: nixpkgs provides ${pin.aspNetCore.version} but expectedRuntimeVersion = ${pin.expectedRuntimeVersion}." >&2
+                echo "SDK pin drift for ${name}: nixpkgs's SDK carries runtime ${pin.sdk.runtime.version} and ASP.NET Core ${pin.sdk.aspnetcore.version}, but expectedRuntimeVersion = ${pin.expectedRuntimeVersion}." >&2
                 exit 1
               ''
               else "touch $out"
@@ -357,7 +362,7 @@
       devShells = let
         # What both shells share. NuGet restores from its usual sources.
         shell = {
-          buildInputs = [dotnet-devshell];
+          buildInputs = [dotnet-sdk];
           DOTNET_CLI_TELEMETRY_OPTOUT = "1";
           # Each runtime's variables carry its name, and no unsuffixed name exists, so nothing can
           # read one runtime's pins believing them another's. Tests read them only through
@@ -375,12 +380,12 @@
           DOTNET_LINUX_FRAMEWORK_DIR_NET11 = frameworkPack "linux-x64" runtimes.net11.linuxFrameworkHash "net11" runtimes.net11;
           DOTNET_OSX_FRAMEWORK_DIR_NET10 = frameworkPack "osx-arm64" runtimes.net10.osxFrameworkHash "net10" runtimes.net10;
           DOTNET_OSX_FRAMEWORK_DIR_NET11 = frameworkPack "osx-arm64" runtimes.net11.osxFrameworkHash "net11" runtimes.net11;
-          # The net11 shared framework inside `dotnet-devshell`, as `dotnet --list-runtimes` names
+          # The net11 shared framework inside `dotnet-sdk`, as `dotnet --list-runtimes` names
           # it. The net10 one needs no variable: the test host runs on it, and finds it from its
           # own runtimeconfig.
-          DOTNET_FRAMEWORK_DIR_NET11 = "${dotnet-devshell.unwrapped}/share/dotnet/shared/Microsoft.NETCore.App/${runtimes.net11.expectedRuntimeVersion}";
-          # Likewise its ASP.NET Core shared framework, which net10's comes with the SDK.
-          DOTNET_ASPNETCORE_FRAMEWORK_DIR_NET11 = "${dotnet-devshell.unwrapped}/share/dotnet/shared/Microsoft.AspNetCore.App/${runtimes.net11.expectedRuntimeVersion}";
+          DOTNET_FRAMEWORK_DIR_NET11 = "${dotnet-sdk.unwrapped}/share/dotnet/shared/Microsoft.NETCore.App/${runtimes.net11.expectedRuntimeVersion}";
+          # Likewise its ASP.NET Core shared framework; the test host finds net10's beside its own.
+          DOTNET_ASPNETCORE_FRAMEWORK_DIR_NET11 = "${dotnet-sdk.unwrapped}/share/dotnet/shared/Microsoft.AspNetCore.App/${runtimes.net11.expectedRuntimeVersion}";
           # Force polling-based file watcher to avoid hangs in
           # FileSystemWatcher.StartRaisingEvents on macOS (FSEvents/CoreFoundation
           # path can deadlock under load when ASP.NET hosts created in tests

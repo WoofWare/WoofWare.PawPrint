@@ -110,16 +110,16 @@ module EmulatedRuntime =
             // `sync-dotnet-runtime` process establishes them.
             {
                 TargetFramework = "net10.0"
-                Build = RuntimeBuild.OfInformationalVersion "10.0.12-servicing.26422.108"
-                SourceRef = "v10.0.12"
-                SourceCommit = "4271d88e0aebf3d04f188f1334c2220d80555ef6"
+                Build = RuntimeBuild.OfInformationalVersion "10.0.14-servicing.26522.126"
+                SourceRef = "v10.0.14"
+                SourceCommit = "6aa72daa24f66c01c3d7b6a32519e9d21396deec"
             }
         | EmulatedRuntime.Net11 ->
             {
                 TargetFramework = "net11.0"
-                Build = RuntimeBuild.OfInformationalVersion "11.0.0-rc.1.26425.128"
-                SourceRef = "v11.0.0-rc.1.26425.128"
-                SourceCommit = "ab19415702aa8139d5369e47c73edb47343c34ad"
+                Build = RuntimeBuild.OfInformationalVersion "11.0.0-rc.3.26522.148"
+                SourceRef = "v11.0.0-rc.3.26522.148"
+                SourceCommit = "474ed963699fc29809015392738a15231aaae2de"
             }
 
     /// The supported runtime whose CoreLib states `coreLibMajor` as its `AssemblyVersion` major,

@@ -20,9 +20,11 @@ using System.Threading.Tasks;
 // and the dispatcher again, and a formatted trace shows that last frame, although the dispatcher
 // is hidden from traces, because it shows the last frame regardless.
 //
-// Which of the awaiter's frames come before that depends on what the JIT inlined: .NET 11's inlines
-// `RuntimeAsyncTaskContinuation.GetResult(ref byte)`, which PawPrint, inlining nothing, shows. So the
-// guest checks the trace from the dispatcher's first catch onward, and how it begins.
+// Which of the awaiter's frames come before that depends on what the JIT inlined, and the formatted
+// trace hides all of them and the dispatcher's first frame. So the guest checks the frames from the
+// dispatcher's first catch onward, and how they begin; that the last frame the formatted trace hides
+// before the method, past the dispatcher's, is a `RuntimeAsyncTaskContinuation.GetResult`; and the
+// formatted trace whole.
 //
 // The first exception was never thrown, so its trace begins where the awaiter throws it. The second
 // was thrown before the guest faulted the task with it, so its trace begins with that throw, and the
@@ -64,6 +66,19 @@ public class Program
 
     private static void Throwing () => throw new InvalidOperationException ("thrown before the fault");
 
+    // Whether the frames before `resumed`, past the dispatcher's, end with the awaiter's `GetResult`.
+    // All of these are hidden from a formatted trace.
+    private static bool AwaiterResumes (StackFrame[] frames, int resumed)
+    {
+        int i = resumed - 1;
+        while (i >= 0 && (frames[i].GetMethod ().Name == "DispatchContinuations" || frames[i].GetMethod ().Name == "ResumeTaskContinuation"))
+            i--;
+
+        if (i < 0) return false;
+        var method = frames[i].GetMethod ();
+        return method.DeclaringType.FullName == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation" && method.Name == "GetResult";
+    }
+
     private static string Describe (StackFrame[] frames)
     {
         var text = new StringBuilder ();
@@ -96,9 +111,6 @@ public class Program
 
     private const string CatchingNet10 = "System.Net.Http.HttpContent+<LoadIntoBufferAsyncCore>d__53::MoveNext\n";
 
-    private const string FormattedAwaiterNet11 =
-        "   at System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation.GetResult(Task task, Byte& result)\n";
-
     private const string FormattedResumedNet11 =
         "   at System.Net.Http.HttpContent.LoadIntoBufferAsyncCore(Task serializeToStreamTask, LimitArrayPoolWriteStream tempBuffer)\n"
         + "   at System.Runtime.CompilerServices.AsyncHelpers.RuntimeAsyncTask`1.DispatchContinuations()";
@@ -114,8 +126,8 @@ public class Program
     }
 
     // 0 if the trace of `rethrown` begins with `before` and then the awaiter's throw, formatted as
-    // `formattedBefore` and then the awaiter's first visible frame, and ends as the guest expects;
-    // otherwise the index of the first check that failed, counting from `first`.
+    // `formattedBefore` and then the resumed frames, and ends as the guest expects; otherwise the
+    // index of the first check that failed, counting from `first`.
     private static int Check (Exception rethrown, string before, string formattedBefore, int first)
     {
         bool net11 = Environment.Version.Major >= 11;
@@ -132,11 +144,10 @@ public class Program
             // The frame the runtime appended for the continuation is at the await.
             if (frames[frames.Length - 2].GetILOffset () != 7) return first + 3;
 
-            string newLine = Environment.NewLine;
+            if (!AwaiterResumes (frames, frames.Length - 2)) return first + 4;
+
             string formatted = new StackTrace (rethrown, false).ToString ().TrimEnd ();
-            string begins = (formattedBefore + FormattedAwaiterNet11).Replace ("\n", newLine);
-            if (!formatted.StartsWith (begins, StringComparison.Ordinal)) return first + 4;
-            if (!formatted.EndsWith (FormattedResumedNet11.Replace ("\n", newLine), StringComparison.Ordinal)) return first + 5;
+            if (formatted != (formattedBefore + FormattedResumedNet11).Replace ("\n", Environment.NewLine)) return first + 5;
         }
 
         return 0;

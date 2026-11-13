@@ -23,6 +23,9 @@ using System.Xml;
 // its call. Were the await of the task
 // the ordinary variant returns, `SwitchEncodingAsync` would have returned before anything
 // suspended, leaving no frame, and an awaiter's `GetResult` would come between the other two.
+// The formatted trace hides the awaiter's frames and the dispatcher's, so it begins with the three;
+// among the frames, the last it hides before them, past the dispatcher's, is a
+// `RuntimeAsyncTaskContinuation.GetResult`.
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
@@ -108,6 +111,19 @@ public class Program
         }
     }
 
+    // Whether the frames before `resumed`, past the dispatcher's, end with the awaiter's `GetResult`.
+    // All of these are hidden from a formatted trace.
+    private static bool AwaiterResumes (StackFrame[] frames, int resumed)
+    {
+        int i = resumed - 1;
+        while (i >= 0 && (frames[i].GetMethod ().Name == "DispatchContinuations" || frames[i].GetMethod ().Name == "ResumeTaskContinuation"))
+            i--;
+
+        if (i < 0) return false;
+        var method = frames[i].GetMethod ();
+        return method.DeclaringType.FullName == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation" && method.Name == "GetResult";
+    }
+
     private static string Describe (StackFrame[] frames)
     {
         var text = new StringBuilder ();
@@ -124,8 +140,6 @@ public class Program
         "System.Xml.XmlTextReaderImpl::ReadDataAsync\n"
         + "System.Xml.XmlTextReaderImpl::SwitchEncodingAsync\n"
         + "System.Xml.XmlTextReaderImpl::ParseXmlDeclarationAsync\n";
-
-    private const string FormattedAwaiterNet11 = "   at System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation.GetResult";
 
     private const string FormattedNet11 =
         "   at System.Xml.XmlTextReaderImpl.ReadDataAsync()\n"
@@ -183,16 +197,10 @@ public class Program
             int switching = IndexOfFrame (frames, "SwitchEncodingAsync");
             if (frames[switching].GetILOffset () != 0x51) return 13;
 
-            string newLine = Environment.NewLine;
             string formatted = new StackTrace (failure, false).ToString ();
-            string middle = FormattedNet11.Replace ("\n", newLine);
-            int at = formatted.IndexOf (middle, StringComparison.Ordinal);
-            if (at < 0) return 14;
+            if (!formatted.StartsWith (FormattedNet11.Replace ("\n", Environment.NewLine), StringComparison.Ordinal)) return 14;
 
-            string before = formatted.Substring (0, at).TrimEnd ();
-            int lastLine = before.LastIndexOf (newLine, StringComparison.Ordinal);
-            string awaiter = lastLine < 0 ? before : before.Substring (lastLine + newLine.Length);
-            if (!awaiter.StartsWith (FormattedAwaiterNet11, StringComparison.Ordinal)) return 15;
+            if (!AwaiterResumes (frames, IndexOfFrame (frames, "ReadDataAsync"))) return 15;
         }
 
         return 0;
