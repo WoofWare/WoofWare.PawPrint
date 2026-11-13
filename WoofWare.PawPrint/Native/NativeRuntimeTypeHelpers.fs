@@ -1268,6 +1268,90 @@ module NativeRuntimeTypeHelpers =
             failwith
                 $"TODO: %s{operation}: cannot instantiate method generic parameter #%i{position} of method %O{declaringMethod.Get} on %O{declaringType.TypeDefinition.Get}"
 
+    let private loadedTypeDefinition
+        (operation : string)
+        (state : IlMachineState)
+        (definition : ResolvedTypeIdentity)
+        : TypeInfo<GenericParamFromMetadata, TypeDefn>
+        =
+        state.LoadedAssembly definition.AssemblyFullName
+        |> Option.defaultWith (fun () ->
+            failwith
+                $"%s{operation}: assembly for open generic type definition is not loaded: %s{definition.AssemblyFullName}"
+        )
+        |> fun assembly -> assembly.TypeDefs.[definition.TypeDefinition.Get]
+
+    /// The first of an instantiation's arguments, by index, for which CoreCLR's class loader refuses
+    /// to create the instantiation at all (`Generics::CheckInstantiation`, generics.cpp, which
+    /// `ClassLoader::LoadTypeHandleForTypeKey` runs before any constraint check), and why. The check
+    /// walks the arguments in order and admits the instantiation at the first type variable, so no
+    /// argument after one is examined; an open construction or a generic type definition is not a
+    /// type variable, and the walk goes past it. A closed argument is judged as
+    /// `AllConcreteTypes.malformedArgument` judges it, at the runtime `baseClassTypes`' CoreLib
+    /// belongs to.
+    let malformedInstantiationArgument
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (arguments : RuntimeTypeHandleTarget list)
+        : (int * MalformedArgument) option
+        =
+        let rec walk (index : int) (remaining : RuntimeTypeHandleTarget list) : (int * MalformedArgument) option =
+            match remaining with
+            | [] -> None
+            | argument :: rest ->
+                match argument with
+                | RuntimeTypeHandleTarget.GenericParameter _
+                | RuntimeTypeHandleTarget.MethodGenericParameter _ -> None
+                | RuntimeTypeHandleTarget.Closed handle ->
+                    match
+                        AllConcreteTypes.malformedArgument baseClassTypes state.TypeSystem.ConcreteTypes [ handle ]
+                    with
+                    | Some (_, malformed) -> Some (index, malformed)
+                    | None -> walk (index + 1) rest
+                | RuntimeTypeHandleTarget.Composite (CompositeShape.Byref, _) -> Some (index, MalformedArgument.Byref)
+                | RuntimeTypeHandleTarget.Composite (CompositeShape.Pointer, _) ->
+                    Some (index, MalformedArgument.Pointer)
+                | RuntimeTypeHandleTarget.FunctionPointer _ -> Some (index, MalformedArgument.FunctionPointer)
+                | RuntimeTypeHandleTarget.Composite (CompositeShape.OneDimArrayZero, _)
+                | RuntimeTypeHandleTarget.Composite (CompositeShape.Array _, _)
+                | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
+                | RuntimeTypeHandleTarget.OpenConstructed _
+                | RuntimeTypeHandleTarget.DynamicMethodsClass _ -> walk (index + 1) rest
+
+        walk 0 arguments
+
+    /// The fields of the `TypeLoadException` CoreCLR's class loader raises when
+    /// `malformedInstantiationArgument` refuses an instantiation of `target`'s generic definition:
+    /// `Assembly::ThrowTypeLoadException` with `IDS_CLASSLOAD_INVALIDINSTANTIATION`, naming the
+    /// definition by its TypeDef's namespace and name alone (so a nested type without its enclosing
+    /// type) and its assembly by display name.
+    let invalidInstantiationExceptionFields
+        (operation : string)
+        (state : IlMachineState)
+        (target : RuntimeTypeHandleTarget)
+        : RuntimeExceptionField list
+        =
+        let definition = genericDefinitionToInstantiate operation state target
+        let typeInfo = loadedTypeDefinition operation state definition
+
+        // `SString::MakeFullNamespacePath` omits the separator for an empty namespace.
+        let typeName =
+            if typeInfo.Namespace = "" then
+                typeInfo.Name
+            else
+                $"%s{typeInfo.Namespace}.%s{typeInfo.Name}"
+
+        let assemblyName = definition.AssemblyFullName
+
+        [
+            RuntimeExceptionField.Message
+                $"The generic type '%s{typeName}' was used with an invalid instantiation in assembly '%s{assemblyName}'."
+            RuntimeExceptionField.TypeLoadClassName typeName
+            RuntimeExceptionField.TypeLoadAssemblyName assemblyName
+            // mscorrc/resource.h
+            RuntimeExceptionField.TypeLoadResourceId 0x1a59
+        ]
+
     /// Re-instantiate a `RuntimeTypeHandleTarget` with the given closed generic arguments. Closed
     /// concrete handles are canonicalised to their open generic definition before re-instantiation
     /// (matching CoreCLR's `genericType.GetCanonicalMethodTable().Instantiate(...)` step).
@@ -1294,6 +1378,9 @@ module NativeRuntimeTypeHelpers =
     /// closed gives the closed instantiation; otherwise the result is the open construction, in the
     /// canonical form `RuntimeTypeHandleTarget.openConstructed` gives it, so that the definition
     /// applied to its own formals is the definition itself.
+    ///
+    /// The caller must already have refused an instantiation `malformedInstantiationArgument`
+    /// refuses; one reaching here fails loudly.
     let instantiateGenericRuntimeTypeTargetOver
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -1318,13 +1405,13 @@ module NativeRuntimeTypeHelpers =
 
             RuntimeTypeHandleTarget.Closed handle, state
         | None ->
-            let typeInfo =
-                state.LoadedAssembly definition.AssemblyFullName
-                |> Option.defaultWith (fun () ->
-                    failwith
-                        $"%s{operation}: assembly for open generic type definition is not loaded: %s{definition.AssemblyFullName}"
-                )
-                |> fun assembly -> assembly.TypeDefs.[definition.TypeDefinition.Get]
+            let typeInfo = loadedTypeDefinition operation state definition
+
+            match malformedInstantiationArgument baseClassTypes state genericArguments with
+            | Some (index, malformed) ->
+                failwith
+                    $"BUG: %s{operation}: argument %i{index} of an open instantiation of %s{typeInfo.Namespace}.%s{typeInfo.Name} is %O{malformed}, which CoreCLR's class loader refuses; the caller must refuse it before instantiating"
+            | None -> ()
 
             if typeInfo.Generics.Length <> genericArguments.Length then
                 failwith

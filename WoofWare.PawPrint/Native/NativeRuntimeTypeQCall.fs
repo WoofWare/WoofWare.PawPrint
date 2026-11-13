@@ -480,15 +480,24 @@ module NativeRuntimeTypeQCall =
                         readTypeHandleInstantiationTarget ctx.BaseClassTypes operation state instantiationPointer index
                 ]
 
+            // The class loader refuses a malformed instantiation before it checks any constraint.
+            // From `MakeGenericType`, only .NET 10's `TypedReference` can be one: the managed
+            // `RuntimeType.MakeGenericType` screens pointers, function pointers, byrefs and `void`
+            // out (`ThrowIfTypeNeverValidGenericArgument`) before the QCall, and PawPrint interprets
+            // that BCL code like any other.
+            match malformedInstantiationArgument ctx.BaseClassTypes state genericArguments with
+            | Some _ ->
+                NativeHandlerResult.raiseExceptionWithFields
+                    ctx.BaseClassTypes.TypeLoadException
+                    (invalidInstantiationExceptionFields operation state typeHandleTarget)
+                    state
+                |> Some
+            | None ->
+
             // Validate the parameter list's constraints before instantiating: the special-constraint
             // flags (NotNullableValueTypeConstraint / ReferenceTypeConstraint /
             // DefaultConstructorConstraint), the `allows ref struct` rejection, and the base-type
             // and interface requirements from the GenericParamConstraint table.
-            //
-            // Pointers, byrefs and `void` never reach here: the managed `RuntimeType.MakeGenericType`
-            // screens them out (`SanityCheckGenericArguments` /
-            // `ThrowIfTypeNeverValidGenericArgument`) before the QCall, and PawPrint interprets that
-            // BCL code like any other.
             let state, constraintViolation =
                 match openGenericTypeInfoForValidation state typeHandleTarget with
                 | None -> state, None
