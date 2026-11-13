@@ -146,6 +146,16 @@ type MethodSpecRid =
         match this with
         | MethodSpecRid rid -> rid
 
+/// The RID of an emit scope's `GenericParam` row: its token, in the order the parameters were created.
+[<Struct>]
+type GenericParamRid =
+    internal
+    | GenericParamRid of int
+
+    member this.Rid : int =
+        match this with
+        | GenericParamRid rid -> rid
+
 /// ECMA-335 II.24.2.6's `ResolutionScope` coded index, for the targets an emit scope can hold.
 [<RequireQualifiedAccess>]
 type ResolutionScope =
@@ -177,6 +187,19 @@ type MemberRefParent =
 type MethodDefOrRef =
     | MethodDef of MethodDefRid
     | MemberRef of MemberRefRid
+
+/// ECMA-335 II.24.2.6's `TypeOrMethodDef` coded index: what owns a generic parameter.
+[<RequireQualifiedAccess>]
+type TypeOrMethodDef =
+    | TypeDef of TypeDefRid
+    | MethodDef of MethodDefRid
+
+    /// The coded index: the RID shifted left one bit, tagged 0 for a TypeDef and 1 for a MethodDef.
+    /// ECMA-335 II.22.20 sorts the `GenericParam` table by it.
+    member this.CodedIndex : int =
+        match this with
+        | TypeOrMethodDef.TypeDef rid -> (rid.Rid <<< 1) ||| 0
+        | TypeOrMethodDef.MethodDef rid -> (rid.Rid <<< 1) ||| 1
 
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
 type MetadataVersion =
@@ -310,6 +333,17 @@ type MethodSpecRow =
         Instantiation : BlobOffset
     }
 
+/// A `GenericParam` row (ECMA-335 II.22.20).
+type GenericParamRow =
+    {
+        /// The parameter's 0-based position among its owner's.
+        Number : uint16
+        /// Stored in a two-byte column.
+        Flags : GenericParameterAttributes
+        Owner : TypeOrMethodDef
+        Name : StringOffset
+    }
+
 type private ByteContentComparer () =
     interface IEqualityComparer<ImmutableArray<byte>> with
         member _.Equals (x : ImmutableArray<byte>, y : ImmutableArray<byte>) : bool =
@@ -357,6 +391,7 @@ type EmitScope =
             TypeSpecs : ImmutableList<TypeSpecRow>
             MethodImpls : ImmutableList<MethodImplRow>
             MethodSpecs : ImmutableList<MethodSpecRow>
+            GenericParams : ImmutableList<GenericParamRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -601,6 +636,7 @@ module EmitScope =
                 TypeSpecs = ImmutableList.Empty
                 MethodImpls = ImmutableList.Empty
                 MethodSpecs = ImmutableList.Empty
+                GenericParams = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -836,6 +872,65 @@ module EmitScope =
             TypeSpecs = scope.TypeSpecs.Add row
         }
 
+    /// <summary>
+    /// The owner of the scope's last <c>GenericParam</c> row, if a row owned by <paramref name="owner"/>
+    /// would sort before it in ECMA-335's order (by the owner's coded index), so that the image could not
+    /// hold the new row at the RID the scope would give it; <c>None</c> if it would not.
+    /// </summary>
+    let genericParamOrderConflict (owner : TypeOrMethodDef) (scope : EmitScope) : TypeOrMethodDef option =
+        // The rows are in owner order already, so the last has the greatest owner.
+        if scope.GenericParams.IsEmpty then
+            None
+        else
+            let last = scope.GenericParams.[scope.GenericParams.Count - 1].Owner
+
+            if owner.CodedIndex < last.CodedIndex then
+                Some last
+            else
+                None
+
+    /// <summary>
+    /// Add a <c>GenericParam</c> row, at the next RID, which is the token CoreCLR hands out for it.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope lacks the owner or the name; the flags do not fit the column's two bytes; the row's
+    /// number is not the count of rows its owner already has; or <c>genericParamOrderConflict</c> finds
+    /// a row the new one would sort before.
+    /// </exception>
+    let addGenericParam (row : GenericParamRow) (scope : EmitScope) : GenericParamRid * EmitScope =
+        let operation = "EmitScope.addGenericParam"
+
+        match row.Owner with
+        | TypeOrMethodDef.TypeDef rid -> requireRid operation "TypeDef" scope.TypeDefs.Count rid.Rid
+        | TypeOrMethodDef.MethodDef rid -> requireRid operation "MethodDef" scope.MethodDefs.Count rid.Rid
+
+        requireString operation scope row.Name
+
+        if int row.Flags < 0 || int row.Flags > 0xFFFF then
+            invalidArg (nameof row) $"%s{operation}: the flags 0x%x{int row.Flags} do not fit the column's two bytes"
+
+        let siblings =
+            scope.GenericParams
+            |> Seq.filter (fun other -> other.Owner = row.Owner)
+            |> Seq.length
+
+        if int row.Number <> siblings then
+            invalidArg
+                (nameof row)
+                $"%s{operation}: parameter %d{row.Number} of %O{row.Owner}, which has %d{siblings}; CoreCLR's managed callers create an owner's parameters once each, in position order"
+
+        match genericParamOrderConflict row.Owner scope with
+        | Some last ->
+            invalidArg
+                (nameof row)
+                $"%s{operation}: a parameter of %O{row.Owner} (coded index %d{row.Owner.CodedIndex}) would sort before the last row's owner %O{last} (coded index %d{last.CodedIndex}), so the image could not hold it at the RID the scope would give it"
+        | None -> ()
+
+        GenericParamRid (scope.GenericParams.Count + 1),
+        { scope with
+            GenericParams = scope.GenericParams.Add row
+        }
+
     /// Adds a `MethodImpl` row. Nothing hands out its RID: the image sorts the table by class.
     let addMethodImpl (row : MethodImplRow) (scope : EmitScope) : EmitScope =
         let operation = "EmitScope.addMethodImpl"
@@ -885,6 +980,7 @@ module EmitScope =
     let standAloneSigs (scope : EmitScope) : ImmutableList<StandAloneSigRow> = scope.StandAloneSigs
     let typeSpecs (scope : EmitScope) : ImmutableList<TypeSpecRow> = scope.TypeSpecs
     let methodSpecs (scope : EmitScope) : ImmutableList<MethodSpecRow> = scope.MethodSpecs
+    let genericParams (scope : EmitScope) : ImmutableList<GenericParamRow> = scope.GenericParams
 
     /// In the order they were added, which is not the image's: the image sorts them by class.
     let interfaceImpls (scope : EmitScope) : ImmutableList<InterfaceImplRow> = scope.InterfaceImpls

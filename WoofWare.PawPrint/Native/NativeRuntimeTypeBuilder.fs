@@ -741,6 +741,95 @@ module NativeRuntimeTypeBuilder =
             let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
 
             NativeHandlerResult.completed state |> Some
+        | "TypeBuilder_DefineGenericParam",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.UInt16)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection",
+                                                        "GenericParameterAttributes",
+                                                        attributesGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty && attributesGenerics.IsEmpty
+            ->
+            let operation = "TypeBuilder_DefineGenericParam"
+
+            if instruction.Arguments.Length <> 6 then
+                failwith $"%s{operation}: expected six native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+
+            let name =
+                match NativeCall.managedPointerOfPointerArgument operation "name" instruction.Arguments.[1] with
+                | ManagedPointerSource.Null ->
+                    failwith
+                        $"%s{operation}: a null parameter name; the managed caller's DefineGenericParameters refuses one"
+                | namePtr -> NativeCall.readNullTerminatedUtf16 operation ctx.BaseClassTypes state namePtr
+
+            let ownerToken = NativeCall.int32Argument operation instruction.Arguments.[2]
+
+            // `RuntimeTypeBuilder.CreateTypeNoLock` passes the declaring type's TypeDef token for a type's
+            // parameter, and the declaring method's MethodDef token for a method's.
+            let owner =
+                match ownerToken >>> 24 &&& 0xFF with
+                | 0x02 ->
+                    match EmitScope.tryTypeDefRid (ownerToken &&& 0x00FFFFFF) held with
+                    | Some typeDef -> TypeOrMethodDef.TypeDef typeDef
+                    | None ->
+                        failwith
+                            $"%s{operation}: the owner 0x%08x{ownerToken} names no TypeDef row of the module's scope"
+                | 0x06 ->
+                    failwith
+                        $"TODO: %s{operation}: %s{name} is a parameter of the method 0x%08x{ownerToken} of %s{moduleName}, which a generic MethodBuilder adds when it is given its token; PawPrint adds only a generic type's parameters"
+                | _ ->
+                    failwith
+                        $"%s{operation}: the owner 0x%08x{ownerToken} is neither a TypeDef nor a MethodDef token, and the managed caller passes only its builder's"
+
+            let attributes = NativeCall.int32Argument operation instruction.Arguments.[3]
+            let position = NativeCall.int32Argument operation instruction.Arguments.[4]
+
+            if position < 0 || position > 0xFFFF then
+                failwith
+                    $"%s{operation}: position %d{position} of %s{name} does not fit the GenericParam table's two-byte Number column, and the managed caller passes an index into its parameters"
+
+            // The managed caller passes the constraints' tokens, the interfaces' then the base type's,
+            // ended by a nil token, and the nil token alone for a parameter without constraints.
+            match
+                NativeCall.managedPointerOfPointerArgument operation "pConstraintTokens" instruction.Arguments.[5]
+            with
+            | ManagedPointerSource.Null ->
+                failwith
+                    $"TODO: %s{operation}: %s{name} has a null constraint array, which RegMeta::_SetGenericParamProps reads as leaving the constraints as they are; the managed caller passes a nil-terminated array, and PawPrint does not model a null one"
+            | constraints ->
+                let first = int32AtPointer operation ctx.BaseClassTypes state constraints
+
+                if first &&& 0x00FFFFFF <> 0 then
+                    failwith
+                        $"TODO: %s{operation}: %s{name} of %s{moduleName} has the constraint 0x%08x{first}, for which CoreCLR adds a GenericParamConstraint row; an emit scope has no GenericParamConstraint table yet"
+
+            match EmitScopeDefinitions.defineGenericParam owner (uint16 position) attributes name held with
+            | GenericParamDefinition.OutOfOrder (owner, last) ->
+                failwith
+                    $"TODO: %s{operation}: %s{name} of %O{owner} (coded index %d{owner.CodedIndex}) of %s{moduleName} would sort before the last GenericParam row, of %O{last} (coded index %d{last.CodedIndex}); CoreCLR numbers generic parameters in the order they are created, and an image sorted by owner cannot hold this one at that RID"
+            | GenericParamDefinition.Defined (rid, extended) ->
+                let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+                state
+                |> IlMachineState.pushToEvalStack
+                    (CliType.Numeric (CliNumericType.Int32 (0x2A000000 ||| rid.Rid)))
+                    ctx.Thread
+                |> NativeHandlerResult.completed
+                |> Some
         | "TypeBuilder_TermCreateClass",
           "System.Private.CoreLib",
           "System.Reflection.Emit",
@@ -793,33 +882,47 @@ module NativeRuntimeTypeBuilder =
             let typeInfo =
                 assembly.TypeDefs.[System.Reflection.Metadata.Ecma335.MetadataTokens.TypeDefinitionHandle created.Rid]
 
-            if not typeInfo.Generics.IsEmpty then
+            // CoreCLR's class loader checks each parameter's variance when it loads the type, which
+            // PawPrint's loader does not.
+            match EmitScopeDefinitions.unmodelledVariance created held with
+            | Some (UnmodelledVariance.BothVarianceBits parameter) ->
                 failwith
-                    $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName} has generic parameters, which a dynamic module's scope cannot yet hold"
+                    $"TODO: %s{operation}: GenericParam 0x%08x{0x2A000000 ||| parameter.Rid} of %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName} has both variance bits set; PawPrint does not model what CoreCLR's class loader does with it"
+            | Some (UnmodelledVariance.VariantOfNonInterface parameter) ->
+                failwith
+                    $"TODO: %s{operation}: GenericParam 0x%08x{0x2A000000 ||| parameter.Rid} of %s{typeInfo.Namespace}.%s{typeInfo.Name} of %s{moduleName} is covariant or contravariant, and the type is not an interface; CoreCLR throws TypeLoadException from CreateType for a class and loads a delegate, and PawPrint models neither"
+            | None -> ()
+
+            let isGeneric =
+                EmitScope.genericParams held
+                |> Seq.exists (fun row -> row.Owner = TypeOrMethodDef.TypeDef created)
 
             // CoreCLR's `LoadTypeHandleForTypeKey` loads the type fully here, raising
             // `TypeLoadException` for a type it rejects. PawPrint, as for any type, builds the type's
             // layout when it is first needed, and refuses there what CoreCLR would reject; a guest
             // that catches `TypeLoadException` from `CreateType` is not modelled.
-            let stk =
-                LoadedTypeInfo.signatureTypeKind ctx.BaseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
+            let state, target =
+                if isGeneric then
+                    // CoreCLR hands back the typical type: the generic type definition.
+                    state, RuntimeTypeHandleTarget.OpenGenericTypeDefinition typeInfo.Identity
+                else
+                    let stk =
+                        LoadedTypeInfo.signatureTypeKind ctx.BaseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
 
-            let state, handle =
-                IlMachineState.concretizeType
-                    ctx.LoggerFactory
-                    ctx.BaseClassTypes
-                    state
-                    moduleName
-                    ImmutableArray.Empty
-                    ImmutableArray.Empty
-                    (TypeDefn.FromDefinition (typeInfo.Identity, stk))
+                    let state, handle =
+                        IlMachineState.concretizeType
+                            ctx.LoggerFactory
+                            ctx.BaseClassTypes
+                            state
+                            moduleName
+                            ImmutableArray.Empty
+                            ImmutableArray.Empty
+                            (TypeDefn.FromDefinition (typeInfo.Identity, stk))
+
+                    state, RuntimeTypeHandleTarget.Closed handle
 
             let runtimeType, state =
-                IlMachineState.getOrAllocateType
-                    ctx.LoggerFactory
-                    ctx.BaseClassTypes
-                    (RuntimeTypeHandleTarget.Closed handle)
-                    state
+                IlMachineState.getOrAllocateType ctx.LoggerFactory ctx.BaseClassTypes target state
 
             let state =
                 IlMachineState.writeManagedByrefWithBase

@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -1343,3 +1343,170 @@ it (vm/commodule.cpp) and its callers in `RuntimeModuleBuilder.cs`:
 
 * A member of an instantiation of the module's own generic `TypeBuilder`, once `CreateType` can add its
   `GenericParam` rows.
+
+### 5l: a generic type's parameters
+
+5f's MethodDef parent, 5j's field of an instantiation of a created generic type and 5k's member of an
+instantiation of the module's own generic `TypeBuilder` each need a generic type or method that can be
+created, and an emit scope has no `GenericParam` table. Read from `RuntimeTypeBuilder.CreateTypeNoLock` and
+`DefineGenericParametersCore`, `RuntimeMethodBuilder.GetToken` and `GetTokenNoLock`,
+`RuntimeGenericTypeParameterBuilder`, `TypeBuilder_DefineGenericParam` (vm/comdynamic.cpp),
+`RegMeta::DefineGenericParam` and `_SetGenericParamProps` (md/compiler/emit.cpp), and `CMiniMdRW`'s
+`FindGenericParamHelper` and `PreSave` (md/enc/metamodelrw.cpp):
+
+* `DefineGenericParameters` makes the parameters' builders and calls nothing native, and a parameter's
+  `MetadataToken` is 0 until it has a row. A type's parameters get their rows in `CreateType`, after
+  `SetParentType` and before the default constructor and the methods' bodies: one
+  `TypeBuilder_DefineGenericParam` each, in position order. A method's parameters get theirs when the
+  method is given its token (`GetTokenNoLock`), straight after its `DefineMethod` and before
+  `SetMethodImpl`. That can be long before `CreateType`: emitting a call to the method gives it its token,
+  and so does asking for it, and giving a method its token first gives one to each earlier method of its
+  type.
+* Each call passes the name, the owner's TypeDef or MethodDef token, the attributes, the position, and the
+  constraint tokens, the interfaces' and then the base type's, ended by a nil token. A parameter without
+  constraints passes the nil token alone, never a null array. The managed caller has asked for each
+  constraint's token first, so the TypeRefs and TypeSpecs they name exist.
+* `RegMeta::DefineGenericParam` looks for a row with the same owner and number only under
+  `MDDupGenericParam`, which a dynamic module does not set (vm/assembly.cpp sets `MDDupDefault` and five
+  others), so it always adds a row. `_SetGenericParamProps` sets the name only if it is not empty, which
+  stores what interning the empty string would; sets the flags unless they are `-1`, truncated to the
+  column's 16 bits; and adds one `GenericParamConstraint` row for each constraint token, in the order
+  given.
+* The read-write metadata keeps the table in the order its rows were added, and finds an owner's rows by
+  scanning or through a virtual sort; only `PreSave`, which a module being saved goes through, sorts it by
+  owner. So a parameter's token is its place in the order of creation, whoever owns it, and reflection over
+  the created type reports the same token.
+* A parameter's builder makes its row once: it sets `m_hasBeenCreated` before returning, and a retried
+  `CreateType` creates only parameters not yet created.
+
+Measured on .NET 10 with a throwaway probe:
+
+* `Box<T, U>` (TypeDef 3), with `T : class, new(), IComparable<T>` and
+  `U : Exception, IDisposable, IFormattable, IMark` (`IMark` a created interface of the module): `T` is
+  `0x2A000001` and `U` is `0x2A000002`, each 0 before `CreateType`, and the created type's parameters report
+  the same tokens and attributes. `U`'s constraints come back as the three interfaces, then `Exception`, and
+  the constraints' TypeRefs were added as ``IComparable`1``, `IDisposable`, `IFormattable`, `Exception`, after
+  `DefineType`'s `object`.
+* `A<T>` (TypeDef 2) created after `B<U, V>` (TypeDef 3): `U`, `V` and `T` are `0x2A000001` to `0x2A000003`,
+  and reflection reports the same. Sorted by owner, `T` would be row 1.
+* `C<T>` whose one method is `M<U>` (MethodDef 1), created without asking for `M`'s token: `T` is
+  `0x2A000001` and `U` is `0x2A000002`, where ECMA-335's order puts `U` (owner coded index 3) before `T` (4).
+  Asking for `M`'s token before `CreateType` makes `U` `0x2A000001` there and then. With a non-generic
+  method before `M`, which makes `M` MethodDef 2 (coded index 5), creation order and owner order agree.
+* System.Reflection.Metadata refuses an image whose GenericParam table is not in owner order and not
+  declared sorted ("Metadata table GenericParam not sorted"). Declared sorted, it reads the image, and gives
+  the wrong parameters for a type.
+* Attributes of `-1` store 0, and `0x10004` stores 4. An empty name is accepted. A covariant parameter of a
+  class makes `CreateType` throw `TypeLoadException` ("declares a covariant or contravariant type parameter
+  and is not an interface or delegate"); one of an interface loads. A `CreateType` that throws (for an
+  abstract method of a class that is not abstract) and is retried leaves the parameter's token as it was,
+  and the next parameter created is the next row.
+
+So the image carries CoreCLR's tokens exactly when the parameters are created in owner order. The work
+splits in four, each its own PR:
+
+1. **5l: a type's parameters, without constraints.** The GenericParam table; `TypeBuilder_DefineGenericParam`
+   for a TypeDef owner and no constraint token; and `TypeBuilder_TermCreateClass` handing back a generic type
+   definition. It lifts none of 5f's, 5j's or 5k's refusals, but makes the last two reachable by a guest
+   that runs through them.
+2. **Constraints**: the GenericParamConstraint table.
+3. **A generic `MethodBuilder`**: MethodDef owners, with which 5f's MethodDef parent reaches a guest. Its
+   commonest shape is out of owner order (the third measurement), so it reopens the first decision below.
+4. **A reference from a module into itself**: 5k's member of an instantiation of the module's own generic
+   `TypeBuilder` and 5j's field of an instantiation of a created generic type, translating a signature from
+   the module into itself, where `ImportTypeDef` keeps each TypeDef token. It needs only 1.
+
+### 5l: the decisions
+
+Taken 2026-11-13. Each keeps 5l a strict prefix of what a later stage may need, so that lifting a
+refusal is a deletion.
+
+* **Parameters created out of owner order are refused by name.** CoreCLR's token is the creation order,
+  and the image must be in owner order (SRM refuses it otherwise, measured). The scope's RID is the
+  creation index, which is the token, and no row ever moves, a created type's included, so the reader,
+  the loader and the extension check see an ordinary sorted table. The rule is one Domain function,
+  `EmitScope.genericParamOrderConflict`: a row is admitted only if its owner's `TypeOrMethodDef` coded
+  index is at least that of the scope's last row. The writer's assertion that the table is sorted is in
+  one place too. Nothing new reads `GenericParameter.Handle` as a token, and nothing new calls SRM's
+  `GetGenericParameters`; the terminal-state check reads the scope's rows through
+  `EmitScope.genericParams`. The alternatives, translating the token and writing creation order, are
+  under "left to later stages", for the stage that adds method owners.
+* **The rows are a table appended in creation order.** `EmitScope.addGenericParam` checks what a row
+  names, that its flags fit their two bytes, that its number is the count of rows its owner already has
+  (CoreCLR's managed callers create an owner's parameters once each, in position order), and the order
+  rule, and refuses loudly otherwise. The alternative, each owner holding its parameters and the writer
+  deriving the table, would make the RID handed out depend on rows added later, and lose the creation
+  order.
+* **The owner is a `TypeOrMethodDef` union with both of ECMA-335's cases**, and Domain and Loader are
+  total over it: the writer and the generators cover MethodDef owners, read back through SRM's
+  `MethodDefinition.GetGenericParameters`, and `EmitScopeExtension.violations` counts a method's
+  parameter as its declaring type's for `AddedToCreatedType`. Only the QCall handler refuses a MethodDef
+  owner, by name.
+* **The order is checked where the row is defined.** `EmitScopeDefinitions.defineGenericParam` answers
+  `Defined` with the RID and the scope, or `OutOfOrder` with the requested owner and the last row's,
+  which the handler refuses with a TODO naming both and their coded indexes. `addGenericParam` asserts
+  the same, and the writer fails on an unsorted table. The extension check gets a positional
+  `RowChanged` and `AddedToCreatedType` for GenericParam, and no moved-row case.
+* **Constraints wait for their own stage.** The handler refuses by name a non-nil first constraint token,
+  and a null constraint pointer, which `_SetGenericParamProps` reads as leaving the constraints as they
+  are. The flags of the special constraints (`class`, `struct`, `new()`) are admitted.
+* **The flags are stored as CoreCLR stores them**: 0 for `-1`, and otherwise the low 16 bits (measured).
+* **`TypeBuilder_TermCreateClass` hands back the generic type definition**,
+  `RuntimeTypeHandleTarget.OpenGenericTypeDefinition`, as CoreCLR returns the typical type, where it
+  concretizes a type without parameters.
+* **A variant parameter of a type that is not an interface is refused by name at `TermCreateClass`,
+  delegates included.** CoreCLR throws `TypeLoadException` from `CreateType` for a class (measured) and
+  loads a delegate, and PawPrint models neither. A parameter with both variance bits (`attrs &&& 3 = 3`)
+  is refused on any type. `EmitScopeDefinitions.unmodelledVariance` finds either.
+
+### 5l: the oracle
+
+* The generator draws GenericParam rows for types and methods, in owner order and numbered after their
+  owner's others, so the image's round trip (each row by RID, and each owner's
+  `GetGenericParameters`) and the extension properties cover the table.
+* Properties: `defineGenericParam` and `addGenericParam` admit exactly the rows a model of the order rule
+  admits, the latter refusing loudly what the former answers `OutOfOrder`; `addGenericParam` admits
+  exactly a number equal to the count of the owner's rows; the flags and name are stored as CoreCLR
+  stores them; and `unmodelledVariance` finds exactly the parameter a model finds.
+* Real .NET's emitter, in the test host, over generated generic interfaces with generated names and
+  attributes: each parameter's token, and the name, position and attributes reflection reports for the
+  created type's parameter, are the scope's row.
+* `TestEmitScopeExtension`: a parameter added to a created type, or to one of its methods, is
+  `AddedToCreatedType`, and a changed row is `RowChanged` at its RID.
+* `TypeBuilderDefineGenericParam.cs`, which exits 0 on .NET 10, defines `Plain`, `Box<T, U>` with
+  `U : class, new()` as flags, and `IOut<out V>`; checks the tokens are 0 before `CreateType` and
+  `0x2A000001` to `0x2A000003` after, equal to those of the created types' parameters, with their names,
+  positions and attributes; and makes `Box<int, object>`, creates one and calls `Id(42)`. Its
+  terminal-state check reads the GenericParam rows. Nothing needed parking.
+* `TestTypeBuilderGenericParamRefusals` runs a guest for each refusal by name: a type created after one
+  with a higher TypeDef RID, a constraint, a generic method's parameter, a covariant parameter of a class,
+  and both variance bits on an interface.
+
+### 5l: left to later stages
+
+* Constraints: one GenericParamConstraint row for each token, the interfaces' then the base type's,
+  which `GetGenericParameterConstraints` reports in that order (measured). While parameters are created
+  in owner order, their constraints are added in parameter order, so the table is sorted by
+  construction.
+* A generic `MethodBuilder`, whose parameters get their rows when the method gets its token, and with it
+  5f's MethodDef parent. Its commonest shape is out of owner order (the third measurement), so that stage
+  chooses again between the order rule and two candidates, both strict extensions of 5l:
+  * *B, translate the token.* The scope keeps the creation order and the image sorts the rows stably by
+    owner; every place a dynamic module's GenericParam token crosses into or out of the guest translates
+    it (`RuntimeType.MetadataToken` of a parameter, `MetadataImport`'s `GetGenericParamProps` and
+    `GetParentToken`, later a custom attribute's parent and a constraint's owner), and `Assembly.read`
+    learns the permutation, keeping CoreCLR's token where `TypeInfo.Generics` now keeps the handle. A
+    missed crossing is a silently wrong token.
+  * *F, write creation order and index it ourselves.* The image holds the rows in creation order, the
+    table declared sorted so that SRM opens it, and PawPrint builds its own owner-to-rows index in one
+    pass per `Assembly.read`, replacing SRM's owner range lookup at its four call sites
+    (`TypeInfo.fs:619`, `MethodInfo.fs:1620` and `:1639`, `FieldInfo.fs:245`, all feeding
+    `GenericParameter.readAll`). The index is oracled against SRM over real, sorted assemblies. It makes a
+    sorted bit untruthful, and SRM's by-RID accessors on a table declared sorted but not sorted must be
+    measured before choosing it (only `GetGenericParameters` was measured, and it gives wrong rows).
+* A reference from a module into itself: 5k's member of an instantiation of the module's own generic
+  `TypeBuilder` and 5j's field of an instantiation of a created generic type, now able to run.
+* Types created out of TypeDef order, which the order rule refuses.
+* A variant parameter of a class or a delegate, and both variance bits.
+* A custom attribute on a parameter, which `CreateType` writes with the parameter's token straight after
+  its row; an emit scope has no CustomAttribute table yet.

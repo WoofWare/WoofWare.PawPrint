@@ -19,6 +19,34 @@ type TypeDefDefinition =
     /// </summary>
     | Duplicate of TypeDefRid
 
+/// <summary>
+/// The outcome of asking CoreCLR's emitter to define a generic parameter in a dynamic module's scope
+/// (<c>RegMeta::DefineGenericParam</c>).
+/// </summary>
+[<RequireQualifiedAccess>]
+type GenericParamDefinition =
+    /// A new <c>GenericParam</c> row, and the scope that holds it.
+    | Defined of GenericParamRid * EmitScope
+    /// <summary>
+    /// Nothing is added: a row owned by <c>owner</c> would sort before the scope's last row, owned by
+    /// <c>last</c>, in ECMA-335's order. CoreCLR adds it, numbered in the order of creation, and an image
+    /// sorted by owner cannot give it that RID.
+    /// </summary>
+    | OutOfOrder of owner : TypeOrMethodDef * last : TypeOrMethodDef
+
+/// <summary>
+/// A generic parameter whose variance PawPrint does not model when its type is created.
+/// </summary>
+[<RequireQualifiedAccess>]
+type UnmodelledVariance =
+    /// Both variance bits are set, which names no variance.
+    | BothVarianceBits of GenericParamRid
+    /// <summary>
+    /// The parameter is covariant or contravariant, and its type is not an interface: CoreCLR raises
+    /// <c>TypeLoadException</c> from <c>CreateType</c> for a class, and loads a delegate.
+    /// </summary>
+    | VariantOfNonInterface of GenericParamRid
+
 /// What an exception clause's handler is (ECMA-335 II.19), as <c>TypeBuilder_SetMethodIL</c> writes the
 /// clause's flags and its class token or filter offset.
 [<RequireQualifiedAccess>]
@@ -354,6 +382,72 @@ module EmitScopeDefinitions =
                     little classToken 4
 
         builder.ToImmutable ()
+
+    /// <summary>
+    /// Define a generic parameter of <paramref name="owner"/>, as <c>RegMeta::DefineGenericParam</c> does
+    /// in a dynamic module, whose emitter does not check for a duplicate (<c>MDDupGenericParam</c> is not
+    /// set): a new row, at the next RID, holding the name, and the flags as
+    /// <c>_SetGenericParamProps</c> stores them, 0 for <c>-1</c> and otherwise their low 16 bits. Nothing
+    /// is added if the row would sort before the scope's last (<c>EmitScope.genericParamOrderConflict</c>).
+    /// </summary>
+    let defineGenericParam
+        (owner : TypeOrMethodDef)
+        (number : uint16)
+        (flags : int)
+        (name : string)
+        (scope : EmitScope)
+        : GenericParamDefinition
+        =
+        match EmitScope.genericParamOrderConflict owner scope with
+        | Some last -> GenericParamDefinition.OutOfOrder (owner, last)
+        | None ->
+            // `_SetGenericParamProps` leaves an empty name unset, which reads back as interning it would.
+            let name, scope = EmitScope.internString name scope
+
+            let flags =
+                if flags = -1 then
+                    enum<GenericParameterAttributes> 0
+                else
+                    enum<GenericParameterAttributes> (flags &&& 0xFFFF)
+
+            let rid, scope =
+                EmitScope.addGenericParam
+                    {
+                        Number = number
+                        Flags = flags
+                        Owner = owner
+                        Name = name
+                    }
+                    scope
+
+            GenericParamDefinition.Defined (rid, scope)
+
+    /// <summary>
+    /// The first generic parameter of <paramref name="typeDef"/>, in RID order, whose variance PawPrint
+    /// does not model when the type is created, if it has one.
+    /// </summary>
+    let unmodelledVariance (typeDef : TypeDefRid) (scope : EmitScope) : UnmodelledVariance option =
+        let isInterface =
+            match EmitScope.tryTypeDefRid typeDef.Rid scope with
+            | Some _ -> (EmitScope.typeDefs scope).[typeDef.Rid - 1].Flags.HasFlag TypeAttributes.Interface
+            | None ->
+                invalidArg
+                    (nameof typeDef)
+                    $"EmitScopeDefinitions.unmodelledVariance: TypeDef %d{typeDef.Rid} is not in the scope"
+
+        EmitScope.genericParams scope
+        |> Seq.indexed
+        |> Seq.tryPick (fun (index, row) ->
+            if row.Owner <> TypeOrMethodDef.TypeDef typeDef then
+                None
+            else
+                match row.Flags &&& GenericParameterAttributes.VarianceMask with
+                | GenericParameterAttributes.VarianceMask ->
+                    Some (UnmodelledVariance.BothVarianceBits (GenericParamRid (index + 1)))
+                | GenericParameterAttributes.None -> None
+                | _ when isInterface -> None
+                | _ -> Some (UnmodelledVariance.VariantOfNonInterface (GenericParamRid (index + 1)))
+        )
 
     /// <summary>
     /// Set a method's implementation flags, as <c>RegMeta::SetMethodImplFlags</c> does: the low 16

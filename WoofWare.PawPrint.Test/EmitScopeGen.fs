@@ -56,6 +56,9 @@ module EmitScopeGen =
         /// An instantiation of a method or method reference already in the scope, if it has any; never
         /// of no type arguments.
         | MethodSpec of method : int * arguments : int list
+        /// A generic parameter of a type or method already in the scope whose row would not sort before
+        /// the scope's last `GenericParam` row, if it has one, numbered after its owner's others.
+        | GenericParam of owner : int * name : string * flags : int
 
     type private Applied =
         {
@@ -136,6 +139,18 @@ module EmitScopeGen =
             ParameterAttributes.In
             ParameterAttributes.Out
             ParameterAttributes.Optional
+        ]
+
+    let genericParamFlagChoices : GenericParameterAttributes list =
+        [
+            GenericParameterAttributes.None
+            GenericParameterAttributes.Covariant
+            GenericParameterAttributes.Contravariant
+            GenericParameterAttributes.Covariant
+            ||| GenericParameterAttributes.Contravariant
+            GenericParameterAttributes.ReferenceTypeConstraint
+            ||| GenericParameterAttributes.DefaultConstructorConstraint
+            GenericParameterAttributes.NotNullableValueTypeConstraint
         ]
 
     let genBody : Gen<BodyShape> =
@@ -226,6 +241,13 @@ module EmitScopeGen =
                 Gen.listOfLength 2 choice
                 |> Gen.bind Gen.subListOf
                 |> Gen.map3 (fun m first rest -> Op.MethodSpec (m, first :: List.ofSeq rest)) choice choice
+                3,
+                gen {
+                    let! owner = choice
+                    let! name = genName
+                    let! flags = choice
+                    return Op.GenericParam (owner, name, flags)
+                }
             ]
 
     let pick (choice : int) (items : 'a list) : 'a option =
@@ -323,6 +345,32 @@ module EmitScopeGen =
             ]
             |> ImmutableArray.CreateRange
             |> Some
+
+    /// The owners a new `GenericParam` row may have: every type and method of the scope whose row would
+    /// not sort before the scope's last `GenericParam` row.
+    let genericParamOwners (scope : EmitScope) : TypeOrMethodDef list =
+        let last =
+            EmitScope.genericParams scope
+            |> Seq.tryLast
+            |> Option.map (fun row -> row.Owner.CodedIndex)
+
+        [
+            for i in 1 .. (EmitScope.typeDefs scope).Count do
+                yield TypeOrMethodDef.TypeDef (TypeDefRid i)
+            for i in 1 .. (EmitScope.methodDefs scope).Count do
+                yield TypeOrMethodDef.MethodDef (MethodDefRid i)
+        ]
+        |> List.filter (fun owner ->
+            match last with
+            | None -> true
+            | Some last -> owner.CodedIndex >= last
+        )
+
+    /// How many `GenericParam` rows the scope gives this owner.
+    let genericParamCount (owner : TypeOrMethodDef) (scope : EmitScope) : int =
+        EmitScope.genericParams scope
+        |> Seq.filter (fun row -> row.Owner = owner)
+        |> Seq.length
 
     let private intern (value : string) (applied : Applied) : StringOffset * Applied =
         let offset, scope = EmitScope.internString value applied.Scope
@@ -626,6 +674,21 @@ module EmitScopeGen =
                     withScope (EmitScope.setMethodBody method filled applied.Scope) applied
                 | Some _
                 | None -> applied
+        | Op.GenericParam (ownerChoice, name, flags) ->
+            match pick ownerChoice (genericParamOwners scope) with
+            | None -> applied
+            | Some owner ->
+                let name, applied = intern name applied
+
+                let row : GenericParamRow =
+                    {
+                        Number = uint16 (genericParamCount owner scope)
+                        Flags = (pick flags genericParamFlagChoices).Value
+                        Owner = owner
+                        Name = name
+                    }
+
+                withScope (EmitScope.addGenericParam row applied.Scope |> snd) applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
@@ -733,6 +796,9 @@ module EmitScopeGen =
             for i in 1 .. reader.GetTableRowCount TableIndex.MethodSpec do
                 let r = reader.GetMethodSpecification (MetadataTokens.MethodSpecificationHandle i)
                 yield (TableIndex.MethodSpec, i), box (token r.Method, blob r.Signature)
+            for i in 1 .. reader.GetTableRowCount TableIndex.GenericParam do
+                let r = reader.GetGenericParameter (MetadataTokens.GenericParameterHandle i)
+                yield (TableIndex.GenericParam, i), box (token r.Parent, r.Index, r.Attributes, heap r.Name)
         ]
         |> Map.ofList
 
