@@ -49,9 +49,9 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 /// form PawPrint's loader reads like any assembly on disk.
 ///
 /// Every RID in the image is the one the scope gave its row, except in `InterfaceImpl` and `MethodImpl`,
-/// which ECMA-335 requires to be sorted and which are sorted stably by class. `GenericParam` must be
-/// sorted by owner too, and the scope holds its rows in that order already, so the writer fails on a
-/// scope whose rows are not. A child table whose rows are
+/// which ECMA-335 requires to be sorted and which are sorted stably by class. `GenericParam` and
+/// `GenericParamConstraint` must be sorted by owner too, and the scope holds their rows in that order
+/// already, so the writer fails on a scope whose rows are not. A child table whose rows are
 /// not grouped by parent, or whose parameters are not in sequence order within their method, gets a
 /// pointer table (`FieldPtr`, `MethodPtr`, `ParamPtr`), as CoreCLR's read-write metadata starts one, so the table stream is always the uncompressed `#-` kind, the only one
 /// that may hold pointer tables. Every heap offset is the one the scope handed out.
@@ -152,6 +152,15 @@ module EmitScopeImage =
                 failwith
                     $"EmitScopeImage: GenericParam row %d{i + 1}'s owner %O{rows.[i].Owner} sorts before row %d{i}'s owner %O{rows.[i - 1].Owner}, so no image can hold the rows at the scope's RIDs"
 
+    /// ECMA-335 II.22.21 requires `GenericParamConstraint` sorted by owner, and SRM's reader refuses it
+    /// otherwise. The scope adds a parameter's constraints only with the parameter, so a scope whose rows
+    /// are out of that order was built by something else.
+    let private requireGenericParamConstraintsSorted (rows : ImmutableList<GenericParamConstraintRow>) : unit =
+        for i in 1 .. rows.Count - 1 do
+            if rows.[i].Owner.Rid < rows.[i - 1].Owner.Rid then
+                failwith
+                    $"EmitScopeImage: GenericParamConstraint row %d{i + 1}'s owner, GenericParam %d{rows.[i].Owner.Rid}, sorts before row %d{i}'s, GenericParam %d{rows.[i - 1].Owner.Rid}, so no image can hold the rows at the scope's RIDs"
+
     let private stringHeap (scope : EmitScope) : BlobBuilder =
         let heap = BlobBuilder ()
         heap.WriteByte 0uy
@@ -250,6 +259,8 @@ module EmitScopeImage =
 
         let genericParams = EmitScope.genericParams scope
         requireGenericParamsSorted genericParams
+        let genericParamConstraints = EmitScope.genericParamConstraints scope
+        requireGenericParamConstraintsSorted genericParamConstraints
 
         let rowCounts = Array.zeroCreate tableCount
         rowCounts.[int TableIndex.Module] <- 1
@@ -270,6 +281,7 @@ module EmitScopeImage =
         rowCounts.[int TableIndex.AssemblyRef] <- (EmitScope.assemblyRefs scope).Count
         rowCounts.[int TableIndex.MethodSpec] <- (EmitScope.methodSpecs scope).Count
         rowCounts.[int TableIndex.GenericParam] <- genericParams.Count
+        rowCounts.[int TableIndex.GenericParamConstraint] <- genericParamConstraints.Count
 
         let stringSize = if largeStrings then 4 else 2
         let guidSize = if largeGuids then 4 else 2
@@ -473,6 +485,11 @@ module EmitScopeImage =
         for row in EmitScope.methodSpecs scope do
             methodDefOrRef "MethodSpec.Method" row.Method
             blob "MethodSpec.Instantiation" row.Instantiation
+
+        // GenericParamConstraint (II.22.21)
+        for row in genericParamConstraints do
+            index TableIndex.GenericParam "GenericParamConstraint.Owner" row.Owner.Rid
+            typeDefOrRef "GenericParamConstraint.Constraint" (Some row.Constraint)
 
         // The header (II.24.2.6), then the rows above, which are in table-number order.
         let stream = BlobBuilder ()

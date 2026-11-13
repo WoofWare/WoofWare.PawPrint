@@ -29,12 +29,21 @@ module TestEmitScopeExtension =
     let private rowNumber (handle : EntityHandle) : int = MetadataTokens.GetRowNumber handle
 
     /// A type's or method's generic parameters as the image holds them: each row's RID, which is its
-    /// token, and its columns.
+    /// token, its columns, and its constraints, each constraint row's RID and the type it names.
     let private genericParamsView (reader : MetadataReader) (parameters : GenericParameterHandleCollection) =
         [
             for p in parameters do
                 let row = reader.GetGenericParameter p
-                yield rowNumber (GenericParameterHandle.op_Implicit p), row.Index, row.Attributes, row.Name
+
+                let constraints =
+                    [
+                        for c in row.GetConstraints () do
+                            yield
+                                rowNumber (GenericParameterConstraintHandle.op_Implicit c),
+                                token (reader.GetGenericParameterConstraint c).Type
+                    ]
+
+                yield rowNumber (GenericParameterHandle.op_Implicit p), row.Index, row.Attributes, row.Name, constraints
         ]
 
     /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its
@@ -698,6 +707,7 @@ module TestEmitScopeExtension =
     /// parameter of the type, and a first of MethodDef 2, either of which the scope admits next.
     let private withGenericParam
         (flags : Reflection.GenericParameterAttributes)
+        (constraints : TypeDefOrRef list)
         : EmitScope * GenericParamRow * GenericParamRow
         =
         let scope = apply Guid.Empty []
@@ -742,6 +752,7 @@ module TestEmitScopeExtension =
                 { parameter (TypeOrMethodDef.TypeDef owner) 0us with
                     Flags = flags
                 }
+                constraints
                 scope
             |> snd
 
@@ -750,12 +761,12 @@ module TestEmitScopeExtension =
     [<Test>]
     let ``a generic parameter added to a created type or one of its methods is refused`` () : unit =
         let before, ofMethod, ofType =
-            withGenericParam Reflection.GenericParameterAttributes.None
+            withGenericParam Reflection.GenericParameterAttributes.None []
 
         let owner = TypeDefRid 2
         let created = ImmutableHashSet.Create owner
-        let toMethod = EmitScope.addGenericParam ofMethod before |> snd
-        let toType = EmitScope.addGenericParam ofType before |> snd
+        let toMethod = EmitScope.addGenericParam ofMethod [] before |> snd
+        let toType = EmitScope.addGenericParam ofType [] before |> snd
 
         EmitScopeExtension.violations ImmutableHashSet.Empty before toType
         |> shouldEqual []
@@ -782,12 +793,75 @@ module TestEmitScopeExtension =
 
     [<Test>]
     let ``a changed generic parameter is reported at its RID`` () : unit =
-        let before, _, _ = withGenericParam Reflection.GenericParameterAttributes.None
-        let after, _, _ = withGenericParam Reflection.GenericParameterAttributes.Covariant
+        let before, _, _ = withGenericParam Reflection.GenericParameterAttributes.None []
+
+        let after, _, _ =
+            withGenericParam Reflection.GenericParameterAttributes.Covariant []
 
         for createdTypes in [ ImmutableHashSet.Empty ; ImmutableHashSet.Create (TypeDefRid 2) ] do
             EmitScopeExtension.violations createdTypes before after
             |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.GenericParam, 1) ]
+
+    [<Test>]
+    let ``a constraint added with a parameter of a created type or one of its methods is refused`` () : unit =
+        // One constraint row before, so that the new rows are at positions 2 and 3.
+        let before, ofMethod, ofType =
+            withGenericParam Reflection.GenericParameterAttributes.None [ TypeDefOrRef.TypeDef (TypeDefRid 1) ]
+
+        let owner = TypeDefRid 2
+        let created = ImmutableHashSet.Create owner
+
+        let constraints =
+            [ TypeDefOrRef.TypeDef owner ; TypeDefOrRef.TypeDef (TypeDefRid 1) ]
+
+        let toMethod = EmitScope.addGenericParam ofMethod constraints before |> snd
+        let toType = EmitScope.addGenericParam ofType constraints before |> snd
+
+        for after in [ toType ; toMethod ] do
+            EmitScopeExtension.violations ImmutableHashSet.Empty before after
+            |> shouldEqual []
+
+            // Another type's being created does not fix this one's parameters' constraints.
+            EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 1)) before after
+            |> shouldEqual []
+
+            // A method's parameter's constraint belongs to the method's declaring type.
+            EmitScopeExtension.violations created before after
+            |> shouldEqual
+                [
+                    EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParam, 2, owner)
+                    EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParamConstraint, 2, owner)
+                    EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.GenericParamConstraint, 3, owner)
+                ]
+
+    [<Test>]
+    let ``a changed constraint is reported at its RID`` () : unit =
+        let constrained (targets : TypeDefOrRef list) =
+            let scope, _, _ =
+                withGenericParam Reflection.GenericParameterAttributes.None targets
+
+            scope
+
+        let before =
+            constrained [ TypeDefOrRef.TypeDef (TypeDefRid 1) ; TypeDefOrRef.TypeDef (TypeDefRid 2) ]
+
+        let changed =
+            constrained [ TypeDefOrRef.TypeDef (TypeDefRid 1) ; TypeDefOrRef.TypeDef (TypeDefRid 1) ]
+
+        let dropped = constrained [ TypeDefOrRef.TypeDef (TypeDefRid 1) ]
+
+        for createdTypes in [ ImmutableHashSet.Empty ; ImmutableHashSet.Create (TypeDefRid 2) ] do
+            EmitScopeExtension.violations createdTypes before changed
+            |> shouldEqual
+                [
+                    EmitScopeExtensionViolation.RowChanged (TableIndex.GenericParamConstraint, 2)
+                ]
+
+            EmitScopeExtension.violations createdTypes before dropped
+            |> shouldEqual
+                [
+                    EmitScopeExtensionViolation.RowChanged (TableIndex.GenericParamConstraint, 2)
+                ]
 
     [<Test>]
     let ``a user string added is an extension, and one rewritten is refused`` () : unit =

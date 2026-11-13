@@ -387,14 +387,17 @@ module EmitScopeDefinitions =
     /// Define a generic parameter of <paramref name="owner"/>, as <c>RegMeta::DefineGenericParam</c> does
     /// in a dynamic module, whose emitter does not check for a duplicate (<c>MDDupGenericParam</c> is not
     /// set): a new row, at the next RID, holding the name, and the flags as
-    /// <c>_SetGenericParamProps</c> stores them, 0 for <c>-1</c> and otherwise their low 16 bits. Nothing
-    /// is added if the row would sort before the scope's last (<c>EmitScope.genericParamOrderConflict</c>).
+    /// <c>_SetGenericParamProps</c> stores them, 0 for <c>-1</c> and otherwise their low 16 bits; then one
+    /// <c>GenericParamConstraint</c> row for each of <paramref name="constraints"/>, in that order,
+    /// repeats included. Nothing is added if the row would sort before the scope's last
+    /// (<c>EmitScope.genericParamOrderConflict</c>).
     /// </summary>
     let defineGenericParam
         (owner : TypeOrMethodDef)
         (number : uint16)
         (flags : int)
         (name : string)
+        (constraints : TypeDefOrRef list)
         (scope : EmitScope)
         : GenericParamDefinition
         =
@@ -418,6 +421,7 @@ module EmitScopeDefinitions =
                         Owner = owner
                         Name = name
                     }
+                    constraints
                     scope
 
             GenericParamDefinition.Defined (rid, scope)

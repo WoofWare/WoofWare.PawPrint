@@ -45,6 +45,14 @@ module TestEmitScopeImage =
         |> Seq.map (fun (i, _) -> i + 1)
         |> List.ofSeq
 
+    /// The RIDs of the scope's `GenericParamConstraint` rows that this parameter owns, in RID order.
+    let private constraintsOwnedBy (owner : int) (scope : EmitScope) : int list =
+        EmitScope.genericParamConstraints scope
+        |> Seq.indexed
+        |> Seq.filter (fun (_, row) -> row.Owner.Rid = owner)
+        |> Seq.map (fun (i, _) -> i + 1)
+        |> List.ofSeq
+
     let private checkString
         (scope : EmitScope)
         (reader : MetadataReader)
@@ -377,6 +385,30 @@ module TestEmitScopeImage =
             token actual.Parent |> shouldEqual (typeOrMethodDefToken expected.Owner)
             checkString scope reader expected.Name actual.Name
 
+            actual.GetConstraints ()
+            |> Seq.map (fun h ->
+                MetadataTokens.GetRowNumber (GenericParameterConstraintHandle.op_Implicit h : EntityHandle)
+            )
+            |> List.ofSeq
+            |> shouldEqual (constraintsOwnedBy i scope)
+
+        // The constraints are added with their parameter, so they too are in owner order already.
+        let constraints = EmitScope.genericParamConstraints scope
+
+        reader.GetTableRowCount TableIndex.GenericParamConstraint
+        |> shouldEqual constraints.Count
+
+        for i in 1 .. constraints.Count do
+            let expected = constraints.[i - 1]
+
+            let actual =
+                reader.GetGenericParameterConstraint (MetadataTokens.GenericParameterConstraintHandle i)
+
+            MetadataTokens.GetRowNumber (GenericParameterHandle.op_Implicit actual.Parameter : EntityHandle)
+            |> shouldEqual expected.Owner.Rid
+
+            token actual.Type |> shouldEqual (typeDefOrRefToken expected.Constraint)
+
         // Nothing the scope cannot hold.
         for table in
             [
@@ -384,7 +416,6 @@ module TestEmitScopeImage =
                 TableIndex.CustomAttribute
                 TableIndex.ModuleRef
                 TableIndex.NestedClass
-                TableIndex.GenericParamConstraint
                 TableIndex.Property
                 TableIndex.Event
             ] do
@@ -507,6 +538,52 @@ module TestEmitScopeImage =
         |> Seq.filter (fun s -> ownedBy true s && ownedBy false s)
         |> Seq.length
         |> shouldBeGreaterThan 20
+
+        // And constraints of each kind, a parameter constrained to one target twice, and a parameter
+        // with several constraints.
+        let constrainedTo (kind : TypeDefOrRef -> bool) (s : EmitScope) =
+            EmitScope.genericParamConstraints s
+            |> Seq.exists (fun row -> kind row.Constraint)
+
+        for kind in
+            [
+                (fun target ->
+                    match target with
+                    | TypeDefOrRef.TypeDef _ -> true
+                    | _ -> false
+                )
+                (fun target ->
+                    match target with
+                    | TypeDefOrRef.TypeRef _ -> true
+                    | _ -> false
+                )
+                (fun target ->
+                    match target with
+                    | TypeDefOrRef.TypeSpec _ -> true
+                    | _ -> false
+                )
+            ] do
+            scopes
+            |> Seq.filter (constrainedTo kind)
+            |> Seq.length
+            |> shouldBeGreaterThan 20
+
+        let perParameter (s : EmitScope) =
+            EmitScope.genericParamConstraints s |> Seq.countBy (fun row -> row.Owner)
+
+        scopes
+        |> Seq.filter (fun s -> perParameter s |> Seq.exists (fun (_, n) -> n > 1))
+        |> Seq.length
+        |> shouldBeGreaterThan 20
+
+        scopes
+        |> Seq.filter (fun s ->
+            EmitScope.genericParamConstraints s
+            |> Seq.countBy id
+            |> Seq.exists (fun (_, n) -> n > 1)
+        )
+        |> Seq.length
+        |> shouldBeGreaterThan 5
 
     /// How a method row with no body read back.
     [<RequireQualifiedAccess>]

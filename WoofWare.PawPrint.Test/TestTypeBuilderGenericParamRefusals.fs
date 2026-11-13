@@ -7,7 +7,8 @@ open WoofWare.PawPrint
 
 /// The generic parameters `TypeBuilder_DefineGenericParam` and `TypeBuilder_TermCreateClass` refuse,
 /// each by name, although real .NET defines each of them (measured on .NET 10, but for the type it
-/// refuses to load). `sourcesImpure/TypeBuilderDefineGenericParam.cs` is the ones they define.
+/// refuses to load). `sourcesImpure/TypeBuilderDefineGenericParam.cs` and
+/// `sourcesImpure/TypeBuilderGenericParamConstraints.cs` are the ones they define.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestTypeBuilderGenericParamRefusals =
@@ -81,19 +82,6 @@ public class Program
 
         exc.Message
         |> shouldContainText "would sort before the last GenericParam row, of TypeDef (TypeDefRid 3) (coded index 6)"
-
-    [<Test>]
-    let ``a parameter with a constraint is refused`` () : unit =
-        let exc =
-            runRefused
-                "GenericParamConstraint.cs"
-                """
-        TypeBuilder box = module.DefineType("Box", TypeAttributes.Public);
-        box.DefineGenericParameters("T")[0].SetInterfaceConstraints(typeof(IDisposable));
-        box.CreateType();"""
-
-        exc.Message
-        |> shouldContainText "for which CoreCLR adds a GenericParamConstraint row"
 
     [<Test>]
     let ``a generic method's parameter is refused`` () : unit =
