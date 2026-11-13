@@ -121,6 +121,13 @@ static class Program
         // element only once the rank has been accepted.
         if (Refused(typeof(void), 33, "System.Void" + rank33, coreLib, ElementMessage("System.Void" + rank33, coreLib, "System.Void"), 0x1777) is int r10) return 190 + r10;
         if (Refused(typeof(OverLimit), 33, "OverLimit" + rank33, here, TooManyDimensions("OverLimit" + rank33, here), 0x1785) is int r11) return 200 + r11;
+        // Above rank 64 the type-key renderer spells the rank as a number instead of commas
+        // (`TypeNameBuilder::AddArray`), which also keeps the name short for any rank.
+        string rank64 = "[" + new string(',', 63) + "]";
+        if (Refused(typeof(int), 64, "System.Int32" + rank64, coreLib, TooManyDimensions("System.Int32" + rank64, coreLib), 0x1785) is int r14) return 230 + r14;
+        if (Refused(typeof(int), 65, "System.Int32[65]", coreLib, TooManyDimensions("System.Int32[65]", coreLib), 0x1785) is int r15) return 240 + r15;
+        if (Refused(typeof(int), int.MaxValue, "System.Int32[2147483647]", coreLib, TooManyDimensions("System.Int32[2147483647]", coreLib), 0x1785) is int r16) return 250 + r16;
+        if (Refused(typeof(void), 65, "System.Void[65]", coreLib, ElementMessage("System.Void[65]", coreLib, "System.Void"), 0x1777) is int r17) return 260 + r17;
 
         // The size refusal names the element rather than the array.
         if (Refused(typeof(OverLimit), 2, "OverLimit", here, $"Array of type 'OverLimit' from assembly '{here}' cannot be created because base value type is too large.", 0x177b) is int r12) return 210 + r12;

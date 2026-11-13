@@ -377,7 +377,9 @@ public unsafe class FnPtrHolder<T>
 
     /// Every array kind is checked over the whole corpus. Rank 1 is here twice over, as the szarray
     /// `T[]` and as the general array `T[*]`, which the type loader validates alike but names
-    /// differently; 32 and 33 are the two sides of `MAX_RANK`.
+    /// differently; 32 and 33 are the two sides of `MAX_RANK`; 64 and 65 are the two sides of
+    /// the type-key renderer's switch from commas to a numeral, and `Int32.MaxValue` is the
+    /// largest rank a guest can ask for.
     let private arrayKinds : ArrayTypeKind list =
         [
             ArrayTypeKind.SzArray
@@ -385,6 +387,9 @@ public unsafe class FnPtrHolder<T>
             ArrayTypeKind.MultiDim 2
             ArrayTypeKind.MultiDim 32
             ArrayTypeKind.MultiDim 33
+            ArrayTypeKind.MultiDim 64
+            ArrayTypeKind.MultiDim 65
+            ArrayTypeKind.MultiDim Int32.MaxValue
         ]
 
     /// The host's verdict: `None` if the array type loads, else the refusal and the type string
