@@ -2724,7 +2724,7 @@ module IlMachineRuntimeMetadata =
             | _ -> false
 
         // `TypeHandle::IsValueType` of a constraint that is neither a variable nor an interface.
-        let isValueTypeConstraint (target : RuntimeTypeHandleTarget) : bool =
+        let isValueTypeConstraint (state : IlMachineState) (target : RuntimeTypeHandleTarget) : bool =
             match target with
             | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle) ->
                 match tryGetConcreteTypeInfo state handle with
@@ -2745,7 +2745,7 @@ module IlMachineRuntimeMetadata =
             | RuntimeTypeHandleTarget.MethodGenericParameter _ ->
                 failwith $"logic error: isValueTypeConstraint asked about the type variable %O{target}"
 
-        let isNullableConstraint (target : RuntimeTypeHandleTarget) : bool =
+        let isNullableConstraint (state : IlMachineState) (target : RuntimeTypeHandleTarget) : bool =
             match nominalInstantiation state target with
             | Some (identity, _) -> identity = baseClassTypes.Nullable.Identity
             | None -> false
@@ -2799,8 +2799,8 @@ module IlMachineRuntimeMetadata =
                     match required with
                     | SpecialConstraint.NotNullableValueType ->
                         state,
-                        isValueTypeConstraint constraintTarget
-                        && not (isNullableConstraint constraintTarget)
+                        isValueTypeConstraint state constraintTarget
+                        && not (isNullableConstraint state constraintTarget)
                     | SpecialConstraint.ReferenceType ->
                         // CoreCLR excludes `Object`, `ValueType` and any class with `ValueType` among
                         // its ancestors, and `Enum` is the only class other than `ValueType` itself
@@ -2812,7 +2812,7 @@ module IlMachineRuntimeMetadata =
                         && not (isClosedNonGeneric state baseClassTypes.Enum constraintTarget)
                     | SpecialConstraint.DefaultConstructor ->
                         // `HasExplicitOrImplicitPublicDefaultConstructor` holds for every value type.
-                        state, isValueTypeConstraint constraintTarget
+                        state, isValueTypeConstraint state constraintTarget
             )
 
         satisfies state [] variable
