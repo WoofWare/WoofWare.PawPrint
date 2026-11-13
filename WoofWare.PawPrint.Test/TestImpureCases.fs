@@ -497,6 +497,22 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """`ILGenerator.EmitCall` naming a reflected method, measured on .NET 10 to exit 0. The emit succeeds and stores a `VarArgMethod` whose `m_dynamicMethod` is null; the call then stops when `ResolveToken` reaches that entry: "TODO: Call names DynamicScope entry 2, a VarArgMethod whose m_dynamicMethod is null, so it wraps a reflected method; PawPrint does not yet resolve the reflected method such a wrapper names". Un-parked by resolving such a wrapper through its `m_method`."""
+            {
+                FileName = "TypeBuilderGenericParamStructFlag.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?

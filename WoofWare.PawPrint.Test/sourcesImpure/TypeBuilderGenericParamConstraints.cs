@@ -46,7 +46,7 @@ public static class Program
 
         // TypeDef 4:
         // class Box<T, U, V, W>
-        //     where T : struct, IComparable<T>
+        //     where T : IComparable<T>
         //     where U : Stream, IDisposable, IAsyncDisposable, new()
         //     where V : class, Base, IMark
         //     where W : T
@@ -58,8 +58,8 @@ public static class Program
         GenericTypeParameterBuilder v = parameters[2];
         GenericTypeParameterBuilder w = parameters[3];
 
+        // `T` has no special constraint: `TypeBuilderGenericParamStructFlag.cs` is the `struct` flag.
         Type comparableOfT = typeof (IComparable<>).MakeGenericType (t);
-        t.SetGenericParameterAttributes (GenericParameterAttributes.NotNullableValueTypeConstraint);
         t.SetInterfaceConstraints (comparableOfT);
 
         // The base type is set first, and its row is still the last.
@@ -111,7 +111,7 @@ public static class Program
             return 3;
         }
 
-        if (arguments[0].GenericParameterAttributes != GenericParameterAttributes.NotNullableValueTypeConstraint)
+        if (arguments[0].GenericParameterAttributes != GenericParameterAttributes.None)
         {
             return 4;
         }
