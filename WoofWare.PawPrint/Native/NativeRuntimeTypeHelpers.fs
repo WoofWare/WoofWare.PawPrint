@@ -4,14 +4,42 @@ open System.Collections.Immutable
 open System.Reflection
 open Microsoft.Extensions.Logging
 
-/// The reason CoreCLR's type loader refuses to construct an szarray over an element type. Each
+/// Which array type to build over an element: CoreCLR's two array type keys,
+/// `ELEMENT_TYPE_SZARRAY` (`T[]`) and `ELEMENT_TYPE_ARRAY` with a rank (`T[*]`, `T[,]`, ...).
+/// A rank-1 `MultiDim` is a different type from `SzArray`.
+[<RequireQualifiedAccess>]
+type ArrayTypeKind =
+    | SzArray
+    | MultiDim of rank : int
+
+    override this.ToString () : string =
+        match this with
+        | ArrayTypeKind.SzArray -> "szarray"
+        | ArrayTypeKind.MultiDim rank -> $"array of rank %d{rank}"
+
+[<RequireQualifiedAccess>]
+module ArrayTypeKind =
+    /// The number of dimensions; an szarray has one.
+    let rank (kind : ArrayTypeKind) : int =
+        match kind with
+        | ArrayTypeKind.SzArray -> 1
+        | ArrayTypeKind.MultiDim rank -> rank
+
+    let toCompositeShape (kind : ArrayTypeKind) : CompositeShape =
+        match kind with
+        | ArrayTypeKind.SzArray -> CompositeShape.OneDimArrayZero
+        | ArrayTypeKind.MultiDim rank -> CompositeShape.Array rank
+
+/// The reason CoreCLR's type loader refuses to construct an array type over an element type. Each
 /// case is one `mscorrc` resource, and they are checked in this order.
 [<RequireQualifiedAccess>]
-type SzArrayElementRefusal =
+type ArrayTypeRefusal =
     | ByRef
     | ByRefLike
     | Void
-    /// A value type too big for the array's `ComponentSize` field to describe. Unlike the three
+    /// More dimensions than `MethodTableProjection.maxArrayRank`. Never the verdict for an szarray.
+    | RankTooLarge
+    /// A value type too big for the array's `ComponentSize` field to describe. Unlike the four
     /// above, this one is raised when the array's own MethodTable is built rather than when its
     /// type key is validated, and its message names the *element* rather than the array.
     | ValueClassTooLarge
@@ -1396,39 +1424,63 @@ module NativeRuntimeTypeHelpers =
             state.TypeSystem.ConcreteTypes
             (RuntimeTypeHandleTarget.Closed arg)
 
-    /// Why CoreCLR's type loader will not construct an szarray over `element`, if it will not.
-    /// The three refusals are checked in this order (`ClassLoader::CreateTypeHandleForTypeKey`,
-    /// clsload.cpp:2693-2708). A byref over a byref-like type is refused as a byref, which is a
-    /// fact about `isByRefLike` (a byref is a TypeDesc) rather than about the order. Every other
-    /// element is legal, including `void*`, a function pointer, an open definition, a type
-    /// variable (whatever its constraints) and a shape over one.
-    let szArrayElementRefusal
+    /// Whether `target` is a byref, the one element over which CoreCLR's type loader refuses to
+    /// build a byref or a pointer (`ClassLoader::CreateTypeHandleForTypeKey`, clsload.cpp:2721-2725),
+    /// and the first element it refuses to build an array over.
+    let isByrefTarget (target : RuntimeTypeHandleTarget) : bool =
+        match target with
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _)
+        | RuntimeTypeHandleTarget.Composite (CompositeShape.Byref, _) -> true
+        | RuntimeTypeHandleTarget.Closed _
+        | RuntimeTypeHandleTarget.Composite _
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
+        | RuntimeTypeHandleTarget.OpenConstructed _
+        | RuntimeTypeHandleTarget.GenericParameter _
+        | RuntimeTypeHandleTarget.MethodGenericParameter _
+        | RuntimeTypeHandleTarget.DynamicMethodsClass _
+        | RuntimeTypeHandleTarget.FunctionPointer _ -> false
+
+    /// Why CoreCLR's type loader will not construct an array type of `kind` over `element`, if it
+    /// will not. The refusals are checked in `ArrayTypeRefusal`'s order
+    /// (`ClassLoader::CreateTypeHandleForTypeKey`, clsload.cpp:2693-2713, then
+    /// `Module::CreateArrayMethodTable`, array.cpp:358-366). A byref over a byref-like type is
+    /// refused as a byref, which is a fact about `isByRefLike` (a byref is a TypeDesc) rather than
+    /// about the order. Every other element is legal, including `void*`, a function pointer, an
+    /// open definition, a type variable (whatever its constraints) and a shape over one.
+    let arrayTypeRefusal
         (operation : string)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
+        (kind : ArrayTypeKind)
         (element : RuntimeTypeHandleTarget)
-        : IlMachineState * SzArrayElementRefusal option
+        : IlMachineState * ArrayTypeRefusal option
         =
-        match element with
-        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _)
-        | RuntimeTypeHandleTarget.Composite (CompositeShape.Byref, _) -> state, Some SzArrayElementRefusal.ByRef
-        | _ ->
+        let rank = ArrayTypeKind.rank kind
 
-        if
+        if rank < 1 then
+            // `RuntimeType.MakeArrayType(int)` throws IndexOutOfRangeException for a rank below 1
+            // before reaching the type loader, and no other route constructs an array type key.
+            failwith $"%s{operation}: rank %d{rank} is below 1, which no managed caller passes to the type loader"
+
+        if isByrefTarget element then
+            state, Some ArrayTypeRefusal.ByRef
+        else if
+
             RuntimeTypeHandleTarget.isByRefLike
                 baseClassTypes
                 state.TypeSystem._LoadedAssemblies
                 state.TypeSystem.ConcreteTypes
                 element
         then
-            state, Some SzArrayElementRefusal.ByRefLike
+            state, Some ArrayTypeRefusal.ByRefLike
         else
 
         match element with
         // `TypeHandle::GetSignatureCorElementType() == ELEMENT_TYPE_VOID`: only the `System.Void`
         // MethodTable itself, never a shape over it.
         | RuntimeTypeHandleTarget.Closed (ConcreteVoid state.TypeSystem.ConcreteTypes) ->
-            state, Some SzArrayElementRefusal.Void
+            state, Some ArrayTypeRefusal.Void
+        | _ when rank > MethodTableProjection.maxArrayRank -> state, Some ArrayTypeRefusal.RankTooLarge
         | (RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity | RuntimeTypeHandleTarget.OpenConstructed (identity,
                                                                                                                  _)) when
             state.TypeSystem._LoadedAssemblies
@@ -1457,7 +1509,7 @@ module NativeRuntimeTypeHelpers =
             let size, state = MethodTableProjection.storageSize baseClassTypes state handle
 
             if size > MethodTableProjection.maxValueClassSizeInArray then
-                state, Some SzArrayElementRefusal.ValueClassTooLarge
+                state, Some ArrayTypeRefusal.ValueClassTooLarge
             else
                 state, None
         | _ -> state, None
@@ -2321,29 +2373,30 @@ module NativeRuntimeTypeHelpers =
 
                     $"%s{name}[%s{args}]"
 
-    /// The type string CoreCLR puts in the `TypeLoadException` for `refusal` of an szarray over
-    /// `element`. Which of the two type renderers applies is part of the answer: the three
+    /// The type string CoreCLR puts in the `TypeLoadException` for `refusal` of an array of `kind`
+    /// over `element`. Which of the two type renderers applies is part of the answer: the four
     /// type-key refusals are formatted by `ClassLoader::ThrowTypeLoadException` from the array
     /// key, and the oversized-value-type one by `array.cpp:362` from the element's own
-    /// `TypeHandle::GetName`. So a nested `Outer.Big` is `Outer+Big` in the first three and bare
-    /// `Big` in the fourth. Measured on .NET 10 for each refusal, nested and not.
-    let szArrayRefusalTypeName
+    /// `TypeHandle::GetName`. So a nested `Outer.Big` is `Outer+Big` in the first four and bare
+    /// `Big` in the fifth. Measured on .NET 10 for each refusal, nested and not.
+    let arrayRefusalTypeName
         (operation : string)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
+        (kind : ArrayTypeKind)
         (element : RuntimeTypeHandleTarget)
-        (refusal : SzArrayElementRefusal)
+        (refusal : ArrayTypeRefusal)
         : string
         =
         match refusal with
-        | SzArrayElementRefusal.ValueClassTooLarge -> typeHandleGetName operation baseClassTypes state element
+        | ArrayTypeRefusal.ValueClassTooLarge -> typeHandleGetName operation baseClassTypes state element
         // The byref refusal renders the byref alone rather than the array over it: the type-name
         // builder will not append `[]` after `&`.
-        | SzArrayElementRefusal.ByRef ->
-            runtimeTypeHandleName operation baseClassTypes state formatNamespaceFlag element
-        | SzArrayElementRefusal.ByRefLike
-        | SzArrayElementRefusal.Void ->
-            RuntimeTypeHandleTarget.composite CompositeShape.OneDimArrayZero element
+        | ArrayTypeRefusal.ByRef -> runtimeTypeHandleName operation baseClassTypes state formatNamespaceFlag element
+        | ArrayTypeRefusal.ByRefLike
+        | ArrayTypeRefusal.Void
+        | ArrayTypeRefusal.RankTooLarge ->
+            RuntimeTypeHandleTarget.composite (ArrayTypeKind.toCompositeShape kind) element
             |> runtimeTypeHandleName operation baseClassTypes state formatNamespaceFlag
 
     /// PawPrint's rendering of CoreCLR's `CopyRuntimeTypeHandles` (runtimehandles.cpp:561), the

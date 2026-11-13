@@ -7,20 +7,23 @@ open Microsoft.CodeAnalysis
 open NUnit.Framework
 open WoofWare.PawPrint
 
-/// `NativeRuntimeTypeHelpers.szArrayElementRefusal` decides whether CoreCLR's type loader would
-/// construct an szarray over an element type, and `szArrayRefusalTypeName` renders the type string
-/// its `TypeLoadException` carries when it would not. `sourcesPure/TypeMakeArrayType.cs` pins the
-/// shapes a guest can spell; here we load one image into both PawPrint and the host CLR and assert
-/// the two agree, on the verdict and on the type string, for every element in a corpus that also
-/// reaches the targets no C# guest can name directly (a variable of an `allows ref struct`
-/// parameter, a pointer over a ref struct, an open construction over a ref struct).
+/// `NativeRuntimeTypeHelpers.arrayTypeRefusal` decides whether CoreCLR's type loader would
+/// construct an array type of a given kind over an element type, and `arrayRefusalTypeName`
+/// renders the type string its `TypeLoadException` carries when it would not;
+/// `NativeRuntimeTypeHelpers.isByrefTarget` decides the same for a pointer.
+/// `sourcesPure/TypeMakeArrayType.cs`, `TypeMakeArrayTypeRank.cs` and `TypeMakePointerType.cs`
+/// pin the shapes a guest can spell; here we load one image into both PawPrint and the host CLR
+/// and assert the two agree, on the verdict and on the type string, for every element in a corpus
+/// that also reaches the targets no C# guest can name directly (a variable of an
+/// `allows ref struct` parameter, a pointer over a ref struct, an open construction over a ref
+/// struct).
 ///
-/// The host is a genuine outside oracle: the expected verdict is the real `Type.MakeArrayType`,
-/// so a classification that is self-consistent but wrong about which targets are TypeDescs cannot
-/// pass.
+/// The host is a genuine outside oracle: the expected verdict is the real `Type.MakeArrayType`
+/// (or `MakePointerType`), so a classification that is self-consistent but wrong about which
+/// targets are TypeDescs cannot pass.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
-module TestMakeSZArrayRefusal =
+module TestMakeTypeRefusal =
 
     let private corpusSource : string =
         """
@@ -81,7 +84,7 @@ public unsafe class FnPtrHolder<T>
 """
 
     let private image : byte[] =
-        Roslyn.compileAssembly "SzArrayRefusalCorpus" OutputKind.DynamicallyLinkedLibrary [] [ corpusSource ]
+        Roslyn.compileAssembly "MakeTypeRefusalCorpus" OutputKind.DynamicallyLinkedLibrary [] [ corpusSource ]
 
     /// The same image the PawPrint side reads, loaded by the real CLR. Non-collectible, which is
     /// fine: nothing here is a guest, so the collectibility that would disqualify a `RealRuntime`
@@ -372,57 +375,140 @@ public unsafe class FnPtrHolder<T>
             (hostType "OverLimit").MakeByRefType ()
         ]
 
+    /// Every array kind is checked over the whole corpus. Rank 1 is here twice over, as the szarray
+    /// `T[]` and as the general array `T[*]`, which the type loader validates alike but names
+    /// differently; 32 and 33 are the two sides of `MAX_RANK`.
+    let private arrayKinds : ArrayTypeKind list =
+        [
+            ArrayTypeKind.SzArray
+            ArrayTypeKind.MultiDim 1
+            ArrayTypeKind.MultiDim 2
+            ArrayTypeKind.MultiDim 32
+            ArrayTypeKind.MultiDim 33
+        ]
+
     /// The host's verdict: `None` if the array type loads, else the refusal and the type string
     /// its `TypeLoadException` carries.
-    let private hostVerdict (element : Type) : (SzArrayElementRefusal * string) option =
+    let private hostVerdict (kind : ArrayTypeKind) (element : Type) : (ArrayTypeRefusal * string) option =
         try
-            element.MakeArrayType () |> ignore
+            match kind with
+            | ArrayTypeKind.SzArray -> element.MakeArrayType () |> ignore<Type>
+            | ArrayTypeKind.MultiDim rank -> element.MakeArrayType rank |> ignore<Type>
+
             None
         with :? TypeLoadException as e ->
             let refusal =
                 if e.Message.EndsWith "because the element type is ByRef." then
-                    SzArrayElementRefusal.ByRef
+                    ArrayTypeRefusal.ByRef
                 elif e.Message.EndsWith "because the element type is ByRef-like." then
-                    SzArrayElementRefusal.ByRefLike
+                    ArrayTypeRefusal.ByRefLike
                 elif e.Message.EndsWith "because the element type is System.Void." then
-                    SzArrayElementRefusal.Void
+                    ArrayTypeRefusal.Void
+                elif e.Message.EndsWith "has too many dimensions." then
+                    ArrayTypeRefusal.RankTooLarge
                 elif e.Message.EndsWith "cannot be created because base value type is too large." then
-                    SzArrayElementRefusal.ValueClassTooLarge
+                    ArrayTypeRefusal.ValueClassTooLarge
                 else
-                    failwith $"host refused an szarray over %O{element} with an unrecognised message: %s{e.Message}"
+                    failwith $"host refused a %O{kind} over %O{element} with an unrecognised message: %s{e.Message}"
 
             Some (refusal, e.TypeName)
 
     /// PawPrint's verdict, in the same shape.
     let private pawPrintVerdict
         (state : IlMachineState)
+        (kind : ArrayTypeKind)
         (element : RuntimeTypeHandleTarget)
-        : IlMachineState * (SzArrayElementRefusal * string) option
+        : IlMachineState * (ArrayTypeRefusal * string) option
         =
         let state, refusal =
-            NativeRuntimeTypeHelpers.szArrayElementRefusal "test" bct state element
+            NativeRuntimeTypeHelpers.arrayTypeRefusal "test" bct state kind element
 
         let rendered =
             refusal
             |> Option.map (fun refusal ->
-                refusal, NativeRuntimeTypeHelpers.szArrayRefusalTypeName "test" bct state element refusal
+                refusal, NativeRuntimeTypeHelpers.arrayRefusalTypeName "test" bct state kind element refusal
             )
 
         state, rendered
 
     [<Test>]
-    let ``every element's szarray refusal and type string agree with the host CLR`` () : unit =
+    let ``every element's array refusal and type string agree with the host CLR, for every array kind`` () : unit =
+        let mutable state = initialState
+        let mutable disagreements = []
+        let mutable verdictsSeen = Set.empty
+
+        for kind in arrayKinds do
+            for name, target, hostElement in elementPool do
+                let expected = hostVerdict kind hostElement
+                let state', element = target state
+                let state', actual = pawPrintVerdict state' kind element
+                state <- state'
+
+                verdictsSeen <- verdictsSeen.Add (expected |> Option.map fst)
+
+                if expected <> actual then
+                    disagreements <-
+                        $"%O{kind} over %s{name}: host %O{expected}, PawPrint %O{actual}"
+                        :: disagreements
+
+        if not (List.isEmpty disagreements) then
+            failwith (
+                $"%d{List.length disagreements} (kind, element) pairs disagree with the host CLR:\n"
+                + String.concat "\n" (List.rev disagreements)
+            )
+
+        // Guard against the corpus never exercising one of the verdicts, which would leave that arm
+        // of the classification untested.
+        let allVerdicts =
+            Set.ofList
+                [
+                    None
+                    Some ArrayTypeRefusal.ByRef
+                    Some ArrayTypeRefusal.ByRefLike
+                    Some ArrayTypeRefusal.Void
+                    Some ArrayTypeRefusal.RankTooLarge
+                    Some ArrayTypeRefusal.ValueClassTooLarge
+                ]
+
+        if verdictsSeen <> allVerdicts then
+            failwith $"the corpus does not reach every verdict: saw only %A{Set.toList verdictsSeen}"
+
+    /// `RuntimeTypeHandle_MakePointer`'s one refusal, a pointer to a byref, decided by
+    /// `isByrefTarget` and named as `MakeByRef`'s refusal names the byref it would wrap.
+    [<Test>]
+    let ``every element's pointer refusal and type string agree with the host CLR`` () : unit =
         let mutable state = initialState
         let mutable disagreements = []
         let mutable verdictsSeen = Set.empty
 
         for name, target, hostElement in elementPool do
-            let expected = hostVerdict hostElement
+            let expected =
+                try
+                    hostElement.MakePointerType () |> ignore<Type>
+                    None
+                with :? TypeLoadException as e ->
+                    if not (e.Message.StartsWith "Could not create a pointer to a ByRef.") then
+                        failwith
+                            $"host refused a pointer to %O{hostElement} with an unrecognised message: %s{e.Message}"
+
+                    Some e.TypeName
+
             let state', element = target state
-            let state', actual = pawPrintVerdict state' element
             state <- state'
 
-            verdictsSeen <- verdictsSeen.Add (expected |> Option.map fst)
+            let actual =
+                if NativeRuntimeTypeHelpers.isByrefTarget element then
+                    NativeRuntimeTypeHelpers.runtimeTypeHandleName
+                        "test"
+                        bct
+                        state
+                        NativeRuntimeTypeHelpers.formatNamespaceFlag
+                        element
+                    |> Some
+                else
+                    None
+
+            verdictsSeen <- verdictsSeen.Add expected.IsSome
 
             if expected <> actual then
                 disagreements <- $"%s{name}: host %O{expected}, PawPrint %O{actual}" :: disagreements
@@ -433,20 +519,8 @@ public unsafe class FnPtrHolder<T>
                 + String.concat "\n" (List.rev disagreements)
             )
 
-        // Guard against the corpus never exercising one of the four verdicts, which would leave
-        // that arm of the classification untested.
-        let allVerdicts =
-            Set.ofList
-                [
-                    None
-                    Some SzArrayElementRefusal.ByRef
-                    Some SzArrayElementRefusal.ByRefLike
-                    Some SzArrayElementRefusal.Void
-                    Some SzArrayElementRefusal.ValueClassTooLarge
-                ]
-
-        if verdictsSeen <> allVerdicts then
-            failwith $"the corpus does not reach every verdict: saw only %A{Set.toList verdictsSeen}"
+        if verdictsSeen <> Set.ofList [ true ; false ] then
+            failwith $"the corpus does not reach both verdicts: saw only %A{Set.toList verdictsSeen}"
 
     /// The one element the classifier declines to answer for. It cannot be a row in the agreement
     /// corpus above: the host has a verdict for these (`BigWrapper<>[]` throws, `SmallWrapper<>[]`
@@ -458,19 +532,28 @@ public unsafe class FnPtrHolder<T>
         let openStruct =
             RuntimeTypeHandleTarget.OpenGenericTypeDefinition (guestType "GenericStruct`1").Identity
 
-        let exn =
-            Assert.Throws (fun () ->
-                NativeRuntimeTypeHelpers.szArrayElementRefusal "test" bct initialState openStruct
-                |> ignore
-            )
+        for kind in arrayKinds do
+            if ArrayTypeKind.rank kind > MethodTableProjection.maxArrayRank then
+                // The rank is refused before the element's size is consulted, so there is nothing
+                // to decline here.
+                let _, refusal =
+                    NativeRuntimeTypeHelpers.arrayTypeRefusal "test" bct initialState kind openStruct
 
-        Assert.That (exn.Message, Does.Contain "cannot size an open generic")
+                Assert.That (refusal, Is.EqualTo (Some ArrayTypeRefusal.RankTooLarge))
+            else
+                let exn =
+                    Assert.Throws (fun () ->
+                        NativeRuntimeTypeHelpers.arrayTypeRefusal "test" bct initialState kind openStruct
+                        |> ignore
+                    )
+
+                Assert.That (exn.Message, Does.Contain "cannot size an open generic")
 
         // The control: an open *reference* type needs no size, and is answered normally.
         let openClass =
             RuntimeTypeHandleTarget.OpenGenericTypeDefinition (guestType "Generic`1").Identity
 
         let _, refusal =
-            NativeRuntimeTypeHelpers.szArrayElementRefusal "test" bct initialState openClass
+            NativeRuntimeTypeHelpers.arrayTypeRefusal "test" bct initialState ArrayTypeKind.SzArray openClass
 
         Assert.That (refusal, Is.Null)

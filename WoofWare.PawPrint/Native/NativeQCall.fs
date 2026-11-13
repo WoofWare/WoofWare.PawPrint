@@ -119,6 +119,8 @@ module NativeQCall =
             NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_RegisterCollectibleTypeDependency"
             "RuntimeTypeHandle_MakeByRef", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_MakeByRef"
             "RuntimeTypeHandle_MakeSZArray", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_MakeSZArray"
+            "RuntimeTypeHandle_MakeArray", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_MakeArray"
+            "RuntimeTypeHandle_MakePointer", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_MakePointer"
             "RuntimeTypeHandle_Instantiate", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_Instantiate"
             "ModuleHandle_GetMDStreamVersion", NativeModuleHandle.tryExecuteQCall "ModuleHandle_GetMDStreamVersion"
             "ModuleHandle_GetPEKind", NativeModuleHandle.tryExecuteQCall "ModuleHandle_GetPEKind"
