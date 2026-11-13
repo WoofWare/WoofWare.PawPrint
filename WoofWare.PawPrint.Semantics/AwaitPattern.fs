@@ -90,6 +90,41 @@ module AwaitFollower =
         }
 
 [<RequireQualifiedAccess>]
+module TailCallFacts =
+
+    /// What the JIT knows, when it compiles the async version of `caller`, a method of
+    /// `callerAssembly`, of its call in a tail shape: `exactCallee` is the callee where the call
+    /// names it exactly, dispatching to nothing (`canTailCall`'s exact callee, jitinterface.cpp),
+    /// and `returnTypesAgree` says whether the callee's async variant returns what the async
+    /// version's does.
+    let ofCall
+        (callerAssembly : DumpedAssembly)
+        (caller : MetadataMethodFacts)
+        (exactCallee : MetadataMethodFacts option)
+        (returnTypesAgree : bool)
+        : TailCallFacts
+        =
+        let assemblyAllowsOptimisation =
+            match Debuggable.allowsJitOptimisation callerAssembly with
+            | Some allows -> allows
+            | None ->
+                failwith
+                    $"TODO: %s{callerAssembly.DefinitionFullName}'s DebuggableAttribute is malformed, over which CoreCLR refuses to load it at all"
+
+        {
+            AssemblyAllowsOptimisation = assemblyAllowsOptimisation
+            CallerNoOptimization = caller.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.NoOptimization
+            CallerNoInlining = caller.ImplAttributes.HasFlag System.Reflection.MethodImplAttributes.NoInlining
+            CallerIsEntryPoint = callerAssembly.MainMethod = Some caller.Handle
+            ReturnTypesAgree = returnTypesAgree
+            ExactCalleeRequiresSecObject =
+                exactCallee
+                |> Option.exists (fun callee ->
+                    callee.MethodAttributes.HasFlag System.Reflection.MethodAttributes.RequireSecObject
+                )
+        }
+
+[<RequireQualifiedAccess>]
 module TailShape =
 
     let map (f : 'a -> 'b) (shape : TailShape<'a>) : TailShape<'b> =

@@ -15,9 +15,10 @@ open Microsoft.Extensions.Logging
 /// does the frame's next step (<c>AsyncContextStep</c>). The body's IL is not rewritten, which would
 /// move the offsets its stack traces report.
 ///
-/// A frame of runtime async's own machinery (<c>AsyncFrame.Transparent</c>) saves no contexts, but
-/// one that suspends other than by a tail await calls <c>AsyncHelpers.CaptureExecutionContext</c>
-/// the same way, and <c>resume</c> does its next step too.
+/// A frame of runtime async's own machinery (<c>AsyncFrame.Transparent</c>) or an async version
+/// (<c>AsyncFrame.AsyncVersion</c>) saves no contexts, but one that suspends other than by a tail
+/// await calls <c>AsyncHelpers.CaptureExecutionContext</c> the same way, and <c>resume</c> does its
+/// next step too.
 /// </remarks>
 [<RequireQualifiedAccess>]
 module AsyncContextSaving =
@@ -106,6 +107,7 @@ module AsyncContextSaving =
         | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _))
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
         | Some (AsyncFrame.Transparent _)
+        | Some (AsyncFrame.AsyncVersion _)
         | None -> None
 
     /// What the active frame of `thread` does at a `ret`, before it returns, if it is a user-written
@@ -126,6 +128,7 @@ module AsyncContextSaving =
             |> Some
         | Some (AsyncFrame.SavesContexts AsyncContextHandling.Restored)
         | Some (AsyncFrame.Transparent _)
+        | Some (AsyncFrame.AsyncVersion _)
         | None -> None
         | Some (AsyncFrame.SavesContexts handling) ->
             failwith $"BUG: %O{frame.ExecutingMethod} reached a ret while its contexts were %A{handling}"
@@ -202,7 +205,8 @@ module AsyncContextSaving =
                 ExecutionResult.UnhandledException (state, thread, exn)
         | AsyncContextStep.AfterFinishSuspension suspension,
           Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)) -> complete suspension state
-        | AsyncContextStep.AfterCaptureExecutionContext suspension, Some (AsyncFrame.Transparent _) ->
+        | AsyncContextStep.AfterCaptureExecutionContext suspension, Some (AsyncFrame.Transparent _)
+        | AsyncContextStep.AfterCaptureExecutionContext suspension, Some (AsyncFrame.AsyncVersion _) ->
             match returned with
             | Some (executionContext, _) ->
                 state

@@ -710,10 +710,15 @@ module AbstractMachine =
         let logger = logger loggerFactory
 
         // A user-written runtime-async body's call of a context helper is a step of its own: CoreCLR's
-        // JIT emits it into the body, after the type-initialisation check.
+        // JIT emits it into the body, after the type-initialisation check. So is an async version's
+        // return once the call that ends its IL has completed.
         let afterPrologue (state : IlMachineState) : ExecutionResult =
             match AsyncContextSaving.beforeInstruction loggerFactory baseClassTypes thread state with
             | Some result -> result
+            | None ->
+
+            match AsyncVersionReturn.returnsNow thread state with
+            | Some state -> NullaryIlOp.returnFromFrame loggerFactory baseClassTypes thread state
             | None -> executeOneStepInitialised loggerFactory baseClassTypes state thread logger
 
         let ran =

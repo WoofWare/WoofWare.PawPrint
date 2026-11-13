@@ -1520,6 +1520,67 @@ module NullaryIlOp =
     let private narrowFloatConversion (corelib : BaseClassTypes<DumpedAssembly>) : NarrowFloatConversion =
         NarrowFloatConversion.ofRuntime (EmulatedRuntime.ofCoreLib corelib.Corelib)
 
+    /// Return from the active frame of `currentThread`, whose evaluation stack holds what it returns,
+    /// with nothing of runtime async left to do first, and do what the frame's caller does next.
+    let internal returnFromFrame
+        (loggerFactory : ILoggerFactory)
+        (corelib : BaseClassTypes<DumpedAssembly>)
+        (currentThread : ThreadId)
+        (state : IlMachineState)
+        : ExecutionResult
+        =
+        match IlMachineState.returnStackFrame loggerFactory corelib currentThread state with
+        | ReturnFrameResult.NoFrameToReturn -> ExecutionResult.Terminated (state, currentThread)
+        | ReturnFrameResult.NormalReturn state -> (state, WhatWeDid.Executed) |> ExecutionResult.stepped
+        | ReturnFrameResult.ResumeVmRaise (state, step) ->
+            IlMachineStateExecution.resumeVmRaise loggerFactory corelib step currentThread state
+        | ReturnFrameResult.ResumeAsyncContexts (state, step, returned) ->
+            AsyncContextSaving.resume loggerFactory corelib step returned currentThread state
+        | ReturnFrameResult.ResumeSynchronizedMethod (state, step) ->
+            SynchronizedMethodMonitor.resume loggerFactory corelib step currentThread state
+        | ReturnFrameResult.ResumedAsyncReturned (state, resultLocation, returned) ->
+            // The resumed frame completed, so `AsyncResume` returns null to CoreLib's dispatcher.
+            state
+            |> AsyncSuspension.deliverResult corelib resultLocation returned
+            |> IlMachineState.pushToEvalStack (CliType.ObjectRef None) currentThread
+            |> fun state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
+        | ReturnFrameResult.DispatchException (state, exnAddr, exnType, making) ->
+            let state, origin =
+                match making with
+                | RuntimeExceptionMaking.Raised fields ->
+                    // The ctor has run; now overwrite _HResult with the CLR's mapped value,
+                    // matching EEException::CreateThrowable's SetHResult(GetHR()) post-ctor step.
+                    let state =
+                        ExceptionDispatching.overwriteHResultPostCtor corelib exnAddr exnType state
+
+                    // The raiser asked for specific field values, i.e. the CLR would have used a
+                    // constructor overload taking them. This has to happen after the ctor, which
+                    // has just written the type's default resource string into `_message`.
+                    let state =
+                        (state, fields)
+                        ||> List.fold (fun state field ->
+                            IlMachineState.setRuntimeExceptionField loggerFactory corelib exnAddr field state
+                        )
+
+                    state, TraceHeadOrigin.RuntimeRaise RuntimeRaiseSite.MadeByRuntime
+                // `IL_Throw` dispatches the wrapper from the `throw`, so the method that threw
+                // is the first frame of its trace, as it is for a `throw` of an exception.
+                | RuntimeExceptionMaking.WrappedNonException -> state, TraceHeadOrigin.IlThrow
+
+            match
+                ExceptionDispatching.throwExceptionObject
+                    loggerFactory
+                    corelib
+                    state
+                    currentThread
+                    origin
+                    exnAddr
+                    exnType
+            with
+            | ExceptionDispatchResult.Dispatched state -> (state, WhatWeDid.Executed) |> ExecutionResult.stepped
+            | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
+                ExecutionResult.UnhandledException (state, currentThread, exn)
+
     let internal execute
         (loggerFactory : ILoggerFactory)
         (corelib : BaseClassTypes<DumpedAssembly>)
@@ -1610,61 +1671,13 @@ module NullaryIlOp =
             | Some exiting -> exiting
             | None ->
 
-            match AsyncContextSaving.beforeReturn loggerFactory corelib currentThread state with
-            | Some restoring -> restoring
+            match AsyncVersionReturn.beforeReturn loggerFactory corelib currentThread state with
+            | Some awaiting -> awaiting
             | None ->
 
-            match IlMachineState.returnStackFrame loggerFactory corelib currentThread state with
-            | ReturnFrameResult.NoFrameToReturn -> ExecutionResult.Terminated (state, currentThread)
-            | ReturnFrameResult.NormalReturn state -> (state, WhatWeDid.Executed) |> ExecutionResult.stepped
-            | ReturnFrameResult.ResumeVmRaise (state, step) ->
-                IlMachineStateExecution.resumeVmRaise loggerFactory corelib step currentThread state
-            | ReturnFrameResult.ResumeAsyncContexts (state, step, returned) ->
-                AsyncContextSaving.resume loggerFactory corelib step returned currentThread state
-            | ReturnFrameResult.ResumeSynchronizedMethod (state, step) ->
-                SynchronizedMethodMonitor.resume loggerFactory corelib step currentThread state
-            | ReturnFrameResult.ResumedAsyncReturned (state, resultLocation, returned) ->
-                // The resumed frame completed, so `AsyncResume` returns null to CoreLib's dispatcher.
-                state
-                |> AsyncSuspension.deliverResult corelib resultLocation returned
-                |> IlMachineState.pushToEvalStack (CliType.ObjectRef None) currentThread
-                |> fun state -> ExecutionResult.stepped (state, WhatWeDid.Executed)
-            | ReturnFrameResult.DispatchException (state, exnAddr, exnType, making) ->
-                let state, origin =
-                    match making with
-                    | RuntimeExceptionMaking.Raised fields ->
-                        // The ctor has run; now overwrite _HResult with the CLR's mapped value,
-                        // matching EEException::CreateThrowable's SetHResult(GetHR()) post-ctor step.
-                        let state =
-                            ExceptionDispatching.overwriteHResultPostCtor corelib exnAddr exnType state
-
-                        // The raiser asked for specific field values, i.e. the CLR would have used a
-                        // constructor overload taking them. This has to happen after the ctor, which
-                        // has just written the type's default resource string into `_message`.
-                        let state =
-                            (state, fields)
-                            ||> List.fold (fun state field ->
-                                IlMachineState.setRuntimeExceptionField loggerFactory corelib exnAddr field state
-                            )
-
-                        state, TraceHeadOrigin.RuntimeRaise RuntimeRaiseSite.MadeByRuntime
-                    // `IL_Throw` dispatches the wrapper from the `throw`, so the method that threw
-                    // is the first frame of its trace, as it is for a `throw` of an exception.
-                    | RuntimeExceptionMaking.WrappedNonException -> state, TraceHeadOrigin.IlThrow
-
-                match
-                    ExceptionDispatching.throwExceptionObject
-                        loggerFactory
-                        corelib
-                        state
-                        currentThread
-                        origin
-                        exnAddr
-                        exnType
-                with
-                | ExceptionDispatchResult.Dispatched state -> (state, WhatWeDid.Executed) |> ExecutionResult.stepped
-                | ExceptionDispatchResult.ExceptionUnhandled (state, exn) ->
-                    ExecutionResult.UnhandledException (state, currentThread, exn)
+            match AsyncContextSaving.beforeReturn loggerFactory corelib currentThread state with
+            | Some restoring -> restoring
+            | None -> returnFromFrame loggerFactory corelib currentThread state
         | LdcI4_0 ->
             state
             |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 0)) currentThread

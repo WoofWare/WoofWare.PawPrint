@@ -936,3 +936,135 @@ module TestAwaitPattern =
                 name, AwaitPattern.isTailAwait (AsyncVersionAwait.TailCall (shape, facts))
             )
             |> shouldEqual (refusing |> List.map (fun (name, _) -> name, false))
+
+    /// Methods ending in each of an async version's tail shapes, and the callees they call, as a
+    /// probe compiled them and measured them on real .NET 11 (`tailAwaitsMeasured`). Only the shapes'
+    /// methods are measured; their callees' bodies do not matter to the rule.
+    let private tailShapeSource : string =
+        """
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
+
+public static class Shapes
+{
+    public static Task<int> Leaf () => Task.FromResult (1);
+    public static Task LeafVoid () => Task.CompletedTask;
+    public static ValueTask<int> LeafVT () => new ValueTask<int> (1);
+    public static ValueTask LeafVTVoid () => default;
+
+    public static Task<int> Ret () => Leaf ();
+    public static Task RetVoid () => LeafVoid ();
+    public static Task Covariant () => Leaf ();
+    [MethodImpl (MethodImplOptions.NoInlining)] public static Task<int> NoInlining () => Leaf ();
+    [MethodImpl (MethodImplOptions.NoOptimization)] public static Task<int> NoOptimization () => Leaf ();
+    public static ValueTask<int> NewValueTask () => new ValueTask<int> (Leaf ());
+    public static ValueTask NewValueTaskVoid () => new ValueTask (LeafVoid ());
+    public static Task<int> AsTask () => LeafVT ().AsTask ();
+    public static Task AsTaskVoid () => LeafVTVoid ().AsTask ();
+    public static ValueTask<int> RetVT () => LeafVT ();
+}
+"""
+
+    /// Measured on real .NET 11.0.0-rc.1 under tiered compilation: whether an exception thrown by the
+    /// callee after it suspended, crossing an `await` of each method from a runtime-async method,
+    /// has a frame of the method in its trace, with the assembly built in Release and in Debug. A
+    /// frame is there exactly where the await is not a tail await. (With `TieredCompilation=0`,
+    /// `Covariant` has none either, as the optimising JIT inlines it; decision 20.)
+    let private tailAwaitsMeasured : (string * bool * bool) list =
+        [
+            "Ret", false, true
+            "RetVoid", false, true
+            "Covariant", true, true
+            "NoInlining", true, true
+            "NoOptimization", true, true
+            "NewValueTask", false, true
+            "NewValueTaskVoid", false, true
+            "AsTask", true, true
+            "AsTaskVoid", true, true
+            "RetVT", false, true
+        ]
+
+    /// The result type a promise type's async variant returns, by its row's return type: `None` for
+    /// `Task` and `ValueTask`, the argument for `Task<T>` and `ValueTask<T>`.
+    let private unwrappedResult (returnType : MethodReturnType<TypeDefn>) : TypeDefn option =
+        match returnType with
+        | MethodReturnType.Returns (TypeDefn.GenericInstantiation (_, args)) -> Some args.[0]
+        | MethodReturnType.Returns _ -> None
+        | MethodReturnType.Void -> failwith "a method of the fixture returns void, where each returns a promise"
+
+    /// Decision 17's tail-await rule, as `TailCallFacts.ofCall` reads its facts from metadata, against
+    /// real .NET 11's traces of methods of each shape, compiled with and without optimisation.
+    [<Test>]
+    let ``An async version's await is a tail await exactly where real .NET 11 leaves no frame of it`` () : unit =
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        for optimised in [ true ; false ] do
+            let image =
+                if optimised then
+                    Roslyn.compileOptimizedAssembly
+                        "TailShapes"
+                        Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                        [ tailShapeSource ]
+                else
+                    Roslyn.compileAssembly
+                        "TailShapes"
+                        Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                        []
+                        [ tailShapeSource ]
+
+            let assembly =
+                Assembly.read loggerFactory (Some "TailShapes.dll") (new MemoryStream (image))
+
+            let methodNamed (name : string) =
+                assembly.Methods.Values
+                |> Seq.filter (fun method -> method.Name = name && method.RequiredDeclaringType.Name = "Shapes")
+                |> Seq.exactlyOne
+
+            let framed (name : string) : bool =
+                let method = methodNamed name
+                let facts = MethodInfo.requireMetadata "test" method
+
+                let body =
+                    match method.Body with
+                    | MethodBody.Il body -> body
+                    | other -> failwith $"expected %s{name} to have IL, got %O{other}"
+
+                // Every call this fixture's methods make is of a method of `Shapes` itself, but for
+                // the constructor or `AsTask` a shape ends with; each method holds one shape at most.
+                let tailCalls =
+                    body.Instructions
+                    |> List.choose (fun (op, offset) ->
+                        match op with
+                        | IlOp.UnaryMetadataToken (UnaryMetadataTokenIlOp.Call, MetadataOperand.FromMetadata callee) ->
+                            match callee.Token with
+                            | MetadataToken.MethodDef handle ->
+                                AwaitPattern.tailShapeAfter body offset
+                                |> Option.map (fun shape -> assembly.Methods.[handle], shape)
+                            | _ -> None
+                        | _ -> None
+                    )
+
+                let await =
+                    match tailCalls with
+                    | [] -> AsyncVersionAwait.WrappedReturn
+                    | [ callee, shape ] ->
+                        let calleeFacts = MethodInfo.requireMetadata "test" callee
+
+                        let agree =
+                            unwrappedResult facts.RawSignature.ReturnType = unwrappedResult
+                                calleeFacts.RawSignature.ReturnType
+
+                        AsyncVersionAwait.TailCall (
+                            TailShape.map ignore shape,
+                            TailCallFacts.ofCall assembly facts (Some calleeFacts) agree
+                        )
+                    | many -> failwith $"expected one tail shape in %s{name}, got %O{many}"
+
+                not (AwaitPattern.isTailAwait await)
+
+            tailAwaitsMeasured
+            |> List.map (fun (name, _, _) -> name, framed name)
+            |> shouldEqual (
+                tailAwaitsMeasured
+                |> List.map (fun (name, release, debug) -> name, (if optimised then release else debug))
+            )

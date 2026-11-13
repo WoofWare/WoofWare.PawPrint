@@ -269,6 +269,18 @@ module IlMachineThreadState =
                 $"BUG: %O{returningMethodState.ExecutingMethod} is returning after AsyncHelpers.TailAwait(), but has made no call with runtime async's calling convention since"
         | Some (AsyncFrame.Transparent TailAwait.NotRequested)
         | Some (AsyncFrame.SavesContexts _)
+        | Some (AsyncFrame.AsyncVersion _)
+        | None -> ()
+
+        // An async version's `ret` awaits the promise it returns, and the frame returns only once that
+        // await, or its tail shape's call, has completed.
+        match returningMethodState.AsyncFrame with
+        | Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running) ->
+            failwith
+                $"BUG: %O{returningMethodState.ExecutingMethod}, an async version, is returning without awaiting the promise it returns"
+        | Some (AsyncFrame.AsyncVersion (AsyncVersionStep.Returning _))
+        | Some (AsyncFrame.Transparent _)
+        | Some (AsyncFrame.SavesContexts _)
         | None -> ()
 
         match returningMethodState.ReturnState with

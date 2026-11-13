@@ -79,13 +79,14 @@ module ContinuationSlots =
             flags ||| (index <<< firstBit)
         )
 
-    /// The bits of `Flags` that say where the code awaiting the continuation's frame continues
-    /// (`ContinuationFlags.ContinueOnThreadPool`), as the JIT sets them when it makes the
-    /// continuation (`AsyncTransformation::CreateSuspension`, jit/async.cpp).
-    let handlingFlags (handling : ContinuationContextHandling) : int =
-        match handling with
-        | ContinuationContextHandling.NoPreference -> 0
-        | ContinuationContextHandling.ContinueOnThreadPool -> 1
+    /// The bits of `Flags` that say what the continuation's frame was awaiting
+    /// (`ContinuationFlags.ContinueOnThreadPool` and `ValueTaskAdaptedToTask`), as the JIT sets them
+    /// when it makes the continuation (`AsyncTransformation::CreateSuspension`, jit/async.cpp).
+    let callFlags (flags : SuspendedCallFlags) : int =
+        match flags with
+        | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference -> 0
+        | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool -> 1
+        | SuspendedCallFlags.ValueTaskAdaptedToTask -> 1 <<< 3
 
 /// What can be asked of a continuation type itself, rather than of its slots.
 [<RequireQualifiedAccess>]

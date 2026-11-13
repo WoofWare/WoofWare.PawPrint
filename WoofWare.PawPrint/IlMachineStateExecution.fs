@@ -404,7 +404,8 @@ module IlMachineStateExecution =
     /// A method's runtime-async IL (`MethodBody.AsyncIl`) is the frame's IL body only when `method`
     /// has the async calling convention. A method flagged `Async` and returning a promise type,
     /// named by its ordinary variant as a token, `ldftn`, delegate or reflection names it, runs the
-    /// task-returning thunk instead.
+    /// task-returning thunk instead. The async variant of a method with IL and no `Async` flag is an
+    /// async version, which runs the method's own IL.
     let frameBody
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -469,17 +470,35 @@ module IlMachineStateExecution =
             | _, Error failure ->
                 failwith
                     $"calling %O{method}: classifying its return type needs a type PawPrint cannot bind, though it loaded the method's declaring type: %s{TypeBindingFailure.describe failure}"
-        | MethodBody.Il _
+        | MethodBody.Il _ ->
+            match method.TryVariant with
+            | Some MethodVariant.AsyncVariant ->
+                // An async version, which runs the method's own IL (decision 17 of
+                // docs/plans/2026-11-11-runtime-async.md).
+                state,
+                {
+                    Method = method
+                    VmStub = None
+                    AsyncFrame = Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running)
+                }
+            | Some MethodVariant.Ordinary
+            | None ->
+                state,
+                {
+                    Method = method
+                    VmStub = None
+                    AsyncFrame = None
+                }
         | MethodBody.InternalCall
         | MethodBody.PInvoke
         | MethodBody.RuntimeProvided _
         | MethodBody.Abstract ->
             match method.TryVariant with
             | Some MethodVariant.AsyncVariant ->
-                // `RuntimeAsyncMethod.asyncVariantOf` gives such a variant IL or no body: an async
-                // version, or a declaration that dispatch replaces before a frame is made.
+                // `RuntimeAsyncMethod.asyncVariantOf` gives no variant of such a body but a
+                // declaration's, which dispatch replaces before a frame is made.
                 failwith
-                    $"TODO: running %O{method}, the async variant of a method whose body is %O{method.Body} rather than runtime-async IL: an async version, which awaits each promise it returns (decision 17 of docs/plans/2026-11-11-runtime-async.md), and which PawPrint does not run yet"
+                    $"BUG: running %O{method}, the async variant of a method whose body is %O{method.Body}; an async variant runs IL"
             | Some MethodVariant.Ordinary
             | None ->
                 state,
@@ -503,10 +522,12 @@ module IlMachineStateExecution =
 
     /// Call `methodToCall` from the active frame of `thread`.
     ///
-    /// `boundAwait` is `Some handling` for the call of an async variant that a matched await site
-    /// binds (`CallSiteBinding.BoundAwait`), from a user's runtime-async body whose program counter
-    /// is at the pattern's `call Await`: if the variant suspends, the caller suspends too, and its
-    /// continuation continues as `handling` says. Every other call passes `None`.
+    /// `boundAwait` is `Some onSuspension` for a call that the caller's JIT compiles as an await,
+    /// saying what the caller does if the callee suspends: the async variant that a matched await
+    /// site or an async version's tail shape binds (`CallSiteBinding.BoundAwait`), or the
+    /// `AsyncHelpers.TransparentAwait` of an async version's `ret`. An async version's call of
+    /// either kind is the last thing its IL does: once it completes, the frame returns its result
+    /// (`AsyncVersionStep.Returning`). Every other call passes `None`.
     let rec callMethodWithCommitment
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -523,7 +544,7 @@ module IlMachineStateExecution =
         (callSiteIlOpIndexOverride : int option)
         (constructedObjectDisposition : ReturnValueDisposition)
         (exceptionEscape : ExceptionEscape)
-        (boundAwait : ContinuationContextHandling option)
+        (boundAwait : OnSuspension option)
         (state : IlMachineState)
         : IlMachineState * CallCommitment
         =
@@ -1371,11 +1392,28 @@ module IlMachineStateExecution =
             | Some _, Some (AsyncFrame.Transparent TailAwait.Requested), None -> Some OnSuspension.TailAwait
             | Some _, Some (AsyncFrame.Transparent TailAwait.NotRequested), None
             | Some _, Some (AsyncFrame.SavesContexts _), None ->
-                Some (OnSuspension.CallerSuspends ContinuationContextHandling.NoPreference)
-            | Some _, Some (AsyncFrame.SavesContexts _), Some handling -> Some (OnSuspension.CallerSuspends handling)
-            | Some _, caller, Some _ ->
+                Some (
+                    OnSuspension.CallerSuspends (SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference)
+                )
+            | Some _, Some (AsyncFrame.AsyncVersion _), None ->
                 failwith
-                    $"BUG: %O{activeMethodState.ExecutingMethod}, whose frame is %A{caller}, binds an await to %O{methodToCall}; only a user's runtime-async body binds one"
+                    $"BUG: %O{activeMethodState.ExecutingMethod}, an async version, calls %O{methodToCall}, which has runtime async's calling convention, other than in a tail shape or at a ret, which are the only such calls its IL makes"
+            | Some _,
+              Some (AsyncFrame.SavesContexts _),
+              Some (OnSuspension.CallerSuspends (SuspendedCallFlags.Continues _) as onSuspension)
+            | Some _,
+              Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running),
+              Some (OnSuspension.TailAwait as onSuspension)
+            | Some _,
+              Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running),
+              Some (OnSuspension.CallerSuspends (SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference) as onSuspension)
+            | Some _,
+              Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running),
+              Some (OnSuspension.CallerSuspends SuspendedCallFlags.ValueTaskAdaptedToTask as onSuspension) ->
+                Some onSuspension
+            | Some _, caller, Some onSuspension ->
+                failwith
+                    $"BUG: %O{activeMethodState.ExecutingMethod}, whose frame is %A{caller}, binds an await to %O{methodToCall} that does %A{onSuspension} if it suspends, which no JIT gives such a frame"
 
         // Helper to create new frame with assembly loading
         let rec createNewFrame state =
@@ -1408,6 +1446,9 @@ module IlMachineStateExecution =
             with
             | Ok frame ->
                 match frame.Synchronized, body.VmStub, body.AsyncFrame with
+                | Some _, None, Some (AsyncFrame.AsyncVersion _) ->
+                    failwith
+                        $"TODO: %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name} is synchronized, and this frame runs its async version. CoreCLR's JIT releases the monitor immediately before a wrapped `ret`'s call of `AsyncHelpers.TransparentAwait` (`impWrapTopOfStackInAwait`, jit/importer.cpp), and a frame resumed after that call does not take it again; PawPrint models neither (stage 4d of docs/plans/2026-11-11-runtime-async.md)"
                 | Some _, Some _, _
                 | Some _, _, Some _ ->
                     failwith
@@ -1534,12 +1575,26 @@ module IlMachineStateExecution =
                 afterPop |> MethodState.advanceProgramCounter
 
         // The tail await a frame of runtime async's machinery asked for is its next call with runtime
-        // async's calling convention, which this is, and whose frame records it.
+        // async's calling convention, which this is, and whose frame records it. An async version's
+        // only such call is the last thing it does, whose result it returns.
         let oldFrame =
             match onSuspension, oldFrame.AsyncFrame with
             | Some OnSuspension.TailAwait, Some (AsyncFrame.Transparent TailAwait.Requested) ->
                 { oldFrame with
                     AsyncFrame = Some (AsyncFrame.Transparent TailAwait.NotRequested)
+                }
+            | Some _, Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running) ->
+                let dropsResult =
+                    match oldFrame.ExecutingMethod.Signature.ReturnType, methodToCall.Signature.ReturnType with
+                    | MethodReturnType.Void, MethodReturnType.Void -> false
+                    | MethodReturnType.Void, MethodReturnType.Returns _ -> true
+                    | MethodReturnType.Returns returned, MethodReturnType.Returns result when returned = result -> false
+                    | returned, result ->
+                        failwith
+                            $"BUG: %O{oldFrame.ExecutingMethod}, an async version returning %O{returned}, returns what %O{methodToCall} returns, %O{result}"
+
+                { oldFrame with
+                    AsyncFrame = Some (AsyncFrame.AsyncVersion (AsyncVersionStep.Returning dropsResult))
                 }
             | _ -> oldFrame
 
@@ -1781,8 +1836,13 @@ module IlMachineStateExecution =
         | Some (AsyncFrame.Transparent TailAwait.Requested) ->
             failwith
                 $"BUG: %O{leaving.ExecutingMethod} is suspending after AsyncHelpers.TailAwait(), but has made no call with runtime async's calling convention since"
+        // An async version suspends only at the call that ends its IL.
+        | Some (AsyncFrame.AsyncVersion AsyncVersionStep.Running) ->
+            failwith
+                $"BUG: %O{leaving.ExecutingMethod}, an async version, is suspending, but has made no call in a tail shape or at a ret"
         | Some (AsyncFrame.Transparent TailAwait.NotRequested)
-        | Some (AsyncFrame.SavesContexts _) -> ()
+        | Some (AsyncFrame.SavesContexts _)
+        | Some (AsyncFrame.AsyncVersion (AsyncVersionStep.Returning _)) -> ()
 
         let returnState =
             match leaving.ReturnState with
@@ -1841,14 +1901,14 @@ module IlMachineStateExecution =
             state, CallCommitment.Committed
         | Some OnSuspension.TailAwait, ReturnValueDisposition.PushToCaller ->
             leaveBySuspension loggerFactory baseClassTypes thread continuation state
-        | Some (OnSuspension.CallerSuspends handling), ReturnValueDisposition.PushToCaller ->
+        | Some (OnSuspension.CallerSuspends flags), ReturnValueDisposition.PushToCaller ->
             beginSuspension
                 loggerFactory
                 baseClassTypes
                 thread
                 returnState.CallSiteIlOpIndex
                 leaving.ExecutingMethod.Signature.ReturnType
-                handling
+                flags
                 continuation
                 state
         | None, _ ->
@@ -1861,7 +1921,7 @@ module IlMachineStateExecution =
     /// The active frame of `thread`, a runtime-async frame whose call at `callSite`, which returns
     /// `awaited`, has just suspended with `calleeContinuation`, suspends too
     /// (`AsyncTransformation::CreateSuspension`): it makes a continuation of its own, with an
-    /// exception slot if the call lies in a `try` region and with the flags `handling` gives, links
+    /// exception slot if the call lies in a `try` region and with the flags `flags` give, links
     /// it after the callee's, and calls the CoreLib helper that captures the thread's
     /// `ExecutionContext` into it (and, for a frame that saves contexts, puts back the ones the frame
     /// found on entry). Once that returns, `completeSuspension` saves the frame and leaves.
@@ -1871,7 +1931,7 @@ module IlMachineStateExecution =
         (thread : ThreadId)
         (callSite : int)
         (awaited : MethodReturnType<ConcreteTypeHandle>)
-        (handling : ContinuationContextHandling)
+        (flags : SuspendedCallFlags)
         (calleeContinuation : ManagedHeapAddress)
         (state : IlMachineState)
         : IlMachineState * CallCommitment
@@ -1887,12 +1947,15 @@ module IlMachineStateExecution =
             failwith
                 $"TODO: %O{method} suspends at its await at IL_%04X{callSite}, which lies in a filter or handler (IL_%04X{start} to IL_%04X{finish}); CoreCLR cannot suspend there, and PawPrint refuses to"
 
-        match frame.AsyncFrame, handling with
-        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)), _
-        | Some (AsyncFrame.Transparent _), ContinuationContextHandling.NoPreference -> ()
-        | other, handling ->
+        match frame.AsyncFrame, flags with
+        | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured _)), SuspendedCallFlags.Continues _
+        | Some (AsyncFrame.Transparent _), SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+        | Some (AsyncFrame.AsyncVersion (AsyncVersionStep.Returning _)),
+          SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+        | Some (AsyncFrame.AsyncVersion (AsyncVersionStep.Returning _)), SuspendedCallFlags.ValueTaskAdaptedToTask -> ()
+        | other, flags ->
             failwith
-                $"BUG: %O{method} is suspending at IL_%04X{callSite}, its continuation continuing as %O{handling}, but its frame is %A{other}"
+                $"BUG: %O{method} is suspending at IL_%04X{callSite}, its continuation flagged %O{flags}, but its frame is %A{other}"
 
         let layout =
             AsyncSuspension.layoutAwaiting (not (AsyncSuspension.tryRegionsAround method callSite).IsEmpty) awaited
@@ -1904,7 +1967,7 @@ module IlMachineStateExecution =
 
         let state =
             state
-            |> AsyncSuspension.initialiseContinuation continuation layout handling resumeInfo callSite
+            |> AsyncSuspension.initialiseContinuation continuation layout flags resumeInfo callSite
             |> AsyncSuspension.link calleeContinuation continuation
 
         let suspension : PendingSuspension =
@@ -1938,12 +2001,14 @@ module IlMachineStateExecution =
                 (AsyncContextStep.AfterFinishSuspension suspension)
                 thread
                 state
-        | Some (AsyncFrame.Transparent _) ->
-            // A method of runtime async's own machinery saves no contexts, so its suspension
-            // captures the `ExecutionContext` itself, from a call of `CaptureExecutionContext()`
-            // (`FinishContextHandlingAndSuspension`). CoreLib's only such await is
-            // `AwaitTaskWithRareOptions`'s, of `UnsafeAwaitAwaiter`, reached by an await of a task
-            // configured with `ConfigureAwaitOptions.SuppressThrowing`.
+        | Some (AsyncFrame.Transparent _)
+        | Some (AsyncFrame.AsyncVersion _) ->
+            // A method of runtime async's own machinery or an async version saves no contexts, so
+            // its suspension captures the `ExecutionContext` itself, from a call of
+            // `CaptureExecutionContext()` (`FinishContextHandlingAndSuspension`). CoreLib's only such
+            // await of its own machinery is `AwaitTaskWithRareOptions`'s, of `UnsafeAwaitAwaiter`,
+            // reached by an await of a task configured with `ConfigureAwaitOptions.SuppressThrowing`;
+            // an async version suspends so at a tail shape whose call is not a tail await.
             callAsyncHelper
                 loggerFactory
                 baseClassTypes
