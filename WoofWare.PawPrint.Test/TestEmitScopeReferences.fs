@@ -111,19 +111,29 @@ module TestEmitScopeReferences =
         |> Seq.map (fun c -> if List.contains c reserved then $"\\%c{c}" else string c)
         |> String.concat ""
 
+    let private genName : Gen<string> =
+        Gen.elements ([ 'a' ; 'B' ; '.' ; '`' ; '1' ; ' ' ] @ reserved)
+        |> Gen.listOf
+        |> Gen.map (fun cs -> System.String (Array.ofSeq cs))
+
     [<Test>]
     let ``unescaping a type name undoes escaping it`` () : unit =
-        let genName =
-            Gen.elements ([ 'a' ; 'B' ; '.' ; '`' ; '1' ; ' ' ] @ reserved)
-            |> Gen.listOf
-            |> Gen.map (fun cs -> System.String (Array.ofSeq cs))
-
         Check.One (
             Config.QuickThrowOnFailure.WithMaxTest 500,
             Prop.forAll
                 (Arb.fromGen genName)
                 (fun name -> EmitScopeReferences.unescapeTypeName (escape name) |> shouldEqual name)
         )
+
+    [<Test>]
+    let ``TypeNameEscaping escapes exactly the reserved characters`` () : unit =
+        Check.One (
+            Config.QuickThrowOnFailure.WithMaxTest 500,
+            Prop.forAll (Arb.fromGen genName) (fun name -> TypeNameEscaping.escape name |> shouldEqual (escape name))
+        )
+
+        for c in char 0 .. char 0x7f do
+            TypeNameEscaping.isReserved c |> shouldEqual (List.contains c reserved)
 
     [<TestCase("a\\b", "a\\b")>]
     [<TestCase("a\\", "a\\")>]

@@ -31,8 +31,16 @@ public static class Program
         // A type with no namespace, TypeDef 3.
         TypeBuilder plain = module.DefineType ("Plain", TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract);
 
+        // Names holding a character that type names reserve, TypeDefs 4 and 5. `GetTypeMetadataToken`
+        // passes the type's `FullName`, escaped (`Odd\+One`, `Back\\\+Slash`), and `GetTypeRef` unescapes
+        // it to find the TypeDef: `Back\+Slash` is found only if `FullName` escaped its backslash too.
+        TypeBuilder odd = module.DefineType ("Odd+One", TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract);
+        TypeBuilder backslash = module.DefineType ("Back\\+Slash", TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract);
+
         Type created = thing.CreateType ()!;
         Type createdPlain = plain.CreateType ()!;
+        Type createdOdd = odd.CreateType ()!;
+        Type createdBackslash = backslash.CreateType ()!;
 
         FieldInfo createdValue = created.GetField ("Value")!;
         MethodInfo createdGet = created.GetMethod ("Get")!;
@@ -48,6 +56,15 @@ public static class Program
             return 2;
         }
 
+        if (module.GetTypeMetadataToken (createdOdd) != 0x02000004)
+        {
+            return 10;
+        }
+
+        if (module.GetTypeMetadataToken (createdBackslash) != 0x02000005)
+        {
+            return 11;
+        }
 
         if (module.GetFieldMetadataToken (createdValue) != value.MetadataToken)
         {

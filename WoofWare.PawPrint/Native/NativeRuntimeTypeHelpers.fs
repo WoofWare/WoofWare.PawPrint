@@ -1847,6 +1847,11 @@ module NativeRuntimeTypeHelpers =
 
     let hasFormatFlag (flag : int32) (flags : int32) : bool = flags &&& flag <> 0
 
+    /// A type definition's name as CoreCLR's `TypeString::AppendNestedTypeDef` appends it, without
+    /// any instantiation: under FormatNamespace, its whole nesting chain with each row's namespace
+    /// (`TypeInfo.escapedFullName`); otherwise its own name alone. Either way each name and
+    /// namespace has the characters a type name reserves escaped, as `TypeNameBuilder::AddName`
+    /// escapes them under every format.
     let typeInfoDisplayName
         (includeNamespace : bool)
         (assembly : DumpedAssembly)
@@ -1854,9 +1859,9 @@ module NativeRuntimeTypeHelpers =
         : string
         =
         if includeNamespace then
-            TypeInfo.fullName (fun h -> assembly.TypeDefs.[h]) typeInfo
+            TypeInfo.escapedFullName (fun h -> assembly.TypeDefs.[h]) typeInfo
         else
-            typeInfo.Name
+            TypeNameEscaping.escape typeInfo.Name
 
     // CoreCLR's `TypeString` (`vm/typestring.cpp`): `AppendType` for one type, or `AppendInst` for an
     // instantiation on its own. Both entry points share every rendering rule below, because
@@ -2105,7 +2110,9 @@ module NativeRuntimeTypeHelpers =
 
                     if bToString && not typeInfo.Generics.IsEmpty then
                         let formals =
-                            typeInfo.Generics |> Seq.map (fun (p, _) -> p.Name) |> String.concat ","
+                            typeInfo.Generics
+                            |> Seq.map (fun (p, _) -> TypeNameEscaping.escape p.Name)
+                            |> String.concat ","
 
                         $"%s{name}[%s{formals}]"
                     else
@@ -2114,9 +2121,9 @@ module NativeRuntimeTypeHelpers =
                 name + assemblySuffix format embedded (fun () -> identity.AssemblyFullName)
             | RuntimeTypeHandleTarget.GenericParameter (declaringType, position) ->
                 // CoreCLR's TypeString::AppendType for a generic parameter emits only the
-                // parameter name regardless of the FormatNamespace / FormatAssembly bits:
-                // parameters have no namespace, no owning assembly suffix, and no instantiation
-                // of their own.
+                // parameter name, escaped like any other name, regardless of the FormatNamespace /
+                // FormatAssembly bits: parameters have no namespace, no owning assembly suffix, and
+                // no instantiation of their own.
                 let assembly =
                     loadedAssembly "declaring type of generic parameter" declaringType.AssemblyFullName
 
@@ -2127,7 +2134,7 @@ module NativeRuntimeTypeHelpers =
                         $"%s{operation}: generic parameter position %d{position} is out of range for %O{declaringType.TypeDefinition.Get} (declares %d{typeInfo.Generics.Length} parameters)"
 
                 let parameter, _ = typeInfo.Generics.[position]
-                parameter.Name
+                TypeNameEscaping.escape parameter.Name
             | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, position) ->
                 // Same as type-generic parameters: CoreCLR emits only the parameter name.
                 let assembly =
@@ -2140,7 +2147,7 @@ module NativeRuntimeTypeHelpers =
                         $"%s{operation}: method generic parameter position %d{position} is out of range for method %O{declaringMethod.Get} (declares %d{methodInfo.Generics.Length} method generics)"
 
                 let parameter, _ = methodInfo.Generics.[position]
-                parameter.Name
+                TypeNameEscaping.escape parameter.Name
             // `TypeString::AppendType` renders a ParamTypeDesc as its element followed by the
             // shape's suffix, exactly as the closed shapes in `concreteTypeHandleName` do; the
             // element here is a variable or an open construction, which print as themselves.
@@ -2218,7 +2225,7 @@ module NativeRuntimeTypeHelpers =
     /// not walk the nesting chain — a nested `Outer.A` renders as bare `A`, because a nested
     /// TypeDef row carries no namespace of its own. (Contrast the sibling
     /// `_GetFullyQualifiedNameForClassNestedAware`, which builds `Outer+A`; `GetName` does not
-    /// call it.) `TypeInfo.fullName`, which `runtimeTypeHandleName` uses, is nesting-aware,
+    /// call it.) `TypeInfo.escapedFullName`, which `runtimeTypeHandleName` uses, is nesting-aware,
     /// so it would answer `Outer.A` here and diverge from the real runtime's exception text.
     ///
     /// The *generic arguments*, by contrast, are rendered by `TypeString::AppendInst` with its

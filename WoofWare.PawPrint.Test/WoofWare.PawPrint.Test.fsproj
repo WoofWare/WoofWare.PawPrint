@@ -406,6 +406,7 @@
     <Compile Include="TestFabricatedClassSlotMethodImpl.fs" />
     <Compile Include="TestFabricatedMethodImplBodyLookup.fs" />
     <Compile Include="TestFabricatedTypicalMethodToken.fs" />
+    <Compile Include="TestFabricatedReservedTypeNames.fs" />
     <Compile Include="TestFabricatedMethodImplAncestorSearch.fs" />
     <Compile Include="TestFabricatedConstrainedEnumRetarget.fs" />
     <Compile Include="TestFabricatedWrappedEnumStore.fs" />
