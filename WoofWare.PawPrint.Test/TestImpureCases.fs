@@ -1813,6 +1813,117 @@ module TestImpureCases =
                 memberRef 3, [ 0x0Auy ; 0x01uy ; 0x0Auy ]
             ]
 
+    /// `ModuleBuilderMemberRefOfOwnGenericType.cs` has called `C<int>.M<long>` and `C<int>.Id`, of its own generic
+    /// type `C<T>` (TypeDef 2), from `User.Before` through `TypeBuilder.GetMethod` before `C` was created, and from
+    /// `After.A` through the created `C<int>`'s `MethodInfo`s. This checks the rows as .NET 10 reports them: one
+    /// TypeSpec, `C<int>` naming `C` by its TypeDef; a MemberRef under it for each method, with the generic
+    /// definition's signature; a MethodSpec for `M<long>` under `M`'s MemberRef; no TypeRef but `object`; and both
+    /// bodies naming the same rows, so `A` found each row `Before` added. The operands are read from the bodies,
+    /// since the guest cannot see them, and resolving a token cannot tell which body named it. .NET 10's reflection
+    /// gives no MethodSpec's blob; the bytes here are those `SignatureHelper.GetMethodSpecSigHelper` writes.
+    let private assertOwnGenericTypeMemberRefRows (state : IlMachineState) : unit =
+        let scope =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith "the guest's dynamic assembly Dyn is not loaded")
+
+        EmitScope.typeRefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "System", "Object" ]
+
+        EmitScope.typeDefs scope
+        |> Seq.map (fun row -> EmitScope.stringAt row.Name scope)
+        |> List.ofSeq
+        |> shouldEqual [ "<Module>" ; "C" ; "User" ; "After" ]
+
+        // GENERICINST, CLASS `C` (TypeDef 2 as a TypeDefOrRef coded index), one argument: I4.
+        EmitScope.typeSpecs scope
+        |> Seq.map (fun row -> EmitScope.blobAt row.Signature scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual [ [ 0x15uy ; 0x12uy ; 0x08uy ; 0x01uy ; 0x08uy ] ]
+
+        let cOfInt = MemberRefParent.TypeSpec (EmitScope.tryTypeSpecRid 1 scope).Value
+
+        EmitScope.memberRefs scope
+        |> Seq.map (fun row ->
+            row.Parent, EmitScope.stringAt row.Name scope, EmitScope.blobAt row.Signature scope |> List.ofSeq
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                // GENERIC, one type parameter, two parameters; MVAR 0 returned; VAR 0 and MVAR 0 taken.
+                cOfInt,
+                "M",
+                [
+                    0x10uy
+                    0x01uy
+                    0x02uy
+                    0x1Euy
+                    0x00uy
+                    0x13uy
+                    0x00uy
+                    0x1Euy
+                    0x00uy
+                ]
+                // DEFAULT, one parameter; VAR 0 returned and taken.
+                cOfInt, "Id", [ 0x00uy ; 0x01uy ; 0x13uy ; 0x00uy ; 0x13uy ; 0x00uy ]
+            ]
+
+        // GENERICINST, one argument: I8.
+        EmitScope.methodSpecs scope
+        |> Seq.map (fun row -> row.Method, EmitScope.blobAt row.Instantiation scope |> List.ofSeq)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                MethodDefOrRef.MemberRef (EmitScope.tryMemberRefRid 1 scope).Value, [ 0x0Auy ; 0x01uy ; 0x0Auy ]
+            ]
+
+        // The token operands of the method `name` of the type `typeName`, read from the IL the guest emitted.
+        let operands (typeName : string) (name : string) : int list =
+            let owner =
+                EmitScope.typeDefs scope
+                |> Seq.findIndex (fun row -> EmitScope.stringAt row.Name scope = typeName)
+                |> fun index -> index + 1
+
+            let body =
+                EmitScope.methodDefs scope
+                |> Seq.filter (fun row -> row.Owner.Rid = owner && EmitScope.stringAt row.Name scope = name)
+                |> Seq.exactlyOne
+                |> fun row -> row.Body.Value
+
+            // A tiny header holds the code's length in its top six bits; a fat one is 12 bytes, with the length at 4.
+            let code =
+                match body.[0] &&& 0x03uy with
+                | 0x02uy -> body.AsSpan().Slice(1, int body.[0] >>> 2).ToArray ()
+                | 0x03uy -> body.AsSpan().Slice(12, int (BitConverter.ToUInt32 (body.AsSpan().Slice (4, 4)))).ToArray ()
+                | other -> failwith $"%s{typeName}.%s{name}'s body has no method header (0x%02x{other})"
+
+            let rec scan (at : int) (found : int list) : int list =
+                if at = code.Length then
+                    List.rev found
+                else
+                    match code.[at] with
+                    // ldc.i4.m1 to ldc.i4.8, add, conv.i4, ret
+                    | op when op >= 0x15uy && op <= 0x1Euy -> scan (at + 1) found
+                    | 0x58uy
+                    | 0x69uy
+                    | 0x2Auy -> scan (at + 1) found
+                    // ldc.i4.s, ldc.i4, ldc.i8
+                    | 0x1Fuy -> scan (at + 2) found
+                    | 0x20uy -> scan (at + 5) found
+                    | 0x21uy -> scan (at + 9) found
+                    | 0x28uy -> scan (at + 5) (BitConverter.ToInt32 (code, at + 1) :: found)
+                    | op ->
+                        failwith
+                            $"%s{typeName}.%s{name} holds the opcode 0x%02x{op} at %d{at}, which the guest does not emit"
+
+            scan 0 []
+
+        // `call M<long>` is MethodSpec 1 and `call Id` MemberRef 2, in both bodies.
+        operands "User" "Before" |> shouldEqual [ 0x2B000001 ; 0x0A000002 ]
+        operands "After" "A" |> shouldEqual [ 0x2B000001 ; 0x0A000002 ]
+
     /// `ModuleBuilderMemberRefTranslatedSignature.cs` has asked for references to four CoreLib methods
     /// whose signatures name CoreLib types, and for two of those types. A guest cannot read a TypeRef's
     /// scope or a member reference's signature, so this checks the rows its dynamic module's scope ends
@@ -5993,6 +6104,26 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertMethodSpecRows
+            }
+            {
+                // `ModuleBuilder_GetMemberRefFromSignature` and `TypeBuilder_DefineMethodSpec`, through calls to
+                // methods of an instantiation of the module's own generic type, before and after the type is
+                // created: each a MemberRef under the instantiation's TypeSpec, found again after;
+                // `assertOwnGenericTypeMemberRefRows` reads the rows and operands. Dynamic-code switch overridden
+                // to true like its siblings; verified by hand to exit 0 on real .NET 10.
+                FileName = "ModuleBuilderMemberRefOfOwnGenericType.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertOwnGenericTypeMemberRefRows
             }
             {
                 // `ModuleBuilder_GetMemberRefOfMethodInfo` for signatures that name CoreLib types by
