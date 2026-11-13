@@ -15,8 +15,13 @@ public ref struct RefBox<T>
 
 public class Holder<U>
 {
-    public Box<U> Field;
-    public Pair<int, U> Mixed;
+    public static void TakesBox(Box<U> box)
+    {
+    }
+
+    public static void TakesMixed(Pair<int, U> pair)
+    {
+    }
 }
 
 public static class Program
@@ -45,8 +50,8 @@ public static class Program
         if (boxUArgs.Length != 1) return 5;
         if (!ReferenceEquals(boxUArgs[0], u)) return 6;
 
-        // The same `Type` as the signature of a field spelling `Box<U>`, and as a second request.
-        if (!ReferenceEquals(boxU, typeof(Holder<>).GetField("Field")!.FieldType)) return 7;
+        // The same `Type` as the signature of a parameter spelling `Box<U>`, and as a second request.
+        if (!ReferenceEquals(boxU, ParameterType("TakesBox"))) return 7;
         if (!ReferenceEquals(boxU, typeof(Box<>).MakeGenericType(u))) return 8;
 
         // A definition applied to its own formals is the definition itself.
@@ -55,7 +60,7 @@ public static class Program
 
         // Closed and open arguments together, through the multi-argument buffer.
         Type mixed = typeof(Pair<,>).MakeGenericType(typeof(int), u);
-        if (!ReferenceEquals(mixed, typeof(Holder<>).GetField("Mixed")!.FieldType)) return 10;
+        if (!ReferenceEquals(mixed, ParameterType("TakesMixed"))) return 10;
         Type[] mixedArgs = mixed.GetGenericArguments();
         if (mixedArgs[0] != typeof(int)) return 11;
         if (!ReferenceEquals(mixedArgs[1], u)) return 12;
@@ -97,4 +102,7 @@ public static class Program
 
         return 0;
     }
+
+    static Type ParameterType(string method) =>
+        typeof(Holder<>).GetMethod(method)!.GetParameters()[0].ParameterType;
 }

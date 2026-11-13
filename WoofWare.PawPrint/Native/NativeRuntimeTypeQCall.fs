@@ -472,10 +472,12 @@ module NativeRuntimeTypeQCall =
             let retType =
                 NativeCall.objectHandleOnStackTarget operation state "type" instruction.Arguments.[3]
 
+            // An argument may be open (`typeof(Box<>).MakeGenericType(typeof(Holder<>).GetGenericArguments()[0])`),
+            // and the instantiation is then an open construction.
             let genericArguments =
                 [
                     for index in 0 .. genericArgumentCount - 1 ->
-                        readTypeHandleInstantiationElement ctx.BaseClassTypes operation state instantiationPointer index
+                        readTypeHandleInstantiationTarget ctx.BaseClassTypes operation state instantiationPointer index
                 ]
 
             // Validate the parameter list's constraints before instantiating: the special-constraint
@@ -511,7 +513,7 @@ module NativeRuntimeTypeQCall =
                 let message =
                     classConstraintsViolationMessage
                         position
-                        (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                        (render violation.Argument)
                         (render (RuntimeTypeHandleTarget.OpenGenericTypeDefinition typeInfo.Identity))
                         (render (RuntimeTypeHandleTarget.GenericParameter (typeInfo.Identity, position)))
 
@@ -519,8 +521,8 @@ module NativeRuntimeTypeQCall =
                 |> Some
             | None ->
 
-            let instantiatedHandle, state =
-                instantiateGenericRuntimeTypeTarget
+            let instantiated, state =
+                instantiateGenericRuntimeTypeTargetOver
                     ctx.LoggerFactory
                     ctx.BaseClassTypes
                     operation
@@ -529,11 +531,7 @@ module NativeRuntimeTypeQCall =
                     genericArguments
 
             let runtimeTypeAddr, state =
-                IlMachineState.getOrAllocateType
-                    ctx.LoggerFactory
-                    ctx.BaseClassTypes
-                    (RuntimeTypeHandleTarget.Closed instantiatedHandle)
-                    state
+                IlMachineState.getOrAllocateType ctx.LoggerFactory ctx.BaseClassTypes instantiated state
 
             let state =
                 IlMachineState.writeManagedByrefWithBase
@@ -595,19 +593,10 @@ module NativeRuntimeTypeQCall =
                 )
 
             let argument =
-                match
-                    NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget
-                        operation
-                        state
-                        (instruction.Arguments.[3] |> EvalStackValue.ofCliType)
-                with
-                | RuntimeTypeHandleTarget.Closed handle -> handle
-                | other ->
-                    // Every argument `MakeGenericType` and `MakeGenericMethod` reach this QCall with
-                    // was first bound by the instantiating QCall, which PawPrint answers only for
-                    // closed arguments.
-                    failwith
-                        $"TODO: %s{operation}: the argument %O{other} is not a closed type; deciding constraints for an open argument needs the argument's own constraints (`GatherConstraintsRecursive`), which PawPrint does not model"
+                NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget
+                    operation
+                    state
+                    (instruction.Arguments.[3] |> EvalStackValue.ofCliType)
 
             let loadedAssembly (assemblyFullName : string) : DumpedAssembly =
                 state.LoadedAssembly assemblyFullName
@@ -2036,7 +2025,7 @@ module NativeRuntimeTypeQCall =
                         (ReflectedTypeTarget.ReflectionVariableBinding.Bound declaringTypeGenerics)
                         (ReflectedTypeTarget.ReflectionVariableBinding.Bound methodGenerics)
                         method.Generics
-                        (List.ofSeq methodGenerics)
+                        (methodGenerics |> Seq.map RuntimeTypeHandleTarget.Closed |> List.ofSeq)
 
                 match constraintViolation with
                 | Some violation ->
@@ -2065,7 +2054,7 @@ module NativeRuntimeTypeQCall =
                         NativeRuntimeTypeHelpers.methodConstraintsViolationMessage
                             (render (RuntimeTypeHandleTarget.Closed declaringHandle))
                             method.Name
-                            (render (RuntimeTypeHandleTarget.Closed violation.Argument))
+                            (render violation.Argument)
                             (render formalParameter)
 
                     NativeHandlerResult.raiseExceptionWithMessage

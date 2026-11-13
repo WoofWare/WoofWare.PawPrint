@@ -23,8 +23,8 @@ type GenericConstraintViolation =
     {
         /// The refusing parameter, from the parameter list being validated.
         Parameter : GenericParameter
-        /// The argument bound to `Parameter`.
-        Argument : ConcreteTypeHandle
+        /// The argument bound to `Parameter`, closed or not.
+        Argument : RuntimeTypeHandleTarget
     }
 
 module NativeRuntimeTypeHelpers =
@@ -1177,9 +1177,28 @@ module NativeRuntimeTypeHelpers =
 
         IlMachineState.allocateUninitialisedInstance loggerFactory baseClassTypes typeHandle state
 
-    /// Read one element of a `TypeHandle*` instantiation buffer and return the
-    /// closed `ConcreteTypeHandle` it points to. Open generic type-parameter
-    /// references aren't yet representable here and fail loudly.
+    /// Read one element of a `TypeHandle*` instantiation buffer: the type it points to, closed or
+    /// not.
+    let readTypeHandleInstantiationTarget
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (buffer : ManagedPointerSource)
+        (index : int)
+        : RuntimeTypeHandleTarget
+        =
+        let ptr = nativeIntElementPointer operation baseClassTypes state buffer index
+
+        match
+            IlMachineState.readManagedByref baseClassTypes state (ManagedPointerSource.requireAddressed ptr)
+            |> CliType.unwrapPrimitiveLikeDeep
+        with
+        | CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.TypeHandlePtr target)) -> target
+        | other -> failwith $"%s{operation}: expected TypeHandlePtr in instantiation buffer, got %O{other}"
+
+    /// Read one element of a `TypeHandle*` instantiation buffer, for a caller that can only bind
+    /// closed arguments: the closed `ConcreteTypeHandle` it points to. An open argument fails
+    /// loudly.
     let readTypeHandleInstantiationElement
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (operation : string)
@@ -1188,31 +1207,31 @@ module NativeRuntimeTypeHelpers =
         (index : int)
         : ConcreteTypeHandle
         =
-        let ptr = nativeIntElementPointer operation baseClassTypes state buffer index
+        match readTypeHandleInstantiationTarget baseClassTypes operation state buffer index with
+        | RuntimeTypeHandleTarget.Closed handle -> handle
+        | open' -> failwith $"TODO: %s{operation} with the generic argument %O{open'}, which is not closed"
 
-        match
-            IlMachineState.readManagedByref baseClassTypes state (ManagedPointerSource.requireAddressed ptr)
-            |> CliType.unwrapPrimitiveLikeDeep
-        with
-        | CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.TypeHandlePtr (RuntimeTypeHandleTarget.Closed handle))) ->
-            handle
-        | CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.TypeHandlePtr (RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity))) ->
-            failwith $"TODO: %s{operation} with open generic type argument %O{identity}"
-        | other -> failwith $"%s{operation}: expected TypeHandlePtr in instantiation buffer, got %O{other}"
+    /// The closed handles of <paramref name="targets"/>, if every one of them is closed.
+    let private allClosed (targets : RuntimeTypeHandleTarget list) : ConcreteTypeHandle list option =
+        let closed =
+            targets
+            |> List.choose (fun target ->
+                match target with
+                | RuntimeTypeHandleTarget.Closed handle -> Some handle
+                | _ -> None
+            )
 
-    /// Re-instantiate a `RuntimeTypeHandleTarget` with the given closed generic
-    /// arguments. Closed concrete handles are canonicalised to their open generic
-    /// definition before re-instantiation (matching CoreCLR's
-    /// `genericType.GetCanonicalMethodTable().Instantiate(...)` step). Structural
-    /// wrappers (byref / pointer / array) have no instantiation and so fail loudly.
-    let instantiateGenericRuntimeTypeTarget
-        (loggerFactory : ILoggerFactory)
-        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        if closed.Length = targets.Length then Some closed else None
+
+    /// The generic type definition that instantiating `target` re-instantiates. Closed concrete
+    /// handles are canonicalised to their open generic definition (matching CoreCLR's
+    /// `genericType.GetCanonicalMethodTable().Instantiate(...)` step). Structural wrappers
+    /// (byref / pointer / array) and type variables have no instantiation and so fail loudly.
+    let private genericDefinitionToInstantiate
         (operation : string)
         (state : IlMachineState)
         (target : RuntimeTypeHandleTarget)
-        (genericArguments : ConcreteTypeHandle list)
-        : ConcreteTypeHandle * IlMachineState
+        : ResolvedTypeIdentity
         =
         match target with
         | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
@@ -1220,14 +1239,7 @@ module NativeRuntimeTypeHelpers =
         | RuntimeTypeHandleTarget.OpenConstructed _ as openConstructed ->
             failwith
                 $"TODO: open constructed types are not handled at Native/NativeRuntimeTypeHelpers.fs:%s{__LINE__}; got %O{openConstructed}"
-        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity ->
-            ReflectedTypeTarget.instantiateOpenGenericTypeDefinition
-                loggerFactory
-                baseClassTypes
-                operation
-                state
-                identity
-                genericArguments
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity -> identity
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as typeHandle) ->
             let concreteType =
                 AllConcreteTypes.lookup typeHandle state.TypeSystem.ConcreteTypes
@@ -1235,13 +1247,7 @@ module NativeRuntimeTypeHelpers =
                     failwith $"%s{operation}: concrete type handle was not registered: %O{typeHandle}"
                 )
 
-            ReflectedTypeTarget.instantiateOpenGenericTypeDefinition
-                loggerFactory
-                baseClassTypes
-                operation
-                state
-                concreteType.Identity
-                genericArguments
+            concreteType.Identity
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
             ContinuationType.unasked operation layout
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _)
@@ -1261,6 +1267,70 @@ module NativeRuntimeTypeHelpers =
         | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, position) ->
             failwith
                 $"TODO: %s{operation}: cannot instantiate method generic parameter #%i{position} of method %O{declaringMethod.Get} on %O{declaringType.TypeDefinition.Get}"
+
+    /// Re-instantiate a `RuntimeTypeHandleTarget` with the given closed generic arguments. Closed
+    /// concrete handles are canonicalised to their open generic definition before re-instantiation
+    /// (matching CoreCLR's `genericType.GetCanonicalMethodTable().Instantiate(...)` step).
+    /// Structural wrappers (byref / pointer / array) and type variables have no instantiation and
+    /// so fail loudly.
+    let instantiateGenericRuntimeTypeTarget
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (target : RuntimeTypeHandleTarget)
+        (genericArguments : ConcreteTypeHandle list)
+        : ConcreteTypeHandle * IlMachineState
+        =
+        ReflectedTypeTarget.instantiateOpenGenericTypeDefinition
+            loggerFactory
+            baseClassTypes
+            operation
+            state
+            (genericDefinitionToInstantiate operation state target)
+            genericArguments
+
+    /// `instantiateGenericRuntimeTypeTarget` over arguments that need not be closed. Every argument
+    /// closed gives the closed instantiation; otherwise the result is the open construction, in the
+    /// canonical form `RuntimeTypeHandleTarget.openConstructed` gives it, so that the definition
+    /// applied to its own formals is the definition itself.
+    let instantiateGenericRuntimeTypeTargetOver
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (target : RuntimeTypeHandleTarget)
+        (genericArguments : RuntimeTypeHandleTarget list)
+        : RuntimeTypeHandleTarget * IlMachineState
+        =
+        let definition = genericDefinitionToInstantiate operation state target
+
+        match allClosed genericArguments with
+        | Some closed ->
+            let handle, state =
+                ReflectedTypeTarget.instantiateOpenGenericTypeDefinition
+                    loggerFactory
+                    baseClassTypes
+                    operation
+                    state
+                    definition
+                    closed
+
+            RuntimeTypeHandleTarget.Closed handle, state
+        | None ->
+            let typeInfo =
+                state.LoadedAssembly definition.AssemblyFullName
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"%s{operation}: assembly for open generic type definition is not loaded: %s{definition.AssemblyFullName}"
+                )
+                |> fun assembly -> assembly.TypeDefs.[definition.TypeDefinition.Get]
+
+            if typeInfo.Generics.Length <> genericArguments.Length then
+                failwith
+                    $"%s{operation}: generic arity mismatch for %s{typeInfo.Namespace}.%s{typeInfo.Name}; definition has %i{typeInfo.Generics.Length} parameters, but call supplied %i{genericArguments.Length} arguments"
+
+            RuntimeTypeHandleTarget.openConstructed definition genericArguments, state
 
     /// Open-generic type-definition behind a `RuntimeTypeHandleTarget`, used by the
     /// constraint validator to look up the type definition's `Generics` (which carry
@@ -1494,11 +1564,16 @@ module NativeRuntimeTypeHelpers =
     /// `methodVariables` is `Open` in the same way when the method is a generic method definition
     /// read as itself, which is the context `RuntimeTypeHandle.SatisfiesConstraints` asks in.
     ///
-    /// CoreCLR additionally walks the *constraining chain* of the argument when the argument is
-    /// itself a type variable (`GatherConstraintsRecursive`), because `class A&lt;S, T&gt; where S : T`
-    /// may be instantiated as `A&lt;U, U&gt;`. That branch is unreachable here and cannot be
-    /// silently mishandled: an argument is a `ConcreteTypeHandle`, which indexes `AllConcreteTypes`
-    /// and is therefore closed by construction, so no open argument is representable to begin with.
+    /// An argument need not be closed. Against a parameter that declares no constraint of its own
+    /// (no special constraint and no general one), an open argument is decided exactly: a type
+    /// variable satisfies it, since CoreCLR applies the byref-like rejection only to an argument
+    /// that is not a variable (typedesc.cpp:1527-1606), and any other open argument is refused
+    /// only if it is byref-like, as an open construction of a `ref struct` is. Against a parameter
+    /// that does declare one, an open argument fails loudly: CoreCLR then reads a variable's own
+    /// constraints (`SatisfiesSpecialConstraintRecursive`, `GatherConstraintsRecursive`), because
+    /// `class A&lt;S, T&gt; where S : T` may be instantiated as `A&lt;U, U&gt;`, and asks an open
+    /// construction's MethodTable, neither of which PawPrint models.
+    ///
     /// The static-virtual-method refinement at typedesc.cpp:1686 (an abstract argument against an
     /// interface constraint carrying unimplemented virtual statics) is likewise not implemented:
     /// it needs `ResolveVirtualStaticMethod`, which PawPrint does not have.
@@ -1518,7 +1593,7 @@ module NativeRuntimeTypeHelpers =
         (typeVariables : ReflectedTypeTarget.ReflectionVariableBinding)
         (methodVariables : ReflectedTypeTarget.ReflectionVariableBinding)
         (generics : GenericParamFromMetadata ImmutableArray)
-        (genericArguments : ConcreteTypeHandle list)
+        (genericArguments : RuntimeTypeHandleTarget list)
         : IlMachineState * GenericConstraintViolation option
         =
         if generics.Length <> List.length genericArguments then
@@ -1620,6 +1695,36 @@ module NativeRuntimeTypeHelpers =
                 state, not satisfied
             )
 
+        /// Whether `paramMd` refuses an argument that is not closed, where that is decidable
+        /// without the argument's own constraints.
+        let violatedByOpenArgument
+            (state : IlMachineState)
+            (param : GenericParameter)
+            (paramMd : GenericParamMetadata)
+            (arg : RuntimeTypeHandleTarget)
+            : bool
+            =
+            let declaresConstraint =
+                paramMd.RequiresReferenceType
+                || paramMd.RequiresNonNullableValueType
+                || paramMd.RequiresParameterlessConstructor
+                || not paramMd.Constraints.IsEmpty
+
+            if declaresConstraint then
+                failwith
+                    $"TODO: validateConstraintsOn: generic parameter '%s{param.Name}' of %s{ownerDisplayName} declares constraints, and its argument %O{arg} is not closed; deciding them needs the argument's own constraints (`SatisfiesSpecialConstraintRecursive` / `GatherConstraintsRecursive` for a type variable) or an open construction's MethodTable, which PawPrint does not model"
+
+            match arg with
+            | RuntimeTypeHandleTarget.GenericParameter _
+            | RuntimeTypeHandleTarget.MethodGenericParameter _ -> false
+            | _ ->
+                not paramMd.AllowsByRefLike
+                && RuntimeTypeHandleTarget.isByRefLike
+                    baseClassTypes
+                    state.TypeSystem._LoadedAssemblies
+                    state.TypeSystem.ConcreteTypes
+                    arg
+
         ((state, None), Seq.zip generics genericArguments)
         ||> Seq.fold (fun (state, found) ((param, paramMd), arg) ->
             match found with
@@ -1627,10 +1732,13 @@ module NativeRuntimeTypeHelpers =
             | None ->
 
             let state, violated =
-                if violatesSpecialConstraint paramMd arg then
-                    state, true
-                else
-                    violatesGeneralConstraint state param paramMd arg
+                match arg with
+                | RuntimeTypeHandleTarget.Closed arg ->
+                    if violatesSpecialConstraint paramMd arg then
+                        state, true
+                    else
+                        violatesGeneralConstraint state param paramMd arg
+                | open' -> state, violatedByOpenArgument state param paramMd open'
 
             if violated then
                 state,
@@ -1644,22 +1752,28 @@ module NativeRuntimeTypeHelpers =
         )
 
     /// `validateConstraintsOn` for a generic *type*'s parameter list. The type's own generic
-    /// arguments are the substitution context for its parameters' constraints.
+    /// arguments, closed or not, are the substitution context for its parameters' constraints
+    /// (`SatisfiesClassConstraints` reads them under the instantiation's `SigTypeContext`).
     let validateConstraints
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
         (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>)
-        (genericArguments : ConcreteTypeHandle list)
+        (genericArguments : RuntimeTypeHandleTarget list)
         : IlMachineState * GenericConstraintViolation option
         =
+        let typeVariables =
+            match allClosed genericArguments with
+            | Some closed -> ReflectedTypeTarget.ReflectionVariableBinding.Bound (ImmutableArray.CreateRange closed)
+            | None -> ReflectedTypeTarget.ReflectionVariableBinding.Open (ImmutableArray.CreateRange genericArguments)
+
         validateConstraintsOn
             loggerFactory
             baseClassTypes
             state
             $"%s{typeInfo.Namespace}.%s{typeInfo.Name}"
             typeInfo.AssemblyFullName
-            (ReflectedTypeTarget.ReflectionVariableBinding.Bound (ImmutableArray.CreateRange genericArguments))
+            typeVariables
             (ReflectedTypeTarget.ReflectionVariableBinding.Bound ImmutableArray.Empty)
             typeInfo.Generics
             genericArguments
