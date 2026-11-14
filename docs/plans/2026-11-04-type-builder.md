@@ -3415,25 +3415,26 @@ The host-only cache test (`late callBefore=True`) gave 1, then 1 and 2, in 20 of
 * The test-only commit's red run: the guest exited 3 ("check 3: got 1, expected 2"), the refusal test saw no failure,
   and the property was falsified at creation by `{ Before = 21; Rows = [3; 2; 3; 2]; Between = 17; After = 0 }`
   (PawPrint `B3`, real .NET `B2`).
-* Each mutant was run against the guest, the refusal test, the differential property, the Domain properties
-  (`TestEmitScopeProperties`) and `TestLoadedAssemblies`:
+* Each mutant was run against the current shape, after the refusal moved to the consumers (addendum below), with a
+  fresh build each, against the guest, both refusal tests (the class's and the interface's), the differential property
+  with its interface schedules, the Domain properties (`TestEmitScopeProperties`) and `TestLoadedAssemblies`:
 
   | Mutant | Killed by |
   |---|---|
-  | The rule never applied | the guest (check 3); the property; the refusal test |
-  | The threshold at 24 | the guest (check 2); both Domain properties; the property; 5s's differential property |
-  | The threshold at 26 | the guest (refuses `After25`, created at 25 rows); both Domain properties; the property; the refusal test; 5s's differential property |
+  | The rule never applied | the guest (check 3); the property; both refusal tests |
+  | The threshold at 24 | the guest (check 2); both Domain properties; 5s's differential property |
+  | The threshold at 26 | the guest (refuses `After25`, created at 25 rows); both Domain properties; the property; both refusal tests; 5s's differential property |
   | The rule applied to an image on disk | the guest (check 15, `CDisk`) alone: neither property reads an image on disk |
-  | The rule keyed on the type's own row count, not the module's | the guest (check 3); the property; the refusal test |
-  | The window answered with the reversed order (no refusal) | the property; the refusal test. The guest passes: its window cases are the ones whose walks agree |
-  | The window refusing on any match | the guest (refuses `WindowOne`, one row per method); the property |
-  | The window refusing on more than one match where the two walks agree | the guest (refuses `Window2`, `B1` twice); the property |
-  | The count at creation taken now | the property; the refusal test (the window never opens); the guest passes |
+  | The rule keyed on the type's own row count, not the module's | the guest (check 3); the property; both refusal tests |
+  | The window answered with the reversed order (no order-dependent body) | the property; both refusal tests. The guest passes: its window cases are the ones whose walks agree, or that a more specific body or a conflict decides |
+  | The window giving an order-dependent body on any match | the guest (refuses `WindowOne`, one row per method); the property |
+  | The window giving an order-dependent body on more than one match where the two walks agree | the guest (refuses `Window2`, `B1` twice); the property |
+  | The count at creation taken now | the property; both refusal tests (the window never opens); the guest passes |
   | The counts taken from the constrained type's module, not the level's | the guest: check 20 through `rowsOfKeySinceCreation`'s check that a key's rows fit the table at creation (`D`'s module had none), and, with that check and `rowsOfKey`'s removed too, check 20's answer (1, not 2) |
   | The window taken whenever rows were added since creation | the guest (refuses `After25`); the Domain property; the property |
-  | `WithCreatedType` recording 0 | the guest (through the same check, then with it removed by refusing `Def25a`); `TestLoadedAssemblies`; the property; the refusal test |
-  | `TryMethodImplRowCounts` giving the count at creation as the count now | `TestLoadedAssemblies`; the property; the refusal test; the guest passes |
-  | `TwoOrders` holding its orders swapped | the Domain property; the refusal test (its message names the bodies in the two orders) |
+  | `WithCreatedType` recording 0 | the guest (through the same check, then with it removed by refusing `Def25a`); `TestLoadedAssemblies`; the property; both refusal tests |
+  | `TryMethodImplRowCounts` giving the count at creation as the count now | `TestLoadedAssemblies`; the property; both refusal tests; the guest passes |
+  | `TwoOrders` holding its orders swapped | the Domain property; both refusal tests (their messages name the bodies in the two orders) |
   | The rule applied to the instance arm too | survives, as expected: the instance arm picks the body with the lowest slot, so the order of its rows cannot change its answer |
 
 * Suites at the tip, built from the whole solution: the default suite (5569 passed, 37 skipped), `Guest` (234),
