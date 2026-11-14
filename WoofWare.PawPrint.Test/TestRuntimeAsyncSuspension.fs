@@ -106,10 +106,13 @@ module TestRuntimeAsyncSuspension =
         ]
 
     /// The flags of `ContinuationFlags` that say what a continuation's frame awaited, as CoreLib's
-    /// dispatcher and its value-task source continuation read them.
+    /// dispatcher and its value-task source continuation read them, before any suspension helper
+    /// adds to them. `FinishSuspensionWithContinuationContext` adds the flag for the context it
+    /// captures.
     let private expectedCallFlags (flags : SuspendedCallFlags) : int =
         match flags with
-        | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference -> 0
+        | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+        | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnCapturedContext -> 0
         | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool ->
             corelibConstant "ContinuationFlags" "ContinueOnThreadPool"
         | SuspendedCallFlags.ValueTaskAdaptedToTask -> corelibConstant "ContinuationFlags" "ValueTaskAdaptedToTask"
@@ -117,9 +120,29 @@ module TestRuntimeAsyncSuspension =
     let private everyCallFlags : SuspendedCallFlags list =
         [
             SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+            SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnCapturedContext
             SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool
             SuspendedCallFlags.ValueTaskAdaptedToTask
         ]
+
+    /// The JIT gives a continuation a slot for the continuation context exactly where the await
+    /// continues on the captured context (`SetNeedsContinuationContext`, jit/async.cpp).
+    [<Test>]
+    let ``A continuation has a continuation-context slot exactly when its await continues on the captured context``
+        ()
+        : unit
+        =
+        for inTry in [ true ; false ] do
+            for flags in everyCallFlags do
+                let layout = AsyncSuspension.layoutAwaiting inTry flags MethodReturnType.Void
+
+                layout.ContinuationContext
+                |> shouldEqual (
+                    flags = SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnCapturedContext
+                )
+
+                layout.ExecutionContext |> shouldEqual true
+                layout.Exception |> shouldEqual inTry
 
     [<Test>]
     let ``A continuation says what its frame awaited in its Flags as CoreLib reads them`` () : unit =

@@ -81,10 +81,13 @@ module ContinuationSlots =
 
     /// The bits of `Flags` that say what the continuation's frame was awaiting
     /// (`ContinuationFlags.ContinueOnThreadPool` and `ValueTaskAdaptedToTask`), as the JIT sets them
-    /// when it makes the continuation (`AsyncTransformation::CreateSuspension`, jit/async.cpp).
+    /// when it makes the continuation (`AsyncTransformation::CreateSuspension`, jit/async.cpp). An
+    /// await that continues on the captured context sets none here: CoreLib's
+    /// `FinishSuspensionWithContinuationContext` adds the flag for the context it captures.
     let callFlags (flags : SuspendedCallFlags) : int =
         match flags with
-        | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference -> 0
+        | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+        | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnCapturedContext -> 0
         | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool -> 1
         | SuspendedCallFlags.ValueTaskAdaptedToTask -> 1 <<< 3
 

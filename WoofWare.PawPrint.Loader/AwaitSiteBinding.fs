@@ -9,6 +9,12 @@ type ContinuationContextHandling =
     /// an await of a promise: each call of runtime async's own machinery, and an async version's
     /// calls in its tail shapes and of `AsyncHelpers.TransparentAwait`.
     | NoPreference
+    /// On the context the awaiting frame captures when it suspends: an await of a promise without
+    /// `ConfigureAwait(false)`. The continuation has a slot for that context, and CoreLib's
+    /// `FinishSuspensionWithContinuationContext` writes the slot and the flag that says which kind
+    /// of context it holds, or flags the continuation `ContinueOnThreadPool` where the frame runs
+    /// under neither a `SynchronizationContext` nor a `TaskScheduler` of its own.
+    | ContinueOnCapturedContext
     /// On the thread pool: an await of a promise with `ConfigureAwait(false)`, whose continuation
     /// carries `ContinuationFlags.ContinueOnThreadPool`.
     | ContinueOnThreadPool
@@ -78,8 +84,6 @@ type AwaitSiteFacts =
 /// variant (decision 6(a)).
 [<RequireQualifiedAccess>]
 type AwaitNotYetBound =
-    /// The await continues on the captured context.
-    | ContinuesOnCapturedContext
     /// The call is a `callvirt` with a `constrained.` prefix: of an instance method, through a
     /// receiver whose type the prefix names.
     | ConstrainedCallvirt
@@ -104,9 +108,8 @@ type AwaitSiteBinding =
 [<RequireQualifiedAccess>]
 module AwaitSiteBinding =
 
-    /// What a matched await site binds, from `facts`. An unmodelled variant is named before any
-    /// reason the site is not yet bound; of those, the first of these is named: the captured
-    /// context, a `callvirt`'s `constrained.` prefix. A site that dispatches binds the named
+    /// What a matched await site binds, from `facts`. An unmodelled variant is named before the
+    /// reason a site is not yet bound, a `callvirt`'s `constrained.` prefix. A site that dispatches binds the named
     /// method's variant, whose implementation on the receiver dispatch finds through its ordinary
     /// sibling (decision 19 of `docs/plans/2026-11-11-runtime-async.md`); so does a `call` with a
     /// `constrained.` prefix, as of a static virtual method, whose implementation the prefix
@@ -130,14 +133,7 @@ module AwaitSiteBinding =
         | Error refusal -> AwaitSiteBinding.NoVariant refusal
         | Ok body ->
 
-        let continuesOnCapturedContext =
-            match facts.Pattern with
-            | MatchedPattern.Await continues -> continues
-            | MatchedPattern.TailShape -> false
-
-        if continuesOnCapturedContext then
-            AwaitSiteBinding.NotYetBound AwaitNotYetBound.ContinuesOnCapturedContext
-        elif facts.Constrained && facts.Opcode = AwaitedCall.Callvirt then
+        if facts.Constrained && facts.Opcode = AwaitedCall.Callvirt then
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.ConstrainedCallvirt
         else
 
@@ -150,10 +146,11 @@ module AwaitSiteBinding =
         | AsyncVariantBody.AsyncVersion ->
 
         match facts.Pattern with
-        | MatchedPattern.Await _ ->
-            // `ConfigureAwait(false)` (`PREFIX_TASK_AWAIT_CONTINUE_ON_CAPTURED_CONTEXT` unset,
+        | MatchedPattern.Await true ->
+            // No `ConfigureAwait(false)` (`PREFIX_TASK_AWAIT_CONTINUE_ON_CAPTURED_CONTEXT` set,
             // `impSetupAsyncCall`, importercalls.cpp).
-            AwaitSiteBinding.BindsVariant ContinuationContextHandling.ContinueOnThreadPool
+            AwaitSiteBinding.BindsVariant ContinuationContextHandling.ContinueOnCapturedContext
+        | MatchedPattern.Await false -> AwaitSiteBinding.BindsVariant ContinuationContextHandling.ContinueOnThreadPool
         | MatchedPattern.TailShape ->
             // A tail shape is no task await (`PREFIX_IS_TASK_AWAIT` unset), so its call's handling
             // stays `None`.
