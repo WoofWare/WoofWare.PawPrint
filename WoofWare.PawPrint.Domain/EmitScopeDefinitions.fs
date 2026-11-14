@@ -20,6 +20,22 @@ type TypeDefDefinition =
     | Duplicate of TypeDefRid
 
 /// <summary>
+/// The outcome of asking CoreCLR's emitter to define a parameter in a dynamic module's scope
+/// (<c>RegMeta::DefineParam</c>).
+/// </summary>
+[<RequireQualifiedAccess>]
+type ParamDefinition =
+    /// A new <c>Param</c> row, and the scope that holds it.
+    | Defined of ParamRid * EmitScope
+    /// <summary>
+    /// CoreCLR would add the row and, sliding it ahead of an earlier row of <c>slid</c>, start
+    /// the <c>ParamPtr</c> table while every MethodDef row after it up to <c>last</c> still
+    /// holds <c>END_OF_TABLE</c> as its <c>ParamList</c>. Real .NET then refuses or misreports those
+    /// methods' parameters, which a scope does not model, so nothing is added (issue #2253).
+    /// </summary>
+    | StrandsLaterMethods of slid : MethodDefRid * last : MethodDefRid
+
+/// <summary>
 /// A generic parameter whose variance PawPrint does not model when its type is created.
 /// </summary>
 [<RequireQualifiedAccess>]
@@ -553,3 +569,75 @@ module EmitScopeDefinitions =
                 EventType = eventType
             }
             scope
+
+    /// <summary>
+    /// Define a parameter of <paramref name="method"/>, as <c>RegMeta::DefineParam</c> does for
+    /// <c>TypeBuilder_SetParamInfo</c>, whose emitter does not check for a duplicate (<c>MDDupParamDef</c> is
+    /// not set): a new row at the next RID, whatever rows the method already has, unless CoreCLR would strand
+    /// later MethodDef rows (<see cref="ParamDefinition.StrandsLaterMethods"/>).
+    /// </summary>
+    /// <remarks>
+    /// The row holds the low 16 bits of <paramref name="sequence"/> and of <paramref name="flags"/>, the
+    /// columns' widths. An empty name leaves the name column 0, as a null name does in CoreCLR.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="flags"/> has a bit of <c>ParameterAttributes.ReservedMask</c> (0xF000), which every
+    /// managed caller clears; <paramref name="sequence"/> is negative, which every managed caller refuses;
+    /// the scope lacks <paramref name="method"/>; or <paramref name="name"/> holds a NUL.
+    /// </exception>
+    let defineParam
+        (method : MethodDefRid)
+        (sequence : int)
+        (name : string)
+        (flags : int)
+        (scope : EmitScope)
+        : ParamDefinition
+        =
+        if flags &&& 0xF000 <> 0 then
+            invalidArg
+                (nameof flags)
+                $"EmitScopeDefinitions.defineParam: the flags 0x%08x{flags} have a reserved bit (0xF000), which every managed caller clears"
+
+        if sequence < 0 then
+            invalidArg
+                (nameof sequence)
+                $"EmitScopeDefinitions.defineParam: the sequence %d{sequence} is negative, which every managed caller refuses"
+
+        if (EmitScope.tryMethodDefRid method.Rid scope).IsNone then
+            invalidArg
+                (nameof method)
+                $"EmitScopeDefinitions.defineParam: the scope has no MethodDef row %d{method.Rid}"
+
+        let stored = uint16 (sequence &&& 0xFFFF)
+        let nameOffset, named = EmitScope.internString name scope
+        let parameters = EmitScope.parameters scope
+        let methodCount = (EmitScope.methodDefs scope).Count
+
+        // `CMiniMdRW::FixParamSequence` starts `ParamPtr` without converting the `END_OF_TABLE` markers when
+        // the new row slides and no table exists. With no table, the rows with a real `ParamList` end at the
+        // method of the last row, so the row slides past one of its own method only if that method owns the
+        // last row; and the methods after it hold the marker.
+        let noTable =
+            parameters
+            |> Seq.pairwise
+            |> Seq.forall (fun (a, b) -> (a.Owner.Rid, a.Sequence) <= (b.Owner.Rid, b.Sequence))
+
+        let slidesPastLast =
+            parameters.Count > 0
+            && parameters.[parameters.Count - 1].Owner = method
+            && parameters.[parameters.Count - 1].Sequence > stored
+
+        if noTable && slidesPastLast && methodCount > method.Rid then
+            ParamDefinition.StrandsLaterMethods (method, MethodDefRid methodCount)
+        else
+            let rid, scope =
+                EmitScope.addParam
+                    {
+                        Owner = method
+                        Flags = enum<ParameterAttributes> (flags &&& 0xFFFF)
+                        Sequence = stored
+                        Name = nameOffset
+                    }
+                    named
+
+            ParamDefinition.Defined (rid, scope)

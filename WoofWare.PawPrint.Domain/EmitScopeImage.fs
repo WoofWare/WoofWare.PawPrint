@@ -66,7 +66,9 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 ///
 /// A child table whose rows are not grouped by parent, or whose parameters are not in sequence order within their method, gets a
 /// pointer table (`FieldPtr`, `MethodPtr`, `ParamPtr`), as CoreCLR's read-write metadata starts one, so the table stream is always the uncompressed `#-` kind, the only one
-/// that may hold pointer tables. A `PropertyMap` row is derived for each type with properties, in the order
+/// that may hold pointer tables. The `ParamPtr` is CoreCLR's for a scope whose parameters all came through
+/// `EmitScopeDefinitions.defineParam`: for those scopes, and no others, CoreCLR has one exactly when the rows sorted
+/// by (method, Sequence, RID) are not in RID order. A `PropertyMap` row is derived for each type with properties, in the order
 /// of each type's first property, as `RegMeta::DefineProperty` adds them, and the properties get a
 /// `PropertyPtr` when they are not grouped in that order; an `EventMap` row and an `EventPtr` likewise for
 /// events, as `RegMeta::_DefineEvent` adds them. Every heap offset is the one the scope handed out.
