@@ -56,9 +56,9 @@ module NativeGcFrameRegistration =
     /// it from, the calling thread's GC frame chain.
     ///
     /// **PawPrint never collects**, so both are no-ops here, and that is an exact behavioural
-    /// match rather than a shortcut. (`Native/NativeGc.fs` rests on the same fact twice: once
-    /// for `GC_ALLOC_PINNED_OBJECT_HEAP`, once for every field `GC.GetMemoryInfo` reports. Of
-    /// those three, this is the one that would become a *silent* soundness bug if a collector
+    /// match rather than a shortcut. (`Native/NativeGc.fs` rests on the same fact three times:
+    /// for `GC_ALLOC_PINNED_OBJECT_HEAP`, for every field `GC.GetMemoryInfo` reports, and for
+    /// every count `GC.CollectionCount` reports. Of those four, this is the one that would become a *silent* soundness bug if a collector
     /// ever landed, because the blocks registered here are precisely the roots nothing else can
     /// find — so a collector's first job is to make this handler stop being a no-op.)
     ///

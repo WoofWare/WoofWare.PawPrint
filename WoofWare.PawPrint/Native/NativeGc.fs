@@ -142,6 +142,19 @@ module NativeGc =
         | RuntimeTypeHandleTarget.FunctionPointer _ ->
             failwith $"%s{operation}: expected a closed SZ array type handle, got %O{target}"
 
+    /// Two of `System.GC`'s InternalCalls, each answered as a runtime that has never collected
+    /// would answer it.
+    ///
+    /// `System.GC._CollectionCount(int generation, int getSpecialGCCount)` is the InternalCall
+    /// behind the public `GC.CollectionCount(int)`, whose commonest framework caller is every
+    /// `TraceSource` and `Switch` constructor (pruning a cache of weak references when
+    /// `CollectionCount(2)` has moved). It answers 0 for every generation: CoreCLR answers
+    /// "how many collections of this generation since the process started", and a generation
+    /// past `max_generation` gets 0 there too. A negative generation fails loudly, since the
+    /// managed wrapper rejects it first and CoreCLR only asserts it. If `GC.Collect` is ever
+    /// implemented, this must count what it does: on CoreCLR an induced collection increments
+    /// the counts of the generation it condemns and of every younger one.
+    ///
     /// `System.GC.GetMemoryInfo(GCMemoryInfoData data, int kind)`: the InternalCall behind
     /// the public `GC.GetGCMemoryInfo(GCKind)`. CoreCLR (comutilnative.cpp:585,
     /// GCInterface::GetMemoryInfo) takes the address of every field of `data` and hands them to
@@ -257,6 +270,36 @@ module NativeGc =
             let state =
                 GcMemoryInfoDataLayout.fieldNames layout
                 |> List.fold (fun state fieldName -> zeroField ctx state dataAddr fieldName) state
+
+            NativeHandlerResult.completed state |> Some
+        | "System.Private.CoreLib",
+          "System",
+          "GC",
+          "_CollectionCount",
+          [ ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
+            let operation = "GC._CollectionCount"
+
+            if instruction.Arguments.Length <> 2 then
+                failwith $"%s{operation}: expected two arguments, got %d{instruction.Arguments.Length}"
+
+            let generation = NativeCall.int32Argument operation instruction.Arguments.[0]
+
+            // The managed `GC.CollectionCount` throws ArgumentOutOfRangeException for a negative
+            // generation before calling this, and CoreCLR only asserts it here: in a release
+            // build the GC would index its per-generation table with it.
+            if generation < 0 then
+                failwith
+                    $"%s{operation}: generation %d{generation} is negative; the managed GC.CollectionCount wrapper rejects this before reaching the InternalCall"
+
+            // Every count CoreCLR could answer from is zero, because no collection has ever
+            // happened to increment it: `dd_collection_count` of a generation up to
+            // `max_generation` with `getSpecialGCCount` zero, the background-GC counters
+            // otherwise, and a literal 0 for a generation past `max_generation`.
+            let state =
+                state
+                |> IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim 0)) ctx.Thread
 
             NativeHandlerResult.completed state |> Some
         | _ -> None
