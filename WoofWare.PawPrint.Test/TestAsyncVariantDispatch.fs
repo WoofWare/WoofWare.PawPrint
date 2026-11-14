@@ -9,10 +9,11 @@ open Microsoft.CodeAnalysis
 open NUnit.Framework
 open WoofWare.PawPrint
 
-/// Virtual dispatch of an async variant (decision 19 of `docs/plans/2026-11-11-runtime-async.md`):
-/// the implementation of a variant on a receiver is the variant of the implementation of its
-/// ordinary sibling, and where that implementation's variant does not return what the declaration's
-/// does, the call is refused by name, since CoreCLR runs something PawPrint does not model there.
+/// Virtual and static virtual dispatch of an async variant (decision 19 of
+/// `docs/plans/2026-11-11-runtime-async.md`): the implementation of a variant on a receiver, or on
+/// the type a `constrained.` prefix names, is the variant of the implementation of its ordinary
+/// sibling, and where that implementation's variant does not return what the declaration's does,
+/// the call is refused by name, since CoreCLR runs something PawPrint does not model there.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestAsyncVariantDispatch =
@@ -61,6 +62,25 @@ public class Asks : IAsks
 {
     public Task<string> Ask() => Task.FromResult("asked");
 }
+
+public interface IStatic
+{
+    static abstract Task<int> S();
+    static virtual Task D() => Task.CompletedTask;
+}
+
+public class StaticImpl : IStatic
+{
+    public static Task<int> S() => Task.FromResult(4);
+}
+
+public class StaticDerived : StaticImpl { }
+
+public struct StaticStruct : IStatic
+{
+    public static Task<int> S() => Task.FromResult(5);
+    static Task IStatic.D() => Task.CompletedTask;
+}
 """
 
     type private Fixture =
@@ -107,13 +127,17 @@ public class Asks : IAsks
     let private typeNamed (fixture : Fixture) (name : string) : TypeInfo<GenericParamFromMetadata, TypeDefn> =
         fixture.Client.TypeDefs.Values |> Seq.find (fun ty -> ty.Name = name)
 
-    /// Dispatch of the async variant of `declaringName::methodName` on a receiver of type
-    /// `receiverName`.
-    let private dispatch
+    /// The type named `receiverName`, of kind `kind`, concretised, and the async variant of
+    /// `declaringName::methodName` concretised, with the fixture and the state they leave.
+    let private prepare
         (receiverName : string)
+        (kind : SignatureTypeKind)
         (declaringName : string)
         (methodName : string)
-        : Fixture * TypeSystemState * VirtualImplementation
+        : Fixture *
+          TypeSystemState *
+          ConcreteTypeHandle *
+          WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
         =
         let fixture = fixture ()
 
@@ -126,7 +150,7 @@ public class Asks : IAsks
                 fixture.Client.DefinitionFullName
                 ImmutableArray.Empty
                 ImmutableArray.Empty
-                (TypeDefn.FromDefinition ((typeNamed fixture receiverName).Identity, SignatureTypeKind.Class))
+                (TypeDefn.FromDefinition ((typeNamed fixture receiverName).Identity, kind))
 
         let receiver = BindingResult.value receiver
 
@@ -164,6 +188,18 @@ public class Asks : IAsks
                 state
 
         let concretized, _ = BindingResult.value concretized
+        fixture, state, receiver, concretized
+
+    /// Dispatch of the async variant of `declaringName::methodName` on a receiver of type
+    /// `receiverName`.
+    let private dispatch
+        (receiverName : string)
+        (declaringName : string)
+        (methodName : string)
+        : Fixture * TypeSystemState * VirtualImplementation
+        =
+        let fixture, state, receiver, concretized =
+            prepare receiverName SignatureTypeKind.Class declaringName methodName
 
         let state, resolved =
             ConcreteVirtualDispatch.tryResolveVirtualImplementation
@@ -177,6 +213,40 @@ public class Asks : IAsks
                 state
 
         fixture, state, BindingResult.value resolved
+
+    /// Static virtual dispatch of the async variant of `IStatic::methodName` where a `constrained.`
+    /// prefix names `constrainedName`, of kind `kind`.
+    let private dispatchStatic
+        (constrainedName : string)
+        (kind : SignatureTypeKind)
+        (methodName : string)
+        : VirtualImplementation
+        =
+        let fixture, state, constrained, concretized =
+            prepare constrainedName kind "IStatic" methodName
+
+        let _, resolved =
+            StaticVirtualDispatch.resolve
+                fixture.LoggerFactory
+                fixture.RuntimeDirs
+                fixture.BaseClassTypes
+                constrained
+                concretized
+                state
+
+        BindingResult.value resolved
+
+    /// Asserts that `resolved` found the async variant of `chosenType::chosenName`.
+    let private chose (chosenType : string) (chosenName : string) (resolved : VirtualImplementation) : unit =
+        match resolved with
+        | VirtualImplementation.Found found ->
+            found.Definition.RequiredDeclaringType.Name |> shouldEqual chosenType
+            found.Definition.Name |> shouldEqual chosenName
+
+            match found.Definition.TryVariant with
+            | Some MethodVariant.AsyncVariant -> ()
+            | other -> failwith $"dispatch chose %O{found.Definition}, the %A{other}, rather than its async variant"
+        | other -> failwith $"expected dispatch to choose %s{chosenType}::%s{chosenName}, got %A{other}"
 
     /// The receiver, the type declaring the method called, the method's name, and the type declaring
     /// the method whose variant dispatch must choose.
@@ -201,15 +271,48 @@ public class Asks : IAsks
         (chosenName : string)
         : unit
         =
-        match dispatch receiverName declaringName methodName with
-        | _, _, VirtualImplementation.Found found ->
-            found.Definition.RequiredDeclaringType.Name |> shouldEqual chosenName
-            found.Definition.Name |> shouldEqual methodName
+        let _, _, resolved = dispatch receiverName declaringName methodName
+        chose chosenName methodName resolved
 
-            match found.Definition.TryVariant with
-            | Some MethodVariant.AsyncVariant -> ()
-            | other -> failwith $"dispatch chose %O{found.Definition}, the %A{other}, rather than its async variant"
-        | _, _, other -> failwith $"expected dispatch to choose %s{chosenName}'s method, got %A{other}"
+    /// The type the `constrained.` prefix names, whether it is a value type, the method of `IStatic`
+    /// called, and the type and name of the method whose variant dispatch must choose.
+    let staticCases : TestCaseData list =
+        [
+            "StaticImpl", false, "S", "StaticImpl", "S"
+            "StaticDerived", false, "S", "StaticImpl", "S"
+            "StaticStruct", true, "S", "StaticStruct", "S"
+            "StaticImpl", false, "D", "IStatic", "D"
+            "StaticStruct", true, "D", "StaticStruct", "Client.IStatic.D"
+        ]
+        |> List.map (fun (constrained, isValueType, methodName, chosenType, chosenName) ->
+            TestCaseData(
+                [|
+                    box constrained
+                    box isValueType
+                    box methodName
+                    box chosenType
+                    box chosenName
+                |]
+            )
+                .SetArgDisplayNames ($"constrained. %s{constrained} IStatic::%s{methodName}")
+        )
+
+    [<TestCaseSource(nameof staticCases)>]
+    let ``static virtual dispatch of a variant chooses the variant of the ordinary sibling's implementation``
+        (constrainedName : string)
+        (isValueType : bool)
+        (methodName : string)
+        (chosenType : string)
+        (chosenName : string)
+        : unit
+        =
+        let kind =
+            if isValueType then
+                SignatureTypeKind.ValueType
+            else
+                SignatureTypeKind.Class
+
+        dispatchStatic constrainedName kind methodName |> chose chosenType chosenName
 
     /// `Covariant.C` returns `Task<int>` for `Base.C`'s `Task`: CoreCLR's builder gives the override's
     /// variant slot a thunk that drops the `int`, which PawPrint does not model.

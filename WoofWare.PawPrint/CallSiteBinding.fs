@@ -519,9 +519,11 @@ module internal CallSiteBinding =
                 TailCallFacts.ofCall
                     assembly
                     caller
-                    // The JIT knows its callee exactly only where the call does not dispatch.
+                    // The JIT knows its callee exactly only where the call does not dispatch, and
+                    // a `constrained.` prefix has no implementation to resolve.
                     (match opcode with
                      | AwaitedCall.Callvirt when named.DispatchesVirtually -> None
+                     | _ when constrained -> None
                      | AwaitedCall.Callvirt
                      | AwaitedCall.Call -> Some (MethodInfo.requireMetadata "the callee of a tail shape" named))
                     returnTypesAgree
@@ -710,10 +712,42 @@ module internal CallSiteBinding =
                     concretized
                     state
 
-        match awaitSite with
-        | AwaitSiteOutcome.Binds bound -> state, CallSiteBinding.BoundAwait bound
-        | AwaitSiteOutcome.NotAnAwaitSite
-        | AwaitSiteOutcome.DoesNotBind _ ->
+        match awaitSite, constrained with
+        | AwaitSiteOutcome.Binds bound, None -> state, CallSiteBinding.BoundAwait bound
+        | AwaitSiteOutcome.Binds bound, Some constrained ->
+            // The prefix resolves the variant as it resolves any static virtual method: dispatch of
+            // the variant takes the step from the ordinary sibling's implementation (decision 19).
+            match
+                constrainedStaticImplementation
+                    loggerFactory
+                    baseClassTypes
+                    thread
+                    constrainedOpName
+                    isLdftn
+                    constrained
+                    fromMetadata
+                    bound.Variant
+                    state
+            with
+            | state, CallSiteBinding.Method implementation ->
+                match bound.Site, implementation with
+                | BoundAwaitSite.TailShape _, MethodInfo.Metadata (_, facts, _) when
+                    facts.MethodAttributes.HasFlag System.Reflection.MethodAttributes.RequireSecObject
+                    ->
+                    // `canTailCall` refuses a tail call of such a callee where it knows the callee
+                    // exactly, which in code compiled for an exact instantiation it does.
+                    failwith
+                        $"TODO: the tail shape calling %O{bound.Variant} through a constrained. prefix resolves to %O{implementation}, which is flagged RequireSecObject; whether CoreCLR's JIT knows that callee exactly depends on whether it shares the code, which PawPrint does not model"
+                | _ ->
+
+                state,
+                CallSiteBinding.BoundAwait
+                    { bound with
+                        Variant = implementation
+                    }
+            | state, other -> state, other
+        | AwaitSiteOutcome.NotAnAwaitSite, _
+        | AwaitSiteOutcome.DoesNotBind _, _ ->
 
         match constrained with
         | Some constrained ->
