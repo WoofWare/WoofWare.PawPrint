@@ -5231,21 +5231,91 @@ public class NoFields
         },
         state
 
-    /// The answer CoreCLR's FCall gives for a FieldLayout row's offset, or for no row.
-    let private expectedFieldOffsetAnswer (offset : int32 option) : FieldOffsetAnswer =
-        match offset with
-        | Some offset ->
-            {
-                ReturnValue = EvalStackValue.Int32 (Int32Source.Verbatim 0)
-                Offset = offset
-                Found = true
-            }
-        | None ->
-            {
-                ReturnValue = EvalStackValue.Int32 (Int32Source.Verbatim 0)
-                Offset = fieldOffsetSentinel
-                Found = false
-            }
+    let private sOk : EvalStackValue = EvalStackValue.Int32 (Int32Source.Verbatim 0)
+    let private sFalse : EvalStackValue = EvalStackValue.Int32 (Int32Source.Verbatim 1)
+
+    /// The found answer: the FieldLayout row's offset, under S_OK.
+    let private foundAt (offset : int32) : FieldOffsetAnswer =
+        {
+            ReturnValue = sOk
+            Offset = offset
+            Found = true
+        }
+
+    /// A not-found answer, with the offset unwritten. CoreCLR's HRESULT is whatever the type's last
+    /// `GetClassLayoutNext` call returned: S_FALSE if some field of the type has no row, and S_OK if
+    /// every field has one or the type has none.
+    let private notFound (returnValue : EvalStackValue) : FieldOffsetAnswer =
+        {
+            ReturnValue = returnValue
+            Offset = fieldOffsetSentinel
+            Found = false
+        }
+
+    let private hostMetadataImportType : System.Type =
+        typeof<obj>.Assembly.GetType ("System.Reflection.MetadataImport", true)
+
+    let private hostGetFieldOffsetFCall : System.Reflection.MethodInfo =
+        match
+            hostMetadataImportType.GetMethod (
+                "GetFieldOffset",
+                System.Reflection.BindingFlags.NonPublic
+                ||| System.Reflection.BindingFlags.Static
+            )
+        with
+        | null -> failwith "the host CoreLib has no static MetadataImport.GetFieldOffset FCall"
+        | fcall -> fcall
+
+    /// The host CoreCLR's own answer for `module`: its `MetadataImport.GetFieldOffset` FCall, called
+    /// directly with the same starting out-parameters as `invokeGetFieldOffsetIn`. It reads only
+    /// metadata, so no type need load.
+    let private hostGetFieldOffset
+        (hostModule : System.Reflection.Module)
+        (typeToken : int32)
+        (fieldToken : int32)
+        : FieldOffsetAnswer
+        =
+        let import =
+            match
+                hostModule
+                    .GetType()
+                    .GetProperty (
+                        "MetadataImport",
+                        System.Reflection.BindingFlags.NonPublic
+                        ||| System.Reflection.BindingFlags.Instance
+                    )
+            with
+            | null -> failwith "the host RuntimeModule has no MetadataImport property"
+            | property -> property.GetValue hostModule
+
+        let scope =
+            match
+                hostMetadataImportType.GetField (
+                    "m_metadataImport2",
+                    System.Reflection.BindingFlags.NonPublic
+                    ||| System.Reflection.BindingFlags.Instance
+                )
+            with
+            | null -> failwith "the host MetadataImport has no m_metadataImport2 field"
+            | field -> field.GetValue import
+
+        let arguments : obj array =
+            [|
+                scope
+                box typeToken
+                box fieldToken
+                box fieldOffsetSentinel
+                box true
+            |]
+
+        let hresult =
+            hostGetFieldOffsetFCall.Invoke ((null : obj), arguments) |> unbox<int32>
+
+        {
+            ReturnValue = EvalStackValue.Int32 (Int32Source.Verbatim hresult)
+            Offset = unbox<int32> arguments.[3]
+            Found = unbox<bool> arguments.[4]
+        }
 
     /// The `FieldOffsetAttribute` that host reflection synthesises for `field`.
     let private hostFieldOffset (field : System.Reflection.FieldInfo) : int32 option =
@@ -5261,45 +5331,108 @@ public class NoFields
         ||| System.Reflection.BindingFlags.Static
         ||| System.Reflection.BindingFlags.DeclaredOnly
 
+    /// How many of a sweep's questions got each kind of answer.
+    type private FieldOffsetAnswerCounts =
+        {
+            FoundAnswers : int
+            NotFoundSOk : int
+            NotFoundSFalse : int
+        }
+
+        static member Zero : FieldOffsetAnswerCounts =
+            {
+                FoundAnswers = 0
+                NotFoundSOk = 0
+                NotFoundSFalse = 0
+            }
+
+        member this.Add (answer : FieldOffsetAnswer) : FieldOffsetAnswerCounts =
+            match answer.Found, answer.ReturnValue with
+            | true, _ ->
+                { this with
+                    FoundAnswers = this.FoundAnswers + 1
+                }
+            | false, EvalStackValue.Int32 (Int32Source.Verbatim 0) ->
+                { this with
+                    NotFoundSOk = this.NotFoundSOk + 1
+                }
+            | false, EvalStackValue.Int32 (Int32Source.Verbatim 1) ->
+                { this with
+                    NotFoundSFalse = this.NotFoundSFalse + 1
+                }
+            | false, other -> failwith $"GetFieldOffset answered not found with HRESULT %O{other}"
+
+    /// PawPrint's `GetFieldOffset` for `typeToken` and `fieldToken`, checked against the host's direct
+    /// call of the same FCall on the same image.
+    let private assertFieldOffsetAgreesWithHost
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (hostModule : System.Reflection.Module)
+        (typeToken : int32)
+        (fieldToken : int32)
+        (state : IlMachineState)
+        : FieldOffsetAnswer * IlMachineState
+        =
+        let answer, state =
+            invokeGetFieldOffsetIn fixture assemblyFullName typeToken fieldToken state
+
+        let expected = hostGetFieldOffset hostModule typeToken fieldToken
+
+        if answer <> expected then
+            failwith
+                $"GetFieldOffset(0x%08x{typeToken}, 0x%08x{fieldToken}): the host answered %O{expected}, PawPrint %O{answer}"
+
+        answer, state
+
+    /// The host's direct call must agree with host reflection, which is public API: a field asked of
+    /// its own type is found exactly when reflection synthesises a `FieldOffsetAttribute`, at that
+    /// attribute's offset.
+    let private assertHostAnswerAgreesWithReflection
+        (field : System.Reflection.FieldInfo)
+        (answer : FieldOffsetAnswer)
+        : unit
+        =
+        let fromAnswer = if answer.Found then Some answer.Offset else None
+
+        if fromAnswer <> hostFieldOffset field then
+            failwith
+                $"the host's GetFieldOffset answered %O{answer} for %O{field}, but reflection reports %O{hostFieldOffset field}"
+
     /// For every type of `hostAssembly` and every field of every one of its types, checks PawPrint's
-    /// `GetFieldOffset` against host reflection: the field's own type gets the attribute's offset, if
-    /// it has one, and every other type gets "not found", as CoreCLR's walk of only that type's
-    /// fields does. Returns how many questions were answered "found".
+    /// `GetFieldOffset` against the host's direct call of the FCall, HRESULT included. A field asked of
+    /// its own type is also checked against host reflection.
     let private assertFieldOffsetsAgreeWithHost
         (fixture : MetadataImportFixture)
         (assemblyFullName : string)
         (hostAssembly : System.Reflection.Assembly)
         (state : IlMachineState)
-        : int * IlMachineState
+        : FieldOffsetAnswerCounts * IlMachineState
         =
         let hostTypes = hostAssembly.GetTypes ()
         let mutable state = state
-        let mutable found = 0
+        let mutable counts = FieldOffsetAnswerCounts.Zero
 
         for declaring in hostTypes do
             for field in declaring.GetFields allDeclaredFields do
-                let ownOffset = hostFieldOffset field
-
                 for asked in hostTypes do
                     let answer, nextState =
-                        invokeGetFieldOffsetIn fixture assemblyFullName asked.MetadataToken field.MetadataToken state
+                        assertFieldOffsetAgreesWithHost
+                            fixture
+                            assemblyFullName
+                            hostAssembly.ManifestModule
+                            asked.MetadataToken
+                            field.MetadataToken
+                            state
 
                     state <- nextState
+                    counts <- counts.Add answer
 
-                    let expected =
-                        if asked.MetadataToken = declaring.MetadataToken then
-                            ownOffset
-                        else
-                            None
+                    if asked.MetadataToken = declaring.MetadataToken then
+                        assertHostAnswerAgreesWithReflection field answer
+                    elif answer.Found then
+                        failwith $"GetFieldOffset found %O{field} in %s{asked.FullName}, which does not declare it"
 
-                    if answer <> expectedFieldOffsetAnswer expected then
-                        failwith
-                            $"GetFieldOffset(%s{asked.FullName}, %s{declaring.FullName}.%s{field.Name}): expected %O{expected}, got %O{answer}"
-
-                    if answer.Found then
-                        found <- found + 1
-
-        found, state
+        counts, state
 
     [<Test>]
     let ``MetadataImport GetFieldOffset agrees with the host runtime for every type and field`` () : unit =
@@ -5320,11 +5453,15 @@ public class NoFields
         try
             let hostAssembly = context.LoadFromStream (new MemoryStream (image))
 
-            let found, _ =
+            let counts, _ =
                 assertFieldOffsetsAgreeWithHost fixture assembly.Name.FullName hostAssembly state
 
             // `Explicit` A, B, C, D and `ExplicitClass` O, I, each asked of its own type alone.
-            found |> shouldEqual 6
+            counts.FoundAnswers |> shouldEqual 6
+            // Both not-found HRESULTs: `ExplicitClass`, whose every field has a row, and `NoFields`
+            // answer S_OK; `Explicit`, `Sequential` and `Plain` answer S_FALSE.
+            counts.NotFoundSOk |> shouldBeGreaterThan 0
+            counts.NotFoundSFalse |> shouldBeGreaterThan 0
         finally
             context.Unload ()
 
@@ -5343,7 +5480,9 @@ public class NoFields
         let name = assembly.Name.FullName
 
         let explicitType = requiredTopLevelType assembly "" "Explicit"
+        let explicitClass = requiredTopLevelType assembly "" "ExplicitClass"
         let sequentialType = requiredTopLevelType assembly "" "Sequential"
+        let noFields = requiredTopLevelType assembly "" "NoFields"
 
         let field (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>) (fieldName : string) : int32 =
             typeInfo.Fields
@@ -5354,27 +5493,30 @@ public class NoFields
             invokeGetFieldOffsetIn fixture name (typeDefToken typeInfo.TypeDefHandle) fieldToken state
             |> fst
 
-        ask explicitType (field explicitType "D")
-        |> shouldEqual (expectedFieldOffsetAnswer (Some 13))
+        // The HRESULTs are those measured by calling the FCall directly on .NET 10 and 11.
+        ask explicitType (field explicitType "D") |> shouldEqual (foundAt 13)
+        ask explicitType (field explicitType "B") |> shouldEqual (foundAt 4)
 
-        ask explicitType (field explicitType "B")
-        |> shouldEqual (expectedFieldOffsetAnswer (Some 4))
-
-        // Not found: a static field of an explicit-layout type, and a field of a sequential one.
-        ask explicitType (field explicitType "S")
-        |> shouldEqual (expectedFieldOffsetAnswer None)
-
-        ask sequentialType (field sequentialType "X")
-        |> shouldEqual (expectedFieldOffsetAnswer None)
+        // Not found: a static field of an explicit-layout type, and a field of a sequential one. Each
+        // type has a field without a row, so its walk ends on S_FALSE.
+        ask explicitType (field explicitType "S") |> shouldEqual (notFound sFalse)
+        ask sequentialType (field sequentialType "X") |> shouldEqual (notFound sFalse)
 
         // A field with a row, asked of a type that does not declare it.
-        ask sequentialType (field explicitType "D")
-        |> shouldEqual (expectedFieldOffsetAnswer None)
+        ask sequentialType (field explicitType "D") |> shouldEqual (notFound sFalse)
+
+        // The same, asked of a type whose every field has a row, and of a type with no fields: the
+        // walk never runs out of rows, so it ends on S_OK.
+        ask explicitClass (field explicitType "D") |> shouldEqual (notFound sOk)
+        ask noFields (field explicitType "D") |> shouldEqual (notFound sOk)
 
         // CoreCLR compares the target with each field token of the type, so a target that is not a
         // FieldDef at all is simply not among them.
         ask explicitType (typeDefToken explicitType.TypeDefHandle)
-        |> shouldEqual (expectedFieldOffsetAnswer None)
+        |> shouldEqual (notFound sFalse)
+
+        ask explicitClass (typeDefToken explicitClass.TypeDefHandle)
+        |> shouldEqual (notFound sOk)
 
     [<Test>]
     let ``MetadataImport GetFieldOffset agrees with the host runtime for every CoreLib field`` () : unit =
@@ -5382,6 +5524,7 @@ public class NoFields
         let corelib = fixture.BaseClassTypes.Corelib
         let name = corelib.Name.FullName
         let mr = corelib.PeReader.GetMetadataReader ()
+        let hostModule = typeof<obj>.Module
 
         let hostTypes = typeof<obj>.Assembly.GetTypes ()
         let typeDefRows = MetadataReaderExtensions.GetTableRowCount (mr, TableIndex.TypeDef)
@@ -5396,32 +5539,34 @@ public class NoFields
 
         let mutable state = fixture.State
         let mutable fields = 0
-        let mutable found = 0
+        let mutable ownCounts = FieldOffsetAnswerCounts.Zero
+        let mutable otherCounts = FieldOffsetAnswerCounts.Zero
 
         for token in moduleFields do
-            let answer, nextState = invokeGetFieldOffsetIn fixture name 0x02000001 token state
+            let answer, nextState =
+                assertFieldOffsetAgreesWithHost fixture name hostModule 0x02000001 token state
+
             state <- nextState
-            answer |> shouldEqual (expectedFieldOffsetAnswer None)
+            ownCounts <- ownCounts.Add answer
             fields <- fields + 1
 
         for declaring in hostTypes do
             for field in declaring.GetFields allDeclaredFields do
-                let expected = hostFieldOffset field
-
                 let answer, nextState =
-                    invokeGetFieldOffsetIn fixture name declaring.MetadataToken field.MetadataToken state
+                    assertFieldOffsetAgreesWithHost
+                        fixture
+                        name
+                        hostModule
+                        declaring.MetadataToken
+                        field.MetadataToken
+                        state
 
                 state <- nextState
-
-                if answer <> expectedFieldOffsetAnswer expected then
-                    failwith
-                        $"GetFieldOffset(%s{declaring.FullName}.%s{field.Name}): expected %O{expected}, got %O{answer}"
-
+                assertHostAnswerAgreesWithReflection field answer
+                ownCounts <- ownCounts.Add answer
                 fields <- fields + 1
 
                 if answer.Found then
-                    found <- found + 1
-
                     // The same field asked of a neighbouring TypeDef, which does not declare it.
                     let other =
                         if declaring.MetadataToken = (0x02000000 ||| typeDefRows) then
@@ -5430,17 +5575,20 @@ public class NoFields
                             declaring.MetadataToken + 1
 
                     let answer, nextState =
-                        invokeGetFieldOffsetIn fixture name other field.MetadataToken state
+                        assertFieldOffsetAgreesWithHost fixture name hostModule other field.MetadataToken state
 
                     state <- nextState
-                    answer |> shouldEqual (expectedFieldOffsetAnswer None)
+                    answer.Found |> shouldEqual false
+                    otherCounts <- otherCounts.Add answer
 
-        // The sweep reaches every field, and both answers occur often.
+        // The sweep reaches every field, and every kind of answer occurs.
         fields
         |> shouldEqual (MetadataReaderExtensions.GetTableRowCount (mr, TableIndex.Field))
 
-        found |> shouldBeGreaterThan 50
-        fields - found |> shouldBeGreaterThan 1000
+        ownCounts.FoundAnswers |> shouldBeGreaterThan 50
+        ownCounts.NotFoundSFalse |> shouldBeGreaterThan 1000
+        otherCounts.NotFoundSOk |> shouldBeGreaterThan 0
+        otherCounts.NotFoundSFalse |> shouldBeGreaterThan 0
 
     [<Test>]
     let ``MetadataImport GetFieldOffset rejects a type token that is not a TypeDef of the assembly`` () : unit =
@@ -5484,6 +5632,8 @@ public class NoFields
         | FieldWithoutRow
         | TypeWithoutFields
         | ValueType
+        | NotFoundSOk
+        | NotFoundSFalse
 
     let private drawnLayoutTypeGen : Gen<DrawnLayoutType> =
         gen {
@@ -5672,8 +5822,14 @@ public class NoFields
                     |> shouldEqual drawn.Rows
                 )
 
-                assertFieldOffsetsAgreeWithHost fixture assembly.Name.FullName hostAssembly state
-                |> ignore<int * IlMachineState>
+                let counts, _ =
+                    assertFieldOffsetsAgreeWithHost fixture assembly.Name.FullName hostAssembly state
+
+                if counts.NotFoundSOk > 0 then
+                    cover DrawnFieldOffsetCoverage.NotFoundSOk
+
+                if counts.NotFoundSFalse > 0 then
+                    cover DrawnFieldOffsetCoverage.NotFoundSFalse
             finally
                 context.Unload ()
 
@@ -5690,5 +5846,7 @@ public class NoFields
                 DrawnFieldOffsetCoverage.FieldWithoutRow
                 DrawnFieldOffsetCoverage.TypeWithoutFields
                 DrawnFieldOffsetCoverage.ValueType
+                DrawnFieldOffsetCoverage.NotFoundSOk
+                DrawnFieldOffsetCoverage.NotFoundSFalse
             ] do
             coverage.Count label |> shouldBeGreaterThan 15
