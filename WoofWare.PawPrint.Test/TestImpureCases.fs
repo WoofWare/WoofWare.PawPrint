@@ -540,22 +540,6 @@ module TestImpureCases =
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
             {
-                FileName = "DispatchProxyPropertyInterface.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, then a second proxy of the same type, measured on .NET 10 and 11 to exit 0. Its first four checks pass; the second `Create` (line 100) stops at "TODO: a dynamic method's Newobj names DynamicScope entry ... but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured by naming the case, after reflection over events). The proxy type's constructor is reflection-invoked a second time, and with dynamic code supported `MethodBaseInvoker` then emits an invoke stub whose `newobj` names the reflected constructor; nothing about events or properties is involved, and `ReflectionConstructorInvokeTwice.cs` pins the same stop. Un-parked by resolving a reflected constructor named by an invoke stub's `newobj`."""
-            {
                 FileName = "DispatchProxyEventInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -619,22 +603,6 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """PawPrint does not verify a dynamic type's MethodImpl rows at `CreateType`. Two `DefineMethodOverride` rows name one instance interface method, with different bodies; on real .NET 10 and 11, `CreateType` throws `TypeLoadException` ("Method 'B2' on type 'C' ... is overriding a method that has been overridden"), and the guest exits 0 (measured; a control with the second row removed exits 1). PawPrint creates the type and the guest exits 1, "CreateType threw nothing" (measured, on both runtimes). Un-parked by verifying the rows at `CreateType`."""
-            {
-                FileName = "ReflectionConstructorInvokeTwice.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`ConstructorInfo.Invoke` through one `ConstructorInfo` of the guest's own class, twice, measured on real .NET 10 and 11 to exit 0 (a control with check 6 inverted exits 6 on both). The first invocation runs through the runtime's invoker; the second runs the `InvokeStub_` dynamic method CoreLib emits (`InvokerEmitUtil`), whose body is `newobj` of the reflected constructor, and which on real .NET calls the constructor from the second invocation on (measured). PawPrint stops at the second invocation, on both runtimes, when it reads that stub's body: "a dynamic method's Newobj names DynamicScope entry ..., but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured). Un-parked by resolving a dynamic method's `newobj` of a reflected constructor."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
@@ -6407,6 +6375,79 @@ module TestImpureCases =
                 // constructor. Dynamic-code switch overridden to true like its siblings; measured to
                 // exit 0 on real .NET 10 and 11.
                 FileName = "TypeBuilderNewobjRefusals.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `ConstructorInfo.Invoke` of one constructor twice, so that the second runs the
+                // `InvokeStub_` dynamic method CoreLib emits, whose body is `newobj` of the reflected
+                // constructor. Dynamic-code switch overridden to true like its siblings; measured to exit 0
+                // on real .NET 10 and 11.
+                FileName = "ReflectionConstructorInvokeTwice.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // Each shape of constructor reflection invokes through that stub, three times each.
+                // Dynamic-code switch overridden to true like its siblings; measured to exit 0 on real
+                // .NET 10 and 11.
+                FileName = "ReflectionConstructorInvokeShapes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // A `newobj` in a `DynamicMethod`'s body naming a scope entry: reflected constructors,
+                // and each method the JIT refuses to construct with. Dynamic-code switch overridden to
+                // true like its siblings; measured to exit 0 on real .NET 10 and 11.
+                FileName = "DynamicMethodNewobj.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `DispatchProxy.Create` over an interface with a property, twice: the second `Create`
+                // invokes the proxy type's constructor through the invoke stub. Dynamic-code switch
+                // overridden to true like its siblings; measured to exit 0 on real .NET 10 and 11.
+                FileName = "DispatchProxyPropertyInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =

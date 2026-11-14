@@ -441,7 +441,7 @@ module StackShapeOfMethod =
 
     /// A body minted by `Reflection.Emit`: the signature and locals come from the definition the
     /// mint registered, and each token's effect from the `DynamicScope` entry it names.
-    let private analyseDynamic
+    let internal analyseDynamic
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
         (handle : DynamicMethodHandle)
