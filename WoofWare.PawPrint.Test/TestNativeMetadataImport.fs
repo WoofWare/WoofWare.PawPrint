@@ -4536,6 +4536,8 @@ public interface IThing { }
 public enum Colour { Red, Green }
 
 public delegate void Callback();
+
+public unsafe class FunctionPointers { public delegate*<void> F; }
 """
 
     /// What `MetadataImport.GetClassLayout` wrote: its HRESULT and its two out-parameters.
@@ -4715,11 +4717,57 @@ public delegate void Callback();
         compared - nonZero |> shouldBeGreaterThan 1000
 
     [<Test>]
+    let ``MetadataImport GetClassLayout reports no row for the nil TypeDef token of a function pointer type``
+        ()
+        : unit
+        =
+        let fixture = makeFixture ()
+
+        let image =
+            Roslyn.compileAssembly
+                "ClassLayoutTestAssembly"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ classLayoutSource ]
+
+        let assembly, state = withImage fixture image
+
+        let context =
+            System.Runtime.Loader.AssemblyLoadContext ("ClassLayoutsFunctionPointer", isCollectible = true)
+
+        try
+            let hostAssembly = context.LoadFromStream (new MemoryStream (image))
+
+            let functionPointer =
+                (hostAssembly.GetType ("FunctionPointers", true)).GetField("F").FieldType
+
+            // A function pointer type gets past `GetStructLayoutCustomAttribute`'s early returns, and
+            // its `MetadataToken` is the nil TypeDef token.
+            functionPointer.IsFunctionPointer |> shouldEqual true
+            functionPointer.MetadataToken |> shouldEqual 0x02000000
+
+            let layout = functionPointer.StructLayoutAttribute
+            let expected = expectedClassLayoutAnswer layout.Pack layout.Size
+            expected |> shouldEqual (expectedClassLayoutAnswer 0 0)
+
+            // Whichever module it is asked in, the nil token has no ClassLayout row.
+            invokeGetClassLayoutIn fixture assembly.Name.FullName 0x02000000 state
+            |> fst
+            |> shouldEqual expected
+
+            invokeGetClassLayoutIn fixture fixture.BaseClassTypes.Corelib.Name.FullName 0x02000000 state
+            |> fst
+            |> shouldEqual expected
+        finally
+            context.Unload ()
+
+    [<Test>]
     let ``MetadataImport GetClassLayout rejects a type token that is not a TypeDef of the assembly`` () : unit =
         // CoreCLR searches the ClassLayout table for the token's row number alone, so another
         // table's token, or a row past the TypeDef table's end, would be answered from whichever
         // row (or none) the number matches. The only managed caller passes a `RuntimeType`'s own
-        // `MetadataToken`, so either is a token PawPrint should never have minted.
+        // `MetadataToken`, so either is a token PawPrint should never have minted. (The nil
+        // TypeDef token is one it does mint, for a function pointer type.)
         let fixture = makeFixture ()
         let corelib = fixture.BaseClassTypes.Corelib
         let name = corelib.Name.FullName
@@ -4727,7 +4775,7 @@ public delegate void Callback();
         let typeDefRows =
             MetadataReaderExtensions.GetTableRowCount (corelib.PeReader.GetMetadataReader (), TableIndex.TypeDef)
 
-        for token in [ 0x06000001 ; 0x04000001 ; 0x02000000 ; 0x02000000 ||| (typeDefRows + 1) ] do
+        for token in [ 0x06000001 ; 0x04000001 ; 0x02000000 ||| (typeDefRows + 1) ] do
             let ex =
                 Assert.Catch (fun () -> invokeGetClassLayoutIn fixture name token fixture.State |> ignore)
 

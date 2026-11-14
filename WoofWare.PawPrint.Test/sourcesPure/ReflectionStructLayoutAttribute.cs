@@ -11,6 +11,8 @@ using System.Runtime.InteropServices;
 // with the two swapped, is caught. C# writes a ClassLayout row only for a type that names `Pack`
 // or `Size`, or for an empty struct, whatever its `LayoutKind`.
 //
+// A function pointer type has no TypeDef of its own, and asks about the nil token.
+//
 // `GetCustomAttributes` does not synthesise a `StructLayoutAttribute` (only `Serializable` and
 // `ComImport` are pseudo-attributes of a type), so it reports none for any of these.
 
@@ -151,6 +153,15 @@ public class Program
         if ((code = Check(typeof(Generic<int>), LayoutKind.Sequential, 16, 56, CharSet.Ansi, 110)) != 0) return code;
         if ((code = Check(typeof(Generic<>), LayoutKind.Sequential, 16, 56, CharSet.Ansi, 120)) != 0) return code;
         if ((code = Check(typeof(Outer.Nested), LayoutKind.Sequential, 1, 7, CharSet.Ansi, 130)) != 0) return code;
+
+        // A function pointer type gets past CoreLib's early returns and asks with the nil TypeDef
+        // token, which has no ClassLayout row; it reports Auto and Ansi because its attributes have
+        // neither the layout nor the string-format bits set.
+        unsafe
+        {
+            if ((code = Check(typeof(delegate*<void>), LayoutKind.Auto, 0, 0, CharSet.Ansi, 135)) != 0) return code;
+            if ((code = Check(typeof(delegate* unmanaged<int, long>), LayoutKind.Auto, 0, 0, CharSet.Ansi, 170)) != 0) return code;
+        }
 
         // CoreLib answers before it asks the metadata for these.
         if (typeof(IThing).StructLayoutAttribute != null) return 140;

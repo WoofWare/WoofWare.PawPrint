@@ -323,9 +323,10 @@ module NativeMetadataImport =
 
     /// The answer of CoreCLR's <c>MetaDataImport::GetClassLayout</c>: the PackingSize and ClassSize
     /// of the ClassLayout row (ECMA-335 II.22.8) of the TypeDef <paramref name="mdToken"/>, or 0 for
-    /// each when it has no row.
+    /// each when it has no row. The nil TypeDef token, which a function pointer type reports as its
+    /// <c>MetadataToken</c>, has no row.
     ///
-    /// Fails for a token that is not a TypeDef of <paramref name="assembly"/>.
+    /// Fails for any other token that is not a TypeDef of <paramref name="assembly"/>.
     let private classLayoutOfTypeDefinition
         (operation : string)
         (assembly : DumpedAssembly)
@@ -333,11 +334,14 @@ module NativeMetadataImport =
         : struct (int32 * int32)
         =
         match MetadataToken.ofInt mdToken with
+        | MetadataToken.TypeDefinition typeDefHandle when typeDefHandle.IsNil ->
+            // CoreCLR searches the ClassLayout table for row number 0, which no row's Parent names.
+            struct (0, 0)
         | MetadataToken.TypeDefinition typeDefHandle ->
             // CoreCLR's read-only reader searches the ClassLayout table by the token's row number
             // alone, so a row past the TypeDef table's end would be answered as having no row. The
-            // only managed caller passes a `RuntimeType`'s own `MetadataToken`, so such a token is
-            // one PawPrint should never have minted.
+            // only managed caller passes a `RuntimeType`'s own `MetadataToken`, which is nil or a
+            // TypeDef of its module, so such a token is one PawPrint should never have minted.
             let mutable typeInfo =
                 Unchecked.defaultof<TypeInfo<GenericParamFromMetadata, TypeDefn>>
 
