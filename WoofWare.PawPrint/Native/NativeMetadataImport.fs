@@ -757,6 +757,117 @@ module NativeMetadataImport =
                     $"%s{operation}: FieldDef token 0x%08x{mdToken} was not present in %s{assembly.DefinitionFullName}"
         | token -> failwith $"%s{operation}: expected FieldDef token, got %O{token} from 0x%08x{mdToken}"
 
+    /// The Offset column, raw, of the FieldLayout row (ECMA-335 II.22.16) whose Field is
+    /// <paramref name="field"/>, or <c>None</c> when that field has no row. Fails if it has more
+    /// than one, which II.22.16 forbids.
+    ///
+    /// The offset is unsigned, and every value is reported: CoreCLR's loader accepts a row of any
+    /// offset on a field of an auto- or sequential-layout type, and reflection reports it.
+    let private fieldLayoutOffset
+        (operation : string)
+        (assembly : DumpedAssembly)
+        (field : System.Reflection.Metadata.FieldDefinitionHandle)
+        : uint32 option
+        =
+        // Read straight from the metadata bytes, because `FieldDefinition.GetOffset` reports an
+        // offset above `Int32.MaxValue` as -1, the same answer it gives for no row at all.
+        //
+        // ECMA-335 II.24.2.6 column widths: the Offset column is a 4-byte constant, and the Field
+        // column a simple index, 2 bytes while the Field table has fewer than 2^16 rows.
+        let fieldIndexSize =
+            if tableRowCount assembly System.Reflection.Metadata.Ecma335.TableIndex.Field < 0x10000 then
+                2
+            else
+                4
+
+        let metadataReader = metadataReaderOf assembly
+
+        let rowSize =
+            System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableRowSize (
+                metadataReader,
+                System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
+            )
+
+        if rowSize <> 4 + fieldIndexSize then
+            failwith
+                $"%s{operation}: FieldLayout row size %d{rowSize} in %s{assembly.DefinitionFullName} disagrees with the ECMA-335 II.24.2.6 widths derived from the table row counts (4 + %d{fieldIndexSize})"
+
+        let target =
+            System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
+                System.Reflection.Metadata.FieldDefinitionHandle.op_Implicit field
+            )
+
+        let rows =
+            tableRowCount assembly System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
+
+        let tableOffset =
+            System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableMetadataOffset (
+                metadataReader,
+                System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
+            )
+
+        // `BlobReader` is a struct: an immutably-bound one is copied before each `Read*` call,
+        // so every read would silently return the same bytes. Hence `let mutable`.
+        let mutable reader =
+            (assembly.PeReader.GetMetadata ()).GetReader (tableOffset, rows * rowSize)
+
+        // A scan of the whole table rather than a binary search. II.24.2.6 requires the table
+        // sorted by Field, and CoreCLR's read-only reader relies on that, so on a conforming image
+        // the two agree; a dynamic module's read-write reader does not rely on it.
+        let offsets = ResizeArray<uint32> ()
+
+        for _ = 1 to rows do
+            let offset = reader.ReadUInt32 ()
+
+            let rowField =
+                if fieldIndexSize = 2 then
+                    int (reader.ReadUInt16 ())
+                else
+                    reader.ReadInt32 ()
+
+            if rowField = target then
+                offsets.Add offset
+
+        match List.ofSeq offsets with
+        | [] -> None
+        | [ offset ] -> Some offset
+        | offsets ->
+            failwith
+                $"%s{operation}: field 0x%08x{metadataTokenOfFieldDefinitionHandle field} of %s{assembly.DefinitionFullName} has %d{offsets.Length} FieldLayout rows, which ECMA-335 II.22.16 forbids; which one CoreCLR reports depends on how it searches the table"
+
+    /// The answer of CoreCLR's <c>MetaDataImport::GetFieldOffset</c>: the offset of the FieldLayout
+    /// row of <paramref name="target"/>, if <paramref name="target"/> is a field of the TypeDef
+    /// <paramref name="typeDef"/> and has a row, and otherwise <c>None</c>. Any token may be the
+    /// target, a token that is not a FieldDef simply being no field of the type.
+    ///
+    /// Fails for a <paramref name="typeDef"/> that is not a TypeDef of <paramref name="assembly"/>.
+    let private fieldOffsetInTypeDefinition
+        (operation : string)
+        (assembly : DumpedAssembly)
+        (typeDef : int32)
+        (target : int32)
+        : uint32 option
+        =
+        match MetadataToken.ofInt typeDef with
+        | MetadataToken.TypeDefinition typeDefHandle ->
+            // CoreCLR's read-only reader takes the row number alone, and one past the table's end
+            // is an error HRESULT, which the managed wrapper turns into BadImageFormatException.
+            // The only managed caller passes a field's `DeclaringType.MetadataToken`, so such a
+            // token is one PawPrint should never have minted.
+            if not (assembly.TypeDefs.ContainsKey typeDefHandle) then
+                failwith
+                    $"%s{operation}: TypeDef token 0x%08x{typeDef} was not present in %s{assembly.DefinitionFullName}"
+
+            // CoreCLR walks the type's run of fields (`GetClassLayoutInit`/`GetClassLayoutNext`,
+            // md/runtime/mdinternalro.cpp:2133 and :2192), stepping over each field without a row,
+            // and compares each field token with the target.
+            ((metadataReaderOf assembly).GetTypeDefinition typeDefHandle).GetFields ()
+            |> Seq.tryFind (fun field -> metadataTokenOfFieldDefinitionHandle field = target)
+            |> Option.bind (fieldLayoutOffset operation assembly)
+        | token ->
+            failwith
+                $"%s{operation}: expected TypeDef token for the type whose fields to search, got %O{token} from 0x%08x{typeDef}"
+
     /// The Constant table row (ECMA-335 II.22.9) attached to a field definition: its declared type
     /// code and a reader over its value blob. <c>None</c> when the field has no Constant row.
     ///
@@ -1558,6 +1669,61 @@ module NativeMetadataImport =
 
             let state =
                 writeInt32AtPointer ctx.BaseClassTypes state attributesOut (int32 field.Attributes)
+
+            let state =
+                IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim 0)) ctx.Thread state
+
+            NativeHandlerResult.completed state |> Some
+        | "System.Private.CoreLib",
+          "System.Reflection",
+          "MetadataImport",
+          "GetFieldOffset",
+          [ ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.IntPtr
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcreteByref (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32)
+            ConcreteByref (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Boolean) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
+            // CoreCLR's FCall (managedmdimport.cpp:176) writes `found`, and writes the offset only
+            // when it finds a row, answering S_OK either way. Its only managed caller is
+            // `RuntimeCustomAttributeData.GetFieldOffsetCustomAttribute`, which turns a found offset
+            // into a `FieldOffsetAttribute` for every field's custom attributes.
+            let operation = "MetadataImport.GetFieldOffset"
+            let assemblyFullName = metadataImportHandleOfArg operation instruction.Arguments.[0]
+            let assembly = metadataImportAssembly operation state assemblyFullName
+
+            let typeDef =
+                match CliType.unwrapPrimitiveLikeDeep instruction.Arguments.[1] with
+                | CliType.Numeric (CliNumericType.Int32 typeDef) -> typeDef
+                | other -> failwith $"%s{operation}: expected Int32 typeTokenDef argument, got %O{other}"
+
+            let target =
+                match CliType.unwrapPrimitiveLikeDeep instruction.Arguments.[2] with
+                | CliType.Numeric (CliNumericType.Int32 target) -> target
+                | other -> failwith $"%s{operation}: expected Int32 fieldTokenDef argument, got %O{other}"
+
+            let offsetOut =
+                NativeCall.managedPointerOfPointerArgument operation "offset out pointer" instruction.Arguments.[3]
+
+            let foundOut =
+                NativeCall.managedPointerOfPointerArgument operation "found out pointer" instruction.Arguments.[4]
+
+            let state =
+                match fieldOffsetInTypeDefinition operation assembly typeDef target with
+                | Some offset ->
+                    let state = writeInt32AtPointer ctx.BaseClassTypes state offsetOut (int32 offset)
+
+                    IlMachineState.writeManagedByrefWithBase
+                        ctx.BaseClassTypes
+                        state
+                        (ManagedPointerSource.requireAddressed foundOut)
+                        (CliType.ofBool true)
+                | None ->
+                    IlMachineState.writeManagedByrefWithBase
+                        ctx.BaseClassTypes
+                        state
+                        (ManagedPointerSource.requireAddressed foundOut)
+                        (CliType.ofBool false)
 
             let state =
                 IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim 0)) ctx.Thread state

@@ -5488,7 +5488,12 @@ public class NoFields
     let private drawnLayoutTypeGen : Gen<DrawnLayoutType> =
         gen {
             let! layout =
-                Gen.elements [ DrawnLayout.AutoClass ; DrawnLayout.SequentialClass ; DrawnLayout.SequentialStruct ]
+                Gen.elements
+                    [
+                        DrawnLayout.AutoClass
+                        DrawnLayout.SequentialClass
+                        DrawnLayout.SequentialStruct
+                    ]
 
             let offsetGen =
                 Gen.frequency
@@ -5555,7 +5560,11 @@ public class NoFields
             |> TypeReferenceHandle.op_Implicit
 
         let valueTypeRef : EntityHandle =
-            builder.AddTypeReference (systemRuntime, builder.GetOrAddString "System", builder.GetOrAddString "ValueType")
+            builder.AddTypeReference (
+                systemRuntime,
+                builder.GetOrAddString "System",
+                builder.GetOrAddString "ValueType"
+            )
             |> TypeReferenceHandle.op_Implicit
 
         builder.AddTypeDefinition (
