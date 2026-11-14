@@ -560,7 +560,7 @@ module internal UnaryMetadataObjectOps =
             // `UnaryMetadataIlOp.execute` has already minted the target, as `ResolveToken` mints it
             // before the JIT looks at it. A DynamicMethod is always static, which `NewobjTarget`
             // refuses as `StaticMethod`, so this is the refusal a static method of an image gets
-            // (measured: InvalidProgramException, with the target minted afterwards).
+            // (measured: the target is minted, then the `newobj` raises InvalidProgramException).
             UnaryMetadataCallOps.raiseCompilationFailure ctx CompilationFailure.NewobjOfStaticMethod state
         | ResolvedMetadataOperand.ScopeType _
         | ResolvedMetadataOperand.ScopeField _
