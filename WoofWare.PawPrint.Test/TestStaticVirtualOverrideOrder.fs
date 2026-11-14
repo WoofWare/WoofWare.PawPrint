@@ -549,11 +549,26 @@ public static class Caller
         let gen =
             gen {
                 let! shape = Gen.elements [ Shape.OnClass ; Shape.OnInterface ; Shape.Overridden ]
-                let! before = Gen.choose (0, 25)
                 let! length = Gen.choose (1, 4)
                 let! rows = Gen.listOfLength length (Gen.choose (1, 3))
-                let! between = Gen.choose (0, 25)
-                let! after = Gen.frequency [ 1, Gen.constant 0 ; 2, Gen.choose (0, 30) ]
+                // Half the schedules create the rows' type below 25 rows and end at 25 or more, near the crossing.
+                let! window = Gen.elements [ true ; false ]
+
+                let! before, between, after =
+                    if window then
+                        gen {
+                            let! before = Gen.choose (0, 12)
+                            let! between = Gen.choose (0, 12 - length)
+                            let! beyond = Gen.choose (0, 4)
+                            return before, between, 25 - (before + length + between) + beyond
+                        }
+                    else
+                        gen {
+                            let! before = Gen.choose (0, 20)
+                            let! between = Gen.choose (0, 20)
+                            let! after = Gen.frequency [ 1, Gen.constant 0 ; 1, Gen.choose (0, 30) ]
+                            return before, between, after
+                        }
 
                 return
                     {
@@ -571,9 +586,9 @@ public static class Caller
                 (Arb.fromGen gen)
                 (fun cover schedule -> property cover schedule)
 
-        coverage.Count Reach.Reversed |> shouldBeGreaterThan 10
-        coverage.Count Reach.InOrder |> shouldBeGreaterThan 5
-        coverage.Count Reach.WindowRefused |> shouldBeGreaterThan 5
-        coverage.Count Reach.WindowAgreed |> shouldBeGreaterThan 3
-        coverage.Count Reach.InterfaceRefused |> shouldBeGreaterThan 2
-        coverage.Count Reach.OverriddenInWindow |> shouldBeGreaterThan 2
+        coverage.Count Reach.Reversed |> shouldBeGreaterThan 5
+        coverage.Count Reach.InOrder |> shouldBeGreaterThan 4
+        coverage.Count Reach.WindowRefused |> shouldBeGreaterThan 15
+        coverage.Count Reach.WindowAgreed |> shouldBeGreaterThan 6
+        coverage.Count Reach.InterfaceRefused |> shouldBeGreaterThan 8
+        coverage.Count Reach.OverriddenInWindow |> shouldBeGreaterThan 6
