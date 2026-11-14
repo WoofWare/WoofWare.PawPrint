@@ -155,6 +155,26 @@ module internal ExceptionMaking =
     let thiscallWithoutArguments : string * ExceptionMaking =
         "System.InvalidProgramException", ExceptionMaking.VmConstructor
 
+    /// The exception CoreCLR raises refusing a `newobj` of an abstract method
+    /// (`NewobjTarget.AbstractMethod`), and how it makes it: `getCallInfo` throws
+    /// `BadImageFormatException` by `COMPlusThrowHR` with one of the runtime's own resources
+    /// (`BFA_BAD_IL`, `EEMessageException`), as for `ofSignatureRefusal`.
+    let newobjOfAbstractMethod : string * ExceptionMaking =
+        "System.BadImageFormatException", ExceptionMaking.VmConstructor
+
+    /// The exception CoreCLR's JIT raises refusing a `newobj` of a static method
+    /// (`NewobjTarget.StaticMethod`), and how it makes it: the JIT fails the compilation
+    /// (`BADCODE`, so `CORJIT_BADCODE`), as for `thiscallWithoutArguments`.
+    let newobjOfStaticMethod : string * ExceptionMaking =
+        "System.InvalidProgramException", ExceptionMaking.VmConstructor
+
+    /// The exception CoreCLR raises refusing a `newobj` of an abstract class's constructor
+    /// (`NewobjTarget.AbstractClass`), and how it makes it: `getNewHelper` throws
+    /// `InvalidOperationException` by `COMPlusThrow` with the resource name
+    /// `InvalidOperation_CantInstantiateAbstractClass`.
+    let newobjOfAbstractClass : string * ExceptionMaking =
+        "System.InvalidOperationException", ExceptionMaking.ResourceMessage
+
     /// The exception CoreCLR raises refusing a P/Invoke as it describes it for the walk of its
     /// signature (`JitTypeLoads.unmanagedWalkRefuses`): it is synchronized, or its calling
     /// conventions conflict. And how it makes it: `COMPlusThrow` with one of the runtime's own

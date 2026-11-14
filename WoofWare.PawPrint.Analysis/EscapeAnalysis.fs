@@ -36,6 +36,11 @@ type Opacity =
     /// runs, which the analysis does not follow. So too such a call on a type variable that allows a
     /// byref-like type, in a definition analysed for every instantiation at once.
     | BoxedByRefLikeReceiver
+    /// A <c>newobj</c> whose token names an instance method that is not an instance constructor
+    /// (<c>NewobjTarget.NotInstanceConstructor</c>). CoreCLR's JIT constructs an object and calls
+    /// some such methods on it, and crashes the process compiling the method holding others, before
+    /// any of that method runs; the analysis does not model which.
+    | NewobjOfNonConstructor
     /// An <c>[UnmanagedCallersOnly]</c> method, or a method calling a P/Invoke, whose attribute
     /// (<c>[UnmanagedCallersOnly]</c>, or the P/Invoke's <c>[UnmanagedCallConv]</c>) CoreCLR cannot
     /// read the calling conventions of (<c>UnmanagedConventionRead</c>), which it reads as the JIT
@@ -113,8 +118,8 @@ type OpaqueSite =
         /// <c>IntrinsicExpansion</c>),
         /// or binding what its body names fails in a way the analysis cannot follow, or the JIT may
         /// refuse to compile it, before any of it runs (<c>DependsOnInstantiation</c>,
-        /// <c>UnresolvedAssembly</c>, <c>BoxedByRefLikeReceiver</c>, <c>UnreadableCallingConvention</c>,
-        /// <c>ValueTypeMarshallingVerdict</c>).
+        /// <c>UnresolvedAssembly</c>, <c>BoxedByRefLikeReceiver</c>, <c>NewobjOfNonConstructor</c>,
+        /// <c>UnreadableCallingConvention</c>, <c>ValueTypeMarshallingVerdict</c>).
         Offset : int option
         Reason : Opacity
         /// The method the instruction's token names, where it names one. For a call, that need not
@@ -1879,6 +1884,19 @@ module EscapeAnalysis =
     let private declaringTypeOf (state : EscapeAnalysisState) (key : MethodKey) : ResolvedTypeIdentity =
         let _, method = methodOf state key
         method.RequiredDeclaringType.Identity
+
+    /// What CoreCLR's JIT makes of a `newobj` whose token binds `callee` (`NewobjTarget.classify`).
+    /// The token must have bound, which loads the type it names and every type that type derives
+    /// from, among them the callee's declaring type, whose being a value type the answer may read.
+    let private newobjTargetOf (state : EscapeAnalysisState) (callee : MethodKey) : NewobjTarget =
+        let _, method = methodOf state callee
+        let _, declaring = definitionOf state method.RequiredDeclaringType.Identity
+
+        NewobjTarget.classify
+            (MethodInfo.requireMetadata "newobj" method).MethodAttributes
+            method.Name
+            declaring.TypeAttributes
+            (LoadedTypeInfo.isValueType state.BaseTypes state.TypeSystem._LoadedAssemblies declaring)
 
     /// Can the method a `callvirt` names be overridden, so that some other method may run?
     let private isOverridable (state : EscapeAnalysisState) (key : MethodKey) : bool =
@@ -3729,6 +3747,18 @@ module EscapeAnalysis =
         /// The JIT refuses the call, which passes no argument by Thiscall's convention
         /// (`UnmanagedCallingConvention.refusesThiscallWithoutArguments`).
         | ThiscallWithoutArguments
+        /// The `newobj` names an abstract method (`NewobjTarget.AbstractMethod`).
+        | NewobjOfAbstractMethod
+        /// The `newobj` names a static method (`NewobjTarget.StaticMethod`).
+        | NewobjOfStaticMethod
+        /// The `newobj` names an instance constructor of an abstract class
+        /// (`NewobjTarget.AbstractClass`).
+        | NewobjOfAbstractClass
+        /// The `newobj` names an instance method that is not an instance constructor
+        /// (`NewobjTarget.NotInstanceConstructor`), which CoreCLR may compile, constructing and
+        /// calling it, or crash the process compiling, as the analysis does not name
+        /// (`Opacity.NewobjOfNonConstructor`).
+        | NewobjOfNonConstructor
 
     /// What the refusal of a compilation raises, and what making the exception runs.
     let private compilationRefusalFacts
@@ -3748,6 +3778,10 @@ module EscapeAnalysis =
         | CompilationRefusal.ThiscallWithoutArguments -> raising ExceptionMaking.thiscallWithoutArguments
         | CompilationRefusal.UnreadableCallingConvention ->
             [ OutsideBodyFact.Opaque Opacity.UnreadableCallingConvention ]
+        | CompilationRefusal.NewobjOfAbstractMethod -> raising ExceptionMaking.newobjOfAbstractMethod
+        | CompilationRefusal.NewobjOfStaticMethod -> raising ExceptionMaking.newobjOfStaticMethod
+        | CompilationRefusal.NewobjOfAbstractClass -> raising ExceptionMaking.newobjOfAbstractClass
+        | CompilationRefusal.NewobjOfNonConstructor -> [ OutsideBodyFact.Opaque Opacity.NewobjOfNonConstructor ]
 
     /// What CoreCLR decides of a method before its JIT runs, where the method is
     /// `[UnmanagedCallersOnly]` (`ThrowIfInvalidUnmanagedCallersOnlyUsage`, from `GetCompileFlags`).
@@ -4661,16 +4695,44 @@ module EscapeAnalysis =
                         | None -> state, failures, [], [], None
                         | Some (spellingAssembly, signature, operand, delegateMade) ->
 
-                        // A `call` or `ldftn` naming an abstract method itself, CoreCLR refuses as
-                        // it resolves it, before it converts the signature (`abstractCallees`).
-                        let abstractTarget =
+                        // What the JIT makes of a `newobj` of the method the token binds.
+                        let newobjTarget : NewobjTarget option =
                             match tokenOp, target with
+                            | UnaryMetadataTokenIlOp.Newobj, Some (CallTarget.Method callee) ->
+                                Some (newobjTargetOf state callee.Callee)
+                            | _ -> None
+
+                        // A `call` or `ldftn` naming an abstract method itself, or a `newobj` naming
+                        // one, CoreCLR refuses as it resolves it, before it converts the signature
+                        // (`abstractCallees`, `newobjRefused`).
+                        let abstractTarget =
+                            match tokenOp, target, newobjTarget with
                             | (UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Ldftn),
-                              Some (CallTarget.Method callee) when (constrainedPrefix index).IsNone ->
+                              Some (CallTarget.Method callee),
+                              _ when (constrainedPrefix index).IsNone ->
                                 match (snd (methodOf state callee.Callee)).Body with
                                 | MethodBody.Abstract -> true
                                 | _ -> false
+                            | _, _, Some NewobjTarget.AbstractMethod -> true
                             | _ -> false
+
+                        // How the JIT refuses a `newobj` (`NewobjTarget`), and the positions of the
+                        // signature at which it meets types before it does: none before it refuses
+                        // an abstract method, as `getCallInfo` resolves it; the return type before
+                        // any other refusal, which the importer makes once `getCallInfo` has
+                        // converted the signature, before it meets the parameters or reads an
+                        // unmanaged call's convention.
+                        let newobjRefused : (CompilationRefusal * JitTypePosition list) option =
+                            match newobjTarget with
+                            | None
+                            | Some NewobjTarget.Constructs -> None
+                            | Some NewobjTarget.AbstractMethod -> Some (CompilationRefusal.NewobjOfAbstractMethod, [])
+                            | Some NewobjTarget.StaticMethod ->
+                                Some (CompilationRefusal.NewobjOfStaticMethod, [ JitTypePosition.CalleeReturn ])
+                            | Some NewobjTarget.NotInstanceConstructor ->
+                                Some (CompilationRefusal.NewobjOfNonConstructor, [ JitTypePosition.CalleeReturn ])
+                            | Some NewobjTarget.AbstractClass ->
+                                Some (CompilationRefusal.NewobjOfAbstractClass, [ JitTypePosition.CalleeReturn ])
 
                         // CoreCLR converts the signature of the method the instruction names, or of
                         // `calli`'s call site, for the JIT before the JIT loads any type of it,
@@ -4689,13 +4751,14 @@ module EscapeAnalysis =
                                 | MemberSignature.Method _
                                 | MemberSignature.Field _ -> None
 
-                            match signatureRefusal, operand with
-                            | Some refusal, _ ->
+                            match signatureRefusal, newobjRefused, operand with
+                            | Some refusal, _, _ ->
                                 Some (
                                     CompilationRefusal.Signature refusal,
                                     MemberPositions.Described (SignatureRefusal.positionsBeforeConversion operand)
                                 )
-                            | None, MemberOperand.UnmanagedCall call ->
+                            | None, Some (refusal, positions), _ -> Some (refusal, MemberPositions.Described positions)
+                            | None, None, MemberOperand.UnmanagedCall call ->
                                 match call.Convention, signature with
                                 | UnmanagedConventionRead.Reads _, MemberSignature.Method methodSignature when
                                     UnmanagedCallingConvention.refusesThiscallWithoutArguments
@@ -4709,7 +4772,7 @@ module EscapeAnalysis =
                                 | UnmanagedConventionRead.Unreadable _, _
                                 | UnmanagedConventionRead.NullArray, _ ->
                                     Some (CompilationRefusal.UnreadableCallingConvention, MemberPositions.BySignature)
-                            | None, _ -> None
+                            | None, None, _ -> None
 
                         match refusal with
                         | Some (refusal, positions) ->
@@ -5925,7 +5988,8 @@ module EscapeAnalysis =
                             | ResolutionFault.TypeAccess -> true
                             // Bound, and refused for the type it names (`resolutionRefusal`), at
                             // `bind`, above. The JIT refusing to compile the body for what a token
-                            // binds to is `abstractCallees`' and `refusals`'.
+                            // binds to is `abstractCallees`', `refusals`' and, for a `newobj`,
+                            // `refusedCompilations`'.
                             | ResolutionFault.TokenBinding -> false
                             // Only a `DynamicMethod`'s body has scope entries, and the analysis
                             // reads bodies from metadata.
