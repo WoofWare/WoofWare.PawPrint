@@ -12,8 +12,9 @@ using System.Reflection;
 // rather than a `RuntimeMethodInfoStub`.
 //
 // The cases cover one and two type arguments, a value-type argument, a type argument that is
-// itself a generic instantiation (of a CoreLib type and of this assembly's own), and constructor
-// and named arguments (property and field) typed by the type parameter, on a type, a method, a
+// itself a generic instantiation (of a CoreLib type and of this assembly's own), an array type
+// argument, and constructor and named arguments (property and field) typed by the type parameter
+// or by an array of it, on a type, a method, a
 // field and a parameter. Every constructor carries a trailing int, so a fixed argument decoded at
 // the wrong width desynchronises the cursor and corrupts the tail.
 
@@ -50,6 +51,20 @@ public sealed class TwoAttribute<TKey, TValue> : Attribute
     public TKey Key { get; set; }
 }
 
+// The type parameter as an array's element.
+[AttributeUsage(AttributeTargets.All, AllowMultiple = true)]
+public sealed class ManyAttribute<T> : Attribute
+{
+    public ManyAttribute(T[] values, int tail)
+    {
+        Values = values;
+        Tail = tail;
+    }
+
+    public T[] Values { get; }
+    public int Tail { get; }
+}
+
 // Its type argument appears only in its type, never in an argument.
 [AttributeUsage(AttributeTargets.All, AllowMultiple = true)]
 public sealed class TagAttribute<T> : Attribute
@@ -80,6 +95,8 @@ public struct Point
 [Tag<List<int>>(14)]
 [Tag<Box<string>>(15)]
 [Tag<Point>(16)]
+[Many<int>(new[] { 1, 2, 3 }, 17)]
+[One<string[]>(new[] { "a", null }, 18)]
 public sealed class Decorated
 {
     [One<string>("f", 20, ExtraField = "ef")]
@@ -177,7 +194,7 @@ public class GenericCustomAttribute
         // An open generic filter selects every instantiation of its definition
         // (RuntimeCustomAttributeData.cs `MatchesTypeFilter`), and the result is an `Attribute[]`.
         object[] oneOpen = t.GetCustomAttributes(typeof(OneAttribute<>), false);
-        Check(oneOpen.Length == 2);
+        Check(oneOpen.Length == 3);
         Check(oneOpen is Attribute[]);
         Check(ByTail<OneAttribute<int>>(oneOpen, x => x.Tail, 10) != null);
         Check(ByTail<OneAttribute<string>>(oneOpen, x => x.Tail, 11) != null);
@@ -185,7 +202,7 @@ public class GenericCustomAttribute
 
         // Every application at once.
         object[] all = t.GetCustomAttributes(false);
-        Check(all.Length == 7);
+        Check(all.Length == 9);
 
         TwoAttribute<string, int> two = ByTail<TwoAttribute<string, int>>(all, x => x.Tail, 12);
         Check(two != null && two.Value == 7 && two.Key == "k");
@@ -202,6 +219,14 @@ public class GenericCustomAttribute
         TagAttribute<Point> tagPoint = ByTail<TagAttribute<Point>>(all, x => x.Tail, 16);
         Check(tagPoint != null && tagPoint.Argument == typeof(Point));
 
+        ManyAttribute<int> many = ByTail<ManyAttribute<int>>(all, x => x.Tail, 17);
+        Check(many != null && many.Values.GetType() == typeof(int[]));
+        Check(many != null && many.Values.Length == 3 && many.Values[0] == 1 && many.Values[2] == 3);
+
+        OneAttribute<string[]> oneArray = ByTail<OneAttribute<string[]>>(all, x => x.Tail, 18);
+        Check(oneArray != null && oneArray.Value.GetType() == typeof(string[]));
+        Check(oneArray != null && oneArray.Value.Length == 2 && oneArray.Value[0] == "a" && oneArray.Value[1] == null);
+
         // The generic extension method, which casts to its type argument.
         OneAttribute<int> viaGeneric = t.GetCustomAttribute<OneAttribute<int>>();
         Check(viaGeneric != null && viaGeneric.Tail == 10);
@@ -215,7 +240,7 @@ public class GenericCustomAttribute
         Check(Attribute.IsDefined(t, typeof(TagAttribute<Point>)));
 
         IList<CustomAttributeData> data = t.GetCustomAttributesData();
-        Check(data.Count == 7);
+        Check(data.Count == 9);
 
         CustomAttributeData oneData = DataOf(data, typeof(OneAttribute<int>));
         Check(oneData != null);
