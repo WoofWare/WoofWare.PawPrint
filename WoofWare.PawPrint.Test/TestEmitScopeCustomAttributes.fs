@@ -108,8 +108,8 @@ module TestEmitScopeCustomAttributes =
         | MethodOfDefinition of ns : string * name : string
         /// A MethodDef of a TypeDef whose visibility is nested.
         | MethodOfNestedDefinition of ns : string * name : string
-        /// A MemberRef on a TypeSpec, which has no name.
-        | MemberOfSpecification
+        /// A MemberRef on a TypeSpec instantiating a TypeRef with this name: the TypeSpec has no name of its own.
+        | MemberOfSpecification of ns : string * name : string
         /// A MemberRef on a MethodDef, a vararg call site's, which has no name.
         | MemberOfMethod
 
@@ -205,10 +205,19 @@ module TestEmitScopeCustomAttributes =
                 EmitScopeDefinitions.defineMethod target ".ctor" ctorSignature MethodAttributes.Public scope
 
             MethodDefOrRef.MethodDef method, scope
-        | Parent.MemberOfSpecification ->
+        | Parent.MemberOfSpecification (ns, name) ->
+            let other, scope = assemblyRef scope
+            let generic, scope = typeRef (ResolutionScope.AssemblyRef other) ns name scope
+
+            // `GENERICINST CLASS <TypeRef> 1 int32`: an instantiation of the type with this name, which the emitter does
+            // not read through a TypeSpec.
             let signature, scope =
                 EmitScope.internBlob
-                    (ImmutableArray.Create<byte> [| 0x15uy ; 0x12uy ; 0x08uy ; 0x01uy ; 0x08uy |])
+                    (ImmutableArray.CreateRange (
+                        [ 0x15uy ; 0x12uy ]
+                        @ compressedUnsigned ((generic.Rid <<< 2) ||| 1)
+                        @ [ 0x01uy ; 0x08uy ]
+                    ))
                     scope
 
             let spec, scope =
@@ -305,7 +314,10 @@ module TestEmitScopeCustomAttributes =
                         EmitScopeDefinitions.classifyCustomAttribute owner constructor scope
                         |> shouldEqual CustomAttributeEmitKind.Ordinary
 
-        for shape in [ Parent.MemberOfSpecification ; Parent.MemberOfMethod ] do
+        let unnamed =
+            Parent.MemberOfMethod :: (names |> List.map Parent.MemberOfSpecification)
+
+        for shape in unnamed do
             let scope, owners = withOwners ()
             let constructor, scope = constructorOf shape scope
 
@@ -917,7 +929,7 @@ module TestEmitScopeCustomAttributes =
                 {
                     Label = "other assembly's generic, instantiated"
                     Constructor = generic
-                    Parent = Parent.MemberOfSpecification
+                    Parent = Parent.MemberOfSpecification ("System", "SerializableAttribute")
                 }
         ]
 
