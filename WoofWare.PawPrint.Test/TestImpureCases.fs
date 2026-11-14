@@ -556,22 +556,6 @@ module TestImpureCases =
             },
             """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, then a second proxy of the same type, measured on .NET 10 and 11 to exit 0. Its first four checks pass; the second `Create` (line 100) stops at "TODO: a dynamic method's Newobj names DynamicScope entry ... but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured by naming the case, after reflection over events). The proxy type's constructor is reflection-invoked a second time, and with dynamic code supported `MethodBaseInvoker` then emits an invoke stub whose `newobj` names the reflected constructor; nothing about events or properties is involved, and `ReflectionConstructorInvokeTwice.cs` pins the same stop. Un-parked by resolving a reflected constructor named by an invoke stub's `newobj`."""
             {
-                FileName = "DispatchProxyEventInterface.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`DispatchProxy.Create` over an interface with an event of its own, extending an interface with a second, measured on .NET 10 and 11 to exit 0 (a control with check 3 inverted exits 3 on both). One proxy, so that a second `Create`'s reflected constructor cannot stand in front of the events. It stops defining the proxy type's events, at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineEvent)" (measured by naming the case, after reflection over events). Un-parked by `TypeBuilder_DefineEvent`."""
-            {
                 FileName = "DispatchProxyInternalInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -6494,6 +6478,45 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertPropertyRows
+            }
+            {
+                // `DispatchProxy.Create` over an interface with an event of its own, extending an interface
+                // with a second: `ProxyBuilder` defines an event on the proxy type for each. Dynamic-code
+                // switch overridden to true like its siblings; measured to exit 0 on real .NET 10 and 11 (a
+                // control with check 3 inverted exits 3 on both).
+                FileName = "DispatchProxyEventInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `TypeBuilder_DefineEvent` and the Event association of `TypeBuilder_DefineMethodSemantics`:
+                // events of several types, their accessors interleaved with a property's, modules either side
+                // of 25 MethodSemantics rows, and what reflection reads back. Dynamic-code switch overridden
+                // to true like its siblings; measured to exit 0 on real .NET 10 and 11 (a control with check
+                // 3 inverted exits 3 on both).
+                FileName = "TypeBuilderDefineEvent.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
             }
             {
                 // A property whose accessor is a method of another type of the module: reflection throws
