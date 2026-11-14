@@ -1532,6 +1532,9 @@ module TestImpureCases =
                 "WindowOne", 25
                 "Window2", 25
                 "Window3", 25
+                "Overridden", 26
+                "Ambiguous28", 26
+                "Ambiguous29", 27
             ]
 
         expected

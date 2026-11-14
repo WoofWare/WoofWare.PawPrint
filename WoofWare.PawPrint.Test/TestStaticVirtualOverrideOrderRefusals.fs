@@ -120,3 +120,29 @@ public class Program
 
         exc.Message
         |> shouldContainText "had 2 MethodImpl rows, and the module now has 25"
+
+    [<Test>]
+    let ``an interface whose rows disagree, the most specific default body, is refused`` () : unit =
+        // `I2`'s rows are the default-body search's only candidate, so its two orders are the call's two answers:
+        // real .NET gives D1 at a call site that resolved before the 23 rows were added, and D2 at one that did not.
+        let exc =
+            runRefused
+                "StaticVirtualOverrideWindowInterface.cs"
+                """
+        TypeBuilder i2 = module.DefineType("I2", TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract);
+        i2.AddInterfaceImplementation(typeof(IDef));
+        i2.DefineMethodOverride(StaticBody(i2, "D1", 1), typeof(IDef).GetMethod("M"));
+        i2.DefineMethodOverride(StaticBody(i2, "D2", 2), typeof(IDef).GetMethod("M"));
+        Type i2Created = i2.CreateType();
+        TypeBuilder c = module.DefineType("C", TypeAttributes.Public);
+        c.AddInterfaceImplementation(i2Created);
+        Type created = c.CreateType();
+        Fill(module, 23);
+        Console.WriteLine(typeof(Caller).GetMethod("CallDef").MakeGenericMethod(created).Invoke(null, null));"""
+
+        exc.Message |> shouldContainText "TODO: static virtual dispatch"
+        exc.Message |> shouldContainText "the MethodImpl rows of I2"
+        exc.Message |> shouldContainText "give D1 in the order added and D2 in reverse"
+
+        exc.Message
+        |> shouldContainText "had 2 MethodImpl rows, and the module now has 25"

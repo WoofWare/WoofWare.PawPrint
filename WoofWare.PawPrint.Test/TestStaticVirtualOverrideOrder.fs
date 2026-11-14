@@ -137,19 +137,38 @@ public static class Caller
         call "CallDef" created |> shouldEqual 1
         call "CallDefAgain" created |> shouldEqual 2
 
-    /// A module's MethodImpl rows, in the order added: `Before` rows of other types, then `C`'s, one naming
-    /// `IDef.M` for each of `Rows` (a body number, repeats allowed), then `Between` rows of other types; `C` is
-    /// created; then `After` rows of other types.
+    /// Whose the schedule's rows for `IDef.M` are, and what `C` is.
+    [<RequireQualifiedAccess>]
+    type private Shape =
+        /// The rows are `C`'s own.
+        | OnClass
+        /// The rows are those of an interface `I2 : IDef`, and `C : I2`, created straight after `I2`, has none.
+        | OnInterface
+        /// As `OnInterface`, but `I3 : I2`, created straight after `I2` with one row of its own (`B9`), is more
+        /// specific than `I2`, and `C : I3`.
+        | Overridden
+
+    /// A module's MethodImpl rows, in the order added: `Before` rows of other types, then those of the type the
+    /// shape gives them to, one naming `IDef.M` for each of `Rows` (a body number, repeats allowed), then
+    /// `Between` rows of other types; that type is created, with `C` (and `I3`, with its row) straight after; then
+    /// `After` rows of other types.
     type private Schedule =
         {
+            Shape : Shape
             Before : int
             Rows : int list
             Between : int
             After : int
         }
 
+        /// The module's row count when the type holding `Rows` is created.
         member this.AtCreation : int = this.Before + this.Rows.Length + this.Between
-        member this.Total : int = this.AtCreation + this.After
+
+        member this.Total : int =
+            this.AtCreation + (if this.Shape = Shape.Overridden then 1 else 0) + this.After
+
+    let private interfaceAttributes : TypeAttributes =
+        TypeAttributes.Public ||| TypeAttributes.Interface ||| TypeAttributes.Abstract
 
     /// The body `GetInterfaceMap` reports for `IDef.M` on real .NET's `C`, when `C` is created and at the end.
     let private hostAnswers (schedule : Schedule) : string * string =
@@ -160,8 +179,14 @@ public static class Caller
 
         let modul = assembly.DefineDynamicModule "Order"
         hostFill modul schedule.Before "F"
-        let c = modul.DefineType ("C", TypeAttributes.Public)
-        c.AddInterfaceImplementation iDef
+
+        let owner =
+            match schedule.Shape with
+            | Shape.OnClass -> modul.DefineType ("C", TypeAttributes.Public)
+            | Shape.OnInterface
+            | Shape.Overridden -> modul.DefineType ("I2", interfaceAttributes)
+
+        owner.AddInterfaceImplementation iDef
         let bodies = Collections.Generic.Dictionary<int, MethodBuilder> ()
 
         for body in schedule.Rows do
@@ -169,14 +194,32 @@ public static class Caller
                 match bodies.TryGetValue body with
                 | true, m -> m
                 | false, _ ->
-                    let m = hostStaticBody c body
+                    let m = hostStaticBody owner body
                     bodies.[body] <- m
                     m
 
-            c.DefineMethodOverride (m, iDef.GetMethod "M")
+            owner.DefineMethodOverride (m, iDef.GetMethod "M")
 
         hostFill modul schedule.Between "G"
-        let created = c.CreateType ()
+        let ownerCreated = owner.CreateType ()
+
+        let created =
+            match schedule.Shape with
+            | Shape.OnClass -> ownerCreated
+            | Shape.OnInterface
+            | Shape.Overridden ->
+                let implemented =
+                    match schedule.Shape with
+                    | Shape.Overridden ->
+                        let i3 = modul.DefineType ("I3", interfaceAttributes)
+                        i3.AddInterfaceImplementation ownerCreated
+                        i3.DefineMethodOverride (hostStaticBody i3 9, iDef.GetMethod "M")
+                        i3.CreateType ()
+                    | _ -> ownerCreated
+
+                let c = modul.DefineType ("C", TypeAttributes.Public)
+                c.AddInterfaceImplementation implemented
+                c.CreateType ()
 
         let read () =
             (created.GetInterfaceMap iDef).TargetMethods |> Array.exactlyOne |> _.Name
@@ -243,13 +286,13 @@ public static class Caller
                 (ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x08uy |])
                 scope
 
-        let defineType (name : string) (implemented : TypeRefRid) (scope : EmitScope) : TypeDefRid * EmitScope =
+        let defineType (name : string) (implemented : TypeDefOrRef) (scope : EmitScope) : TypeDefRid * EmitScope =
             match
                 EmitScopeDefinitions.defineTopLevelTypeDef
                     name
                     TypeAttributes.Public
                     (Some (TypeDefOrRef.TypeRef objectRef))
-                    [ TypeDefOrRef.TypeRef implemented ]
+                    [ implemented ]
                     scope
             with
             | TypeDefDefinition.Defined (rid, scope) -> rid, scope
@@ -272,7 +315,7 @@ public static class Caller
         let fill (count : int) (prefix : string) (scope : EmitScope) : EmitScope =
             (scope, [ 0 .. count - 1 ])
             ||> List.fold (fun scope i ->
-                let t, scope = defineType $"%s{prefix}%d{i}" iFillRef scope
+                let t, scope = defineType $"%s{prefix}%d{i}" (TypeDefOrRef.TypeRef iFillRef) scope
 
                 let f, scope =
                     defineMethod
@@ -296,8 +339,38 @@ public static class Caller
                     scope
             )
 
+        let defineInterface (name : string) (extended : TypeDefOrRef) (scope : EmitScope) : TypeDefRid * EmitScope =
+            match EmitScopeDefinitions.defineTopLevelTypeDef name interfaceAttributes None [ extended ] scope with
+            | TypeDefDefinition.Defined (rid, scope) -> rid, scope
+            | TypeDefDefinition.Duplicate _ -> failwith $"the schedule defines %s{name} twice"
+
+        let addRow (owner : TypeDefRid) (body : MethodDefRid) (scope : EmitScope) : EmitScope =
+            EmitScope.addMethodImpl
+                {
+                    Class = owner
+                    Body = MethodDefOrRef.MethodDef body
+                    Declaration = MethodDefOrRef.MemberRef mRef
+                }
+                scope
+
+        let staticBody (owner : TypeDefRid) (body : int) (scope : EmitScope) : MethodDefRid * EmitScope =
+            defineMethod
+                owner
+                $"B%d{body}"
+                [| 0x00uy ; 0x00uy ; 0x08uy |]
+                (MethodAttributes.Public
+                 ||| MethodAttributes.Static
+                 ||| MethodAttributes.HideBySig)
+                body
+                scope
+
         let scope = fill schedule.Before "F" scope
-        let c, scope = defineType "C" iDefRef scope
+
+        let owner, scope =
+            match schedule.Shape with
+            | Shape.OnClass -> defineType "C" (TypeDefOrRef.TypeRef iDefRef) scope
+            | Shape.OnInterface
+            | Shape.Overridden -> defineInterface "I2" (TypeDefOrRef.TypeRef iDefRef) scope
 
         let scope, _ =
             ((scope, Map.empty), schedule.Rows)
@@ -306,34 +379,16 @@ public static class Caller
                     match Map.tryFind body bodies with
                     | Some m -> m, scope, bodies
                     | None ->
-                        let m, scope =
-                            defineMethod
-                                c
-                                $"B%d{body}"
-                                [| 0x00uy ; 0x00uy ; 0x08uy |]
-                                (MethodAttributes.Public
-                                 ||| MethodAttributes.Static
-                                 ||| MethodAttributes.HideBySig)
-                                body
-                                scope
-
+                        let m, scope = staticBody owner body scope
                         m, scope, Map.add body m bodies
 
-                EmitScope.addMethodImpl
-                    {
-                        Class = c
-                        Body = MethodDefOrRef.MethodDef m
-                        Declaration = MethodDefOrRef.MemberRef mRef
-                    }
-                    scope,
-                bodies
+                addRow owner m scope, bodies
             )
 
-        let atCreationScope = fill schedule.Between "G" scope
-        let finalScope = fill schedule.After "H" atCreationScope
+        let atOwnerCreation = fill schedule.Between "G" scope
 
         let loaded, dynamicAssembly =
-            match baseLoaded.Value.WithDynamicAssembly loggerFactory atCreationScope with
+            match baseLoaded.Value.WithDynamicAssembly loggerFactory atOwnerCreation with
             | Ok loaded -> loaded
             | Error existing -> failwith $"unexpected collision with %s{existing.DefinitionFullName}"
 
@@ -342,7 +397,28 @@ public static class Caller
         let loaded =
             (loaded.WithAssemblyRefTarget name fixtureRef fixture).WithAssemblyRefTarget name corelibRef corelib
 
-        let loaded = loaded.WithCreatedType name c
+        let loaded = loaded.WithCreatedType name owner
+
+        // `C`, and for `Overridden` `I3` before it, each created as soon as it is defined.
+        let c, atCreationScope, loaded =
+            match schedule.Shape with
+            | Shape.OnClass -> owner, atOwnerCreation, loaded
+            | Shape.OnInterface ->
+                // `C` implements `I2`, not `IDef`, as real .NET's `TypeBuilder` records it.
+                let c, scope = defineType "C" (TypeDefOrRef.TypeDef owner) atOwnerCreation
+                let loaded, _ = loaded.WithEmitScope loggerFactory name scope
+                c, scope, loaded.WithCreatedType name c
+            | Shape.Overridden ->
+                let i3, scope = defineInterface "I3" (TypeDefOrRef.TypeDef owner) atOwnerCreation
+                let b9, scope = staticBody i3 9 scope
+                let scope = addRow i3 b9 scope
+                let loaded, _ = loaded.WithEmitScope loggerFactory name scope
+                let loaded = loaded.WithCreatedType name i3
+                let c, scope = defineType "C" (TypeDefOrRef.TypeDef i3) scope
+                let loaded, _ = loaded.WithEmitScope loggerFactory name scope
+                c, scope, loaded.WithCreatedType name c
+
+        let finalScope = fill schedule.After "H" atCreationScope
 
         let resolve (loaded : LoadedAssemblies) : Result<string, string> =
             let dirs = HostImage.runtimeDirs
@@ -414,6 +490,11 @@ public static class Caller
         | WindowRefused
         /// Created below 25 rows and resolved from 25, several rows, the two orders giving one body.
         | WindowAgreed
+        /// An interface's rows, created below 25 rows and resolved from 25, the two orders giving different
+        /// bodies, and no more specific interface: refused.
+        | InterfaceRefused
+        /// As `InterfaceRefused`, but a more specific interface supplies the body: it runs.
+        | OverriddenInWindow
 
     [<Test>]
     let ``static virtual resolution over a dynamic module's rows agrees with real .NET's TypeBuilder`` () : unit =
@@ -441,21 +522,33 @@ public static class Caller
                 | Error message ->
                     message |> shouldContainText "TODO: static virtual dispatch"
                     cover Reach.WindowRefused
+
+                    if schedule.Shape = Shape.OnInterface then
+                        cover Reach.InterfaceRefused
                 | Ok answer -> failwith $"expected a refusal in the window, got %s{answer} (real .NET: %s{hostAtEnd})"
             else
                 show atEnd |> shouldEqual $"runs %s{hostAtEnd}"
 
-                if forward <> backward then
-                    if schedule.Total >= 25 then
-                        cover Reach.Reversed
-                    else
-                        cover Reach.InOrder
+                match schedule.Shape with
+                | Shape.Overridden ->
+                    hostAtEnd |> shouldEqual "B9"
 
-                if window && schedule.Rows.Length > 1 then
-                    cover Reach.WindowAgreed
+                    if window && forward <> backward then
+                        cover Reach.OverriddenInWindow
+                | Shape.OnClass
+                | Shape.OnInterface ->
+                    if forward <> backward then
+                        if schedule.Total >= 25 then
+                            cover Reach.Reversed
+                        else
+                            cover Reach.InOrder
+
+                    if window && schedule.Rows.Length > 1 then
+                        cover Reach.WindowAgreed
 
         let gen =
             gen {
+                let! shape = Gen.elements [ Shape.OnClass ; Shape.OnInterface ; Shape.Overridden ]
                 let! before = Gen.choose (0, 25)
                 let! length = Gen.choose (1, 4)
                 let! rows = Gen.listOfLength length (Gen.choose (1, 3))
@@ -464,6 +557,7 @@ public static class Caller
 
                 return
                     {
+                        Shape = shape
                         Before = before
                         Rows = List.ofSeq rows
                         Between = between
@@ -473,7 +567,7 @@ public static class Caller
 
         let coverage =
             CoverageSample.check
-                (Config.QuickThrowOnFailure.WithMaxTest 100)
+                (Config.QuickThrowOnFailure.WithMaxTest 150)
                 (Arb.fromGen gen)
                 (fun cover schedule -> property cover schedule)
 
@@ -481,3 +575,5 @@ public static class Caller
         coverage.Count Reach.InOrder |> shouldBeGreaterThan 5
         coverage.Count Reach.WindowRefused |> shouldBeGreaterThan 5
         coverage.Count Reach.WindowAgreed |> shouldBeGreaterThan 3
+        coverage.Count Reach.InterfaceRefused |> shouldBeGreaterThan 2
+        coverage.Count Reach.OverriddenInWindow |> shouldBeGreaterThan 2

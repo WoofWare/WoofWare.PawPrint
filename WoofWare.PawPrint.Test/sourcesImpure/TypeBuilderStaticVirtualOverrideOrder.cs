@@ -68,6 +68,7 @@ public class Fill29 : IFill { int IFill.F() => 29; }
 public static class Caller
 {
     public static int CallDef<T>() where T : IDef => T.M();
+    public static int CallDefAgain<T>() where T : IDef => T.M();
     public static int CallDef2<T>() where T : IDef2 => T.M2();
     public static int CallVar<T>() where T : IVar<string> => T.M();
 }
@@ -113,6 +114,36 @@ public static class Program
     }
 
     static int Call(string name, Type type) => (int)typeof(Caller).GetMethod(name).MakeGenericMethod(type).Invoke(null, null);
+
+    // A call of `IDef.M` from a call site that has not resolved it before.
+    static int CallAgain(Type type) => Call("CallDefAgain", type);
+
+    // Whether a call of `IDef.M` on `type` throws `AmbiguousImplementationException`.
+    static bool Ambiguous(Type type)
+    {
+        try
+        {
+            Call("CallDef", type);
+            return false;
+        }
+        catch (TargetInvocationException e) when (e.InnerException is System.Runtime.AmbiguousImplementationException)
+        {
+            return true;
+        }
+    }
+
+    // An interface of `module` extending `parent`, with a row naming `IDef.M` for `Dn` for each n of `bodies` that is
+    // not 0, in order; `Dn` returns n.
+    static TypeBuilder OrderDependentInterface(ModuleBuilder module, string name, Type parent, (int, int) bodies)
+    {
+        TypeBuilder i = module.DefineType(name, TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract);
+        i.AddInterfaceImplementation(parent);
+        foreach (int body in new[] { bodies.Item1, bodies.Item2 })
+        {
+            if (body != 0) i.DefineMethodOverride(StaticBody(i, "D" + body, body), typeof(IDef).GetMethod("M"));
+        }
+        return i;
+    }
 
     // `C : IDef` (a class, or a struct) with one row naming `IDef.M` for each of `bodies`, in order; `Bn` returns n.
     static TypeBuilder DefineC(ModuleBuilder module, bool isStruct, params int[] bodies)
@@ -271,6 +302,35 @@ public static class Program
             Type created = DefineC(module, false, bodies).CreateType();
             Fill(module, 25 - bodies.Length, "F");
             Check(number, Call("CallDef", created), 1);
+        }
+
+        // 26-27: `I2 : IDef` with rows `D1`, `D2`, created below 25 rows, whose two orders disagree once its module
+        // reaches 25; but `I3 : I2` supplies `D3`, and is more specific, so the call runs `D3` before and after.
+        {
+            ModuleBuilder module = NewModule("Overridden");
+            Type i2 = OrderDependentInterface(module, "I2", typeof(IDef), (1, 2)).CreateType();
+            Type i3 = OrderDependentInterface(module, "I3", i2, (3, 0)).CreateType();
+            TypeBuilder c = module.DefineType("C", TypeAttributes.Public);
+            c.AddInterfaceImplementation(i3);
+            Type created = c.CreateType();
+            Check(26, Call("CallDef", created), 3);
+            Fill(module, 23, "F");
+            Check(27, CallAgain(created), 3);
+        }
+
+        // 28-29: two equally specific interfaces, one or both of whose walks disagree, in the window: the call is
+        // ambiguous whichever body each supplies.
+        foreach (var (number, second) in new[] { (28, (4, 0)), (29, (4, 5)) })
+        {
+            ModuleBuilder module = NewModule($"Ambiguous{number}");
+            Type i2 = OrderDependentInterface(module, "I2", typeof(IDef), (1, 2)).CreateType();
+            Type i4 = OrderDependentInterface(module, "I4", typeof(IDef), second).CreateType();
+            TypeBuilder c = module.DefineType("C", TypeAttributes.Public);
+            c.AddInterfaceImplementation(i2);
+            c.AddInterfaceImplementation(i4);
+            Type created = c.CreateType();
+            Fill(module, 23, "F");
+            Check(number, Ambiguous(created) ? 1 : 0, 1);
         }
 
         return failed;
