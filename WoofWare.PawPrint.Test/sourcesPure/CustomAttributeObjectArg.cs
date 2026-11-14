@@ -153,6 +153,13 @@ public class CustomAttributeObjectArg
     static int next = 1;
     static int firstFailure = 0;
 
+    // Read once: each read instantiates every attribute of that type on the class.
+    static Attribute[] objs;
+    static Attribute[] objArrays;
+    static Attribute[] pairs;
+    static IList<CustomAttributeData> decoratedData;
+    static IList<CustomAttributeData> namedData;
+
     static void Check(bool ok)
     {
         int index = next;
@@ -165,7 +172,7 @@ public class CustomAttributeObjectArg
 
     static ObjAttribute Obj(int tag)
     {
-        foreach (var a in Attribute.GetCustomAttributes(typeof(Decorated), typeof(ObjAttribute)))
+        foreach (var a in objs)
         {
             var o = (ObjAttribute)a;
             if (o.Tag == tag) return o;
@@ -175,7 +182,7 @@ public class CustomAttributeObjectArg
 
     static ObjArrayAttribute ObjArray(int tag)
     {
-        foreach (var a in Attribute.GetCustomAttributes(typeof(Decorated), typeof(ObjArrayAttribute)))
+        foreach (var a in objArrays)
         {
             var o = (ObjArrayAttribute)a;
             if (o.Tag == tag) return o;
@@ -185,7 +192,7 @@ public class CustomAttributeObjectArg
 
     static PairAttribute Pair(int tail)
     {
-        foreach (var a in Attribute.GetCustomAttributes(typeof(Decorated), typeof(PairAttribute)))
+        foreach (var a in pairs)
         {
             var p = (PairAttribute)a;
             if (p.Tail == tail) return p;
@@ -208,7 +215,7 @@ public class CustomAttributeObjectArg
 
     static CustomAttributeData Data(Type decorated, Type attribute, int tag)
     {
-        foreach (var d in CustomAttributeData.GetCustomAttributes(decorated))
+        foreach (var d in decorated == typeof(Decorated) ? decoratedData : namedData)
         {
             if (d.AttributeType != attribute) continue;
             if (d.ConstructorArguments.Count == 0) continue;
@@ -255,6 +262,12 @@ public class CustomAttributeObjectArg
 
     static int Main(string[] argv)
     {
+        objs = Attribute.GetCustomAttributes(typeof(Decorated), typeof(ObjAttribute));
+        objArrays = Attribute.GetCustomAttributes(typeof(Decorated), typeof(ObjArrayAttribute));
+        pairs = Attribute.GetCustomAttributes(typeof(Decorated), typeof(PairAttribute));
+        decoratedData = CustomAttributeData.GetCustomAttributes(typeof(Decorated));
+        namedData = CustomAttributeData.GetCustomAttributes(typeof(NamedDecorated));
+
         // ---- Instances: boxed primitives (1-12) ----
         object v;
         v = Value(1); Check(Is(v, typeof(bool)) && (bool)v);
