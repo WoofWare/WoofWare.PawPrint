@@ -3374,3 +3374,67 @@ Taken 2026-11-14.
   * The test-only PR's two parked guests, and the verification at `CreateType` that un-parks them.
   * `GetInterfaceMap` as corrected above.
   * The Constant stage checks whether a second `SetConstant` adds a row or overwrites one, since its table has the hash.
+
+### 5t: as built
+
+Built 2026-11-14 as decided above, after the measurements the decisions asked for, which agree with the reading on .NET
+10.0.14 and 11.0.0-rc.3 alike (throwaway probe `5t-probe3`):
+
+| Emitted | Observed |
+|---|---|
+| `C : IDef` with rows `B1`, `B2`, created at 2 rows; `GetInterfaceMap` read; 23 rows added; read twice more | `B1`, then `B2`, `B2`: no cache, the order at the read |
+| a struct `C` with rows `B1`, `B2`, at 2 / 25 rows | 1 / 2 |
+| `C` created at 25 rows, 5 more rows, then called | 2 |
+| base `C` (rows `B1`, `B2`) in a module of 25 rows, `D : C` in a module of none; `CallDef<D>` | 2 |
+| the converse: `C`'s module at 2 rows, `D`'s at 25 | 1 |
+| in the window, rows `B1` twice; rows `B1`, `B2`, `B1` | 1; 1 |
+
+The host-only cache test (`late callBefore=True`) gave 1, then 1 and 2, in 20 of 20 runs under default tiering, 10 of
+10 under `DOTNET_TieredCompilation=0` and 10 of 10 under `DOTNET_TieredPGO=0`, so it stays.
+
+* `ReadWriteMetadataLookup.rowsOfKeySinceCreation`, beside `rowsOfKey`, returns a `RowsSinceCreation`: `OneOrder`, or
+  `TwoOrders (inOrderAdded, reversed)` exactly when the owner was created below 25 rows and the table has 25 or more now.
+  It refuses a count now below the count at creation, and a key with more rows than the table had at creation.
+* `LoadedAssemblies.Created` maps each created `TypeDefRid` to a `TypeCreation` record, whose one field is the scope's
+  MethodImpl row count when `WithCreatedType` was called. `TryMethodImplRowCounts` takes the type's
+  `ResolvedTypeIdentity` (`TypeDefRid`'s constructor is not visible outside Domain) and answers both counts from that
+  one assembly's content, `None` for an assembly that is not dynamic, and crashes for a dynamic type not created.
+* The static arm of `DefaultInterfaceImplementation.implementationOnType` asks for the level's counts. With none, it
+  walks the rows in image order as before. With one order, it walks that. With two, it walks both, each to its first
+  match; an error from either is the result, the same body (or no match) resolves, and two bodies are the TODO
+  failure, which names the level, the method, both bodies and both counts. The instance arm is untouched.
+* Tests: `TypeBuilderStaticVirtualOverrideOrder.cs` (25 checks, registered in `TestImpureCases.fs` with
+  `assertStaticVirtualOverrideModules`, which checks every module's MethodImpl row count and `Def25a`'s two rows);
+  `TestStaticVirtualOverrideOrderRefusals` (the window); `TestStaticVirtualOverrideOrder`, holding the host-only cache
+  test and the differential property, which builds each schedule's scope with `EmitScopeReferences`,
+  `EmitScopeDefinitions` and `EmitScope.addMethodImpl`, registers it with `WithDynamicAssembly`,
+  `WithAssemblyRefTarget`, `WithCreatedType` and `WithEmitScope`, and resolves `IDef.M` with
+  `StaticVirtualDispatch.resolve`, at creation and at the end, against real .NET's `GetInterfaceMap` at the same two
+  points; the Domain property in `TestEmitScopeProperties`; and the counts in `TestLoadedAssemblies`. Bodies are drawn
+  with repetition, so `B1`, `B2`, `B1` occurs; the fixed sample's coverage floors are asserted.
+* The test-only commit's red run: the guest exited 3 ("check 3: got 1, expected 2"), the refusal test saw no failure,
+  and the property was falsified at creation by `{ Before = 21; Rows = [3; 2; 3; 2]; Between = 17; After = 0 }`
+  (PawPrint `B3`, real .NET `B2`).
+* Each mutant was run against the guest, the refusal test, the differential property, the Domain properties
+  (`TestEmitScopeProperties`) and `TestLoadedAssemblies`:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The rule never applied | the guest (check 3); the property; the refusal test |
+  | The threshold at 24 | the guest (check 2); both Domain properties; the property; 5s's differential property |
+  | The threshold at 26 | the guest (refuses `After25`, created at 25 rows); both Domain properties; the property; the refusal test; 5s's differential property |
+  | The rule applied to an image on disk | the guest (check 15, `CDisk`) alone: neither property reads an image on disk |
+  | The rule keyed on the type's own row count, not the module's | the guest (check 3); the property; the refusal test |
+  | The window answered with the reversed order (no refusal) | the property; the refusal test. The guest passes: its window cases are the ones whose walks agree |
+  | The window refusing on any match | the guest (refuses `WindowOne`, one row per method); the property |
+  | The window refusing on more than one match where the two walks agree | the guest (refuses `Window2`, `B1` twice); the property |
+  | The count at creation taken now | the property; the refusal test (the window never opens); the guest passes |
+  | The counts taken from the constrained type's module, not the level's | the guest: check 20 through `rowsOfKeySinceCreation`'s check that a key's rows fit the table at creation (`D`'s module had none), and, with that check and `rowsOfKey`'s removed too, check 20's answer (1, not 2) |
+  | The window taken whenever rows were added since creation | the guest (refuses `After25`); the Domain property; the property |
+  | `WithCreatedType` recording 0 | the guest (through the same check, then with it removed by refusing `Def25a`); `TestLoadedAssemblies`; the property; the refusal test |
+  | `TryMethodImplRowCounts` giving the count at creation as the count now | `TestLoadedAssemblies`; the property; the refusal test; the guest passes |
+  | `TwoOrders` holding its orders swapped | the Domain property; the refusal test (its message names the bodies in the two orders) |
+  | The rule applied to the instance arm too | survives, as expected: the instance arm picks the body with the lowest slot, so the order of its rows cannot change its answer |
+
+* Suites at the tip, built from the whole solution: the default suite (5569 passed, 37 skipped), `Guest` (234),
+  `GuestSolo` (2), `GuestPure` (1179) and `GuestImpure` (276), each run on its own, all passing.
