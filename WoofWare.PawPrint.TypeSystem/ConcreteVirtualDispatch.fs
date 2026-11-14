@@ -1064,15 +1064,17 @@ module ConcreteVirtualDispatch =
                 state
 
         let foundDefault (state : TypeSystemState) (candidate : DefaultInterfaceImplementation.Candidate) =
-            match candidate.Body.Body with
+            let body = DefaultInterfaceImplementation.instanceCandidateBody candidate
+
+            match body.Body with
             | MethodBody.Abstract ->
                 logger.LogDebug (
                     "The most specific default interface body is the reabstraction {DeclaringTypeName}.{MethodName}",
-                    candidate.Body.RequiredDeclaringType.Name,
-                    candidate.Body.Name
+                    body.RequiredDeclaringType.Name,
+                    body.Name
                 )
 
-                state, Ok (VirtualImplementation.Reabstracted candidate.Body)
+                state, Ok (VirtualImplementation.Reabstracted body)
             | MethodBody.Il _
             | MethodBody.AsyncIl _
             | MethodBody.MissingIl
@@ -1081,11 +1083,11 @@ module ConcreteVirtualDispatch =
             | MethodBody.RuntimeProvided _ ->
                 logger.LogDebug (
                     "Found default interface body {DeclaringTypeName}.{MethodName}",
-                    candidate.Body.RequiredDeclaringType.Name,
-                    candidate.Body.Name
+                    body.RequiredDeclaringType.Name,
+                    body.Name
                 )
 
-                state, Ok (VirtualImplementation.Found (dispatchedOn candidate.Interface candidate.Body state))
+                state, Ok (VirtualImplementation.Found (dispatchedOn candidate.Interface body state))
 
         let throughVariantInterface =
             methodDeclaringType.Generics
@@ -1161,7 +1163,8 @@ module ConcreteVirtualDispatch =
         | state, Error failure -> state, Error failure
         | state, Ok [ only ] -> foundDefault state only
         | state, Ok (_ :: _ :: _ as candidates) ->
-            let candidates = candidates |> List.map _.Body
+            let candidates =
+                candidates |> List.map DefaultInterfaceImplementation.instanceCandidateBody
 
             if throughVariantInterface then
                 // A conflict at the call's exact instantiation, where CoreCLR's search reports
