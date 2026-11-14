@@ -1498,6 +1498,61 @@ module TestImpureCases =
     /// `TypeBuilderCreateInterface.cs` has created its three interfaces, `N.IEmpty` (TypeDef 2),
     /// `IDerived` (TypeDef 3) and `IAfter` (TypeDef 4), which the runtime must have recorded as
     /// created, so that the dynamic module's scope can no longer change their members.
+    /// `TypeBuilderStaticVirtualOverrideOrder.cs` resolves each case against the MethodImpl row count of a
+    /// module of its own, which no guest can read. This checks that each module ends with the count its name
+    /// promises, so that a filler which wrote no row cannot turn a 25-row case into a 24-row one unseen, and
+    /// that `Def25a`'s type `C` (TypeDef 2) has its two rows, `B1` then `B2` for `IDef.M`, first.
+    let private assertStaticVirtualOverrideModules (state : IlMachineState) : unit =
+        let loaded = state.TypeSystem._LoadedAssemblies
+
+        let scopeOf (name : string) : EmitScope =
+            loaded.TryDynamicScope $"%s{name}, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith $"the guest's dynamic assembly %s{name} is not loaded")
+
+        let expected =
+            [
+                "Def2a", 2
+                "Def24a", 24
+                "Def25a", 25
+                "Def26a", 26
+                "Def24b", 24
+                "Def25b", 25
+                "Swapped2", 2
+                "Swapped25", 25
+                "Iface2", 2
+                "Iface25", 25
+                "Var2a", 2
+                "Var2b", 2
+                "Var25a", 25
+                "Var25b", 25
+                "Struct2", 2
+                "Struct25", 25
+                "After25", 30
+                "Base25", 25
+                "Derived0", 0
+                "Base2", 2
+                "Derived25", 25
+                "WindowOne", 25
+                "Window2", 25
+                "Window3", 25
+            ]
+
+        expected
+        |> List.map (fun (name, _) -> name, (EmitScope.methodImpls (scopeOf name)).Count)
+        |> shouldEqual expected
+
+        let def25a = scopeOf "Def25a"
+
+        EmitScope.methodImpls def25a
+        |> Seq.take 2
+        |> Seq.map (fun row -> row.Class.Rid, row.Body, row.Declaration)
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                2, MethodDefOrRef.MethodDef (MethodDefRid 1), MethodDefOrRef.MemberRef (MemberRefRid 1)
+                2, MethodDefOrRef.MethodDef (MethodDefRid 2), MethodDefOrRef.MemberRef (MemberRefRid 1)
+            ]
+
     let private assertInterfacesCreated (state : IlMachineState) : unit =
         let loaded = state.TypeSystem._LoadedAssemblies
         let name = "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
@@ -6330,6 +6385,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
+            }
+            {
+                // A static virtual call over a type with several matching MethodImpl rows, in modules either
+                // side of the 25 MethodImpl rows from which CoreCLR finds a type's rows in reverse;
+                // `assertStaticVirtualOverrideModules` checks each module's row count. Dynamic-code switch
+                // overridden to true like its siblings; verified by hand to exit 0 on real .NET 10 and 11.
+                FileName = "TypeBuilderStaticVirtualOverrideOrder.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertStaticVirtualOverrideModules
             }
             {
                 // `ModuleBuilder_GetStringConstant`, through `ldstr` and `GetStringMetadataToken`: the

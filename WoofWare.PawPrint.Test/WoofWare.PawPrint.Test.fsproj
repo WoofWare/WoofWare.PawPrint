@@ -469,6 +469,8 @@
     <Compile Include="TestTypeBuilderGenericParamRefusals.fs" />
     <Compile Include="TestTypeBuilderPropertyRefusals.fs" />
     <Compile Include="TestFabricatedPropertyAccessorOrder.fs" />
+    <Compile Include="TestStaticVirtualOverrideOrderRefusals.fs" />
+    <Compile Include="TestStaticVirtualOverrideOrder.fs" />
     <Compile Include="TestNextCallReturnAddressRefusal.fs" />
     <Compile Include="TestFabricatedCallArgumentCoercion.fs" />
     <Compile Include="TestFabricatedTypedReferenceInstantiation.fs" />
