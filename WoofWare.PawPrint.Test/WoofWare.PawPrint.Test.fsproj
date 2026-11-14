@@ -448,6 +448,7 @@
     <Compile Include="TestFabricatedDiscardedRead.fs" />
     <Compile Include="TestFabricatedLongFormArgLocal.fs" />
     <Compile Include="TestFabricatedArrayConstructorNewobj.fs" />
+    <Compile Include="TestFabricatedUnsafeAccessorAbstractConstructor.fs" />
     <Compile Include="TestFabricatedInheritedMemberReference.fs" />
     <Compile Include="TestFabricatedVoidParentMemberReference.fs" />
     <Compile Include="TestFabricatedCatchClauseRefusal.fs" />

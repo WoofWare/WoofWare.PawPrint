@@ -1341,6 +1341,32 @@ module internal UnsafeAccessorDispatch =
 
             refuseByrefReferenceReceiver ()
 
+            // The body of a `Constructor` accessor is a `newobj` of the target, which the JIT refuses
+            // for an abstract class. The lookup asks only for a method named `.ctor` that is not
+            // static, so it also binds a `.ctor` without `RTSpecialName`, at which
+            // `NewobjTarget.classify` would stop; the JIT treats a `newobj` of that exactly as one of
+            // a constructor (measured on .NET 10 and 11), so only the declaring type is asked about.
+            // The other refusals `classify` knows cannot arise: the lookup admits no static method,
+            // and the loader rejects a virtual `.ctor` (`BFA_VIRTUAL_INSTANCE_CTOR`).
+            let refusedAsAbstractClass =
+                match kind with
+                | UnsafeAccessorKind.Constructor ->
+                    let attributes =
+                        (MethodInfo.requireMetadata "[UnsafeAccessor] constructor target" target).MethodAttributes
+
+                    if
+                        attributes.HasFlag MethodAttributes.Static
+                        || attributes.HasFlag MethodAttributes.Abstract
+                    then
+                        failwith
+                            $"BUG: %s{describe} bound %O{target}, which is static or abstract; the lookup admits only instance methods, and the loader rejects a virtual .ctor"
+
+                    NewobjTarget.refusesAsAbstractClass targetTypeInfo.TypeAttributes targetIsValueType
+                | UnsafeAccessorKind.Method
+                | UnsafeAccessorKind.StaticMethod
+                | UnsafeAccessorKind.Field
+                | UnsafeAccessorKind.StaticField -> false
+
             // Two shapes the *body* CoreCLR emits refuses, both of them after the lookup has
             // succeeded -- measured on real .NET 10, an abstract class with no matching
             // constructor reports the missing constructor rather than the abstract class.
@@ -1350,9 +1376,7 @@ module internal UnsafeAccessorDispatch =
                 // `static abstract` interface member is the one static method that can be
                 // abstract. The message is the JIT's rather than the attribute's.
                 state, Error (UnsafeAccessorRefusal.BadImageFormat BadImageFormatMessages.badIl)
-            | UnsafeAccessorKind.Constructor, _ when targetTypeInfo.TypeAttributes.HasFlag TypeAttributes.Abstract ->
-                // The body is a `newobj`, which the JIT refuses for an abstract class
-                // (`CEEInfo::getNewHelper`).
+            | UnsafeAccessorKind.Constructor, _ when refusedAsAbstractClass ->
                 state, Error UnsafeAccessorRefusal.CantInstantiateAbstractClass
             | _ ->
 
