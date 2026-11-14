@@ -48,7 +48,10 @@ module TestFabricatedFieldLayoutOffset =
             Kind : Kind
             IsClass : bool
             RowA : uint32 option
+            /// `None` both for no row and, in an inline array, for no field `B`.
             RowB : uint32 option
+            /// `[InlineArray(n)]`, whose type declares field `A` alone.
+            InlineArray : int option
         }
 
     /// The placeholder offset `PersistedAssemblyBuilder` writes for row `index`, later patched.
@@ -76,16 +79,27 @@ module TestFabricatedFieldLayoutOffset =
             specs
             |> List.map (fun spec ->
                 let attrs =
-                    TypeAttributes.Public ||| TypeAttributes.Sealed ||| TypeAttributes.ExplicitLayout
+                    TypeAttributes.Public
+                    ||| TypeAttributes.Sealed
+                    ||| TypeAttributes.ExplicitLayout
 
                 let parent = if spec.IsClass then typeof<obj> else typeof<ValueType>
                 let t = modul.DefineType (spec.Name, attrs, parent)
                 setRow (t.DefineField ("A", typeof<int>, FieldAttributes.Public)) spec.RowA
-                setRow (t.DefineField ("B", typeof<int>, FieldAttributes.Public)) spec.RowB
+
+                match spec.InlineArray with
+                | None -> setRow (t.DefineField ("B", typeof<int>, FieldAttributes.Public)) spec.RowB
+                | Some length ->
+                    t.SetCustomAttribute (
+                        CustomAttributeBuilder (
+                            typeof<System.Runtime.CompilerServices.InlineArrayAttribute>.GetConstructor
+                                [| typeof<int> |],
+                            [| box length |]
+                        )
+                    )
 
                 if spec.IsClass then
-                    t.DefineDefaultConstructor MethodAttributes.Public
-                    |> ignore<ConstructorBuilder>
+                    t.DefineDefaultConstructor MethodAttributes.Public |> ignore<ConstructorBuilder>
 
                 t
             )
@@ -102,8 +116,7 @@ module TestFabricatedFieldLayoutOffset =
         let mr = peReader.GetMetadataReader ()
         let metadataStart = peReader.PEHeaders.MetadataStartOffset
 
-        let layoutStart =
-            metadataStart + mr.GetTableMetadataOffset TableIndex.FieldLayout
+        let layoutStart = metadataStart + mr.GetTableMetadataOffset TableIndex.FieldLayout
 
         let layoutRowSize = mr.GetTableRowSize TableIndex.FieldLayout
         let mutable patched = Set.empty
@@ -130,12 +143,18 @@ module TestFabricatedFieldLayoutOffset =
             | None -> ()
             | Some spec ->
                 // The Flags column is the row's first, four bytes wide.
-                let at = typeDefStart + (MetadataTokens.GetRowNumber (TypeDefinitionHandle.op_Implicit handle : EntityHandle) - 1) * typeDefRowSize
+                let at =
+                    typeDefStart
+                    + (MetadataTokens.GetRowNumber (TypeDefinitionHandle.op_Implicit handle : EntityHandle)
+                       - 1)
+                      * typeDefRowSize
+
                 let flags = BitConverter.ToUInt32 (bytes, at)
                 flags |> shouldEqual (uint32 def.Attributes)
 
                 let flags =
-                    (flags &&& ~~~(uint32 TypeAttributes.LayoutMask)) ||| uint32 spec.Kind.Attributes
+                    (flags &&& ~~~(uint32 TypeAttributes.LayoutMask))
+                    ||| uint32 spec.Kind.Attributes
 
                 BitConverter.GetBytes(flags).CopyTo (bytes, at)
 
@@ -162,6 +181,7 @@ module TestFabricatedFieldLayoutOffset =
                             IsClass = isClass
                             RowA = None
                             RowB = Some offset
+                            InlineArray = None
                         }
             for isClass in [ false ; true ] do
                 {
@@ -170,6 +190,7 @@ module TestFabricatedFieldLayoutOffset =
                     IsClass = isClass
                     RowA = Some 0u
                     RowB = Some 0x10u
+                    InlineArray = None
                 }
         ]
 
@@ -263,9 +284,9 @@ public static class Driver
     let private refusalDriver (spec : Spec) : string =
         let instance =
             if spec.IsClass then
-                $"return new %s{spec.Name} ().B;"
+                $"return new %s{spec.Name} ().A;"
             else
-                $"%s{spec.Name} v = default; return v.B;"
+                $"%s{spec.Name} v = default; return v.A;"
 
         $"""
 using System;
@@ -300,7 +321,7 @@ public static class Driver
     [MethodImpl (MethodImplOptions.NoInlining)]
     static int Probe ()
     {{
-        if (typeof (%s{spec.Name}).GetField ("B") == null)
+        if (typeof (%s{spec.Name}).GetField ("A") == null)
         {{
             return 1;
         }}
@@ -325,11 +346,7 @@ public static class Driver
             "OverLastRealOffset", Some 0u, 0x07FFFFF9u, typeLoadGeneral, "FIELD_OFFSET_LAST_REAL_OFFSET"
             "Int32Max", Some 0u, 0x7FFFFFFFu, typeLoadGeneral, "FIELD_OFFSET_LAST_REAL_OFFSET"
             "TwoToThe31", Some 0u, 0x80000000u, typeLoadNegativeOffset, "IDS_CLASSLOAD_NSTRUCT_NEGATIVE_OFFSET"
-            "LastWithoutOverflow",
-            Some 0u,
-            0xFFFFFFFBu,
-            typeLoadNegativeOffset,
-            "IDS_CLASSLOAD_NSTRUCT_NEGATIVE_OFFSET"
+            "LastWithoutOverflow", Some 0u, 0xFFFFFFFBu, typeLoadNegativeOffset, "IDS_CLASSLOAD_NSTRUCT_NEGATIVE_OFFSET"
             "EndOverflows", Some 0u, 0xFFFFFFFCu, outOfMemory, "OutOfMemoryException"
             "AllOnes", Some 0u, 0xFFFFFFFFu, outOfMemory, "OutOfMemoryException"
             "NoRowOnA", None, 0x10u, typeLoadNoExplicitOffset, "IDS_CLASSLOAD_NSTRUCT_EXPLICIT_OFFSET"
@@ -346,15 +363,20 @@ public static class Driver
                             IsClass = isClass
                             RowA = rowA
                             RowB = Some rowB
+                            InlineArray = None
                         },
                         exitCode,
                         refusal
                     )
-                        .SetName $"explicit %s{(shapeName isClass).ToLowerInvariant ()} refused: %s{name}"
+                        .SetName
+                        $"explicit %s{(shapeName isClass).ToLowerInvariant ()} refused: %s{name}"
         }
 
     [<TestCaseSource(nameof refusalCases)>]
-    let ``explicit layouts CoreCLR refuses to load are refused by name`` (spec : obj, exitCode : int, refusal : string) : unit =
+    let ``explicit layouts CoreCLR refuses to load are refused by name``
+        (spec : obj, exitCode : int, refusal : string)
+        : unit
+        =
         let spec = spec :?> Spec
 
         let onHost, onPawPrint =
@@ -363,9 +385,89 @@ public static class Driver
         onHost |> shouldEqual (RealRuntimeResult.NormalExit exitCode)
 
         match onPawPrint with
-        | FabricatedOutcome.Exited code -> failwith $"PawPrint ran the guest to exit code %d{code}, but CoreCLR refuses its type"
+        | FabricatedOutcome.Exited code ->
+            failwith $"PawPrint ran the guest to exit code %d{code}, but CoreCLR refuses its type"
         | FabricatedOutcome.Failed e ->
             let messages = messages e
 
             if not (messages |> List.exists (fun m -> m.Contains refusal)) then
-                failwith $"expected PawPrint's refusal to name %s{refusal}; got:\n%s{String.concat Environment.NewLine messages}"
+                failwith
+                    $"expected PawPrint's refusal to name %s{refusal}; got:\n%s{String.concat Environment.NewLine messages}"
+
+    /// CoreCLR refuses `[InlineArray]` on a type that declares explicit layout, and asks nothing of
+    /// the field's FieldLayout row: on a sequential type the row is reflected and ignored.
+    [<Test>]
+    let ``a row on a sequential inline array is ignored`` () : unit =
+        let spec =
+            {
+                Name = "SequentialInline"
+                Kind = Kind.Sequential
+                IsClass = false
+                RowA = Some 0x80000000u
+                RowB = None
+                InlineArray = Some 3
+            }
+
+        FabricatedGuest.run
+            "InlineRows"
+            (fabricate "InlineRows" [ spec ])
+            "InlineRowsDriver"
+            """
+using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+public static class Driver
+{
+    public static int Main (string[] args)
+    {
+        if (typeof (SequentialInline).GetField ("A").GetCustomAttribute<FieldOffsetAttribute> ()?.Value != int.MinValue)
+        {
+            return 1;
+        }
+
+        if (Unsafe.SizeOf<SequentialInline> () != 12)
+        {
+            return 2;
+        }
+
+        SequentialInline v = default;
+        Unsafe.Add (ref v.A, 2) = 7;
+        return Unsafe.Add (ref v.A, 2) == 7 ? 0 : 3;
+    }
+}
+"""
+            0
+
+    [<Test>]
+    let ``an explicit inline array is refused by name`` () : unit =
+        let spec =
+            {
+                Name = "ExplicitInline"
+                Kind = Kind.Explicit
+                IsClass = false
+                RowA = Some 0u
+                RowB = None
+                InlineArray = Some 3
+            }
+
+        let onHost, onPawPrint =
+            FabricatedGuest.runOnBoth "Refused" (fabricate "Refused" [ spec ]) "RefusedDriver" (refusalDriver spec)
+
+        onHost |> shouldEqual (RealRuntimeResult.NormalExit typeLoadGeneral)
+
+        match onPawPrint with
+        | FabricatedOutcome.Exited code ->
+            failwith $"PawPrint ran the guest to exit code %d{code}, but CoreCLR refuses its type"
+        | FabricatedOutcome.Failed e ->
+            let messages = messages e
+
+            if
+                not (
+                    messages
+                    |> List.exists (fun m -> m.Contains "IDS_CLASSLOAD_INLINE_ARRAY_EXPLICIT")
+                )
+            then
+                failwith
+                    $"expected PawPrint's refusal to name IDS_CLASSLOAD_INLINE_ARRAY_EXPLICIT; got:\n%s{String.concat Environment.NewLine messages}"

@@ -287,7 +287,7 @@ module TestStorageLocationResolve =
             Id = FieldId.Named name
             Name = name
             Contents = CliType.Numeric (CliNumericType.Int32 value)
-            Offset = Some offset
+            Offset = Some (uint32 offset)
             Type = int32Handle
             MarshallingDescriptor = None
         }
@@ -431,7 +431,7 @@ module TestStorageLocationResolve =
             Id = FieldId.Named name
             Name = name
             Contents = CliType.Numeric (CliNumericType.UInt8 (UInt8Source.Verbatim 0uy))
-            Offset = Some offset
+            Offset = Some (uint32 offset)
             Type = byteHandle
             MarshallingDescriptor = None
         }

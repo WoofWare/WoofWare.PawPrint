@@ -493,6 +493,8 @@
     <Compile Include="TestUnsafeStubs.fs" />
     <Compile Include="TestFabricatedFieldMarshal.fs" />
     <Compile Include="TestFabricatedFieldLayoutOffset.fs" />
+    <Compile Include="TestFieldInfoLayoutOffset.fs" />
+    <Compile Include="TestExplicitFieldOffsets.fs" />
     <Compile Include="TestFabricatedFieldReference.fs" />
     <Compile Include="TestSetupShape.fs" />
     <Compile Include="TestStartCallbackShape.fs" />

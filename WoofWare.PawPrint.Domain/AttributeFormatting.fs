@@ -414,8 +414,9 @@ module AttributeFormatting =
     /// <summary>
     /// Comment-prefixed header for a FieldDef. Static-ness is rendered in the
     /// same position as <see cref="methodHeader"/> renders it. A trailing
-    /// <c>@ 0xNN</c> reports the field's offset for explicitly-laid-out types;
-    /// fields whose offset the runtime chooses carry no such suffix.
+    /// <c>@ 0xNN</c> reports the raw offset of the field's FieldLayout row, which
+    /// places the field only in an explicitly-laid-out type; a field without a
+    /// row carries no such suffix.
     /// </summary>
     let fieldHeader
         (assembly : DumpedAssembly)

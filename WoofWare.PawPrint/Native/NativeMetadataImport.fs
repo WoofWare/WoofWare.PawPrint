@@ -792,88 +792,6 @@ module NativeMetadataImport =
                     $"%s{operation}: FieldDef token 0x%08x{mdToken} was not present in %s{assembly.DefinitionFullName}"
         | token -> failwith $"%s{operation}: expected FieldDef token, got %O{token} from 0x%08x{mdToken}"
 
-    /// The Offset column, raw, of the FieldLayout row (ECMA-335 II.22.16) of each of
-    /// <paramref name="fields"/> that has one, keyed by the field's row number. A field with no row
-    /// is absent. Fails if one of <paramref name="fields"/> has more than one row, which II.22.16
-    /// forbids.
-    ///
-    /// The offset is unsigned, and every value is reported: CoreCLR's loader accepts a row of any
-    /// offset on a field of an auto- or sequential-layout type, and reflection reports it.
-    let private fieldLayoutOffsets
-        (operation : string)
-        (assembly : DumpedAssembly)
-        (fields : System.Reflection.Metadata.FieldDefinitionHandle list)
-        : Map<int, uint32>
-        =
-        // Read straight from the metadata bytes, because `FieldDefinition.GetOffset` reports an
-        // offset above `Int32.MaxValue` as -1, the same answer it gives for no row at all.
-        //
-        // ECMA-335 II.24.2.6 column widths: the Offset column is a 4-byte constant, and the Field
-        // column a simple index, 2 bytes while the Field table has fewer than 2^16 rows.
-        let fieldIndexSize =
-            if tableRowCount assembly System.Reflection.Metadata.Ecma335.TableIndex.Field < 0x10000 then
-                2
-            else
-                4
-
-        let metadataReader = metadataReaderOf assembly
-
-        let rowSize =
-            System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableRowSize (
-                metadataReader,
-                System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
-            )
-
-        if rowSize <> 4 + fieldIndexSize then
-            failwith
-                $"%s{operation}: FieldLayout row size %d{rowSize} in %s{assembly.DefinitionFullName} disagrees with the ECMA-335 II.24.2.6 widths derived from the table row counts (4 + %d{fieldIndexSize})"
-
-        let wanted =
-            fields
-            |> List.map (fun field ->
-                System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
-                    System.Reflection.Metadata.FieldDefinitionHandle.op_Implicit field
-                )
-            )
-            |> Set.ofList
-
-        let rows =
-            tableRowCount assembly System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
-
-        let tableOffset =
-            System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableMetadataOffset (
-                metadataReader,
-                System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
-            )
-
-        // `BlobReader` is a struct: an immutably-bound one is copied before each `Read*` call,
-        // so every read would silently return the same bytes. Hence `let mutable`.
-        let mutable reader =
-            (assembly.PeReader.GetMetadata ()).GetReader (tableOffset, rows * rowSize)
-
-        // A scan of the whole table rather than a binary search. II.24.2.6 requires the table
-        // sorted by Field, and CoreCLR's read-only reader relies on that, so on a conforming image
-        // the two agree; a dynamic module's read-write reader does not rely on it.
-        let mutable offsets : Map<int, uint32> = Map.empty
-
-        for _ = 1 to rows do
-            let offset = reader.ReadUInt32 ()
-
-            let rowField =
-                if fieldIndexSize = 2 then
-                    int (reader.ReadUInt16 ())
-                else
-                    reader.ReadInt32 ()
-
-            if wanted.Contains rowField then
-                if offsets.ContainsKey rowField then
-                    failwith
-                        $"%s{operation}: field row %d{rowField} of %s{assembly.DefinitionFullName} has more than one FieldLayout row, which ECMA-335 II.22.16 forbids; which one CoreCLR reports depends on how it searches the table"
-
-                offsets <- offsets.Add (rowField, offset)
-
-        offsets
-
     /// The answer of CoreCLR's <c>MetaDataImport::GetFieldOffset</c> (vm/managedmdimport.cpp:176).
     [<RequireQualifiedAccess>]
     type private FieldOffsetSearch =
@@ -913,14 +831,8 @@ module NativeMetadataImport =
                 ((metadataReaderOf assembly).GetTypeDefinition typeDefHandle).GetFields ()
                 |> List.ofSeq
 
-            let offsets = fieldLayoutOffsets operation assembly fields
-
             let offsetOf (field : System.Reflection.Metadata.FieldDefinitionHandle) : uint32 option =
-                offsets.TryFind (
-                    System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
-                        System.Reflection.Metadata.FieldDefinitionHandle.op_Implicit field
-                    )
-                )
+                assembly.Fields.[field].Offset
 
             // CoreCLR calls `GetClassLayoutNext` (md/runtime/mdinternalro.cpp:2192) once per field
             // of the type, stopping early at the target. Each call steps over fields without a row

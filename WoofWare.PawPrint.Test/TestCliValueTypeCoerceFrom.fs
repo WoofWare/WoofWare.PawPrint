@@ -85,7 +85,7 @@ module TestCliValueTypeCoerceFrom =
                 Id = FieldId.named "A"
                 Name = "A"
                 Contents = CliType.Numeric (CliNumericType.Int32 0)
-                Offset = Some 0
+                Offset = Some 0u
                 Type = int32Handle
                 MarshallingDescriptor = None
             }
@@ -95,7 +95,7 @@ module TestCliValueTypeCoerceFrom =
                 Id = FieldId.named "B"
                 Name = "B"
                 Contents = CliType.Numeric (CliNumericType.Int64 (Int64Source.Verbatim 0L))
-                Offset = Some 0
+                Offset = Some 0u
                 Type = int64Handle
                 MarshallingDescriptor = None
             }

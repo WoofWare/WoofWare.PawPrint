@@ -742,7 +742,7 @@ module TestManagedHeap =
                 Id = id
                 Name = name
                 Contents = CliType.Numeric (CliNumericType.Int32 value)
-                Offset = Some offset
+                Offset = Some (uint32 offset)
                 Type = int32Handle
                 MarshallingDescriptor = None
             }

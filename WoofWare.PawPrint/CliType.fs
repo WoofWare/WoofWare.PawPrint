@@ -1441,8 +1441,10 @@ and CliField =
         Id : FieldId
         Name : string
         Contents : CliType
-        /// "None" for "no explicit offset specified"; we expect most offsets to be None.
-        Offset : int option
+        /// The raw offset of the field's FieldLayout row (ECMA-335 II.22.16), or `None` if it has none;
+        /// see `FieldInfo.Offset`. Layout places the field at it only when the declaring type has
+        /// explicit layout, and ignores it otherwise, as CoreCLR does.
+        Offset : uint32 option
         Type : ConcreteTypeHandle
         /// Parsed `[MarshalAs(...)]` descriptor for this field, or `None` if absent. Carried
         /// on the field itself so that unmanaged-size computation can consult it without
@@ -1515,7 +1517,8 @@ and CliConcreteField =
             Offset : int
             Size : int
             Alignment : int
-            ConfiguredOffset : int option
+            /// The field's FieldLayout row, as `CliField.Offset` carried it into layout.
+            ConfiguredOffset : uint32 option
             EditedAtTime : uint64
             Id : FieldId
             Type : ConcreteTypeHandle
@@ -2088,21 +2091,18 @@ and CliValueType =
         total, alignment
 
     /// Whether CoreCLR's auto-layout algorithm governs a type, given the layout kind PawPrint
-    /// applies to it (`TypeLayoutKind.applied`) and three facts about its fields.
+    /// applies to it (`TypeLayoutKind.applied`), whether its own fields are placed at their
+    /// FieldLayout rows, and two facts about its chain.
     ///
     /// Two routes reach auto layout (`MethodTableBuilder::PlaceInstanceFields`,
     /// methodtablebuilder.cpp:8212): the type declares it, or the type declares `Sequential` and
     /// holds GC references, which promotes it. Explicit layout is never promoted.
     ///
-    /// Explicit layout is recognised from the fields rather than from the declared kind, and that
-    /// is not a shortcut: a *reference* type's field list here is its whole base chain flattened
-    /// (issue #994), so it routinely mixes fields governed by different kinds. An explicit-layout
-    /// class with no instance fields of its own presents only its sequential base's offset-free
-    /// fields, and a sequential class deriving from an explicit-layout base presents only
-    /// offset-carrying ones — both load on real .NET (`LayoutKindAcrossInheritance.cs`). So "the
-    /// declared kind and the field shape agree" is false as a property of this list, and
-    /// the kind matters only for the choice this function exists to make: among fields
-    /// that carry no offsets, auto placement or sequential.
+    /// `placesExplicitly` is the declared kind `Explicit` with at least one instance field of the
+    /// type's own. An explicit-layout class with no instance fields of its own places nothing, and
+    /// over its sequential base it loads on real .NET (`LayoutKindAcrossInheritance.cs`), so for
+    /// such a type the kind decides only the choice this function exists to make: among fields
+    /// placed without rows, auto placement or sequential.
     ///
     /// An `[InlineArray(N)]` type is routed by this function like any other, because CoreCLR routes
     /// it like any other: the repeat count is applied to the size the chosen route computes for the
@@ -2117,19 +2117,19 @@ and CliValueType =
     /// is the only route into that arm with no GC reference in sight.
     static member private AutoLayoutGoverns
         (layoutKind : TypeLayoutKind)
-        (hasFieldOffsets : bool)
+        (placesExplicitly : bool)
         (containsReferences : bool)
         (parentIsNonSequential : bool)
         : bool
         =
-        if hasFieldOffsets then
+        if placesExplicitly then
             false
         else
 
         match layoutKind with
         | TypeLayoutKind.Auto -> true
-        // A declared-`Explicit` type whose fields carry no offsets is the inheritance shape above;
-        // it keeps the promotion rule.
+        // A declared-`Explicit` type with no instance fields of its own is the inheritance shape
+        // above; it keeps the promotion rule.
         | TypeLayoutKind.Sequential -> containsReferences || parentIsNonSequential
         | TypeLayoutKind.Explicit -> containsReferences
 
@@ -2199,20 +2199,17 @@ and CliValueType =
                 else
                     0
 
-        let seqFields, nonSeqFields =
-            fields |> List.partition (fun field -> field.Offset.IsNone)
-
-        // A declared-`Auto` type may not carry `FieldOffset` rows: the router below reads the
-        // offsets structurally, so such a type would silently get explicit layout instead of the
-        // auto layout its caller asked for. This list is one type's *own* fields, so there is no
-        // way for an inherited field to make the two disagree innocently: it
-        // means malformed metadata (Roslyn rejects `FieldOffset` outside an explicit-layout type)
-        // or a synthetic construction site contradicting itself.
-        match nonSeqFields with
-        | _ :: _ when layoutKind = TypeLayoutKind.Auto ->
-            failwith
-                $"CliValueType.LayoutLevel: type declares LayoutKind.Auto but %d{nonSeqFields.Length} of its %d{fields.Length} fields carry a FieldOffset (first: %O{nonSeqFields.Head.Id})"
-        | _ -> ()
+        // The level's own fields when CoreCLR places them at their FieldLayout rows: exactly when the
+        // type declares explicit layout. Auto- and sequential-layout types load with rows of any value
+        // and ignore them (measured in `TestFabricatedFieldLayoutOffset`), so their fields are placed
+        // as if they had none. An explicit-layout level with no instance fields of its own places
+        // nothing, and takes the offset-free routes below like any other.
+        let explicitFields =
+            match layoutKind, fields with
+            | TypeLayoutKind.Explicit, _ :: _ -> Some fields
+            | TypeLayoutKind.Explicit, []
+            | TypeLayoutKind.Auto, _
+            | TypeLayoutKind.Sequential, _ -> None
 
         // `hasGCFields = (pParentMT && pParentMT->ContainsGCPointers()) || <own>`
         // (methodtablebuilder.cpp:8179).
@@ -2231,11 +2228,7 @@ and CliValueType =
                 |> List.exists (fun field -> CliType.ContainsObjectReferences field.Contents))
 
         let governedByAuto =
-            CliValueType.AutoLayoutGoverns
-                layoutKind
-                (not nonSeqFields.IsEmpty)
-                containsReferences
-                parentIsNonSequential
+            CliValueType.AutoLayoutGoverns layoutKind explicitFields.IsSome containsReferences parentIsNonSequential
 
         // An `[InlineArray(N)]` type's storage slots are N copies of its one declared field
         // (`InlineArrayStorage.expand`), and CoreCLR lays out only the first of them: see
@@ -2247,8 +2240,11 @@ and CliValueType =
         // the first -- and every route into this function, including the eval-stack rewrap in
         // `OfFieldsLike`, would have to carry it.
         let inlineArraySlots : CliField list option =
-            if CliValueType.IsInlineArrayExpansion (seqFields |> Seq.map _.Id) then
-                Some seqFields
+            if
+                explicitFields.IsNone
+                && CliValueType.IsInlineArrayExpansion (fields |> Seq.map _.Id)
+            then
+                Some fields
             else
                 None
 
@@ -2277,22 +2273,22 @@ and CliValueType =
                 failwith
                     $"CliValueType.LayoutLevel: %O{level.Declared} carries inline-array storage slots and a declared ClassLayout.Size of %d{minimumSize}; CoreCLR refuses to load such a type (IDS_CLASSLOAD_INLINE_ARRAY_EXPLICIT_SIZE), so `InlineArrayStorage.expand` should already have rejected it"
 
-        // The fields actually placed: an inline array's one element, or every field of an ordinary
-        // level. Empty exactly when `seqFields` is, so it can carry the routing match below.
+        // The fields placed by the auto or sequential route: an inline array's one element, or every
+        // field of an ordinary level.
         let placementFields =
             match inlineArraySlots with
-            | None -> seqFields
+            | None -> fields
             | Some slots -> [ List.head slots ]
 
         let placed, unrounded =
-            match placementFields, nonSeqFields with
-            | _, [] when governedByAuto ->
+            match explicitFields with
+            | None when governedByAuto ->
                 // Either the type declares `LayoutKind.Auto`, or it declares `Sequential` and is
                 // promoted -- for holding GC references, or for having a parent that is not
                 // managed-sequential. Declared field order and any `Pack`/`Size` request are both
                 // discarded here; explicit layout is never promoted.
                 CliValueType.ComputeAutoLayoutFields startOffset placementFields
-            | _, [] ->
+            | None ->
                 // Sequential layout: declared order, each field at its own alignment capped by
                 // `Pack`, continuing from where the parent's fields ended.
                 let finalOffset, concreteFields =
@@ -2327,7 +2323,23 @@ and CliValueType =
 
                 List.rev concreteFields, finalOffset
 
-            | [], _ :: _ ->
+            | Some explicitFields ->
+                // CoreCLR's own checks of the rows come first (`ReadOffsetsForExplicitLayout`, whose
+                // parent size is this level's start). A type they reject never loads on real .NET:
+                // it raises OutOfMemoryException or TypeLoadException at type load, which PawPrint
+                // does not raise in the guest.
+                let placedFields =
+                    explicitFields
+                    |> List.map (fun field -> field, uint32 (CliType.SizeOf field.Contents).Size, field.Offset)
+                    |> ExplicitFieldOffsets.place (uint32 startOffset)
+
+                let placedFields =
+                    match placedFields with
+                    | Ok placed -> placed
+                    | Error refusal ->
+                        failwith
+                            $"CliValueType.LayoutLevel: refusing to lay out %O{level.Declared}: %s{ExplicitFieldOffsetRefusal.describe (fun (field : CliField) -> field.Name) (string level.Declared) refusal}, which PawPrint does not model"
+
                 // Explicit layout. A declared `FieldOffset` is relative to this type's own
                 // *instance slice*, so with a non-trivial parent it is biased -- but not by the
                 // parent's size, which is what the obvious reading of
@@ -2350,18 +2362,18 @@ and CliValueType =
                 // guessing. Refuse instead.
                 if startOffset <> 0 then
                     failwith
-                        $"CliValueType.LayoutLevel: refusing to lay out explicit-layout type %O{level.Declared}, which declares %d{nonSeqFields.Length} field offset(s) of its own and inherits %d{startOffset} bytes from its base chain. Real .NET biases such a type's declared offsets by *twice* the parent's instance size (measured: parent 4 -> first field at 8, parent 8 -> 16, parent 16 -> 32), which looks like a double-application of `cbAdjustedParentLayoutSize` between `ReadOffsetsForExplicitLayout` and `ValidateExplicitLayout`'s fixup (methodtablebuilder.cpp:9053-9125). PawPrint does not model that; see issue #994"
+                        $"CliValueType.LayoutLevel: refusing to lay out explicit-layout type %O{level.Declared}, which declares %d{explicitFields.Length} field offset(s) of its own and inherits %d{startOffset} bytes from its base chain. Real .NET biases such a type's declared offsets by *twice* the parent's instance size (measured: parent 4 -> first field at 8, parent 8 -> 16, parent 16 -> 32), which looks like a double-application of `cbAdjustedParentLayoutSize` between `ReadOffsetsForExplicitLayout` and `ValidateExplicitLayout`'s fixup (methodtablebuilder.cpp:9053-9125). PawPrint does not model that; see issue #994"
 
                 let concreteFields =
-                    nonSeqFields
-                    |> List.map (fun field ->
+                    placedFields
+                    |> List.map (fun (field, offset) ->
                         let size = CliType.SizeOf field.Contents
 
                         {
                             Id = field.Id
                             Name = field.Name
                             Contents = field.Contents
-                            Offset = field.Offset.Value
+                            Offset = offset
                             Size = size.Size
                             Alignment = size.Alignment
                             ConfiguredOffset = field.Offset
@@ -2376,8 +2388,6 @@ and CliValueType =
                     |> List.fold (fun maxEnd field -> max maxEnd (field.Offset + field.Size)) startOffset
 
                 concreteFields, finalOffset
-
-            | _ :: _, _ :: _ -> failwith "unexpectedly mixed explicit and automatic layout of fields"
 
         let size, alignment, isZeroSized =
             if governedByAuto then
@@ -4458,7 +4468,12 @@ and CliValueType =
                 }
         | CliValueTypeStorage.Fields storage ->
             CliValueType.ClassifyOwnFields concreteTypes assemblies corelib vt.CharSet (CliValueType.OwnFields storage)
-            |> CliValueType.LayOutClassified vt.Layout vt._NominalAlignment CliValueType.NoParentNativeLayout
+            |> CliValueType.LayOutClassified
+                (string vt._Declared)
+                vt.LayoutKind
+                vt.Layout
+                vt._NominalAlignment
+                CliValueType.NoParentNativeLayout
             |> Result.map CliValueType.BumpZeroSized
 
     /// A value type's own fields, as the native layout walk reads them: with the offset each one
@@ -4516,10 +4531,13 @@ and CliValueType =
 
     /// Lay out one type's own fields, as `ClassifyOwnFields` classified them, into its native
     /// image, after whatever `parent` contributes; `NotImplemented` for the first field PawPrint
-    /// cannot classify. `layout` and `nominalAlignment` are the declaring type's.
+    /// cannot classify. `typeName` names the declaring type in a refusal, and `layoutKind`, `layout` and
+    /// `nominalAlignment` are its own.
     ///
     /// The size is the computed one, *before* `BumpZeroSized`, which callers apply.
     static member private LayOutClassified
+        (typeName : string)
+        (layoutKind : TypeLayoutKind)
         (layout : Layout)
         (nominalAlignment : int option)
         (parent : ParentNativeLayout)
@@ -4571,8 +4589,15 @@ and CliValueType =
                 Alignment = nominalAlignment |> Option.defaultValue alignment
             }
 
-        let seqFields, nonSeqFields =
-            sized |> List.partition (fun (field, _) -> field.Offset.IsNone)
+        // As in the managed layout (`CliValueType.LayoutLevel`), only an explicit-layout type places
+        // its fields at their FieldLayout rows; `CollectNativeLayoutFieldMetadataThrowing` asks
+        // `IsTdExplicitLayout`, not whether the rows exist.
+        let placesExplicitly =
+            match layoutKind, sized with
+            | TypeLayoutKind.Explicit, _ :: _ -> true
+            | TypeLayoutKind.Explicit, []
+            | TypeLayoutKind.Auto, _
+            | TypeLayoutKind.Sequential, _ -> false
 
         // Accumulator for both folds: placements so far (reversed), the running
         // offset/extent, and the widest alignment seen. Placements are recorded by the same
@@ -4609,9 +4634,8 @@ and CliValueType =
         // alignment requirement, capped by this type's `Pack`, is where this type's own starts.
         let initial = [], parent.Start, min packingSize parent.AlignmentRequirement
 
-        match seqFields, nonSeqFields with
-        | _, [] ->
-            (initial, seqFields)
+        if not placesExplicitly then
+            (initial, sized)
             ||> List.fold (fun acc sizedField ->
                 placeField
                     sizedField
@@ -4630,17 +4654,24 @@ and CliValueType =
             )
             |> finish
             |> Result.Ok
-        | [], _ :: _ ->
-            // A declared offset counts from the end of the parent (`ReadOffsetsForExplicitLayout`).
-            (initial, nonSeqFields)
-            ||> List.fold (fun acc (field, native) ->
-                placeField (field, native) (fun _ _ -> field.Offset.Value + parent.Start) acc
-            )
+        else
+
+        // A declared offset counts from the end of the parent, after CoreCLR's checks of the rows
+        // (`ReadOffsetsForExplicitLayout`), here with the fields' native sizes.
+        let placed =
+            sized
+            |> List.map (fun (field, native) -> (field, native), uint32 native.Size.Size, field.Offset)
+            |> ExplicitFieldOffsets.place (uint32 parent.Start)
+
+        match placed with
+        | Error refusal ->
+            failwith
+                $"CliValueType.LayOutClassified: refusing to compute a native layout: %s{ExplicitFieldOffsetRefusal.describe (fun ((field : CliField), _) -> field.Name) typeName refusal}, which PawPrint does not model"
+        | Ok placed ->
+            (initial, placed)
+            ||> List.fold (fun acc (sizedField, offset) -> placeField sizedField (fun _ _ -> offset) acc)
             |> finish
             |> Result.Ok
-        | _ :: _, _ :: _ ->
-            MarshalSizeError.NotMarshalable "unexpectedly mixed explicit and automatic field offsets"
-            |> Result.Error
 
     /// The first of `classified` whose native form CoreCLR refuses, as the `NotMarshalable` that
     /// refusal makes of the type declaring it (`IsStructMarshalable`, fieldmarshaler.cpp:288).
@@ -4693,6 +4724,8 @@ and CliValueType =
                 | Some err -> Result.Error err
                 | None ->
                     CliValueType.LayOutClassified
+                        (string vt._Declared)
+                        vt.LayoutKind
                         vt.Layout
                         vt._NominalAlignment
                         CliValueType.NoParentNativeLayout
@@ -4809,7 +4842,13 @@ and CliValueType =
             ||> List.fold (fun acc (level, fields) ->
                 acc
                 |> Result.bind (fun (parent, placements, _) ->
-                    CliValueType.LayOutClassified level.Facts.Layout level.Facts.NominalAlignment parent fields
+                    CliValueType.LayOutClassified
+                        (string level.Declared)
+                        level.Facts.LayoutKind
+                        level.Facts.Layout
+                        level.Facts.NominalAlignment
+                        parent
+                        fields
                     |> Result.map (fun (layout : NativeLayout) ->
                         // A base's computed size is 0 exactly when CoreCLR calls it zero-sized, so
                         // passing the size before `BumpZeroSized` is what makes such a base
@@ -5169,7 +5208,7 @@ module InlineArrayStorage =
     /// `None` (the overwhelmingly common case) is the identity. `Some n` reproduces every condition
     /// CoreCLR checks alongside the repeat count, all of which raise `TypeLoadException` there:
     /// exactly one declared instance field (`IDS_CLASSLOAD_INLINE_ARRAY_FIELD_COUNT`,
-    /// methodtablebuilder.cpp:1751), no explicit field offset (`..._EXPLICIT`, :1767), and no
+    /// methodtablebuilder.cpp:1751), no explicit layout (`..._EXPLICIT`, :1767), and no
     /// declared `ClassSize` (`..._EXPLICIT_SIZE`, :1773). The last is a distinct condition from the
     /// second — `[StructLayout(Sequential, Size = X)]` sets `ClassSize` without making the layout
     /// explicit — and it matters here even though `Layout.Custom`'s size is only ever a floor:
@@ -5181,6 +5220,7 @@ module InlineArrayStorage =
     /// see `FieldId.InlineArrayElement`.
     let expand
         (describeType : unit -> string)
+        (layoutKind : TypeLayoutKind)
         (layout : Layout)
         (inlineArrayLength : int option)
         (fields : CliField list)
@@ -5194,6 +5234,15 @@ module InlineArrayStorage =
             failwith
                 $"[InlineArray(%d{repeat})] on %s{describeType ()}: the repeat count must be positive (CoreCLR's IDS_CLASSLOAD_INLINE_ARRAY_LENGTH)"
 
+        // CoreCLR asks whether the type declares explicit layout (`HasExplicitFieldOffsetLayout`),
+        // not whether its field has a FieldLayout row, which a sequential type may carry and ignore.
+        match layoutKind with
+        | TypeLayoutKind.Explicit ->
+            failwith
+                $"[InlineArray(%d{repeat})] on %s{describeType ()}: the type declares explicit layout, but an inline array may not (CoreCLR's IDS_CLASSLOAD_INLINE_ARRAY_EXPLICIT)"
+        | TypeLayoutKind.Auto
+        | TypeLayoutKind.Sequential -> ()
+
         match layout with
         | Layout.Custom (size = size) when size > 0 ->
             failwith
@@ -5203,10 +5252,6 @@ module InlineArrayStorage =
 
         match fields with
         | [ single ] ->
-            if single.Offset.IsSome then
-                failwith
-                    $"[InlineArray(%d{repeat})] on %s{describeType ()}: field %s{single.Name} carries an explicit offset, but an inline array may not use explicit layout (CoreCLR's IDS_CLASSLOAD_INLINE_ARRAY_EXPLICIT)"
-
             // CoreCLR rejects the type when the multiplied instance size overflows a field offset
             // (`extendedSize > FIELD_OFFSET_LAST_REAL_OFFSET`, methodtablebuilder.cpp:8616 and
             // :8669; the limit is `(1 <<< 27) - 8`, field.h:16 and :27). Check it here, *before*
@@ -5598,6 +5643,7 @@ module CliType =
                 )
                 |> InlineArrayStorage.expand
                     (fun () -> $"%s{typeDef.Namespace}.%s{typeDef.Name}")
+                    (TypeLayoutKind.ofTypeAttributes typeDef.TypeAttributes)
                     typeDef.Layout
                     (InlineArrayStorage.effectiveLength isValueType typeDef.InlineArrayLength)
                 |> CliValueType.OfFields

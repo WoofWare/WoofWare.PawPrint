@@ -98,6 +98,7 @@ module internal Boxing =
                     // on that being true here.
                     |> InlineArrayStorage.expand
                         (fun () -> $"%s{defn.Namespace}.%s{defn.Name}")
+                        (TypeLayoutKind.ofTypeAttributes defn.TypeAttributes)
                         defn.Layout
                         (InlineArrayStorage.effectiveLength
                             (LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies defn)

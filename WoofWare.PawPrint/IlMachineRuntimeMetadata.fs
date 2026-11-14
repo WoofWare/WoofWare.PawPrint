@@ -480,6 +480,7 @@ module IlMachineRuntimeMetadata =
             List.rev ownFields
             |> InlineArrayStorage.expand
                 (fun () -> $"%s{typeInfo.Namespace}.%s{typeInfo.Name}")
+                (TypeLayoutKind.ofTypeAttributes typeInfo.TypeAttributes)
                 typeInfo.Layout
                 (InlineArrayStorage.effectiveLength
                     (LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo)

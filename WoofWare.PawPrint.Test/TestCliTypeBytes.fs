@@ -67,7 +67,7 @@ module TestCliTypeBytes =
             Id = FieldId.named name
             Name = name
             Contents = contents
-            Offset = offset
+            Offset = offset |> Option.map uint32
             Type = fieldType
             MarshallingDescriptor = None
         }
