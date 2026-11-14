@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p implemented (#2234); stage 5q implemented (#2235); stage 5r implemented (#2236); stage 5s implemented (#2239); stage 5t implemented (#2242); stage 5u implemented (#2244); stage 5v implemented (#2246); the `newobj` stage in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p implemented (#2234); stage 5q implemented (#2235); stage 5r implemented (#2236); stage 5s implemented (#2239); stage 5t implemented (#2242); stage 5u implemented (#2244); stage 5v implemented (#2246); the `newobj` stage in progress: its PR 1 (#2248) and PR 2 implemented. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -5214,3 +5214,114 @@ seconds and each process 9 to 11 seconds of wall time.
   type's non-constructors also skipped five static methods, which compile (measured above).
 * The fabricated abstract struct's method returns the field its constructor stored, boxed, rather than the struct: C#
   reads an abstract sealed type as a static class, so the driver cannot name it.
+
+### The `newobj` stage, PR 2: as built
+
+Built 2026-11-14 as decided above, stacked on PR 1 (#2248, at `b1696f5e0`), which was on the merge queue.
+
+**Measured first**, each guest built against net10.0 from its file in `sourcesImpure` and run on 10.0.14 and rolled
+forward to 11.0.0 (scratchpad `newobj-pr2/real-*` and `newobj-pr2/controls`):
+
+* `ReflectionConstructorInvokeShapes.cs`: 0 on both; with its last check (`Activator.CreateInstance`) inverted, 101 on
+  both.
+* `DynamicMethodNewobj.cs`: 0 on both, so the three rows the decisions asked to measure in the guest hold on both
+  runtimes: a static abstract interface member is `BadImageFormatException`, "Bad IL format."; an abstract generic
+  class's constructor at an instantiation is `InvalidOperationException` with the CLR message; and a static method of
+  one parameter, named with nothing pushed, is `InvalidProgramException`, as the rule says, so the guest has that row.
+  With that row's expected exception changed to `BadImageFormatException`, 18 on both.
+
+**Files.**
+
+* `IlDecoding.scopeOperandKind` classes `Newobj` with `Call` and `Callvirt` as `Method`.
+* `UnaryMetadataObjectOps.fs`: `newobjTargetOf` reads `NewobjTarget.classify`'s inputs from a bound method (its
+  attributes and name, its declaring type's attributes and value-typeness), for any instantiation of `MethodInfo`;
+  `constructOrRefuse` asks it. `executeNewobj`'s `ScopeMethod (FromMetadata identity)` arm concretises the identity
+  with `MethodHandleResolution.concretizeClosedMetadataIdentity`, as `executeCall` does, and calls `constructOrRefuse`,
+  as the metadata arm does after binding. Its `ScopeMethod (FromDynamic _)` arm, reached after
+  `UnaryMetadataIlOp.execute` has minted the target, raises `CompilationFailure.NewobjOfStaticMethod` through
+  `raiseCompilationFailure`.
+* `StackShapeOfMethod.dynamicTokenShape` has a `Newobj` arm: `tryMethod`'s refusals give no shape, as for `call`; a
+  `DynamicMethod`, minted or not, gives none; a reflected method gives `TokenShape.Callee (parameter count, None)` where
+  `newobjTargetOf` says `Constructs`, and no shape for the other four outcomes, each matched by name.
+  `analyseDynamic` is `internal`, for the unit tests.
+* `docs/divergences.md`: the paragraph on what Reflection.Emit still refuses no longer lists `newobj`, and the section
+  on refused `newobj`s names the scope arm, the stack shape and `DynamicMethodNewobj.cs`. The comments of
+  `DynamicMethodExceptionRegions.cs` and `DynamicMethodStackTrace.cs` no longer describe a dynamic method's `newobj`
+  (or `callvirt`, or a field) as refused.
+* Tests, committed first (`e9028da18`):
+  * `ReflectionConstructorInvokeTwice.cs` and `DispatchProxyPropertyInterface.cs` registered as passing, out of
+    `parkedEverywhere`.
+  * `sourcesImpure/ReflectionConstructorInvokeShapes.cs` and `sourcesImpure/DynamicMethodNewobj.cs`, as the stage's
+    oracle and the decisions describe them, registered beside `TypeBuilderNewobjRefusals.cs`.
+  * In `TestNativeGetDynamicMethod`: "newobj naming any method entry is minted" replaces "a newobj naming a
+    dynamic-method entry is refused as unsupported rather than as wrong-kind"; "a newobj of a reflected constructor
+    pops its parameters and pushes the object" mints `ldarg.0; newobj Made::.ctor(int32); ret` and asserts that every
+    offset is typed, with one value on the stack at the `newobj` and one at the `ret`; "a newobj the instruction
+    refuses has no stack shape" asserts `MissingTokenShape` at the `newobj` for a static method, an instance method that
+    is not a constructor, an abstract method, an abstract class's constructor, an unminted `DynamicMethod` and a minted
+    one. The fixture's guest gains `Made` and `Shape` for them, and its `ScopeEntry` a `MintedDynamicMethodObject`.
+
+**Red**, at `e9028da18`: the three unit tests fail when the body is minted, at "TODO: a dynamic method's Newobj names
+DynamicScope entry 2 (token 0x06000002), but newobj naming a DynamicMethod is an InvalidProgramException on real .NET,
+while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet". The four
+guests fail at the same refusal: `DynamicMethodNewobj.cs` for entry 2, `ReflectionConstructorInvokeTwice.cs` and
+`ReflectionConstructorInvokeShapes.cs` for entry 6, `DispatchProxyPropertyInterface.cs` for entry 4.
+
+**Green**: the 56 tests of `TestNativeGetDynamicMethod` and the four guests pass; the four guests and
+`TypeBuilderNewobjRefusals.cs` pass with `PAWPRINT_TEST_RUNTIME=Net11` too.
+
+**Mutants**, each built fresh and run against `TestNativeGetDynamicMethod`, `TestNewobjTarget`,
+`TestNewobjTargetOnHost` and `TestFabricatedNewobjRefusals` (63 tests), and against six guests: the four above,
+`TypeBuilderNewobjRefusals.cs` and `ReflectionInvokeThroughEmittedStub.cs` (scratchpad `newobj-pr2/mut`). "U" is the
+unit tests, "D" `DynamicMethodNewobj.cs` (with its exit code), "S" the three stub guests
+(`ReflectionConstructorInvokeTwice.cs`, `ReflectionConstructorInvokeShapes.cs`, `DispatchProxyPropertyInterface.cs`),
+"T" `TypeBuilderNewobjRefusals.cs`:
+
+| Mutant | Killed by |
+|---|---|
+| `Newobj` classed `NotYetSupported` again | the three new unit tests; D and S, each at the mint refusal |
+| the scope arm falling through to the metadata arm | D and S, at `ActiveAssembly`'s TODO |
+| the scope arm skipping the rule (constructing whatever it names) | D alone, at its first refused row (`Holder.Stat` called as a constructor: "Invalid CIL ... returned with more than one evaluation stack value") |
+| the `DynamicMethod` refused before the mint (`execute` answering `InvalidProgramException` for an unminted target) | D (11: the target left unminted) |
+| the `DynamicMethod` arm raising its own exception (`NamesAbstractMethod`) | D (10) |
+| the stack shape counting `this` | the constructor shape test; D and S, at the Debug depth check ("StackUnderflow" at the `newobj`) |
+| the stack shape giving no shape for a reflected constructor | the constructor shape test alone |
+| a shape given to each method the rule refuses | the refused-shape test; D, at the unpushed static method's row ("StackUnderflow" at offset 0) |
+| a shape given to a `DynamicMethod` | the refused-shape test alone |
+| static checked before abstract | PR 1's rule tests, the sweep and the fabricated refusals; D (22: the static abstract interface member) |
+| the abstract-class refusal dropped | PR 1's rule tests, the sweep and the fabricated refusals; the refused-shape test; D (23), T (7) |
+| abstract class checked before abstract method | PR 1's rule tests, the sweep and the fabricated refusals; D (16: `Holder` is a static class, so abstract), T (4) |
+| a reflected identity concretised with no type arguments | D and S, each crashing in concretisation (the stubs at `Span<object>.get_Item`) |
+| a reflected identity concretised with every type argument `Object` | D and `ReflectionConstructorInvokeShapes.cs`, each crashing at `Gen<int>` before its `Gen<string>` row |
+
+No test was strengthened after the first run.
+
+**Suites**, built from the whole solution at `79a05df86`, with every `ref` and `refint` directory deleted first, each run on its own: `Guest` (234), `GuestSolo` (2), `GuestPure` (1185) and `GuestImpure` (285: PR 1's 281 and the four guests
+above), all passing, and the default suite (5615 passed, 37 skipped). `scripts/footprint.py generate`, fantomas and the
+docstring-attachment check (against PR 1's tip and against the merge base) changed nothing.
+
+**Deviations.**
+
+* The `DynamicMethod` arm, in `executeNewobj` and in the stack shape, does not call `NewobjTarget.classify`: a
+  `DynamicMethodDefinition` holds no method attributes, and classifying invented ones would be the rule asked of
+  facts PawPrint does not have. Both arms instead give the static outcome directly, with a comment saying why. The
+  raise still goes through `raiseCompilationFailure` with `CompilationFailure.NewobjOfStaticMethod`, so its category
+  is `TokenBinding`, as decided.
+* The rule's inputs are read by one function, `UnaryMetadataObjectOps.newobjTargetOf`, which the stack shape calls
+  too, so `StackShapeOfMethod` reads a function of an opcode's module. The alternative, a copy of the four reads in
+  the stack shape, would have been a second statement of what the rule is asked of.
+* `StackShapeOfMethod.analyseDynamic` is now `internal` (it was `private`), so that the unit tests can read the shape
+  the analysis records; the decisions did not say how the tests reach it.
+* The mutant "the `DynamicMethod` arm constructing" was not built: a `DynamicMethod` has no declaring type to allocate,
+  so there is no construction to mutate to. The decisions' added mutant, the arm raising its own exception, stands in
+  for it. "`constructObject` given the definition's declaring type rather than the identity's" was not built apart
+  from the identity mutants: here the declaring type and the method come out of one call,
+  `concretizeClosedMetadataIdentity`, and the two identity mutants above break that call. Both crash PawPrint at
+  `Gen<int>` rather than give a wrong answer, so neither shows that `Gen<string>` alone would catch a wrong
+  instantiation.
+* The first build of the decoder mutant replaced the result of the whole `Call | Callvirt | Newobj` arm, so it refused
+  `call` too; it was run again with `Newobj` split off, which is the row in the table.
+* `DynamicMethodNewobj.cs`'s row for `Gen<>`'s open constructor pushes `ldnull` before its `newobj`, since the
+  constructor takes a `T`; nothing observable runs before the refusal.
+* The unit tests' tokens carry the MethodDef tag, which `GetTokenFor(RuntimeMethodHandle)` gives, where the existing
+  `call` tests use MemberRef.

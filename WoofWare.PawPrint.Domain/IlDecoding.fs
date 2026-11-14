@@ -93,18 +93,18 @@ module IlDecoding =
         // Every method entry, a DynamicMethod included: real .NET answers a `callvirt` of any static
         // method with MissingMethodException, and a DynamicMethod is always static, so that is one
         // rule about the resolved callee rather than a property of the entry (both measured).
-        | UnaryMetadataTokenIlOp.Callvirt -> ScopeOperandKind.Method
+        | UnaryMetadataTokenIlOp.Callvirt
+        // Every method entry too: the JIT resolves a `newobj` token exactly as a `call` one
+        // (`CORINFO_TOKENKIND_NewObj` is the method kind with a bit added), and only then asks
+        // whether the method it names can be constructed with. A DynamicMethod is static, so it
+        // cannot, which is again a rule about the resolved method (measured: the target is minted,
+        // then the `newobj` raises InvalidProgramException).
+        | UnaryMetadataTokenIlOp.Newobj -> ScopeOperandKind.Method
 
         // The rest of the method-shaped opcodes, each refused for its own measured reason. Which of
         // them a guest can even emit is not obvious: `Emit(OpCode, MethodInfo)`'s `DynamicMethod`
         // branch rules out only `ldtoken`, `ldftn` and `ldvirtftn` (`DynamicILGenerator.cs:73-82`),
         // so the others accept one and it is the *runtime* that decides what to do with it.
-        | UnaryMetadataTokenIlOp.Newobj ->
-            // Emittable with either operand kind, and again they diverge on real .NET (both
-            // measured): a DynamicMethod gives a catchable InvalidProgramException, whereas a
-            // reflected ConstructorInfo constructs the object.
-            ScopeOperandKind.NotYetSupported
-                "newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet"
         | UnaryMetadataTokenIlOp.Jmp ->
             // Emittable, and it *runs* on real .NET (measured: `jmp` to a dynamic method answers the
             // callee's result). PawPrint does not implement `jmp` for metadata tokens either, so
