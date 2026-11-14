@@ -5325,3 +5325,587 @@ docstring-attachment check (against PR 1's tip and against the merge base) chang
   constructor takes a `T`; nothing observable runs before the refusal.
 * The unit tests' tokens carry the MethodDef tag, which `GetTokenFor(RuntimeMethodHandle)` gives, where the existing
   `call` tests use MemberRef.
+
+
+### 5w: what it is
+
+**Which stage.** 5v's decisions put 5w after the `newobj` stage. 5w is `TypeBuilder_DefineEvent`, with the Event case
+of `TypeBuilder_DefineMethodSemantics`, so that a guest's `TypeBuilder.DefineEvent` and its `EventBuilder`'s
+`SetAddOnMethod`, `SetRemoveOnMethod`, `SetRaiseMethod` and `AddOtherMethod` write what CoreCLR writes, and reflection
+over the created type then reads it back through 5v's three arms. It un-parks `DispatchProxyEventInterface.cs`, which
+stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineEvent)" (measured again on this branch,
+`main` at 9ea367d4b: scratchpad `5w/guest/DispatchProxyEventInterface-pawprint-reverted.log`). Its code depends on
+nothing in the `newobj` stage's PR 2, and the guest holds one `DispatchProxy.Create`, so 5w can branch from `main`
+whichever lands first.
+
+**One feature stands behind the stop.** A throwaway arm (scratchpad `5w/throwaway.diff`, 146 lines, reverted) gave the
+scope an Event table (owner, flags, name, event type), `HasSemantics.Event` with tag 0, a writer that derived an
+EventMap and EventPtr with 5s's `propertyMaps` and `pointerTable`, the extension rule's Event cases, a `TypeBuilder_DefineEvent`
+handler and an Event arm in `TypeBuilder_DefineMethodSemantics`. Nothing else changed. Under the Release App:
+
+| Program | Under PawPrint with the throwaway arm |
+|---|---|
+| `DispatchProxyEventInterface.cs` | exits 0 (`5w/guest/DispatchProxyEventInterface-pawprint-throwaway.log`); a control with check 3 inverted exits 3 under PawPrint and on .NET 10.0.14 and 11.0.0-rc.3 |
+| `5v-proxy event`, `5v-proxy event-base` | the proxy's `Changed` read back as on .NET; `event-base` lists one event (`5w/5v-proxy-*-pawprint-throwaway.log`) |
+| `5v-emit all` (5v's emit probe: tokens, two adds, the 5/24/25/26-row thresholds, 20 property rows then an event's five, an interface) | output byte-identical to .NET 10.0.14's (`5w/5v-emit-pawprint-throwaway.stdout`) |
+| `5w/probe` scenarios `refusals`, `flags`, `interleave`, `semantics`, `reflect` (below) | each byte-identical to .NET 10.0.14's (`5w/probe/diff-*.txt` empty) |
+| `5w/probe foreign` | identical for its first eight lines; then the existing TODO for an accessor whose RID is past the module's MethodDefs (`NativeRuntimeTypeBuilder.fs:483`), which 5s decided to refuse |
+
+With the arm reverted and the App rebuilt, the guest stops at the `DefineEvent` refusal again. So PawPrint's reader,
+5v's arms, `methodSemanticsForAssociation` with `ReadWriteMetadataLookup.rowsOfKey`, and the existing TypeRef and
+TypeSpec QCalls that `GetTypeTokenInternal` reaches all serve events unchanged. The stage is the write side alone.
+
+**What CoreCLR does.** Read from the pinned source (`$DOTNET_RUNTIME_SRC_NET10`; the lines that matter are the same in
+`_NET11`):
+
+* `TypeBuilder.DefineEvent` (libraries TypeBuilder.cs:62) refuses a null or empty name
+  (`ArgumentException.ThrowIfNullOrEmpty`). `RuntimeTypeBuilder.DefineEventCore` (RuntimeTypeBuilder.cs:1431) refuses a
+  name whose first char is NUL (`Argument_IllegalName`), then takes the lock, then `ThrowIfCreated`, then
+  `GetTypeTokenInternal(eventtype)`, which throws `ArgumentNullException` (`type`) for a null type
+  (RuntimeModuleBuilder.cs:896). Nothing in that sequence refuses a byref, pointer, array, open generic or generic
+  parameter type: each is a TypeSpec (RuntimeModuleBuilder.cs:908-915), a TypeBuilder of the module is its TypeDef, and
+  anything else is a TypeRef. Then the QCall, with `StringMarshalling.Utf16`, so the native side sees a `ushort*` and
+  reads to the first NUL.
+* `TypeBuilder_DefineEvent` (vm/comdynamic.cpp:580) calls `RegMeta::DefineEventHelper` (md/compiler/helper.cpp:214),
+  which calls `_DefineEvent` (md/compiler/regmeta_emit.cpp:1256). That searches only under `MDDupEvent`, which neither
+  `MDDupDefault` nor vm/assembly.cpp:88 sets. It finds the type's EventMap row, adding one at the type's first event and
+  before the Event row; adds the Event row; and appends it to the map's run with `AddEventToEventMap`
+  (md/enc/metamodelrw.cpp:4927), which is `AddPropertyToPropertyMap` (:4892) with the event tables: direct when the map
+  is the last, else through an EventPtr. As for properties, no API shows a dynamic module's EventMap or EventPtr, so
+  their order is read from source and its oracle is a model of it.
+* `_SetEventProps1` (regmeta_emit.cpp:1346): when the flags are not `UINT32_MAX` it clears `evReservedMask`, which is
+  `evRTSpecialName` alone (0x0400, inc/corhdr.h:544), ORs in the reserved bits the fresh row already has (none), and
+  stores the low sixteen bits; `-1` leaves the column 0. It writes `EventType` unless the token is nil, which the
+  managed caller never passes.
+* `RuntimeEventBuilder.SetMethodSemantics` (RuntimeEventBuilder.cs:48) checks the builder for null, then
+  `m_type.ThrowIfCreated()`, then passes `mdBuilder.MetadataToken` to `TypeBuilder_DefineMethodSemantics`, as 5s read
+  for properties. Nothing checks the method's type or module.
+* Read-write metadata's `EnumInit` for `mdtEvent` (md/enc/mdinternalrw.cpp:1195-1235) has a `HasDelete` arm which
+  skips an `RTSpecialName` event with a deleted name. 5v asked whether a dynamic module reaches it. It does not, for two
+  reasons: `HAS_DELETE` is set only under `MDUpdateIncremental` (md/enc/metamodelrw.cpp:1136-1137), a dynamic module's
+  scope is created with the dispenser's default `MDUpdateFull` (md/compiler/disp.cpp:33; vm/assembly.cpp sets no update
+  mode), and `_SetEventProps1` clears `RTSpecialName` anyway.
+* ECMA-335 II.22.13: `EventType` "can be null or non-null"; a name "shall index a non-empty string".
+
+**Measured on .NET 10.0.14 and 11.0.0-rc.3**, with a throwaway probe (scratchpad `5w/probe`, `Program.cs`), built
+against net10.0 with `IsDynamicCodeSupported` on, run on 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148
+(`5w/probe/net10-version.out`, `net11-version.out`). The two outputs are identical (`net10-all.out`, `net11-all.out`).
+Tokens are read from each `EventBuilder`'s private `m_evToken`, as 5v did. A "TypeSpec probe" is
+`GetTypeMetadataToken` of a fresh `Func<...>`, which shows how many TypeSpec rows the call before it added.
+
+| Emitted (module `Ref` unless named) | Observed |
+|---|---|
+| `DefineEvent(null, ...)`; `""`; `"\0x"`; `"\0"` | `ArgumentNullException` (`name`); `ArgumentException` (`name`, "cannot be an empty string"); `ArgumentException` (`name`, "Illegal name.") for both |
+| a null event type; null name and null type; empty name and null type | `ArgumentNullException` (`type`); the name's exception in both, so the name is checked first |
+| the event after those seven refusals | `0x14000002`, after `E0`'s `0x14000001`: none consumed a token |
+| `"a\0b"` | `0x14000003`, and the created type lists an event named `a` |
+| event type `int&`; `int*`; `int[]`; `Action<>` (open) | each accepted, each adding one TypeSpec (probes `0x1B000003`, `0x1B000005`, `0x1B000007`, `0x1B000009`); `GetTypeMetadataToken(typeof(Action<>))` is then the TypeRef `0x01000004` |
+| `Action<int>` twice | one TypeSpec (`0x1B00000A`), shared |
+| `G`'s own parameter `T`; the TypeBuilder `A`; the generic TypeBuilder `G` | a TypeSpec; none; a TypeSpec |
+| `EventHandler` after `GetTypeMetadataToken(typeof(EventHandler))` | the existing TypeRef `0x01000005`, no new row |
+| `E1` again | `0x1400000E`, a second row |
+| `SetAddOnMethod(null)`, `AddOtherMethod(null)` | `ArgumentNullException` (`mdBuilder`) |
+| `AddOtherMethod(o)` twice | others `o, o` |
+| after `CreateType`: `SetAddOnMethod(null)`; `SetAddOnMethod(o)` | `ArgumentNullException`; `InvalidOperationException` |
+| after `CreateType`: null name; `""`; `"\0x"`; a null type; a good event | the three name exceptions; `InvalidOperationException` twice: `ThrowIfCreated` precedes the type's null check |
+| the next event, on a new type `B` | `0x14000010`: the refusals after creation consumed nothing |
+| flags: each of the 32 single bits, and `0`, `0x0600`, `0xFFFF`, `0xFFFE`, `0xFBFF`, `0x7FFF0600`, `-1`, `-2`, `0x1FFFF` | bits 0 to 15 kept except `0x0400`; bits 16 to 31 dropped; `0x0600` → `0x0200`; `0xFFFF` and `0x1FFFF` → `0xFBFF`; `-2` → `0xFBFE`; `-1` → `0x0000`. `IsSpecialName` follows `0x0200`. The rule is "0 for `-1`, otherwise the low sixteen bits without `0x0400`", which is not 5s's (`0xF400`) |
+| `B.Zed`, `A.E1`, `C.G1`, `A.Alpha`, `B.F2`, `A.E3`; `B` created; `C.G2`, `A.E4`; `E` defined; `E.H1`, `C.G3`, `E.H2` (module `Inter`) | tokens `0x14000001` to `0x1400000B` in that order; each created type lists its own in token order (`A`: `E1`, `Alpha`, `E3`, `E4`), `D` none. EventMap rows in first-event order are `B`, `A`, `C`, `E`, and an EventPtr is needed (read, not measured) |
+| a property `P` and an event `E` of one type, given in turn `g1`, `a1`, `po1`, `r1`, `eo1`, `s1`, `a2`, `g2`, `eo2`, `f1`, `f2` (11 rows), after 0, 13 and 14 filler getters (modules `S11`, `S24`, `S25`) | below 25 rows: getter `g2`, accessors `g2, s1, po1`; add `a2`, remove `r1`, raise `f2`, others `eo1, eo2`. At 25: getter `g1`; add `a1`, raise `f1`, others `eo2, eo1`. Property and event rows count together, and each association's rows reverse, raise included |
+| `G<T>`'s `Changed` of type `Action<T>` | `EventHandlerType` `Action<T>` on `G<>` and `Action<Int32>` on `G<int>`, one token |
+| on `T`: `Inst` (`SpecialName`, field-backed add and remove), static `Stat` (`EventHandler<int>`), `Priv` (private add), `NotDelegate` (add takes `int`), `RaiseOnly` (only a raise method), `Z` (its add defined before every event) | `GetEvents(all)` in token order; `Inst` `0x0200`, `IsSpecialName`; `Stat` `EventHandler<Int32>`; `NotDelegate`'s `EventHandlerType` null and `IsMulticast` false; `RaiseOnly`'s `EventHandlerType` throws `NullReferenceException`; `GetEvents()` is `Inst, Stat, NotDelegate, RaiseOnly, Z` (a public raise method alone makes the event public); `NonPublic \| Instance` is `Priv`; `AddEventHandler` twice, the field invoked, `RemoveEventHandler`, invoked again: 3 calls |
+| a struct's event; an interface's with abstract accessors | each listed with its accessors |
+| `DynDerived : DynBase`, both dynamic, each with an event `BaseE`, and `DynDerived.Own` | `GetEvents(Public \| Instance)` is `DynDerived`'s `BaseE` (`Action<Int32>`) and `Own`: the base's is hidden by name |
+| `FA.X` with `FB.add_X` as add (`FB` created first) (module `Foreign`) | accepted; `FA.GetEvents` and `GetEvent("X")` throw `ArgumentException` ("Type handle 'FA' and method handle with declaring type 'FB' are incompatible") |
+| `Derived.Y` with created `Base.add_FromBase` as add | listed with that add; `AddEventHandler` reaches `Base`'s field |
+| module `X`'s `Wild` with module `Y`'s `y0` (`0x06000001`), `X`'s `add_Own` being `0x06000001`; `Wild2` with `y2` (`0x06000003`) | both accepted; `TX.GetEvents` throws `ArgumentOutOfRangeException` (`methodToken`, "Token 6000003 is not valid"), so `Wild2` hides `Wild` from reflection. Under PawPrint the first is admitted and the second refused at `SetAddOnMethod`, as 5s decided for properties |
+
+5v's `5v-emit` table (two adds on one event, the 5/24/25/26-row thresholds, 20 property rows then an event's five,
+`DefineEvent` and `SetAddOnMethod` after `CreateType`) stands; its two outputs are identical on both runtimes.
+
+**What 5w must change in PawPrint.** Cited at `main` 9ea367d4b.
+
+* `WoofWare.PawPrint/Native/NativeRuntimeTypeBuilder.fs`:
+  * `TypeBuilder_DefineMethodSemantics` (`:418`) refuses any association that is not a Property token (`:451-456`), with
+    a message saying no `EventBuilder` can exist. That arm becomes an Event arm over the scope's Event rows.
+  * Its three accessor refusals (`:466-483`) say "reflection over the property"; they now serve events too.
+  * There is no `TypeBuilder_DefineEvent` handler. `TypeBuilder_DefineProperty` (`:348-416`) is the template: the module
+    from the `QCallModule`, a TypeDef parent and nothing else, the name read with `readNullTerminatedUtf16`. The event
+    type is a fifth argument, an `int` token, which `typeDefOrRef` (`:48-70`) already reads as `RegMeta` does, `None` for
+    a nil token. `propertyTable` (`:19`) gains an `eventTable` sibling.
+  * `NativeQCall.fs:231-233` registers the two property QCalls; `TypeBuilder_DefineEvent` joins them.
+* `WoofWare.PawPrint.Domain/EmitScope.fs`: `PropertyRid` (`:159-167`), `HasSemantics` with its one case and its coded
+  index (`:214-224`), `PropertyRow` and `MethodSemanticsRow` (`:376-394`), the record's two lists (`:445-446`),
+  `tryPropertyRid` (`:595-600`), `addProperty` (`:1008-1027`), `addMethodSemantics`, whose match on the association
+  (`:1039-1040`) gains the Event case, and the readers `properties` and `methodSemantics` (`:1103-1108`).
+* `EmitScopeDefinitions.fs`: `reservedPropertyFlags` and `defineProperty` (`:459-499`), where the flag rule lives;
+  `defineMethodSemantics` (`:503`) is unchanged.
+* `EmitScopeImage.fs`: the docstring (`:49-71`) names PropertyMap and PropertyPtr only; `propertyMaps` (`:151-169`)
+  derives a map from owners and is not specific to properties; the derivation (`:299-309`) and the row counts
+  (`:324-327`); `hasSemanticsSize` (`:372-373`) already counts Event rows; the table writes (`:500-522`) need the three
+  event tables before PropertyMap, which ECMA-335's table order (0x12 to 0x14) puts there. `semanticsOrder`
+  (`:141-149`) sorts on the coded index and needs nothing.
+* `WoofWare.PawPrint.Loader/EmitScopeExtension.fs`: `associationOwner` (`:163-167`) matches the one case; the Property
+  checks (`:222-242`) want Event siblings; the docstrings (`:13`, and `AddedToCreatedType`'s) name properties.
+* `WoofWare.PawPrint/Native/NativeMetadataImport.fs` needs nothing, as the throwaway showed. 5v's
+  `eventDefinitionsForTypeDefinition` (`:417-445`) follows the EventMap run through an EventPtr by SRM's `GetEvents`;
+  `eventRow` (`:447-486`) reads the raw flags; `methodSemanticsForAssociation` (`:612`) already takes an Event parent and
+  applies `ReadWriteMetadataLookup.rowsOfKey` (Domain `ReadWriteMetadataLookup.fs:45`) for a dynamic module
+  (`:735-736`, `:1255-1258`), over the table's whole row count, property and event rows together. The Enum's arm reads
+  no `isDynamic` (`:1246-1247`), and still needs none: EventMap has no lookup hash.
+* Tests: `EmitScopeGen.fs`'s property generator (`:731-751`) and `propertyMapReplay` (`:906`), with
+  `propertyMapRows`/`propertyPtrRows` (`:965-970`); `TestEmitScopeProperties.fs`, whose differential property
+  (`:325`) is the one 5w extends; `TestEmitScopeImage.fs`'s round trip (`:424-450`); `TestEmitScopeExtension.fs`;
+  `TestTypeBuilderPropertyRefusals.fs`; `TestImpureCases.fs`, where `DispatchProxyEventInterface.cs` is parked
+  (`:559-573`) and `assertPropertyRows` (`:1784`) is the precedent for a terminal-state check.
+
+### 5w: the options
+
+Every option adds a `TypeBuilder_DefineEvent` handler and an Event arm in `TypeBuilder_DefineMethodSemantics`, each
+checking the module and the tokens it is given, keeps the accessor refusals 5s decided (a RID past the module's
+MethodDefs, a nil token, another table) for an Event association too, with messages that say "association", and leaves
+the read side alone. They differ in what the emit scope holds.
+
+**A. An Event table beside the Property table, each row naming its owner; `HasSemantics` gains `Event`; the writer
+derives EventMap and EventPtr with the map rule it already has.** `EventRid` and `EventRow` (owner, flags, name, event
+type) mirror `PropertyRid` and `PropertyRow`; `HasSemantics.Event` codes as `rid <<< 1 ||| 0`. `EmitScopeDefinitions.defineEvent`
+holds the flag rule (0 for `-1`, otherwise the low sixteen bits without `0x0400`) and searches for nothing.
+`EmitScopeImage` uses one map derivation for both kinds, `propertyMaps` generalised and renamed, and `pointerTable` over
+each event's map position, as 5s's conditions require for properties. `EmitScopeExtension` refuses an Event row of a
+created type and a MethodSemantics row whose event is of one, keyed on the association's owner.
+
+* Correctness: every row above, measured with exactly this structure by the throwaway arm.
+* Blast radius if wrong: events of dynamic types, which are refused today. An image whose MethodSemantics sort or
+  EventMap is wrong is refused by SRM or misreads at once, in every guest that defines two events.
+* Reversibility: new types and cases beside 5s's; nothing existing changes shape, except that `HasSemantics` gains a
+  case, which is a change to a published package's union (Domain).
+* Information: CoreCLR's rows in CoreCLR's order. 5s's surviving mutant (the sort keyed on the RID with the tag
+  dropped) becomes killable.
+* Size: about the throwaway's 146 lines, plus docstrings, tests and the generalised map helper.
+
+**B. The accessors as a column of the event.** `EventRow` carries a list of (semantics, method), and the writer merges
+those columns with 5s's MethodSemantics table into one sorted table.
+
+* Correctness: the same answers, if the merge reproduces the module's row count for `rowsOfKey`.
+* But it is two structures for one CoreCLR table, which 5s's decisions rejected for properties for this very reason
+  ("the events stage would have to merge two columns into one sorted table"). The 25-row count would be a sum over
+  the table and every event's column, and the extension rule gains an append-only column.
+* Rejected unless the decider reopens 5s's choice.
+
+**C. A union of the two association kinds in one table.** One list of map members, `Property of ... | Event of ...`,
+with each kind's RID its rank among rows of its kind, and one writer path deriving both maps.
+
+* It states the shared map rule once in the data as well as the writer.
+* But each kind's RID becomes a computed rank rather than a list position, every reader of `properties` changes, and
+  5s's `PropertyRow` and `addProperty`, which are public in Domain, change shape. What the two kinds share is the map
+  derivation, which A shares in the writer without changing the rows.
+
+**Recommended: A.** It is 5s's structure, decided and built; the throwaway measured it end to end; and the one rule the
+kinds share (the map and pointer table) is shared in the writer, where it is a function of owners alone. B is 5s's
+rejected option again. C changes 5s's public rows to share a function that A already shares.
+
+Open questions:
+
+1. A, B or C.
+2. One PR (recommended: the handler, the tables and the Event arm are one feature, a readable event, and the throwaway
+   shows the whole feature is about 150 lines), or split by layer, the Domain tables and their properties first and the
+   handlers and guests second (5s's fallback cut, if review finds it too large). Either way, tests first.
+3. The `EventType` column. (a) Held as a `TypeDefOrRef`, not optional, with a nil token refused by the handler as a
+   PawPrint fault, since `GetTypeTokenInternal` never returns one (recommended: it keeps what CoreCLR writes, the
+   image shows it to IlDump and SRM, and an unreachable state is not representable). (b) Held as `TypeDefOrRef option`,
+   modelling `_SetEventProps1`'s nil case, which no caller reaches. (c) Not held, written as nil: smallest, but the image
+   would no longer be CoreCLR's, and the mutant "column written nil" could not be told from the design.
+4. An empty name. The managed side refuses an empty or NUL-led name before the QCall, so, unlike `DefineProperty`'s,
+   the handler never sees one (measured: `"\0x"` consumes no token, `"a\0b"` stores `a`). (a) The handler refuses an
+   empty name as a PawPrint fault and Domain's `defineEvent` stores what it is given, as `RegMeta` does (recommended:
+   the fault states the managed caller's guarantee, and Domain stays a model of the emitter). (b) Domain refuses it
+   too, as ECMA-335 II.22.13 requires a non-empty name. (c) Neither refuses.
+5. Sharing with 5s's code. (a) Generalise `EmitScopeImage.propertyMaps` and `EmitScopeGen.propertyMapReplay` into one
+   function each, over owners, used by both kinds (recommended: `AddEventToEventMap` is `AddPropertyToPropertyMap`
+   with other tables, and one replay checked against two writers kills more mutants than two copies checked against
+   themselves). (b) Copy them for events, leaving 5s's code untouched.
+6. Whether the guests pin the foreign-type accessor (`FA.X` with `FB.add_X`, `ArgumentException`) and the in-range
+   accessor of another module (`Wild` with `y0`), both measured identical under the throwaway arm. Recommended: yes,
+   in the main guest, since 5s pinned both for properties and the arm already answers them as .NET does.
+7. Whether 5w also changes the docstrings and messages that name properties only (`EmitScopeImage`'s module
+   docstring, `EmitScopeExtensionViolation`'s, `HasSemantics`', the accessor refusals' "reflection over the
+   property"). Recommended: yes, in the same PR, since each becomes false the moment the Event case exists.
+
+### 5w: the oracle
+
+Written first, and seen to fail on this branch at the `DefineEvent` refusal before the handler exists:
+
+* `sourcesImpure/TypeBuilderDefineEvent.cs` (`IsDynamicCodeSupported` on, registered in `TestImpureCases.fs`): the
+  probe's scenarios without the private-field reads except `m_evToken`, returning the number of the first failing check:
+  * the refusals and their order (each name refusal, the null type, the three pairs, all on a live and a created type;
+    `SetAddOnMethod(null)` before and after creation), with a token read after them showing none was consumed;
+  * the embedded NUL (`a`, one token);
+  * the event types: byref, pointer, array, open generic, `Action<int>` twice, a generic parameter, the module's own
+    TypeBuilder and generic TypeBuilder, `EventHandler` with its TypeRef taken first, each followed by its TypeSpec
+    probe, so that the TypeSpec and TypeRef rows each adds are checked;
+  * the duplicate name (two rows; reflection lists the first);
+  * the flag sweep (all 32 single bits and the nine specials), on a type of its own so that no other token moves;
+  * the interleaving across `A`, `B`, `C`, `D`, `E`, including events added after `B` is created and on a type defined
+    after other types' events;
+  * `S11`, `S24` and `S25`, with a property's and an event's rows interleaved, two raises included. `P`'s first row
+    precedes `E`'s, and both have RID 1, which kills 5s's surviving mutant (the sort keyed on the RID, the tag dropped)
+    because SRM then refuses the image;
+  * the reflection rows: `G<T>`, the six events of `T` with every binding-flag query and the add/remove/invoke count,
+    the struct, the interface, `DynDerived` hiding `DynBase.BaseE`;
+  * question 6's two foreign accessors, and `Derived.Y` with its base's add.
+
+  Tokens are checked as relations where a literal would move as the guest grows (5v's rule), and as literals within
+  each module of their own, as the probe does. Its terminal-state check, beside `assertPropertyRows`, reads the scope's
+  Event rows (owner, name, flags, event type) and MethodSemantics rows in the order added, and, from the image SRM reads
+  back, the EventMap in first-event order and the EventPtr's presence and contents for `Inter`. That check is the only
+  oracle of the map's order and of the EventType column, which no guest can see.
+* `DispatchProxyEventInterface.cs` is registered as passing.
+* Both guests are built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 before they are
+  committed, each with a control inverting one check that must exit with that check's number on both, and each run
+  under PawPrint with `PAWPRINT_TEST_RUNTIME` unset and `Net11`.
+* Domain models (in `TestEmitScopeProperties` or a sibling `TestEmitScopeEvents`): `defineEvent` against a model over
+  generated interleavings across owners and flags drawn from the whole `int` range (`-1` and values above sixteen bits
+  over-represented): each event the next RID, flags as the rule says, no search. `defineMethodSemantics` with an Event
+  association: one row per call, in call order; an Event RID the scope lacks refused.
+* The image round trip (`TestEmitScopeImage`): `EmitScopeGen` draws events across owners and accessor rows over both
+  kinds of association in any order. For every type, SRM's `GetEvents` is the model's events of that type in
+  definition order; every Event row reads back (flags, name, `EventType`'s coded index); the EventMap and EventPtr equal
+  a replay of `AddChildRowDirectForParent` one event at a time (question 5's shared replay, not `pointerTable` again);
+  `methodSemanticsForAssociation`'s scan gives each association's rows in the order added; SRM opening the image checks
+  the MethodSemantics sort across both tags. `TypeInfo.Events` of every TypeDef equals SRM's `GetEvents`, as 5v's sweep
+  asserts for CoreLib. The fixed sample asserts its coverage: an EventPtr, an EventMap order unlike TypeDef order, an
+  event and a property of one RID with the property's row added first, 25 rows with a repeated add and a repeated
+  raise, and a type with events created before a later type gets its first.
+* The differential property against real .NET (`TestEmitScopeProperties`' existing one, extended): schedules of
+  `DefineProperty`, `DefineEvent` and every accessor call of both kinds, over a few abstract types with abstract
+  methods (tokens forced first, `RunAndCollect`, as now), reaching both sides of 25 rows with repeated adds, removes and
+  raises, flags from the whole `int` range. For every created type, the host's `GetEvents(all | DeclaredOnly)` names,
+  tokens and `Attributes`, and each event's add, remove, raise and other methods in order, equal the image's read
+  through `rowsOfKey`, beside the property comparison it makes now. Each event's type is one of the module's own types,
+  so that no TypeRef or TypeSpec needs modelling; the host does not read the column. The property's model of
+  reflection needs `PopulateEvents`' rules for the flags it uses (5v measured them: a repeated name hidden, an event
+  with only a raise method public if that method is). It covers Domain and the read rule, not the handlers' reading of
+  their arguments, which the guests cover.
+* `TestEmitScopeExtension`: an Event row added to a created type, and a MethodSemantics row for an event of a created
+  type, are each a violation; one naming a method of a created type, for an event of a type not yet created, is not;
+  a MethodSemantics row that moves because a later event's row sorts before it is not.
+* `TestTypeBuilderPropertyRefusals` (or a sibling): an event accessor whose RID is past the module's MethodDefs
+  (`Wild2` with `y2`) is refused by name, the message naming the association.
+* Mutants, each run against both guests, the Domain models, the round trip, the extension tests and the differential
+  property:
+  * the event's RID off by one in the handler; the token's table byte `0x17`;
+  * the property's reserved mask (`0xF400`) applied to events (the sweep's bits 12 to 15; `0xFFFF` gives `0x0BFF`);
+  * `RTSpecialName` kept (the sweep's `0x0400`, `F1`-style `0x0600`);
+  * `-1` masked rather than zeroed (`0xFBFF`); the high sixteen bits kept (Domain's column check, or `0x10000`);
+  * a search for an existing event (the duplicate `E1`);
+  * the name read past the first NUL (`a\0b`);
+  * the EventPtr omitted (`Inter`'s `A`);
+  * the EventMap in TypeDef order (expected to survive both guests; killed by the terminal-state check and the
+    round trip's replay);
+  * the EventPtr keyed on the owner's TypeDef RID rather than the map position (`Inter`, where `B`'s map row precedes
+    `A`'s);
+  * `HasSemantics.Event` coded with tag 1 (property and event of one RID collide; `S11`);
+  * the MethodSemantics sort on the RID with the tag dropped (5s's survivor; `S11`, SRM's refusal);
+  * the 25-row count taken over event rows or property rows alone (`S25`);
+  * the add and remove semantics swapped, and the raise written as Other (`S11`, `T`'s `Inst` count);
+  * the `EventType` column written nil, or with the wrong coded tag (the terminal-state check and the round trip only:
+    no reflection reads it);
+  * the Event arm of `DefineMethodSemantics` reading the RID through `tryPropertyRid` (a property and an event of one
+    RID: `S11`);
+  * the extension rule's `associationOwner` reading an Event RID from the Property table (`TestEmitScopeExtension`);
+  * the extension check not refusing an Event row of a created type (`TestEmitScopeExtension` alone, since the managed
+    caller refuses first);
+  * `DefineEvent`'s extended scope not kept (both guests).
+
+### 5w: left to later stages
+
+* `EventBuilder.SetCustomAttribute`, through `TypeBuilder_DefineCustomAttribute`, which is refused for every parent
+  today; custom attributes are their own stage.
+* Modelling an accessor whose RID is past the module's MethodDefs (`ArgumentOutOfRangeException` from reflection,
+  measured for `Wild2`), and the nil token's silent no-op: still refused, now for both kinds of association.
+* `TypeBuilder_SetParamInfo`, the next emit stage by 5v's decisions.
+* 5u's list as 5v carried it: `XmlSerializer`, the dynamic-methods class's two queries, nested dynamic types, and the
+  `Signature.Init` fix.
+* Whether reflection should read `TypeInfo.Events`, or it should go (5v's item), unchanged by 5w.
+* The `newobj` stage's PR 2, independent of 5w.
+
+### 5w: the decisions
+
+Taken 2026-11-14.
+
+* **A: an Event table beside the Property table, `HasSemantics.Event`, and an EventMap and EventPtr which the writer
+  derives.** Checked against the pinned source:
+  * `DefineEventCore` (RuntimeTypeBuilder.cs:1431-1460), `GetTypeTokenWorkerNoLock` (RuntimeModuleBuilder.cs:894-939),
+    `TypeBuilder_DefineEvent` (vm/comdynamic.cpp:580), `_DefineEvent` and `_SetEventProps1`
+    (md/compiler/regmeta_emit.cpp:1256, :1346), `AddEventToEventMap` and `AddChildRowDirectForParent`
+    (md/enc/metamodelrw.cpp:4927, :4500), `RuntimeEventBuilder.SetMethodSemantics` (RuntimeEventBuilder.cs:48), the
+    `HasDelete` reading (md/enc/mdinternalrw.cpp:1208, metamodelrw.cpp:1136, md/compiler/disp.cpp:33), `evReservedMask`
+    (inc/corhdr.h:544) and ECMA-335 II.22.13 are each as "5w: what it is" describes them.
+  * `AddEventToEventMap` differs from `AddPropertyToPropertyMap` only in the tables it names, so the map order and
+    the pointer rule are 5s's. A map row is added only with its first event, so every map row has a child, and "an
+    event added to a map that is not the last" is the whole condition for an EventPtr.
+  * `5w/probe/net10-all.out` and `net11-all.out` are identical and hold every row of the stage's table.
+  * B is rejected for 5s's reason: two structures for one CoreCLR table, and a 25-row count that becomes a sum.
+  * C is rejected. It changes `PropertyRow`, `addProperty` and every reader of `properties`, all public in a
+    published package, to share a derivation that is already a function of owners alone.
+  * A fourth structure was weighed: the scope holding EventMap and EventPtr rows, added one event at a time as
+    CoreCLR adds them. It is rejected because a map that disagrees with its events could then be represented, and
+    because 5s derives the PropertyMap; the two kinds would be held two ways.
+  * Conditions on A.
+    * The scope holds no EventMap or EventPtr rows. The EventPtr is `pointerTable` over each event's map position.
+    * `HasSemantics.Event` codes as `rid <<< 1`. The header's `Sorted` bit for MethodSemantics stays clear.
+    * `EventRid` has an `internal` constructor and a `tryEventRid`, as `PropertyRid` has.
+    * The three event tables are written between StandAloneSig and PropertyMap, which is ECMA-335's table order.
+    * The Event arm of `TypeBuilder_DefineMethodSemantics` stores the semantics it is given, as the Property arm
+      does. An Event token out of range is a PawPrint fault: an `EventBuilder` passes the token its own module gave it.
+    * `HasSemantics` is a public union of a published package and gains a case. The PR body says so.
+* **One PR.** The handler, the tables and the Event arm are one feature: an event that can be read back.
+  * The split by layer stays the cut to make if review finds the PR too large. It is not the default, for 5s's
+    reason: the new adders would ship with nothing calling them.
+  * 5w branches from `main`. It needs nothing from the `newobj` stage's PR 2.
+* **The `EventType` column is a `TypeDefOrRef`, not optional. The handler refuses a nil token as a PawPrint fault.**
+  * `GetTypeTokenWorkerNoLock` returns a TypeSpec, a TypeBuilder's TypeDef or a TypeRef, and throws for a null type.
+    It has no path that returns nil.
+  * `InterfaceImplRow.Interface` and `GenericParamConstraintRow.Constraint` are already held this way, and the writer
+    takes `Some` of each.
+  * The handler's `typeDefOrRef` gives `None` for a nil token. The Event handler fails by name on `None`, and the
+    message says that `GetTypeTokenInternal` hands out no nil token.
+  * `EmitScope.addEvent` requires that the target row exists, as it requires the owner and the name.
+  * An optional column is rejected: it models a branch of `_SetEventProps1` that no caller reaches, and every reader
+    would then carry a case that cannot occur.
+  * Writing the column as nil is rejected: the image would no longer be CoreCLR's.
+  * Nothing in PawPrint reads the column. `EventDefn.make` reads the name and the flags only, and reflection takes
+    `EventHandlerType` from the add method's parameter (measured: `Weird`, below).
+* **An empty name: the handler refuses it as a PawPrint fault, and Domain's `defineEvent` stores what it is given.**
+  * `TypeBuilder.DefineEvent` refuses a null or empty name and `DefineEventCore` refuses a leading NUL, both before
+    the QCall. So an empty name at the handler means that PawPrint misread the string. The handler also refuses a
+    null name pointer, as the property handler does.
+  * Domain refusing it too is rejected. `defineEvent` models `RegMeta::_DefineEvent`, which stores any name, and
+    `defineProperty` beside it must store an empty one.
+  * Neither refusing is rejected: a misread string would then become a silent row.
+  * The rule that reconciles this with the `EventType` decision: Domain holds what CoreCLR's emitter can be made to
+    hold by its managed callers. Where a type can exclude an unreachable state at no cost, it does (the column).
+    Where it cannot without a new wrapper type (the name), the handler states the caller's guarantee as a fault.
+* **One map derivation and one replay serve both kinds.**
+  * `EmitScopeImage.propertyMaps` already takes owners alone, and `EmitScopeGen.propertyMapReplay` already takes
+    TypeDef RIDs alone. Each is renamed for the rule it holds, a map table derived from its members' owners, and its
+    docstring names both `RegMeta::DefineProperty` and `_DefineEvent`. `propertyMapRows` and `propertyPtrRows` take
+    the table to read.
+  * Copies for events are rejected: a second copy of the replay would be checked only against a second copy of the
+    writer's rule.
+  * Nothing else is shared. The flag rules differ (`0xF400` and `0x0400`), and the rows and RIDs stay two types. No
+    abstraction over "a member of a map" is introduced.
+* **Both foreign accessors are pinned in the main guest.**
+  * `FA.X` with `FB.add_X`, `FB` created first: the throwaway arm gave real .NET's `ArgumentException` from both
+    `GetEvents` and `GetEvent`. 5s gave its counterpart a guest of its own only because the answer was then unknown.
+  * `Wild` with `y0` goes in a module of its own, without `Wild2`. Measured for this decision on .NET 10.0.14 and
+    11.0.0-rc.3 (scratchpad `5w-decider/probe`): `TX.GetEvents` lists `Wild` with add method `TX.add_Own`, which is
+    `X`'s MethodDef 1.
+  * `Wild2` with `y2` goes in the refusal fixture.
+* **Wording that names only properties is corrected in this PR.** Each of these becomes false when the Event case
+  exists: `EmitScopeImage`'s module docstring; `HasSemantics`' docstring; `EmitScopeExtensionViolation`'s remarks and
+  `AddedToCreatedType`'s; the comment on `associationOwner`; the three accessor refusals' "reflection over the
+  property"; the comment and the last arm's message in `TypeBuilder_DefineMethodSemantics`; and the docstrings of
+  `TestTypeBuilderPropertyRefusals` and of the differential property.
+  * No test file is renamed. A rename would hide the changes to tests that review must read. Each fixture's
+    docstring says what it now holds.
+* **Corrections to the other 5w sections.**
+  * Question 6 says both foreign accessors were "measured identical under the throwaway arm". For `Wild` only the
+    acceptance of `SetAddOnMethod(y0)` was measured. The probe defines `Wild2` on the same type, so real .NET's
+    `TX.GetEvents` throws and PawPrint stops before it. The answer for `Wild` alone is the measurement above. Under
+    PawPrint it is not yet measured; the guest measures it.
+  * The oracle says the differential property "needs `PopulateEvents`' rules for the flags it uses". With every
+    binding flag set and `DeclaredOnly`, the only rule is the one for a repeated name. An event with no accessor is
+    listed (measured, `5w-decider/probe`: `N1`). No rule about a vtable slot exists for events.
+  * The mutant "the Event arm of `DefineMethodSemantics` reading the RID through `tryPropertyRid`" is two mutants
+    (below). `S11` kills only the one that builds a Property association.
+  * The logs of the PawPrint runs under `5w/` hold no exit code: `pp.sh` prints it to the terminal. The exit codes in
+    the stage's table are the planner's reading. The PR measures and records them.
+  * "The stage is the write side alone" stands for the code. For the tests, 5w's guest is the first check of 5v's
+    Enum arm through an EventPtr, as 5v's decisions said.
+  * Option A's "nothing existing changes shape" leaves out one thing: `assertPropertyRows` matches on
+    `HasSemantics` with one case. It gains an Event case that fails by name, since `Props` has no event.
+* **The oracle is sufficient with these changes.** In this order:
+  * Before any commit, both guests are built against net10.0 and run on .NET 10.0.14 and 11.0.0-rc.3, each with a
+    control that inverts one check, as the stage says.
+  * Commit 1 holds what compiles today, and its failing run is recorded:
+    * `TypeBuilderDefineEvent.cs`, registered;
+    * `DispatchProxyEventInterface.cs`, registered as passing;
+    * the `Wild2` refusal test.
+
+    Each stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineEvent)".
+  * Commit 2 holds the smallest Domain surface that lets the other tests compile: `EventRid`, `EventRow`,
+    `HasSemantics.Event`, and `addEvent` and `defineEvent` with bodies that fail by name. With it come the Domain
+    models, the round trip, the differential property and the extension tests, and their failing run is recorded.
+  * Then Domain, then the handlers.
+  * The guest is the stage's list, with these changes.
+    * It gains `Weird`: event type `int`, add method taking `Action`, `EventHandlerType` `Action`. It is the one row
+      which shows that reflection does not read the column.
+    * `Wild` is in a module of its own, as above.
+    * Its terminal-state check reads four scopes. `Ref`: every Event row's owner, name, flags and event type, with
+      the kind and RID of each type (the two `Action<int>` rows hold one TypeSpec RID; `OfA` holds `A`'s TypeDef;
+      `EH` holds TypeRef 5). `Flags`: the flags column of all 41 rows. `Inter`: the EventMap in first-event order
+      (`B`, `A`, `C`, `E`) and the EventPtr's contents, from the image that SRM reads back. `S11`: the
+      MethodSemantics rows in the order added, with each association's kind.
+  * The Domain models go in a new `TestEmitScopeEvents`. Beside the stage's two, `addEvent` refuses an owner, a name
+    offset or an event type that the scope lacks.
+  * The round trip is as the stage has it, with these changes.
+    * The generator draws all six semantics for either kind of association. `_DefineMethodSemantics` takes any, and
+      neither the sort nor the read rule depends on the semantics.
+    * The fixed sample also asserts an event type of each of the three kinds.
+  * The differential property is as the stage has it, with these changes. The shape was measured for this decision
+    on both runtimes (`5w-decider/probe`): abstract methods returning `int` serve as every kind of accessor.
+    * Event names are drawn from a small pool, so that names repeat within a type. The model lists the first event
+      of each name, in token order, whatever its accessors. Property names stay distinct.
+    * It reads each event's add, remove and raise methods and its other methods with non-public methods included.
+      It does not read `EventHandlerType`, which throws when there is no add method.
+    * Its fixed sample asserts, each above a stated count: an event with two rows of one semantics in a module
+      below 25 rows, and one in a module of 25 or more; an EventPtr; a property and an event of one RID, each with
+      a row; a repeated event name; flags of `-1`; an event with no accessor.
+  * `TestEmitScopeExtension` is as the stage has it, with these changes.
+    * A history that changes an Event row's flags or event type is `RowChanged`.
+    * The generated property compares each created type's events and their accessors, as it does properties.
+  * The refusal test goes in `TestTypeBuilderPropertyRefusals`, beside the property's.
+  * Mutants: the stage's list, with these changes. Each is built fresh, after the work is committed.
+    * `-1` recognised on the low sixteen bits alone, so that `0xFFFF` and `0x1FFFF` store 0 (the sweep; the Domain
+      model; the differential property).
+    * The Event arm checking the RID against the Property table but building an Event association (any module with
+      more events than properties: `Ref`, `Flags`, `Inter`).
+    * The Event arm building a Property association (`S11`).
+    * The writer deriving the EventMap from the properties' owners (the replay; `Inter`).
+    * The extension rule no longer comparing the earlier scope's Event rows (`TestEmitScopeExtension` alone).
+    * The extension rule keyed on the accessor's owner for an event (`FA.X`, since `FB` is created first;
+      `TestEmitScopeExtension`).
+    * The handler reading a TypeSpec token as a TypeRef (`Ref`'s terminal-state check, or the handler's refusal of a
+      row that does not exist).
+    * Four guards have no killer by construction, since no managed caller reaches them: the refusals of an empty
+      name, of a null name pointer, of a nil event type, and of a parent that is not a TypeDef. Each is recorded as
+      surviving, with that reason.
+    * "As built" records, for each mutant, which test killed it. A mutant that survives where a killer is named
+      above means a test is strengthened and the run repeated.
+  * At the tip, the default suite and the four Guest suites run, each as its own invocation, built from the whole
+    solution. Both guests also run under PawPrint with `PAWPRINT_TEST_RUNTIME=Net11`.
+* **PR title:** "A TypeBuilder's events (type-builder stage 5w)".
+* **Additions to "left to later stages".**
+  * An event type that is a TypeBuilder of another dynamic module, or an `EnumBuilder`. Each goes through
+    `GetTypeTokenInternal` and the existing TypeRef QCalls, and neither is measured for events.
+  * A name that `RegMeta`'s conversion to UTF-8 changes, such as a lone surrogate. Every QCall that takes a name
+    shares the question, and no stage has measured it.
+  * A MethodSemantics row whose semantics does not belong to its association's kind, such as a getter of an event.
+    The scope admits it, as CoreCLR's table does; no managed caller writes one.
+  * The four guards above are assertions about the managed callers. A test that drives a handler with arguments
+    which no caller passes would be their check; no fixture does that for the emit QCalls today.
+
+### 5w: as built
+
+Built 2026-11-14 as decided above, in the decisions' order: the guests measured, then the tests that compile today
+(`b7816ee89`), then the smallest Domain surface with the Domain tests (`840f161ba`), then Domain (`600a2baeb`), then the
+handlers (`dd131b3dd`). Probes, logs and the mutation harness are in scratchpad `5w-impl`.
+
+Each guest was built against net10.0, run on 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148, and run under the
+Debug App at the handlers' commit (which runs on the host's .NET 10), each with a control inverting check 3:
+
+| Guest | .NET 10.0.14 | .NET 11.0.0-rc.3 | PawPrint | Control (check 3 inverted): .NET 10, .NET 11, PawPrint |
+|---|---|---|---|---|
+| `sourcesImpure/TypeBuilderDefineEvent.cs` (47 checks) | 0 | 0 | 0 | 3, 3, 3 |
+| `sourcesImpure/DispatchProxyEventInterface.cs` (8 checks) | 0 | 0 | 0 | 3, 3, 3 |
+
+Both pass as registered tests with `PAWPRINT_TEST_RUNTIME` unset and `Net11`, the terminal-state check included.
+
+* Domain (`WoofWare.PawPrint.Domain/EmitScope.fs`, `EmitScopeDefinitions.fs`, `EmitScopeImage.fs`): `EventRid` with an
+  `internal` constructor and `tryEventRid`; `EventRow` (owner, flags, name, and `EventType`, a `TypeDefOrRef`);
+  `HasSemantics.Event`, coded `rid <<< 1`; `addEvent`, which requires the owner, the name and the event type to exist and
+  the flags to fit two bytes; `events`; and `defineEvent`, which stores 0 for `-1` and otherwise the low sixteen bits
+  without `evReservedMask` (0x0400), with no search. The writer's map derivation is renamed `ownerMaps` and serves both
+  kinds; EventMap, EventPtr and Event are written between StandAloneSig and PropertyMap. The `Sorted` bit for
+  MethodSemantics stays clear.
+* Loader (`EmitScopeExtension.fs`): the earlier scope's Event rows are compared, an Event row of a created type is
+  refused, and an accessor row keys on its event's owner.
+* Interpreter (`Native/NativeRuntimeTypeBuilder.fs`, `Native/NativeQCall.fs`): `TypeBuilder_DefineEvent`, with the four
+  guards the decisions name as PawPrint faults; the Event arm of `TypeBuilder_DefineMethodSemantics`; the accessor
+  refusal's message says "association".
+* Tests: `TypeBuilderDefineEvent.cs` and its terminal-state check `assertEventRows` (`Ref`'s 16 Event rows, `Flags`' 41
+  flags, `Inter`'s EventMap `(3,1) (2,3) (4,7) (6,10)` and EventPtr `1 5 2 4 6 8 3 7 10 9 11`, `S11`'s eleven
+  MethodSemantics rows); `DispatchProxyEventInterface.cs` registered as passing; the `Wild2` refusal in
+  `TestTypeBuilderPropertyRefusals`; `TestEmitScopeEvents` (the Domain models, the probe's 41 measured flag values, and
+  `addEvent`'s refusals); events in `EmitScopeGen`, the image round trip, `Assembly.read`'s `TypeInfo.Events`, the
+  extension tests and the differential property.
+* Red at `b7816ee89`: both guests failed with "GuestFailureException : Unimplemented native method (PInvokeImpl
+  QCall!TypeBuilder_DefineEvent)", and the event refusal test with `Expected: String containing "TODO:
+  TypeBuilder_DefineMethodSemantics"` but that message. Red at `840f161ba`: of the 65 tests in `TestEmitScopeEvents`,
+  `TestEmitScopeProperties`, `TestEmitScopeImage`, `TestEmitScopeExtension` and `TestTypeBuilderPropertyRefusals`, 35
+  failed: 22 at "TODO: EmitScope.events: the scope holds no Event table yet", 8 at "TODO:
+  EmitScopeDefinitions.defineEvent", 4 at "TODO: EmitScope.addEvent of TypeDef ...", and the event refusal test at the
+  unimplemented QCall. The guests still stopped there; `TypeBuilderDefineProperty.cs` passed.
+* The differential property's fixed sample (150 cases) reached: a property with two rows of one semantics from 25 rows
+  70 times and below 25 rows 42 times; the same for an event 70 and 44 times; a PropertyPtr 42 times; an EventPtr 47
+  times; a property and an event of one RID each with a row 114 times; a repeated event name 79 times; flags of `-1` 75
+  times; an event with no accessor 81 times. Each is asserted above 20.
+* Mutants, each built fresh after the work was committed and run against the three `TypeBuilderDefine*`/`DispatchProxy`
+  guests (`TypeBuilderDefineEvent.cs`, `DispatchProxyEventInterface.cs`, `TypeBuilderDefineProperty.cs`) and the 65 tests
+  of the five fixtures above. A guest's number is the exit code of `TypeBuilderDefineEvent.cs`, its first failing check;
+  "round trip" is "every row reads back at the RID the scope gave it", "differential" the differential property, "Domain
+  model" `TestEmitScopeEvents`:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The event's RID off by one in the handler | both guests (the accessor call names no Event row); the refusal test |
+  | The token's table byte `0x17` | both guests (the accessor call names no Property row); the refusal test |
+  | The property's mask `0xF400` applied to events | the guest (28, `Flags`); the Domain model and the 41 measured values; the differential |
+  | `RTSpecialName` kept | the same three |
+  | `-1` masked rather than zeroed | the same three |
+  | The high sixteen bits kept | the guest (`addEvent` refuses flags 0x10000); the same unit tests |
+  | A search for an existing event | the guest (18, the duplicate `E1`); the Domain model; the differential |
+  | The EventPtr omitted | the guest (20); the round trip; `Assembly.read`; the differential |
+  | The EventMap in TypeDef order | the terminal-state check (`Inter`'s map rows); the round trip's replay. The guest's checks, and the differential, survive it, as the stage expected |
+  | The EventPtr keyed on the owner's TypeDef RID | the guest (30, `Inter`); the round trip; `Assembly.read`; the differential; the generated extension property |
+  | `HasSemantics.Event` coded with tag 1 | both guests (21); the extension tests (the moved rows; the generated property); the differential; the Domain accessor model |
+  | The MethodSemantics sort on the RID, the tag dropped (5s's survivor) | the guest (SRM: "Metadata table MethodSemantics not sorted"); the round trip; the differential; the extension tests |
+  | The 25-row count taken over one kind's rows alone | the guest (33, `S25`) alone: the differential applies `rowsOfKey` to the whole table itself |
+  | An event's add and remove swapped | both guests (21, `Acc`); no unit test, since no unit test runs the handler |
+  | An event's raise written as Other | the guest (31, `S11`) alone |
+  | The EventType column written nil | the round trip and the index-width round trips alone: no reflection reads the column |
+  | The EventType column with a TypeSpec's tag written as a TypeRef's | the round trip alone |
+  | The Event arm checking the RID against the Property table but building an Event association | both guests, at `Ref`'s first accessor call, since `Ref` has no property; the refusal test |
+  | The Event arm building a Property association | the same, for the same reason: `Ref` fails before `S11` is reached |
+  | `associationOwner` reading an Event RID from the Property table | both guests (index out of range); the generated extension property; the history property |
+  | The extension check not refusing an Event row of a created type | `TestEmitScopeExtension` alone ("an event added to a created type is refused"; the generated property), since the managed caller refuses first |
+  | `DefineEvent`'s extended scope not kept | both guests (7); the refusal test |
+  | `-1` recognised on the low sixteen bits alone | the guest (28); the Domain model and the 41 measured values; the differential |
+  | The EventMap derived from the properties' owners | all three guests; the round trip; `Assembly.read`; the differential |
+  | The extension rule no longer comparing the earlier scope's Event rows | `TestEmitScopeExtension` alone ("a changed event is reported at its RID"; the history property) |
+  | The extension rule keyed on the accessor's owner for an event | the guest (`Foreign`: "AddedToCreatedType (MethodSemantics, 1, TypeDefRid 3)"); `TestEmitScopeExtension` |
+  | The handler reading a TypeSpec token as a TypeRef | the guest (the handler's refusal: "the event type 0x01000004 names no row") |
+  | The refusal of an empty name removed | survives: no managed caller passes one |
+  | The refusal of a null name pointer removed | survives, for the same reason |
+  | The refusal of a nil event type removed | survives: `GetTypeTokenInternal` hands out no nil token |
+  | The refusal of a parent that is not a TypeDef removed | survives: the managed caller passes only its TypeBuilder's |
+  | `addEvent` not checking the event type (beyond the decisions) | the Domain model's refusal test alone |
+  | `addEvent` not checking the flags' width (beyond the decisions) | the same |
+
+  No mutant with a named killer survived, so no test was strengthened after the battery.
+* Suites, built from the whole solution at `dd131b3dd` in a detached worktree while the mutants ran here (the later
+  commit changes only this plan), each run on its own: the default suite (5623 passed, 37 skipped), `Guest` (234),
+  `GuestSolo` (2), `GuestPure` (1185) and `GuestImpure` (283), all passing; both 5w guests under
+  `PAWPRINT_TEST_RUNTIME=Net11` (2), passing.
+* Deviations from the decisions, and findings:
+  * `assertEventRows` is in the second commit, not the first: it reads `EmitScope.events` and `HasSemantics.Event`,
+    which do not compile before the Domain surface exists. The guest itself, registered, is in the first.
+  * The Domain surface of the second commit also has `EmitScope.events` and `tryEventRid`, failing by name, beyond the
+    decisions' list, because the tests read them; and the Event arms of `addMethodSemantics` and of the extension rule's
+    `associationOwner`, failing by name, because a match without them does not compile.
+  * `EmitScopeGen` gained `MethodSemanticsRun`, several accessors of one association at once, in the Domain commit: with
+    single rows none of the 200 fixed-sample scopes reached 25 MethodSemantics rows with an event given two adds, which
+    the round trip's coverage asserts. The coverage assertion itself is as first committed.
+  * "A type with events created before a later type gets its first" is asserted in the round trip's fixed sample as a
+    type defined after the module's first event that then gets events of its own, since a scope has no notion of a
+    created type; the guest's `Inter` (events on `E`, defined after `B` is created) is the case with creation.
+  * The mutant "the name read past the first NUL" was not built. The handler gets no length, and the shared
+    `readNullTerminatedUtf16` stops at the first NUL by construction; a mutant reading past it would read past every
+    name's terminator, so it could not single out `a\0b`.
+  * The two `tryPropertyRid` mutants are both killed at `Ref`'s first accessor, not at `S11` as the decisions expected
+    for the second: `Ref` has no property, so the Property check fails before an association of either kind is built.
+  * `EmitScopeExtensionViolation`'s remarks needed no change: they already speak of an association, not a property. Only
+    one of the three accessor refusals said "reflection over the property"; it now says "association".
+  * `describeRows` (`EmitScopeGen`) reads Event rows, so the history property checks them; Property rows it does not
+    read, as before.

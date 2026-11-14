@@ -6,8 +6,10 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// The accessors `TypeBuilder_DefineMethodSemantics` refuses, each by name, although real .NET writes a
-/// row for each (measured on .NET 10). The properties PawPrint defines are in
-/// `sourcesImpure/TypeBuilderDefineProperty.cs` and `sourcesImpure/TypeBuilderPropertyForeignAccessor.cs`.
+/// row for each (measured on .NET 10), of a property and of an event alike. The properties PawPrint
+/// defines are in `sourcesImpure/TypeBuilderDefineProperty.cs` and
+/// `sourcesImpure/TypeBuilderPropertyForeignAccessor.cs`, and the events in
+/// `sourcesImpure/TypeBuilderDefineEvent.cs`.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestTypeBuilderPropertyRefusals =
@@ -87,3 +89,31 @@ public class Program
 
         exc.Message |> shouldContainText "TODO: TypeBuilder_DefineMethodSemantics"
         exc.Message |> shouldContainText "names no MethodDef row of"
+
+    [<Test>]
+    let ``an event accessor whose token names no method of the module is refused`` () : unit =
+        // `y2` is MethodDef 3 of module `Y`, and module `Dyn` has one method. Real .NET writes the row with
+        // RID 3, creates `TX`, and throws ArgumentOutOfRangeException from reflection over its events
+        // (measured on .NET 10 and 11).
+        let exc =
+            runRefused
+                "EventAccessorOfAnotherModule.cs"
+                """
+        ModuleBuilder y = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("Y"), AssemblyBuilderAccess.Run).DefineDynamicModule("Y");
+        TypeBuilder ty = y.DefineType("TY", TypeAttributes.Public);
+        MethodBuilder y0 = ty.DefineMethod("y0", MethodAttributes.Public, typeof(void), new[] { typeof(Action) });
+        y0.GetILGenerator().Emit(OpCodes.Ret);
+        MethodBuilder y1 = ty.DefineMethod("y1", MethodAttributes.Public, typeof(void), new[] { typeof(Action) });
+        y1.GetILGenerator().Emit(OpCodes.Ret);
+        MethodBuilder y2 = ty.DefineMethod("y2", MethodAttributes.Public, typeof(void), new[] { typeof(Action) });
+        y2.GetILGenerator().Emit(OpCodes.Ret);
+        TypeBuilder tx = module.DefineType("TX", TypeAttributes.Public);
+        MethodBuilder own = tx.DefineMethod("add_Own", MethodAttributes.Public | MethodAttributes.SpecialName, typeof(void), new[] { typeof(Action) });
+        own.GetILGenerator().Emit(OpCodes.Ret);
+        if (own.MetadataToken != 0x06000001) return 1;
+        tx.DefineEvent("Wild2", EventAttributes.None, typeof(Action)).SetAddOnMethod(y2);"""
+
+        exc.Message |> shouldContainText "TODO: TypeBuilder_DefineMethodSemantics"
+
+        exc.Message
+        |> shouldContainText "the accessor 0x06000003 of 0x14000001 names no MethodDef row of"

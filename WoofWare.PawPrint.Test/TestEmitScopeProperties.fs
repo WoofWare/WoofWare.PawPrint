@@ -16,9 +16,9 @@ open WoofWare.PawPrint.Test.EmitScopeGen
 /// A dynamic module's properties and their accessors: `EmitScopeDefinitions.defineProperty` and
 /// `defineMethodSemantics` against models of `RegMeta::DefineProperty` and `_DefineMethodSemantics`;
 /// `ReadWriteMetadataLookup.rowsOfKey`, the order in which CoreCLR's read-write metadata finds a key's
-/// rows; and both, through the image, against real .NET's `TypeBuilder` in this process. The last covers
-/// the Domain and the read rule, not the QCall handlers' reading of their arguments, which only the guests
-/// cover.
+/// rows; and both, through the image, against real .NET's `TypeBuilder` in this process, for properties
+/// and events together. The last covers the Domain and the read rule, not the QCall handlers' reading of
+/// their arguments, which only the guests cover. `TestEmitScopeEvents` holds the models of events alone.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestEmitScopeProperties =
@@ -298,6 +298,12 @@ module TestEmitScopeProperties =
         /// `SetGetMethod` (0), `SetSetMethod` (1) or `AddOtherMethod` (2) on property `property`, with one
         /// of its type's methods, if there is a property.
         | Accessor of property : int * semantics : int * method : int
+        /// `DefineEvent` on type `owner`, with a name from a small pool, these flags, and one of the module's
+        /// types as its event type, so that no TypeRef or TypeSpec is added.
+        | DefineEvent of owner : int * name : int * flags : int * eventType : int
+        /// `SetAddOnMethod` (0), `SetRemoveOnMethod` (1), `SetRaiseMethod` (2) or `AddOtherMethod` (3) on
+        /// event `event`, with one of its type's methods, if there is an event.
+        | EventAccessor of event : int * semantics : int * method : int
 
     /// What reflection reports of one property: its name, token and flags, its getter's and setter's
     /// names, and its accessors' names in `GetAccessors(true)`'s order.
@@ -311,6 +317,19 @@ module TestEmitScopeProperties =
             Accessors : string list
         }
 
+    /// What reflection reports of one event: its name, token and flags, its add, remove and raise
+    /// methods' names, and its other methods' names in `GetOtherMethods(true)`'s order.
+    type private ReportedEvent =
+        {
+            Name : string
+            Token : int
+            Flags : int
+            Add : string option
+            Remove : string option
+            Raise : string option
+            Others : string list
+        }
+
     /// What the cases reached.
     [<RequireQualifiedAccess>]
     type private Reach =
@@ -320,9 +339,23 @@ module TestEmitScopeProperties =
         | InOrder
         /// The image needed a `PropertyPtr`.
         | PointerTable
+        /// The module had 25 or more MethodSemantics rows, and an event two of one semantics.
+        | EventReversed
+        /// The module had fewer than 25 rows, and an event two of one semantics.
+        | EventInOrder
+        /// The image needed an `EventPtr`.
+        | EventPointerTable
+        /// A property and an event of one RID each had a MethodSemantics row.
+        | SharedRid
+        /// A type had two events of one name.
+        | RepeatedEventName
+        /// An event was defined with flags of -1.
+        | EventFlagsMinusOne
+        /// An event had no accessor.
+        | EventWithoutAccessor
 
     [<Test>]
-    let ``properties read back as real .NET's TypeBuilder reports them`` () : unit =
+    let ``properties and events read back as real .NET's TypeBuilder reports them`` () : unit =
         let all =
             BindingFlags.DeclaredOnly
             ||| BindingFlags.Public
@@ -372,6 +405,7 @@ module TestEmitScopeProperties =
 
             let mutable scope = withTypes types methodsPerType
             let hostProperties = ResizeArray<PropertyBuilder * int> ()
+            let hostEvents = ResizeArray<EventBuilder * int> ()
 
             for call in calls do
                 match call with
@@ -413,8 +447,68 @@ module TestEmitScopeProperties =
                             (MethodDefRid (owner * methodsPerType + m + 1))
                             scope
                 | Call.Accessor _ -> ()
+                | Call.DefineEvent (owner, name, flags, eventType) ->
+                    let owner = owner % types
+                    let eventType = eventType % types
+                    let name = $"E%d{name % 3}"
+
+                    let builder =
+                        hostTypes.[owner].DefineEvent (name, enum<EventAttributes> flags, hostTypes.[eventType])
+
+                    hostEvents.Add (builder, owner)
+
+                    scope <-
+                        EmitScopeDefinitions.defineEvent
+                            (TypeDefRid (owner + 2))
+                            name
+                            (TypeDefOrRef.TypeDef (TypeDefRid (eventType + 2)))
+                            flags
+                            scope
+                        |> snd
+
+                | Call.EventAccessor (e, semantics, m) when hostEvents.Count > 0 ->
+                    let e = e % hostEvents.Count
+                    let builder, owner = hostEvents.[e]
+                    let m = m % methodsPerType
+                    let method = hostMethods.[owner].[m]
+
+                    let attribute =
+                        match semantics % 4 with
+                        | 0 ->
+                            builder.SetAddOnMethod method
+                            MethodSemanticsAttributes.Adder
+                        | 1 ->
+                            builder.SetRemoveOnMethod method
+                            MethodSemanticsAttributes.Remover
+                        | 2 ->
+                            builder.SetRaiseMethod method
+                            MethodSemanticsAttributes.Raiser
+                        | _ ->
+                            builder.AddOtherMethod method
+                            MethodSemanticsAttributes.Other
+
+                    scope <-
+                        EmitScopeDefinitions.defineMethodSemantics
+                            (HasSemantics.Event (EmitScope.tryEventRid (e + 1) scope).Value)
+                            attribute
+                            (MethodDefRid (owner * methodsPerType + m + 1))
+                            scope
+                | Call.EventAccessor _ -> ()
+
+            if
+                calls
+                |> List.exists (fun call ->
+                    match call with
+                    | Call.DefineEvent (_, _, flags, _) -> flags = -1
+                    | Call.Define _
+                    | Call.Accessor _
+                    | Call.EventAccessor _ -> false
+                )
+            then
+                cover Reach.EventFlagsMinusOne
 
             let created = hostTypes |> Array.map (fun t -> t.CreateType ())
+            let name (m : MethodInfo) = m.Name
 
             let reportedByHost =
                 [
@@ -422,10 +516,8 @@ module TestEmitScopeProperties =
                         yield
                             [
                                 for p in t.GetProperties all do
-                                    let name (m : MethodInfo) = m.Name
-
                                     yield
-                                        {
+                                        ({
                                             Name = p.Name
                                             Token = p.MetadataToken
                                             Flags = int p.Attributes
@@ -433,6 +525,28 @@ module TestEmitScopeProperties =
                                             Setter = p.GetSetMethod true |> Option.ofObj |> Option.map name
                                             Accessors = p.GetAccessors true |> Seq.map name |> List.ofSeq
                                         }
+                                        : Reported)
+                            ]
+                ]
+
+            // `EventHandlerType` is not read: it throws for an event with no add method.
+            let eventsReportedByHost =
+                [
+                    for t in created do
+                        yield
+                            [
+                                for e in t.GetEvents all do
+                                    yield
+                                        ({
+                                            Name = e.Name
+                                            Token = e.MetadataToken
+                                            Flags = int e.Attributes
+                                            Add = e.GetAddMethod true |> Option.ofObj |> Option.map name
+                                            Remove = e.GetRemoveMethod true |> Option.ofObj |> Option.map name
+                                            Raise = e.GetRaiseMethod true |> Option.ofObj |> Option.map name
+                                            Others = e.GetOtherMethods true |> Seq.map name |> List.ofSeq
+                                        }
+                                        : ReportedEvent)
                             ]
                 ]
 
@@ -443,10 +557,27 @@ module TestEmitScopeProperties =
             let methodName (rid : int) =
                 reader.GetString (reader.GetMethodDefinition (MetadataTokens.MethodDefinitionHandle rid)).Name
 
-            // What `Associates.AssignAssociates` makes of each property's rows, found as CoreCLR's read-write
-            // metadata finds them; and `RuntimeType`'s `PopulateProperties`, which lists a class's property
-            // only if no earlier one's public getter (or else setter) has its vtable slot, and each of these
-            // abstract methods has a slot of its own.
+            // An association's rows, found as CoreCLR's read-write metadata finds them, as (semantics,
+            // method) pairs.
+            let rowsOf (association : int) : (int * int) list =
+                semanticsRows
+                |> List.filter (fun (_, _, a) -> a = association)
+                |> List.map (fun (s, m, _) -> s, m)
+                |> ReadWriteMetadataLookup.rowsOfKey semanticsRows.Length
+
+            // What `Associates.AssignAssociates` keeps of one semantics: the last row met.
+            let pick (rows : (int * int) list) (semantics : int) : int option =
+                rows
+                |> List.filter (fun (s, _) -> s = semantics)
+                |> List.tryLast
+                |> Option.map snd
+
+            let others (rows : (int * int) list) : int list =
+                rows |> List.filter (fun (s, _) -> s = 4) |> List.map snd
+
+            // `RuntimeType`'s `PopulateProperties`, which lists a class's property only if no earlier one's
+            // public getter (or else setter) has its vtable slot, and each of these abstract methods has a slot
+            // of its own.
             let reportedByImage =
                 [
                     for t in 0 .. types - 1 do
@@ -464,23 +595,9 @@ module TestEmitScopeProperties =
                                         )
 
                                     let row = reader.GetPropertyDefinition handle
-                                    let association = (rid <<< 1) ||| 1
-
-                                    let rows =
-                                        semanticsRows
-                                        |> List.filter (fun (_, _, a) -> a = association)
-                                        |> List.map (fun (s, m, _) -> s, m)
-                                        |> ReadWriteMetadataLookup.rowsOfKey semanticsRows.Length
-
-                                    let pick (semantics : int) =
-                                        rows
-                                        |> List.filter (fun (s, _) -> s = semantics)
-                                        |> List.tryLast
-                                        |> Option.map snd
-
-                                    let getter = pick 2
-                                    let setter = pick 1
-                                    let others = rows |> List.filter (fun (s, _) -> s = 4) |> List.map snd
+                                    let rows = rowsOf ((rid <<< 1) ||| 1)
+                                    let getter = pick rows 2
+                                    let setter = pick rows 1
 
                                     let listed =
                                         match Option.orElse setter getter with
@@ -492,7 +609,7 @@ module TestEmitScopeProperties =
 
                                     if listed then
                                         yield
-                                            {
+                                            ({
                                                 Name = reader.GetString row.Name
                                                 Token = 0x17000000 ||| rid
                                                 Flags = int row.Attributes
@@ -502,34 +619,129 @@ module TestEmitScopeProperties =
                                                     [
                                                         yield! Option.toList getter
                                                         yield! Option.toList setter
-                                                        yield! others
+                                                        yield! others rows
                                                     ]
                                                     |> List.map methodName
                                             }
+                                            : Reported)
                             ]
                 ]
 
             reportedByImage |> shouldEqual reportedByHost
 
-            let repeated =
+            // `PopulateEvents`, with every binding flag and `DeclaredOnly`: the first event of each name, in
+            // token order, whatever its accessors.
+            let eventsReportedByImage =
+                [
+                    for t in 0 .. types - 1 do
+                        let definition =
+                            reader.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle (t + 2))
+
+                        let mutable seen = Set.empty
+
+                        yield
+                            [
+                                for handle in definition.GetEvents () do
+                                    let rid =
+                                        MetadataTokens.GetRowNumber (
+                                            EventDefinitionHandle.op_Implicit handle : EntityHandle
+                                        )
+
+                                    let row = reader.GetEventDefinition handle
+                                    let eventName = reader.GetString row.Name
+
+                                    if not (seen.Contains eventName) then
+                                        seen <- seen.Add eventName
+                                        let rows = rowsOf (rid <<< 1)
+
+                                        yield
+                                            ({
+                                                Name = eventName
+                                                Token = 0x14000000 ||| rid
+                                                Flags = int row.Attributes
+                                                Add = pick rows 8 |> Option.map methodName
+                                                Remove = pick rows 16 |> Option.map methodName
+                                                Raise = pick rows 32 |> Option.map methodName
+                                                Others = others rows |> List.map methodName
+                                            }
+                                            : ReportedEvent)
+                            ]
+                ]
+
+            eventsReportedByImage |> shouldEqual eventsReportedByHost
+
+            let repeated (isEvent : bool) =
                 EmitScope.methodSemantics scope
+                |> Seq.filter (fun row ->
+                    match row.Association with
+                    | HasSemantics.Event _ -> isEvent
+                    | HasSemantics.Property _ -> not isEvent
+                )
                 |> Seq.countBy (fun row -> row.Association, row.Semantics)
                 |> Seq.exists (fun (_, n) -> n > 1)
 
-            if repeated then
+            if repeated false then
                 if semanticsRows.Length >= 25 then
                     cover Reach.Reversed
                 else
                     cover Reach.InOrder
 
-            if (propertyPtrRows pe reader).IsSome then
+            if repeated true then
+                if semanticsRows.Length >= 25 then
+                    cover Reach.EventReversed
+                else
+                    cover Reach.EventInOrder
+
+            if (pointerRows pe reader TableIndex.PropertyPtr).IsSome then
                 cover Reach.PointerTable
+
+            if (pointerRows pe reader TableIndex.EventPtr).IsSome then
+                cover Reach.EventPointerTable
+
+            let withRows =
+                EmitScope.methodSemantics scope
+                |> Seq.map (fun row -> row.Association)
+                |> Set.ofSeq
+
+            let eventRids = [ 1 .. (EmitScope.events scope).Count ]
+
+            let hasRows (rid : int) =
+                withRows.Contains (HasSemantics.Event (EmitScope.tryEventRid rid scope).Value)
+
+            if eventRids |> List.exists (hasRows >> not) then
+                cover Reach.EventWithoutAccessor
+
+            if
+                eventRids
+                |> List.exists (fun rid ->
+                    match EmitScope.tryPropertyRid rid scope with
+                    | Some property -> hasRows rid && withRows.Contains (HasSemantics.Property property)
+                    | None -> false
+                )
+            then
+                cover Reach.SharedRid
+
+            if
+                EmitScope.events scope
+                |> Seq.countBy (fun row -> row.Owner, EmitScope.stringAt row.Name scope)
+                |> Seq.exists (fun (_, n) -> n > 1)
+            then
+                cover Reach.RepeatedEventName
 
         let genCall =
             Gen.frequency
                 [
                     1, Gen.map2 (fun o f -> Call.Define (o, f)) choice genFlags
                     4, Gen.map3 (fun p s m -> Call.Accessor (p, s, m)) choice choice choice
+                    1,
+                    gen {
+                        let! owner = choice
+                        let! name = choice
+                        let! flags = genFlags
+                        let! eventType = choice
+                        return Call.DefineEvent (owner, name, flags, eventType)
+                    }
+                    4, Gen.map3 (fun e s m -> Call.EventAccessor (e, s, m)) choice choice choice
                 ]
 
         let gen =
@@ -537,7 +749,7 @@ module TestEmitScopeProperties =
                 let! types = Gen.choose (1, 3)
                 let! methodsPerType = Gen.choose (1, 4)
                 // Enough calls that many modules reach 25 MethodSemantics rows, and many do not.
-                let! length = Gen.choose (0, 60)
+                let! length = Gen.choose (0, 80)
                 let! calls = Gen.listOfLength length genCall
                 return types, methodsPerType, List.ofSeq calls
             }
@@ -551,3 +763,10 @@ module TestEmitScopeProperties =
         coverage.Count Reach.Reversed |> shouldBeGreaterThan 20
         coverage.Count Reach.InOrder |> shouldBeGreaterThan 20
         coverage.Count Reach.PointerTable |> shouldBeGreaterThan 20
+        coverage.Count Reach.EventReversed |> shouldBeGreaterThan 20
+        coverage.Count Reach.EventInOrder |> shouldBeGreaterThan 20
+        coverage.Count Reach.EventPointerTable |> shouldBeGreaterThan 20
+        coverage.Count Reach.SharedRid |> shouldBeGreaterThan 20
+        coverage.Count Reach.RepeatedEventName |> shouldBeGreaterThan 20
+        coverage.Count Reach.EventFlagsMinusOne |> shouldBeGreaterThan 20
+        coverage.Count Reach.EventWithoutAccessor |> shouldBeGreaterThan 20

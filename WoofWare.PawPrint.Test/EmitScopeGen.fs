@@ -63,9 +63,18 @@ module EmitScopeGen =
         /// A property of a type already in the scope, of the element type this chooses; its owner need not
         /// own the scope's last property, as CoreCLR's tokens are in definition order across the module.
         | Property of owner : int * name : string * flags : int * propertyType : int
-        /// An accessor of a property already in the scope, which may be any method of the scope, if it has
-        /// both; in the order added, with no search, as `_DefineMethodSemantics` adds them.
-        | MethodSemantics of property : int * semantics : int * method : int
+        /// An event of a type already in the scope, its event type any TypeDef, TypeRef or TypeSpec of the
+        /// scope; its owner need not own the scope's last event, as CoreCLR's tokens are in definition order
+        /// across the module.
+        | Event of owner : int * name : string * flags : int * eventType : int
+        /// An accessor of a property or event already in the scope, which may be any method of the scope,
+        /// if it has both; with any of the six semantics, whichever kind the association is, and in the
+        /// order added, with no search, as `_DefineMethodSemantics` adds them.
+        | MethodSemantics of association : int * semantics : int * method : int
+        /// `count` accessors of one property or event, all of one semantics, the methods consecutive from
+        /// the one `method` chooses: enough rows, sometimes, for a module to reach the 25 from which CoreCLR
+        /// finds an association's rows in reverse.
+        | MethodSemanticsRun of association : int * semantics : int * method : int * count : int
 
     type private Applied =
         {
@@ -168,11 +177,22 @@ module EmitScopeGen =
             enum<PropertyAttributes> 0x0BFF
         ]
 
+    let eventFlagChoices : EventAttributes list =
+        [
+            EventAttributes.None
+            EventAttributes.SpecialName
+            // Every bit outside `evReservedMask`.
+            enum<EventAttributes> 0xFBFF
+        ]
+
     let semanticsChoices : MethodSemanticsAttributes list =
         [
             MethodSemanticsAttributes.Getter
             MethodSemanticsAttributes.Setter
             MethodSemanticsAttributes.Other
+            MethodSemanticsAttributes.Adder
+            MethodSemanticsAttributes.Remover
+            MethodSemanticsAttributes.Raiser
         ]
 
     let genBody : Gen<BodyShape> =
@@ -279,7 +299,23 @@ module EmitScopeGen =
                     let! propertyType = choice
                     return Op.Property (owner, name, flags, propertyType)
                 }
+                2,
+                gen {
+                    let! owner = choice
+                    let! name = genName
+                    let! flags = choice
+                    let! eventType = choice
+                    return Op.Event (owner, name, flags, eventType)
+                }
                 3, Gen.map3 (fun p s m -> Op.MethodSemantics (p, s, m)) choice choice choice
+                1,
+                gen {
+                    let! association = choice
+                    let! semantics = choice
+                    let! method = choice
+                    let! count = Gen.choose (2, 30)
+                    return Op.MethodSemanticsRun (association, semantics, method, count)
+                }
             ]
 
     let pick (choice : int) (items : 'a list) : 'a option =
@@ -415,7 +451,7 @@ module EmitScopeGen =
             Scope = scope
         }
 
-    let private applyOp (applied : Applied) (op : Op) : Applied =
+    let rec private applyOp (applied : Applied) (op : Op) : Applied =
         let scope = applied.Scope
         let typeDefCount = (EmitScope.typeDefs scope).Count
         let methodCount = (EmitScope.methodDefs scope).Count
@@ -737,22 +773,45 @@ module EmitScopeGen =
                 }
 
             withScope (EmitScope.addProperty row applied.Scope |> snd) applied
-        | Op.MethodSemantics (propertyChoice, semantics, methodChoice) ->
-            let propertyCount = (EmitScope.properties scope).Count
+        | Op.Event (owner, name, flags, eventType) ->
+            let name, applied = intern name applied
 
-            if propertyCount = 0 || methodCount = 0 then
+            let row : EventRow =
+                {
+                    Owner = TypeDefRid (owner % typeDefCount + 1)
+                    Flags = (pick flags eventFlagChoices).Value
+                    Name = name
+                    EventType = (pick eventType (typeDefOrRefs scope)).Value
+                }
+
+            withScope (EmitScope.addEvent row applied.Scope |> snd) applied
+        | Op.MethodSemantics (associationChoice, semantics, methodChoice) ->
+            applyOp applied (Op.MethodSemanticsRun (associationChoice, semantics, methodChoice, 1))
+        | Op.MethodSemanticsRun (associationChoice, semantics, methodChoice, count) ->
+            let propertyCount = (EmitScope.properties scope).Count
+            let eventCount = (EmitScope.events scope).Count
+
+            if propertyCount + eventCount = 0 || methodCount = 0 then
                 applied
             else
-                let row : MethodSemanticsRow =
-                    {
-                        Semantics = (pick semantics semanticsChoices).Value
-                        Method = MethodDefRid (methodChoice % methodCount + 1)
-                        Association =
-                            HasSemantics.Property
-                                (EmitScope.tryPropertyRid (propertyChoice % propertyCount + 1) scope).Value
-                    }
+                let association =
+                    match associationChoice % (propertyCount + eventCount) with
+                    | i when i < propertyCount -> HasSemantics.Property (EmitScope.tryPropertyRid (i + 1) scope).Value
+                    | i -> HasSemantics.Event (EmitScope.tryEventRid (i - propertyCount + 1) scope).Value
 
-                withScope (EmitScope.addMethodSemantics row applied.Scope) applied
+                let scope =
+                    (applied.Scope, [ 0 .. count - 1 ])
+                    ||> List.fold (fun scope i ->
+                        EmitScope.addMethodSemantics
+                            {
+                                Semantics = (pick semantics semanticsChoices).Value
+                                Method = MethodDefRid ((methodChoice + i) % methodCount + 1)
+                                Association = association
+                            }
+                            scope
+                    )
+
+                withScope scope applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
@@ -775,16 +834,20 @@ module EmitScopeGen =
             }
             scope
 
-    let apply (mvid : Guid) (ops : Op list) : EmitScope =
-        let start : Applied =
-            {
-                Scope = emptyScope mvid
-                ParamCounts = []
-                ParamSequences = Set.empty
-                MethodRefs = []
-            }
+    let private start (mvid : Guid) : Applied =
+        {
+            Scope = emptyScope mvid
+            ParamCounts = []
+            ParamSequences = Set.empty
+            MethodRefs = []
+        }
 
-        (List.fold applyOp start ops).Scope
+    let apply (mvid : Guid) (ops : Op list) : EmitScope =
+        (List.fold applyOp (start mvid) ops).Scope
+
+    /// The scope before any operation, then after each in turn: `apply` of each prefix of `ops`.
+    let applySteps (mvid : Guid) (ops : Op list) : EmitScope list =
+        List.scan applyOp (start mvid) ops |> List.map _.Scope
 
     let genGuid : Gen<Guid> =
         Gen.arrayOfLength 16 (Gen.choose (0, 255) |> Gen.map byte) |> Gen.map Guid
@@ -851,6 +914,9 @@ module EmitScopeGen =
             for i in 1 .. reader.GetTableRowCount TableIndex.MemberRef do
                 let r = reader.GetMemberReference (MetadataTokens.MemberReferenceHandle i)
                 yield (TableIndex.MemberRef, i), box (token r.Parent, heap r.Name, blob r.Signature)
+            for i in 1 .. reader.GetTableRowCount TableIndex.Event do
+                let r = reader.GetEventDefinition (MetadataTokens.EventDefinitionHandle i)
+                yield (TableIndex.Event, i), box (r.Attributes, heap r.Name, token r.Type)
             for i in 1 .. reader.GetTableRowCount TableIndex.StandAloneSig do
                 let r = reader.GetStandaloneSignature (MetadataTokens.StandaloneSignatureHandle i)
                 yield (TableIndex.StandAloneSig, i), box (blob r.Signature)
@@ -895,16 +961,17 @@ module EmitScopeGen =
         )
 
     /// <summary>
-    /// The `PropertyMap` rows (each parent's TypeDef RID and its list's start) and the `PropertyPtr`
-    /// contents CoreCLR's read-write metadata holds after adding properties of these owners (TypeDef RIDs, in
-    /// definition order), replayed one property at a time as <c>RegMeta::DefineProperty</c> and
-    /// <c>CMiniMdRW::AddPropertyToPropertyMap</c> add them: a map row at an owner's first property; the
-    /// property appended directly to its map's run while that map is the last and no pointer table has
-    /// started (<c>AddChildRowDirectForParent</c>), and otherwise through a <c>PropertyPtr</c> at the end of
-    /// its map's run (<c>AddChildRowIndirectForParent</c>). <c>None</c> when no pointer table started.
+    /// The map rows (each parent's TypeDef RID and its list's start) and the pointer table's contents that
+    /// CoreCLR's read-write metadata holds after adding members of these owners (TypeDef RIDs, in definition
+    /// order), replayed one member at a time as <c>RegMeta::DefineProperty</c> with
+    /// <c>CMiniMdRW::AddPropertyToPropertyMap</c> adds a property, and <c>RegMeta::_DefineEvent</c> with
+    /// <c>AddEventToEventMap</c> an event: a map row at an owner's first member; the member appended
+    /// directly to its map's run while that map is the last and no pointer table has started
+    /// (<c>AddChildRowDirectForParent</c>), and otherwise through the pointer table at the end of its map's
+    /// run (<c>AddChildRowIndirectForParent</c>). <c>None</c> when no pointer table started.
     /// </summary>
-    let propertyMapReplay (owners : int list) : (int * int) list * int list option =
-        // Each map's parent and its run of property RIDs, in map order.
+    let ownerMapReplay (owners : int list) : (int * int) list * int list option =
+        // Each map's parent and its run of member RIDs, in map order.
         let mutable maps : (int * int list) list = []
         let mutable indirect = false
 
@@ -960,15 +1027,14 @@ module EmitScopeGen =
                     ]
         ]
 
-    /// The image's `PropertyMap` rows, each its parent's TypeDef RID and its list's start, for an image
-    /// whose tables are small enough for two-byte columns.
-    let propertyMapRows (pe : PEReader) (reader : MetadataReader) : (int * int) list =
-        rawRows pe reader TableIndex.PropertyMap [ 2 ; 2 ]
-        |> List.map (fun row -> row.[0], row.[1])
+    /// The image's rows of a map table (`PropertyMap` or `EventMap`), each its parent's TypeDef RID and
+    /// its list's start, for an image whose tables are small enough for two-byte columns.
+    let mapRows (pe : PEReader) (reader : MetadataReader) (table : TableIndex) : (int * int) list =
+        rawRows pe reader table [ 2 ; 2 ] |> List.map (fun row -> row.[0], row.[1])
 
-    /// The image's `PropertyPtr` contents, or `None` when it has none.
-    let propertyPtrRows (pe : PEReader) (reader : MetadataReader) : int list option =
-        match rawRows pe reader TableIndex.PropertyPtr [ 2 ] with
+    /// The image's contents of a pointer table (`PropertyPtr` or `EventPtr`), or `None` when it has none.
+    let pointerRows (pe : PEReader) (reader : MetadataReader) (table : TableIndex) : int list option =
+        match rawRows pe reader table [ 2 ] with
         | [] -> None
         | rows -> Some (rows |> List.map List.head)
 

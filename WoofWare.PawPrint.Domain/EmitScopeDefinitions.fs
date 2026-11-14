@@ -514,3 +514,42 @@ module EmitScopeDefinitions =
                 Association = association
             }
             scope
+
+    /// `evReservedMask`: `evRTSpecialName`, which only the emitter sets.
+    let private reservedEventFlags : int = 0x0400
+
+    /// <summary>
+    /// Define an event of <paramref name="owner"/>, as <c>RegMeta::_DefineEvent</c> does in a dynamic
+    /// module, whose emitter does not check for a duplicate (<c>MDDupEvent</c> is not set): a new row, at
+    /// the next RID, however many of the type's events share its name, holding the name and the event type
+    /// as given.
+    /// </summary>
+    /// <remarks>
+    /// The flags are as <c>_SetEventProps1</c> stores them: 0 for <c>-1</c>, which leaves them unset;
+    /// otherwise without <c>evReservedMask</c> (<c>RTSpecialName</c>, which the emitter keeps for itself), in
+    /// the column's two bytes. An empty name is stored, as <c>RegMeta</c> stores any name.
+    /// </remarks>
+    let defineEvent
+        (owner : TypeDefRid)
+        (name : string)
+        (eventType : TypeDefOrRef)
+        (flags : int)
+        (scope : EmitScope)
+        : EventRid * EmitScope
+        =
+        let flags =
+            if flags = -1 then
+                0
+            else
+                flags &&& ~~~reservedEventFlags &&& 0xFFFF
+
+        let name, scope = EmitScope.internString name scope
+
+        EmitScope.addEvent
+            {
+                Owner = owner
+                Flags = enum<EventAttributes> flags
+                Name = name
+                EventType = eventType
+            }
+            scope
