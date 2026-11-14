@@ -85,9 +85,6 @@ module TestEmitScopeImage =
         |> Seq.map (fun (i, _) -> i + 1)
         |> List.ofSeq
 
-    /// Every row of the scope reads back from the image with the same columns at the RID the scope gave
-    /// it, and every heap reference at the offset the scope gave it; and the `ParamPtr` table and every
-    /// method's run of parameters are those of `replay`, CoreCLR's tables after the same definitions.
     /// The metadata token of a custom attribute's owner, as SRM reads the `Parent` column.
     let private ownerToken (owner : HasCustomAttribute) : int =
         match owner with
@@ -156,6 +153,9 @@ module TestEmitScopeImage =
             inRidOrder (ParameterHandle.op_Implicit (MetadataTokens.ParameterHandle i))
             |> shouldEqual (expectedOf (0x08000000 ||| i))
 
+    /// Every row of the scope reads back from the image with the same columns at the RID the scope gave
+    /// it, and every heap reference at the offset the scope gave it; and the `ParamPtr` table and every
+    /// method's run of parameters are those of `replay`, CoreCLR's tables after the same definitions.
     let private checkRoundTrip (replay : ParamTableReplay.State) (scope : EmitScope) (image : byte[]) : unit =
         let pe, reader = readImage image
         use _ = pe
