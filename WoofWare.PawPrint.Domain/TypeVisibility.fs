@@ -15,7 +15,19 @@ module TypeVisibility =
     /// last is <c>Public</c>. Total over all eight visibility values and every chain; an empty chain
     /// names no type, and is false.
     /// </summary>
-    let isChainExternallyVisible (chain : TypeAttributes list) : bool = failwith "TODO 5u: not yet implemented"
+    let isChainExternallyVisible (chain : TypeAttributes list) : bool =
+        // CoreCLR returns true at a `tdPublic` innermost level and walks out through `tdNestedPublic`
+        // enclosers to the first that is not, asking whether it is `tdPublic`. On a chain a reader
+        // admits (nested levels inside, one top-level level last) that is this sentence.
+        let rec walk (levels : TypeAttributes list) : bool =
+            match levels with
+            | [] -> false
+            | [ last ] -> last &&& TypeAttributes.VisibilityMask = TypeAttributes.Public
+            | level :: outer ->
+                level &&& TypeAttributes.VisibilityMask = TypeAttributes.NestedPublic
+                && walk outer
+
+        walk chain
 
     /// <summary>
     /// The <c>TypeAttributes</c> of <paramref name="typeInfo"/> and of each type enclosing it, innermost
@@ -32,7 +44,28 @@ module TypeVisibility =
         (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>)
         : TypeAttributes list
         =
-        failwith "TODO 5u: not yet implemented"
+        let rec gather
+            (current : TypeInfo<GenericParamFromMetadata, TypeDefn>)
+            (accumulated : TypeAttributes list)
+            (length : int)
+            : TypeAttributes list
+            =
+            if length > assembly.TypeDefs.Count then
+                failwith
+                    $"TypeVisibility.nestingChain: the enclosing types of %s{typeInfo.Namespace}.%s{typeInfo.Name} in %s{assembly.DefinitionFullName} form a cycle among its NestedClass rows"
+
+            let accumulated = current.TypeAttributes :: accumulated
+
+            if not current.IsNested then
+                List.rev accumulated
+            else
+                match assembly.TypeDefs.TryGetValue current.DeclaringType with
+                | true, encloser -> gather encloser accumulated (length + 1)
+                | false, _ ->
+                    failwith
+                        $"TypeVisibility.nestingChain: %s{current.Name}, enclosing %s{typeInfo.Namespace}.%s{typeInfo.Name} or itself, names an encloser that is not a TypeDef of %s{assembly.DefinitionFullName}"
+
+        gather typeInfo [] 1
 
     /// <summary>
     /// <c>isChainExternallyVisible</c> of <paramref name="typeInfo"/>'s nesting chain in
