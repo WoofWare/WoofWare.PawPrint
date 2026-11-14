@@ -264,6 +264,16 @@ module internal BadImageFormatMessages =
     /// abstract method.
     let badIl : string = "Bad IL format."
 
+/// The message CoreCLR attaches to the `InvalidOperationException` its JIT raises for a `newobj`
+/// of an abstract class, `InvalidOperation_CantInstantiateAbstractClass`, in its invariant-culture
+/// wording.
+[<RequireQualifiedAccess>]
+module internal InvalidOperationMessages =
+
+    /// `InvalidOperation_CantInstantiateAbstractClass`, from `CEEInfo::getNewHelper`.
+    let cantInstantiateAbstractClass : string =
+        "Instances of abstract classes cannot be created."
+
 /// Helper functions for exception handling
 [<RequireQualifiedAccess>]
 module ExceptionHandling =

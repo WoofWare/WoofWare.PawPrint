@@ -8,8 +8,15 @@ open Microsoft.Extensions.Logging
 [<RequireQualifiedAccess>]
 type internal CompilationFailure =
     /// A `call` or `ldftn` names an abstract method itself, rather than through a `constrained.`
-    /// prefix that resolves it: `BadImageFormatException`, "Bad IL format." (`BFA_BAD_IL`).
+    /// prefix that resolves it, or a `newobj` names an abstract method: `BadImageFormatException`,
+    /// "Bad IL format." (`BFA_BAD_IL`).
     | NamesAbstractMethod
+    /// A `newobj` names a static method that is not abstract (`NewobjTarget.StaticMethod`):
+    /// `InvalidProgramException`.
+    | NewobjOfStaticMethod
+    /// A `newobj` names an instance constructor of an abstract class (`NewobjTarget.AbstractClass`):
+    /// `InvalidOperationException`, "Instances of abstract classes cannot be created."
+    | InstantiatesAbstractClass
     /// The token names a type CoreCLR refuses as the instruction's operand (`TypeOperand.refusal`),
     /// or names its member through one: `InvalidProgramException`.
     | RefusesTypeOperand of TypeOperandRefusal

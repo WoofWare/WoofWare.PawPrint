@@ -36,7 +36,7 @@ module NewobjTarget =
     /// `IsMdInstanceInitializer` says (`inc/corhdr.h`): `RTSpecialName` set and the name `.ctor`.
     /// A method named `.ctor` without `RTSpecialName` is not one.
     let isInstanceConstructor (attributes : MethodAttributes) (name : string) : bool =
-        failwith "TODO: NewobjTarget.isInstanceConstructor is not implemented yet"
+        attributes.HasFlag MethodAttributes.RTSpecialName && name = ".ctor"
 
     /// What the JIT makes of a `newobj` naming a method with attributes `method` and name
     /// `methodName`, declared on a type with attributes `declaringType`, which is a value type if
@@ -57,4 +57,13 @@ module NewobjTarget =
         (declaringTypeIsValueType : bool)
         : NewobjTarget
         =
-        failwith "TODO: NewobjTarget.classify is not implemented yet"
+        if method.HasFlag MethodAttributes.Abstract then
+            NewobjTarget.AbstractMethod
+        elif method.HasFlag MethodAttributes.Static then
+            NewobjTarget.StaticMethod
+        elif not (isInstanceConstructor method methodName) then
+            NewobjTarget.NotInstanceConstructor
+        elif declaringType.HasFlag TypeAttributes.Abstract && not declaringTypeIsValueType then
+            NewobjTarget.AbstractClass
+        else
+            NewobjTarget.Constructs

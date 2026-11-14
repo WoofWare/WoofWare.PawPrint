@@ -659,9 +659,9 @@ module internal UnaryMetadataCallOps =
         | IlMachineStateExecution.CallCommitment.Raised -> state, WhatWeDid.Executed
 
     /// Raise what CoreCLR raises for a `call` or `ldftn` whose operand names an abstract method
-    /// directly, rather than through a `constrained.` prefix that resolves it: a
-    /// `BadImageFormatException` with the JIT's "Bad IL format.". The program counter is left on
-    /// the instruction, for exception dispatch.
+    /// directly, rather than through a `constrained.` prefix that resolves it, and for a `newobj`
+    /// naming one: a `BadImageFormatException` with the JIT's "Bad IL format.". The program counter
+    /// is left on the instruction, for exception dispatch.
     ///
     /// Real .NET raises it when it compiles the method holding the instruction, so it arrives
     /// before that method has run anything, whether or not the instruction would have been reached,
@@ -721,6 +721,31 @@ module internal UnaryMetadataCallOps =
         =
         match failure with
         | CompilationFailure.NamesAbstractMethod -> raiseNamedAbstractMethod ctx state
+        | CompilationFailure.NewobjOfStaticMethod ->
+            // CoreCLR's message here is InvalidProgramException's default (measured).
+            IlMachineStateExecution.raiseRuntimeException
+                ctx.LoggerFactory
+                ctx.BaseClassTypes
+                (IlMachineStateExecution.RaiseOrigin.InstructionResolution (
+                    ResolutionFault.TokenBinding,
+                    ctx.BaseClassTypes.InvalidProgramException
+                ))
+                []
+                ctx.Thread
+                state
+        | CompilationFailure.InstantiatesAbstractClass ->
+            IlMachineStateExecution.raiseRuntimeException
+                ctx.LoggerFactory
+                ctx.BaseClassTypes
+                (IlMachineStateExecution.RaiseOrigin.InstructionResolution (
+                    ResolutionFault.TokenBinding,
+                    ctx.BaseClassTypes.InvalidOperationException
+                ))
+                [
+                    RuntimeExceptionField.Message InvalidOperationMessages.cantInstantiateAbstractClass
+                ]
+                ctx.Thread
+                state
         | CompilationFailure.RefusesTypeOperand refusal -> UnaryMetadataIlOpContext.raiseTypeRefusal ctx refusal state
         | CompilationFailure.ViolatesConstraints refusal ->
             UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state

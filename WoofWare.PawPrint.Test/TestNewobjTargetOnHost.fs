@@ -125,7 +125,7 @@ module TestNewobjTargetOnHost =
                     mismatches.Add
                         $"%s{t.FullName}: PawPrint reads IsValueType %b{isValueType}, reflection %b{t.IsValueType}"
 
-                for m in t.GetMembers flags |> Seq.ofArray |> Seq.choose methodBase do
+                for m in t.GetMembers flags |> Seq.choose methodBase do
                     if
                         not m.ContainsGenericParameters
                         && not (m.CallingConvention.HasFlag CallingConventions.VarArgs)
@@ -177,7 +177,8 @@ module TestNewobjTargetOnHost =
 
                             note "static abstract interface member" (m.IsStatic && m.IsAbstract && t.IsInterface)
                             note "static method of an interface" (m.IsStatic && not m.IsAbstract && t.IsInterface)
-                            note "class constructor" (m.IsStatic && m.IsConstructor)
+                            // `IsConstructor` is false of a class constructor.
+                            note "class constructor" (m.IsStatic && (m :? ConstructorInfo))
 
                             note
                                 "value type's constructor"
@@ -186,6 +187,8 @@ module TestNewobjTargetOnHost =
                             note "byref-like struct's constructor" (m.IsConstructor && not m.IsStatic && t.IsByRefLike)
                             note "String's constructor" (m.IsConstructor && t = typeof<string>)
                             note "Delegate's constructor" (m.IsConstructor && not m.IsStatic && t = typeof<Delegate>)
+
+        TestContext.Out.WriteLine $"enumerated %d{enumerated}, compiled %d{compiled}, skipped %d{skipped}: %A{outcomes}"
 
         mismatches |> Seq.truncate 50 |> List.ofSeq |> shouldEqual []
         compiled + skipped |> shouldEqual enumerated
