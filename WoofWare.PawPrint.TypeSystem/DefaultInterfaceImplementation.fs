@@ -42,8 +42,11 @@ module internal DefaultInterfaceImplementation =
     /// it is the one CoreCLR's search meets first: for an instance method the first body in
     /// `level`'s method table, in slot order (the MethodImpl search of
     /// `TryGetCandidateImplementation`), and for a static method the body of the first such
-    /// MethodImpl row (`MethodTable::TryResolveVirtualStaticMethodOnThisType`). A type the search
-    /// reaches that does not bind is the failure.
+    /// MethodImpl row (`MethodTable::TryResolveVirtualStaticMethodOnThisType`) in the order CoreCLR
+    /// finds `level`'s rows: for a type of a dynamic module, `ReadWriteMetadataLookup.rowsOfKeySinceCreation`
+    /// over its module's MethodImpl row counts. Where that gives two orders whose first rows have
+    /// different bodies, CoreCLR's answer depends on its own caches, and this fails with a TODO naming
+    /// the condition. A type the search reaches that does not bind is the failure.
     let internal implementationOnType
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
@@ -130,7 +133,42 @@ module internal DefaultInterfaceImplementation =
                     | state, Ok None -> first state rows
                     | found -> found
 
-            first state rows
+            // `rows` is in image order, which for a type of a dynamic module is the order its rows were added.
+            // CoreCLR reads a dynamic module's rows from its read-write metadata, counted in the module of the
+            // type whose rows these are.
+            match state._LoadedAssemblies.TryMethodImplRowCounts levelTy.Identity with
+            | None -> first state rows
+            | Some counts ->
+
+            match ReadWriteMetadataLookup.rowsOfKeySinceCreation counts.AtCreation counts.Now rows with
+            | RowsSinceCreation.OneOrder rows -> first state rows
+            | RowsSinceCreation.TwoOrders (inOrderAdded, reversed) ->
+                match first state inOrderAdded with
+                | state, Error failure -> state, Error failure
+                | state, Ok earlier ->
+
+                match first state reversed with
+                | state, Error failure -> state, Error failure
+                | state, Ok now ->
+
+                let identity
+                    (body : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>)
+                    =
+                    body.DeclaringAssemblyFullName, body.IdentityKey
+
+                match earlier, now with
+                | Some earlier, Some now when identity earlier <> identity now ->
+                    let methodName =
+                        match method with
+                        | assemblyName, (Some (handle, _), _) ->
+                            match state.LoadedAssembly assemblyName with
+                            | Some declaring -> declaring.Methods.[handle].Name
+                            | None -> $"a method of %s{assemblyName}"
+                        | _, _ -> "a synthesised method"
+
+                    failwith
+                        $"TODO: static virtual dispatch: the MethodImpl rows of %s{levelTy.Name} that implement %s{methodName} give %s{earlier.Name} in the order added and %s{now.Name} in reverse; %s{levelTy.Name} was created when its module %s{levelTy.Identity.AssemblyFullName} had %d{counts.AtCreation} MethodImpl rows, and the module now has %d{counts.Now}. CoreCLR walks them in the order added below 25 rows and in reverse from 25, and caches a resolution where it makes one, so its answer depends on whether it resolved this call before the module reached 25 rows"
+                | _, _ -> state, Ok now
         else
             let state, bodies =
                 (state, [], rows)

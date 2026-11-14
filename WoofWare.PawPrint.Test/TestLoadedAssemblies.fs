@@ -879,12 +879,17 @@ module TestLoadedAssemblies =
                 }
                 scope
 
+        let counts (loaded : LoadedAssemblies) (name : string) (typeDef : TypeDefRid) =
+            loaded.TryMethodImplRowCounts (
+                ResolvedTypeIdentity.ofDefinitionInAssembly name (MetadataTokens.TypeDefinitionHandle typeDef.Rid)
+            )
+
         let scope = scope |> impl first 1 |> impl first 1
         let loaded, dynamic = registerDynamic scope LoadedAssemblies.empty
         let name = dynamic.DefinitionFullName
         let loaded = loaded.WithCreatedType name first
 
-        loaded.TryMethodImplRowCounts name first
+        counts loaded name first
         |> shouldEqual (
             Some
                 {
@@ -897,7 +902,7 @@ module TestLoadedAssemblies =
         let loaded, _ = loaded.WithEmitScope loggerFactory name scope
         let loaded = loaded.WithCreatedType name second
 
-        loaded.TryMethodImplRowCounts name first
+        counts loaded name first
         |> shouldEqual (
             Some
                 {
@@ -906,7 +911,7 @@ module TestLoadedAssemblies =
                 }
         )
 
-        loaded.TryMethodImplRowCounts name second
+        counts loaded name second
         |> shouldEqual (
             Some
                 {
@@ -920,7 +925,7 @@ module TestLoadedAssemblies =
         let loaded, otherDynamic = registerDynamic otherScope loaded
         let loaded = loaded.WithCreatedType otherDynamic.DefinitionFullName other
 
-        loaded.TryMethodImplRowCounts otherDynamic.DefinitionFullName other
+        counts loaded otherDynamic.DefinitionFullName other
         |> shouldEqual (
             Some
                 {
@@ -929,16 +934,15 @@ module TestLoadedAssemblies =
                 }
         )
 
-        loaded.TryMethodImplRowCounts "Elsewhere, Version=1.0.0.0" first
-        |> shouldEqual None
+        counts loaded "Elsewhere, Version=1.0.0.0" first |> shouldEqual None
 
         // A type not yet created has been read by nothing.
         let uncreated, extended = withType "Fourth" scope
         let loaded, _ = loaded.WithEmitScope loggerFactory name extended
 
-        match thrownBy (fun () -> loaded.TryMethodImplRowCounts name uncreated) with
+        match thrownBy (fun () -> counts loaded name uncreated) with
         | None -> Assert.Fail "Expected the counts of a type that is not created to be refused"
-        | Some message -> message |> shouldContainText "is not created"
+        | Some message -> message |> shouldContainText "is not a created type"
 
     [<Test>]
     let ``a type is created once, and only a type the scope has`` () : unit =

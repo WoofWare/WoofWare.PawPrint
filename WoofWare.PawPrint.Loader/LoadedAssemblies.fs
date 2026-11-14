@@ -168,23 +168,33 @@ type LoadedAssemblies =
     /// <summary>
     /// For a type of a dynamic assembly, the number of <c>MethodImpl</c> rows the assembly's scope held when
     /// the runtime created the type, and holds now, read together so that neither can come from another
-    /// assembly. <c>None</c> if no dynamic assembly has this definition identity.
+    /// assembly. <c>None</c> if the type is not of a dynamic assembly.
     /// </summary>
     /// <remarks>Crashes if the assembly is dynamic and the type is not created.</remarks>
-    member this.TryMethodImplRowCounts (fullName : string) (typeDef : TypeDefRid) : MethodImplRowCounts option =
-        match this.Dynamic.TryGetValue fullName with
+    member this.TryMethodImplRowCounts (identity : ResolvedTypeIdentity) : MethodImplRowCounts option =
+        match this.Dynamic.TryGetValue identity.AssemblyFullName with
         | false, _ -> None
         | true, content ->
-            match content.Created.TryGetValue typeDef with
-            | true, creation ->
+            let rid = MetadataTokens.GetRowNumber identity.TypeDefinition.Get
+
+            let creation =
+                match EmitScope.tryTypeDefRid rid content.Scope with
+                | None -> None
+                | Some typeDef ->
+                    match content.Created.TryGetValue typeDef with
+                    | true, creation -> Some creation
+                    | false, _ -> None
+
+            match creation with
+            | Some creation ->
                 {
                     AtCreation = creation.MethodImplRowsAtCreation
                     Now = (EmitScope.methodImpls content.Scope).Count
                 }
                 |> Some
-            | false, _ ->
+            | None ->
                 failwith
-                    $"TryMethodImplRowCounts: TypeDef %d{typeDef.Rid} of the dynamic assembly %s{fullName} is not created, so nothing has read its rows"
+                    $"TryMethodImplRowCounts: TypeDef %d{rid} of the dynamic assembly %s{identity.AssemblyFullName} is not a created type of its scope, so nothing has read its rows"
 
     /// <summary>
     /// True if <paramref name="identity"/> is a type of a dynamic assembly that the runtime has not
