@@ -52,6 +52,9 @@ module TestFabricatedFieldLayoutOffset =
             RowB : uint32 option
             /// `[InlineArray(n)]`, whose type declares field `A` alone.
             InlineArray : int option
+            /// The spec, earlier in the same image, this type derives from; otherwise `object` or
+            /// `ValueType`.
+            Parent : string option
         }
 
     /// The placeholder offset `PersistedAssemblyBuilder` writes for row `index`, later patched.
@@ -75,37 +78,46 @@ module TestFabricatedFieldLayoutOffset =
                 field.SetOffset p
                 wanted <- wanted.Add (uint32 p, offset)
 
-        let types =
-            specs
-            |> List.map (fun spec ->
-                let attrs =
-                    TypeAttributes.Public
-                    ||| TypeAttributes.Sealed
-                    ||| TypeAttributes.ExplicitLayout
+        let mutable defined : Map<string, TypeBuilder> = Map.empty
 
-                let parent = if spec.IsClass then typeof<obj> else typeof<ValueType>
-                let t = modul.DefineType (spec.Name, attrs, parent)
-                setRow (t.DefineField ("A", typeof<int>, FieldAttributes.Public)) spec.RowA
+        specs
+        |> List.iter (fun spec ->
+            let isParent = specs |> List.exists (fun other -> other.Parent = Some spec.Name)
 
-                match spec.InlineArray with
-                | None -> setRow (t.DefineField ("B", typeof<int>, FieldAttributes.Public)) spec.RowB
-                | Some length ->
-                    t.SetCustomAttribute (
-                        CustomAttributeBuilder (
-                            typeof<System.Runtime.CompilerServices.InlineArrayAttribute>.GetConstructor
-                                [| typeof<int> |],
-                            [| box length |]
-                        )
+            let attrs =
+                TypeAttributes.Public
+                ||| TypeAttributes.ExplicitLayout
+                ||| (if isParent then
+                         TypeAttributes.Class
+                     else
+                         TypeAttributes.Sealed)
+
+            let parent : Type =
+                match spec.Parent with
+                | Some name -> defined.[name]
+                | None -> if spec.IsClass then typeof<obj> else typeof<ValueType>
+
+            let t = modul.DefineType (spec.Name, attrs, parent)
+            defined <- defined.Add (spec.Name, t)
+            setRow (t.DefineField ("A", typeof<int>, FieldAttributes.Public)) spec.RowA
+
+            match spec.InlineArray with
+            | None -> setRow (t.DefineField ("B", typeof<int>, FieldAttributes.Public)) spec.RowB
+            | Some length ->
+                t.SetCustomAttribute (
+                    CustomAttributeBuilder (
+                        typeof<System.Runtime.CompilerServices.InlineArrayAttribute>.GetConstructor [| typeof<int> |],
+                        [| box length |]
                     )
+                )
 
-                if spec.IsClass then
-                    t.DefineDefaultConstructor MethodAttributes.Public |> ignore<ConstructorBuilder>
+            if spec.IsClass then
+                t.DefineDefaultConstructor MethodAttributes.Public |> ignore<ConstructorBuilder>
 
-                t
-            )
-
-        for t in types do
+            // Created at once, because a derived type's default constructor looks up its
+            // parent's, which a `TypeBuilder` answers only once created.
             t.CreateType () |> ignore<Type>
+        )
 
         let bytes =
             use image = new MemoryStream ()
@@ -182,6 +194,7 @@ module TestFabricatedFieldLayoutOffset =
                             RowA = None
                             RowB = Some offset
                             InlineArray = None
+                            Parent = None
                         }
             for isClass in [ false ; true ] do
                 {
@@ -191,6 +204,7 @@ module TestFabricatedFieldLayoutOffset =
                     RowA = Some 0u
                     RowB = Some 0x10u
                     InlineArray = None
+                    Parent = None
                 }
         ]
 
@@ -364,6 +378,7 @@ public static class Driver
                             RowA = rowA
                             RowB = Some rowB
                             InlineArray = None
+                            Parent = None
                         },
                         exitCode,
                         refusal
@@ -406,6 +421,7 @@ public static class Driver
                 RowA = Some 0x80000000u
                 RowB = None
                 InlineArray = Some 3
+                Parent = None
             }
 
         FabricatedGuest.run
@@ -450,6 +466,7 @@ public static class Driver
                 RowA = Some 0u
                 RowB = None
                 InlineArray = Some 3
+                Parent = None
             }
 
         let onHost, onPawPrint =
@@ -471,3 +488,54 @@ public static class Driver
             then
                 failwith
                     $"expected PawPrint's refusal to name IDS_CLASSLOAD_INLINE_ARRAY_EXPLICIT; got:\n%s{String.concat Environment.NewLine messages}"
+
+    /// CoreCLR checks an explicit offset after adding the parent's instance size: `B` at 0x7FFFFFFE
+    /// alone is only beyond `FIELD_OFFSET_LAST_REAL_OFFSET`, but over an 8-byte parent it is above
+    /// `Int32.MaxValue`.
+    [<Test>]
+    let ``an explicit offset is checked with the parent's size added`` () : unit =
+        let parent =
+            {
+                Name = "SequentialBase"
+                Kind = Kind.Sequential
+                IsClass = true
+                RowA = None
+                RowB = None
+                InlineArray = None
+                Parent = None
+            }
+
+        let derived =
+            {
+                Name = "ExplicitDerived"
+                Kind = Kind.Explicit
+                IsClass = true
+                RowA = Some 0u
+                RowB = Some 0x7FFFFFFEu
+                InlineArray = None
+                Parent = Some parent.Name
+            }
+
+        let onHost, onPawPrint =
+            FabricatedGuest.runOnBoth
+                "Refused"
+                (fabricate "Refused" [ parent ; derived ])
+                "RefusedDriver"
+                (refusalDriver derived)
+
+        onHost |> shouldEqual (RealRuntimeResult.NormalExit typeLoadNegativeOffset)
+
+        match onPawPrint with
+        | FabricatedOutcome.Exited code ->
+            failwith $"PawPrint ran the guest to exit code %d{code}, but CoreCLR refuses its type"
+        | FabricatedOutcome.Failed e ->
+            let messages = messages e
+
+            if
+                not (
+                    messages
+                    |> List.exists (fun m -> m.Contains "IDS_CLASSLOAD_NSTRUCT_NEGATIVE_OFFSET")
+                )
+            then
+                failwith
+                    $"expected PawPrint's refusal to name IDS_CLASSLOAD_NSTRUCT_NEGATIVE_OFFSET; got:\n%s{String.concat Environment.NewLine messages}"

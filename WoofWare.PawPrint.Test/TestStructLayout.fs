@@ -561,16 +561,15 @@ module TestStructLayout =
             TypeLayoutKind.ofTypeAttributes attrs |> shouldEqual expected
 
     [<Test>]
-    let ``A declared-Auto type carrying field offsets is rejected`` () : unit =
-        // Explicit layout is read off the fields, so a declared-`Auto` type that carries offsets
-        // would silently be laid out explicitly rather than by the algorithm its kind names. That
-        // combination cannot arise from the base-chain flattening — `applied` reports `Auto` only
-        // for value types, which inherit no instance fields — so it is malformed input, and is
-        // refused rather than reinterpreted.
+    let ``Layout places fields at their FieldLayout rows only in a declared-Explicit type`` () : unit =
+        // CoreCLR asks whether the type declares explicit layout, not whether its fields have rows:
+        // an auto- or sequential-layout type loads with rows of any value and ignores them, and an
+        // explicit-layout type whose instance field has no row does not load
+        // (`TestFabricatedFieldLayoutOffset` measures both on real .NET).
         let withOffsets =
             [
-                cliField "a" (CliType.Numeric (CliNumericType.Int32 1)) (Some 0)
-                cliField "b" (CliType.Numeric (CliNumericType.Int32 2)) (Some 4)
+                cliField "a" (CliType.Numeric (CliNumericType.Int32 1)) (Some 4)
+                cliField "b" (CliType.Numeric (CliNumericType.Int32 2)) (Some 0)
             ]
 
         let withoutOffsets =
@@ -579,31 +578,31 @@ module TestStructLayout =
                 cliField "b" (CliType.Numeric (CliNumericType.Int32 2)) None
             ]
 
+        for kind in [ TypeLayoutKind.Auto ; TypeLayoutKind.Sequential ] do
+            fingerprint (ofFieldsWithKind kind Layout.Default withOffsets)
+            |> shouldEqual (fingerprint (ofFieldsWithKind kind Layout.Default withoutOffsets))
+
+        let sequential =
+            ofFieldsWithKind TypeLayoutKind.Sequential Layout.Default withOffsets
+
+        CliValueType.DereferenceFieldAt 0 4 sequential
+        |> shouldEqual (CliType.Numeric (CliNumericType.Int32 1))
+
+        let explicitLayout =
+            ofFieldsWithKind TypeLayoutKind.Explicit Layout.Default withOffsets
+
+        CliValueType.DereferenceFieldAt 0 4 explicitLayout
+        |> shouldEqual (CliType.Numeric (CliNumericType.Int32 2))
+
+        CliValueType.DereferenceFieldAt 4 4 explicitLayout
+        |> shouldEqual (CliType.Numeric (CliNumericType.Int32 1))
+
         let exn =
-            Assert.Throws<exn> (fun () -> ofFieldsWithKind TypeLayoutKind.Auto Layout.Default withOffsets |> ignore)
+            Assert.Throws<exn> (fun () ->
+                ofFieldsWithKind TypeLayoutKind.Explicit Layout.Default withoutOffsets |> ignore
+            )
 
-        exn.Message |> shouldContainText "carry a FieldOffset"
-
-        // Every other combination of kind and field shape is reachable, because a reference type's
-        // flattened base chain mixes fields governed by different kinds — see
-        // `LayoutKindAcrossInheritance.cs`, where an explicit-layout class presents only its
-        // sequential base's offset-free fields. They are laid out, not refused.
-        for kind in [ TypeLayoutKind.Explicit ; TypeLayoutKind.Sequential ] do
-            ofFieldsWithKind kind Layout.Default withOffsets |> ignore
-            ofFieldsWithKind kind Layout.Default withoutOffsets |> ignore
-
-        // A declared-`Explicit` type whose fields carry no offsets falls back to declared-order
-        // placement.
-        let fallback =
-            ofFieldsWithKind TypeLayoutKind.Explicit Layout.Default withoutOffsets
-
-        (CliValueType.SizeOf fallback).Size |> shouldEqual 8
-
-        tryFieldAt 0 4 fallback
-        |> shouldEqual (Some (CliType.Numeric (CliNumericType.Int32 1)))
-
-        tryFieldAt 4 4 fallback
-        |> shouldEqual (Some (CliType.Numeric (CliNumericType.Int32 2)))
+        exn.Message |> shouldContainText "IDS_CLASSLOAD_NSTRUCT_EXPLICIT_OFFSET"
 
     [<Test>]
     let ``A value type holding references is pointer-sized and pointer-aligned`` () : unit =
