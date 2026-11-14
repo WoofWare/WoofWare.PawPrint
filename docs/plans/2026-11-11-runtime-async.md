@@ -1052,6 +1052,47 @@ Each stage is one pull request, with its tests first.
     return-dropping thunk, and an override returning a subclass of `Task`). Not yet bound: a
     `constrained.` call.
 
+    As built:
+    * Decision 13's classification binds a site whose call dispatches, whatever variant the named
+      method has: runtime-async IL, an async version, or none (an abstract method).
+      `AwaitNotYetBound.CalleeDispatches` is gone; the captured context and the `constrained.`
+      prefix are the reasons left.
+    * A bound `callvirt` dispatches on its receiver as any `callvirt` does, after its null check.
+      `ConcreteVirtualDispatch.tryResolveVirtualImplementation` takes decision 19's step for an
+      async variant: it concretises the ordinary sibling, resolves that, and gives the variant of
+      what it finds. Where the implementation has no variant (an override returning a subclass of
+      `Task`), or its variant returns something other than the declaration's (a covariant
+      `Task<T>` for `Task`), the call is refused by name. A tail shape whose call dispatches binds
+      too, with no exact callee for decision 17's `canTailCall` facts.
+    * The async version of a synchronized method runs. Its `ret` already asked
+      `SynchronizedMethodMonitor` before `AsyncVersionReturn`, so the monitor is released before
+      the wrapped `ret`'s call of `TransparentAwait`; that call is a tail await, so no frame of the
+      method resumes. An exception `TransparentAwait` throws finds the monitor released and does
+      not release it again.
+
+    Guests, each run on real .NET 10 and 11 RC3 first. RC3 hides the awaiter's and the dispatcher's
+    frames from a formatted trace, so each guest checks the formatted trace and, among the frames,
+    that the awaiter's `GetResult` is the last hidden frame before the first resumed one.
+    * `RuntimeAsyncDispatchesToAsyncVersion.cs`: `StreamWriter.DisposeAsync` (resumed frames
+      `Core`, `FlushAsyncInternalWithGuard`, `DisposeAsyncCore` at IL_0014) and
+      `CreateBroadcasting(streamWriter, TextWriter.Null).FlushAsync()` (resumed frames `Core`,
+      `FlushAsyncInternalWithGuard`, `BroadcastingTextWriter.FlushAsync` at IL_0019). Before the
+      stage, PawPrint exited 11 on .NET 11.
+    * `RuntimeAsyncDispatchesToAsyncMethod.cs`: `IndentedTextWriter.WriteAsync(string)` with one
+      tab pending, then faulting (`OutputTabsAsync` at IL_0023, `WriteAsync` at IL_000C). Before the
+      stage, PawPrint exited 11 on .NET 11.
+    * `RuntimeAsyncSynchronizedAsyncVersion.cs`: `CreateBroadcasting(TextWriter.Synchronized(w),
+      TextWriter.Null)`'s `WriteAsync` and `FlushAsync`, over a `StringWriter` and over a
+      `StreamWriter` whose stream's `Write` throws, and `FlushAsync` with a cancelled token, whose
+      `TransparentAwait` throws after the release. After each call `Monitor.IsEntered` is false and
+      another thread can take the monitor. It passes before the stage; a mutant whose async version
+      never releases fails it with exit 3.
+
+    `TestAwaitSiteBinding` checks the classification against stage 4d's rule, and
+    `TestAsyncVariantDispatch` checks the dispatch of variants over a Roslyn-compiled fixture: an
+    override, an inherited override, a `ValueTask<T>` override, an interface method, the method
+    itself, and the two refusals.
+
 12. **(4e) Constrained calls and static virtual methods.** A matched site whose call has a
     `constrained.` prefix binds the variant of what the prefix resolves: 40 sites in RC1 call a
     static abstract method of `IReadWriteAdapter` (`System.Formats.Tar`, `System.Net.Security`,

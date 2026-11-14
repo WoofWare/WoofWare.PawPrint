@@ -7,11 +7,11 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// `AwaitSiteBinding.classify`, decision 13's classification of a matched await site, against the
-/// rule of stage 4c of `docs/plans/2026-11-11-runtime-async.md`: a site binds the callee's async
+/// rule of stage 4d of `docs/plans/2026-11-11-runtime-async.md`: a site binds the callee's async
 /// variant exactly when it is a tail shape or an await with `ConfigureAwait(false)`, has no
-/// `constrained.` prefix, does not dispatch, and names a method whose variant runs IL, an `Async`
-/// method's or an async version's. An await continues on the thread pool, and a tail shape with no
-/// preference.
+/// `constrained.` prefix, and names a method with a variant PawPrint models: one that runs IL, an
+/// `Async` method's or an async version's, or an abstract one, which only a call that dispatches
+/// names. An await continues on the thread pool, and a tail shape with no preference.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestAwaitSiteBinding =
@@ -78,30 +78,24 @@ module TestAwaitSiteBinding =
         }
         |> Gen.filter (callsAbstractDirectly >> not)
 
-    /// Whether the site dispatches, as stage 4c reads it: a `callvirt` of a method that is virtual
-    /// and not final.
-    let private dispatches (facts : AwaitSiteFacts) : bool =
-        facts.Opcode = AwaitedCall.Callvirt && facts.NamedDispatchesVirtually
-
     /// Whether `reason` holds of `facts`.
     let private holds (facts : AwaitSiteFacts) (reason : AwaitNotYetBound) : bool =
         match reason with
         | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.Pattern = MatchedPattern.Await true
         | AwaitNotYetBound.Constrained -> facts.Constrained
-        | AwaitNotYetBound.CalleeDispatches -> dispatches facts
 
     [<Test>]
-    let ``A site binds exactly when stage 4c's four conditions hold, and continues as its pattern says`` () : unit =
+    let ``A site binds exactly when stage 4d's three conditions hold, and continues as its pattern says`` () : unit =
         let property (facts : AwaitSiteFacts) : unit =
-            let runsIl =
-                facts.NamedVariant = Ok AsyncVariantBody.RuntimeAsyncIl
-                || facts.NamedVariant = Ok AsyncVariantBody.AsyncVersion
+            let hasVariant =
+                match facts.NamedVariant with
+                | Ok _ -> true
+                | Error _ -> false
 
             let binds =
-                runsIl
+                hasVariant
                 && facts.Pattern <> MatchedPattern.Await true
                 && not facts.Constrained
-                && not (dispatches facts)
 
             match AwaitSiteBinding.classify facts with
             | AwaitSiteBinding.BindsVariant handling ->
@@ -178,7 +172,31 @@ module TestAwaitSiteBinding =
             |> Set.ofSeq
 
         reasons
-        |> shouldEqual (Set.ofList [ "ContinuesOnCapturedContext" ; "Constrained" ; "CalleeDispatches" ])
+        |> shouldEqual (Set.ofList [ "ContinuesOnCapturedContext" ; "Constrained" ])
+
+    /// A `callvirt` that dispatches binds the named method's variant, abstract or not: dispatch
+    /// finds the receiver's implementation through the ordinary sibling (decision 19).
+    [<Test>]
+    let ``A site that dispatches binds, whatever variant the named method has`` () : unit =
+        for body in
+            [
+                AsyncVariantBody.RuntimeAsyncIl
+                AsyncVariantBody.AsyncVersion
+                AsyncVariantBody.Abstract
+            ] do
+            for pattern in [ MatchedPattern.Await false ; MatchedPattern.TailShape ] do
+                let facts : AwaitSiteFacts =
+                    {
+                        Pattern = pattern
+                        Opcode = AwaitedCall.Callvirt
+                        Constrained = false
+                        NamedDispatchesVirtually = true
+                        NamedVariant = Ok body
+                    }
+
+                match AwaitSiteBinding.classify facts with
+                | AwaitSiteBinding.BindsVariant _ -> ()
+                | other -> failwith $"%A{facts} classified as %A{other}"
 
     [<Test>]
     let ``A call naming an abstract method directly is refused as a precondition`` () : unit =

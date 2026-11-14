@@ -1414,6 +1414,10 @@ module ConcreteVirtualDispatch =
     ///
     /// `methodToCall` must be an instance method: a static virtual is `StaticVirtualDispatch`'s.
     ///
+    /// For the async variant of a method, the implementation is the async variant of the method's
+    /// ordinary sibling's implementation. Where that has no variant, or one returning something
+    /// other than `methodToCall` does, the call is refused by name.
+    ///
     /// A type the search reaches that does not bind is the failure, returned with what loaded before
     /// it: CoreCLR would have failed to load that type before any call could dispatch on it.
     let tryResolveVirtualImplementation
@@ -1431,12 +1435,106 @@ module ConcreteVirtualDispatch =
             failwith
                 $"virtual dispatch of %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}: a static virtual is resolved by StaticVirtualDispatch.resolve, not by instance dispatch"
 
-        match methodToCall.TryVariant with
-        | Some MethodVariant.AsyncVariant ->
-            failwith
-                $"TODO: virtual dispatch of the async variant of %s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}: CoreCLR gives a promise-returning virtual method's async variant a slot of its own, which PawPrint's tables do not have (runtime-async plan, stage 4)"
-        | Some MethodVariant.Ordinary
-        | None -> ()
+        match methodToCall with
+        | MethodInfo.Metadata (_, facts, MethodVariant.AsyncVariant) ->
+            // CoreCLR gives the variant a slot of its own, which the variant of whatever overrides
+            // the ordinary sibling fills (`MethodTableBuilder`, methodtablebuilder.cpp); PawPrint's
+            // tables have no such slot, and take the same step from the ordinary sibling's.
+            let describe = $"%s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}"
+
+            let declaringAssy =
+                state.LoadedAssembly methodToCall.DeclaringAssemblyFullName
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"BUG: virtual dispatch of the async variant of %s{describe}, whose declaring assembly is not loaded"
+                )
+
+            match
+                MethodConcretisation.concretizeMethodWithAllGenerics
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    methodToCall.DeclaringTypeGenerics
+                    declaringAssy.Methods.[facts.Handle]
+                    methodToCall.Generics
+                    state
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok (ordinary, _) ->
+
+            match
+                tryResolveVirtualImplementationForSlot
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    methodGenerics
+                    ordinary
+                    dispatchTypeHandle
+                    walkBaseTypes
+                    state
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok (VirtualImplementation.Found found) ->
+                let implementing = found.Definition
+
+                let implementingAssy =
+                    state.LoadedAssembly implementing.DeclaringAssemblyFullName
+                    |> Option.defaultWith (fun () ->
+                        failwith
+                            $"BUG: dispatch of %s{describe} chose %O{implementing}, whose declaring assembly is not loaded"
+                    )
+
+                let assemblies, implementingVariant =
+                    RuntimeAsyncMethod.asyncVariantOf
+                        loggerFactory
+                        dotnetRuntimeDirs
+                        baseClassTypes.Corelib
+                        implementingAssy
+                        implementing
+                        state._LoadedAssemblies
+
+                let state =
+                    { state with
+                        _LoadedAssemblies = assemblies
+                    }
+
+                match implementingVariant with
+                | Error (AsyncVariantRefusal.ReturnTypeUnbound failure)
+                | Error (AsyncVariantRefusal.BaseTypeUnbound failure) -> state, Error failure
+                | Error refusal ->
+                    failwith
+                        $"TODO: dispatch of the async variant of %s{describe} on %O{dispatchTypeHandle} reaches %O{implementing}, which has no async variant (%A{refusal}). CoreCLR's builder fills that slot with the variant the override inherits, which PawPrint does not model (decision 19 of docs/plans/2026-11-11-runtime-async.md)"
+                | Ok implementingVariant ->
+
+                match
+                    MethodConcretisation.concretizeMethodWithAllGenerics
+                        loggerFactory
+                        dotnetRuntimeDirs
+                        baseClassTypes
+                        found.TypeGenerics
+                        implementingVariant
+                        found.MethodGenerics
+                        state
+                with
+                | state, Error failure -> state, Error failure
+                | state, Ok (concrete, _) ->
+
+                // The two return different values only where the override's promise type differs
+                // from its declaration's, as a covariant return (`Task<T>` for `Task`).
+                if concrete.Signature.ReturnType <> methodToCall.Signature.ReturnType then
+                    failwith
+                        $"TODO: dispatch of the async variant of %s{describe}, returning %O{methodToCall.Signature.ReturnType}, on %O{dispatchTypeHandle} reaches the async variant of %O{implementing}, returning %O{concrete.Signature.ReturnType}. CoreCLR's builder runs a return-dropping thunk there, which PawPrint does not model (decision 19 of docs/plans/2026-11-11-runtime-async.md)"
+
+                state,
+                Ok (
+                    VirtualImplementation.Found
+                        { found with
+                            Definition = implementingVariant
+                        }
+                )
+            | state, Ok other -> state, Ok other
+        | MethodInfo.Metadata (_, _, MethodVariant.Ordinary)
+        | MethodInfo.Synthesised _ ->
 
         tryResolveVirtualImplementationForSlot
             loggerFactory

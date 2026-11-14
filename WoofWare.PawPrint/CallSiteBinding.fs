@@ -512,8 +512,11 @@ module internal CallSiteBinding =
                 TailCallFacts.ofCall
                     assembly
                     caller
-                    // The call names its callee exactly, as one that dispatches binds nothing yet.
-                    (Some (MethodInfo.requireMetadata "the callee of a tail shape" named))
+                    // The JIT knows its callee exactly only where the call does not dispatch.
+                    (match opcode with
+                     | AwaitedCall.Callvirt when named.DispatchesVirtually -> None
+                     | AwaitedCall.Callvirt
+                     | AwaitedCall.Call -> Some (MethodInfo.requireMetadata "the callee of a tail shape" named))
                     returnTypesAgree
             )
 

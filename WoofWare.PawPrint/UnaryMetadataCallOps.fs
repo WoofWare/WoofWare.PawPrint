@@ -1357,8 +1357,9 @@ module internal UnaryMetadataCallOps =
 
         match awaitSite with
         | AwaitSiteOutcome.Binds bound ->
-            // The variant of a method that does not dispatch, with no `constrained.` prefix.
-            enterVirtualCallee ctx bound.Variant false (Some bound.Site) state
+            // No `constrained.` prefix: dispatch on the receiver finds the implementation of the
+            // variant, if the named method dispatches.
+            enterVirtualCallee ctx bound.Variant true (Some bound.Site) state
         | AwaitSiteOutcome.NotAnAwaitSite
         | AwaitSiteOutcome.DoesNotBind _ ->
 
