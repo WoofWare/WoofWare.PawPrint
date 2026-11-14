@@ -2962,7 +2962,9 @@ rows are.
 
 * Suites at the tip, built from the whole solution: the default suite (5564 passed, 38 skipped), `Guest` (235),
   `GuestSolo` (2), `GuestPure` (1179) and `GuestImpure` (274), each run on its own, all passing.
-* Left to later stages, besides those above: `GenericParam` and `GenericParamConstraint` go through the same lookup hash
-  (`FindGenericParamHelper`, md/enc/metamodelrw.cpp), so from 25 rows CoreCLR enumerates an owner's parameters in reverse
-  RID order too; whether anything a guest sees depends on that order is not known, and wants measuring alongside
-  MethodImpl's.
+* `GenericParam` and `GenericParamConstraint` are not in the 25-row hash, although `FindGenericParamHelper` and
+  `FindGenericParamConstraintHelper` (md/enc/metamodelrw.cpp:5196-5321) have hash arms: no `Add*ToHash` exists for
+  either table (md/inc/metamodelrw.h), so those arms never run, and the VM's enumeration (md/enc/mdinternalrw.cpp:1091-1133)
+  uses neither helper but `SearchTableForMultipleRows` for parameters and a stable VirtualSort for constraints. Measured
+  after 30 rows of other types, on .NET 10 and under PawPrint alike: parameters and constraints come back in RID order.
+  Nothing is left to do for them.
