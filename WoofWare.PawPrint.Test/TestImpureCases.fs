@@ -619,6 +619,22 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """PawPrint does not verify a dynamic type's MethodImpl rows at `CreateType`. Two `DefineMethodOverride` rows name one instance interface method, with different bodies; on real .NET 10 and 11, `CreateType` throws `TypeLoadException` ("Method 'B2' on type 'C' ... is overriding a method that has been overridden"), and the guest exits 0 (measured; a control with the second row removed exits 1). PawPrint creates the type and the guest exits 1, "CreateType threw nothing" (measured, on both runtimes). Un-parked by verifying the rows at `CreateType`."""
+            {
+                FileName = "ReflectionConstructorInvokeTwice.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`ConstructorInfo.Invoke` through one `ConstructorInfo` of the guest's own class, twice, measured on real .NET 10 and 11 to exit 0 (a control with check 6 inverted exits 6 on both). The first invocation runs through the runtime's invoker; the second runs the `InvokeStub_` dynamic method CoreLib emits (`InvokerEmitUtil`), whose body is `newobj` of the reflected constructor, and which on real .NET calls the constructor from the second invocation on (measured). PawPrint stops at the second invocation, on both runtimes, when it reads that stub's body: "a dynamic method's Newobj names DynamicScope entry ..., but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured). Un-parked by resolving a dynamic method's `newobj` of a reflected constructor."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
