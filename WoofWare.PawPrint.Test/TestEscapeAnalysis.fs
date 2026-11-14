@@ -17176,6 +17176,438 @@ public static class Runners
         | [] -> ()
         | failures -> failures |> String.concat Environment.NewLine |> failwith
 
+    let private invalidOperation = "System.InvalidOperationException"
+
+    /// An image of `newobj`s whose tokens name what CoreCLR's JIT will not construct
+    /// (`NewobjTarget`), which no C# spells, over types of its own:
+    ///   - `Plain`, with a constructor from `int`, a static `Stat()` returning `object`, and a
+    ///     static `StatGone()` returning `EscapeNewobjDep.Gone`;
+    ///   - the abstract class `Abs`, with a constructor from `int`, and abstract methods `A()`
+    ///     returning `int` and `AGone()` returning `Gone`;
+    ///   - the interface `I`, with a static abstract `SA()`;
+    ///   - `AbsS`, a struct flagged abstract and sealed, with a constructor from `int`;
+    ///   - `Inst`, with a constructor and an instance method `NotCtor()`;
+    ///   - `Fake`, whose instance method named `.ctor` lacks `RTSpecialName`.
+    ///
+    /// Each method of `EscapeNewobj.Runners` takes a `bool` it may branch on, and returns an `int`.
+    /// The image is compiled against an `EscapeNewobjDep` declaring `Gone`, which the one
+    /// `newobjRefusalsDependency` makes does not.
+    let private fabricateNewobjRefusals () : byte[] =
+        let gone =
+            Emit
+                .PersistedAssemblyBuilder(AssemblyName "EscapeNewobjDep", typeof<obj>.Assembly)
+                .DefineDynamicModule("EscapeNewobjDep")
+                .DefineType(
+                    "EscapeNewobjDep.Gone",
+                    TypeAttributes.Public
+                    ||| TypeAttributes.Sealed
+                    ||| TypeAttributes.SequentialLayout,
+                    typeof<ValueType>
+                )
+                .CreateType ()
+
+        let builder =
+            Emit.PersistedAssemblyBuilder (AssemblyName "EscapeNewobj", typeof<obj>.Assembly)
+
+        let modul = builder.DefineDynamicModule "EscapeNewobj"
+
+        let ctorAttributes =
+            MethodAttributes.Public
+            ||| MethodAttributes.HideBySig
+            ||| MethodAttributes.SpecialName
+            ||| MethodAttributes.RTSpecialName
+
+        let abstractAttributes =
+            MethodAttributes.Public
+            ||| MethodAttributes.Virtual
+            ||| MethodAttributes.Abstract
+            ||| MethodAttributes.HideBySig
+            ||| MethodAttributes.NewSlot
+
+        let staticAttributes = MethodAttributes.Public ||| MethodAttributes.Static
+
+        // A public constructor of `owner` from an `int`, which it ignores.
+        let intConstructor (owner : Emit.TypeBuilder) : Emit.ConstructorBuilder =
+            let ctor =
+                owner.DefineConstructor (ctorAttributes, CallingConventions.Standard, [| typeof<int> |])
+
+            ctor.GetILGenerator().Emit Emit.OpCodes.Ret
+            ctor
+
+        // A public static method of `owner` returning the default of `returns`.
+        let staticReturning (owner : Emit.TypeBuilder) (name : string) (returns : Type) : Emit.MethodBuilder =
+            let m = owner.DefineMethod (name, staticAttributes, returns, [||])
+            let il = m.GetILGenerator ()
+            let local = il.DeclareLocal returns
+            il.Emit (Emit.OpCodes.Ldloc, local)
+            il.Emit Emit.OpCodes.Ret
+            m
+
+        let plain =
+            modul.DefineType ("EscapeNewobj.Plain", TypeAttributes.Public ||| TypeAttributes.Class)
+
+        let plainCtor = intConstructor plain
+        let stat = staticReturning plain "Stat" typeof<obj>
+        let statGone = staticReturning plain "StatGone" gone
+        plain.CreateType () |> ignore<Type>
+
+        let abs =
+            modul.DefineType (
+                "EscapeNewobj.Abs",
+                TypeAttributes.Public ||| TypeAttributes.Abstract ||| TypeAttributes.Class
+            )
+
+        let absCtor = intConstructor abs
+        let absA = abs.DefineMethod ("A", abstractAttributes, typeof<int>, [||])
+        let absAGone = abs.DefineMethod ("AGone", abstractAttributes, gone, [||])
+        abs.CreateType () |> ignore<Type>
+
+        let i =
+            modul.DefineType (
+                "EscapeNewobj.I",
+                TypeAttributes.Public ||| TypeAttributes.Interface ||| TypeAttributes.Abstract
+            )
+
+        let iSA =
+            i.DefineMethod (
+                "SA",
+                MethodAttributes.Public
+                ||| MethodAttributes.Static
+                ||| MethodAttributes.Virtual
+                ||| MethodAttributes.Abstract
+                ||| MethodAttributes.HideBySig,
+                typeof<int>,
+                [||]
+            )
+
+        i.CreateType () |> ignore<Type>
+
+        let absS =
+            modul.DefineType (
+                "EscapeNewobj.AbsS",
+                TypeAttributes.Public
+                ||| TypeAttributes.Abstract
+                ||| TypeAttributes.Sealed
+                ||| TypeAttributes.SequentialLayout,
+                typeof<ValueType>
+            )
+
+        absS.DefineField ("V", typeof<int>, FieldAttributes.Public)
+        |> ignore<Emit.FieldBuilder>
+
+        let absSCtor = intConstructor absS
+        absS.CreateType () |> ignore<Type>
+
+        let inst =
+            modul.DefineType ("EscapeNewobj.Inst", TypeAttributes.Public ||| TypeAttributes.Class)
+
+        inst.DefineDefaultConstructor MethodAttributes.Public
+        |> ignore<Emit.ConstructorBuilder>
+
+        let notCtor =
+            inst.DefineMethod ("NotCtor", MethodAttributes.Public ||| MethodAttributes.HideBySig, typeof<Void>, [||])
+
+        notCtor.GetILGenerator().Emit Emit.OpCodes.Ret
+        inst.CreateType () |> ignore<Type>
+
+        let fake =
+            modul.DefineType ("EscapeNewobj.Fake", TypeAttributes.Public ||| TypeAttributes.Class)
+
+        let fakeCtor =
+            fake.DefineMethod (
+                ".ctor",
+                MethodAttributes.Public
+                ||| MethodAttributes.HideBySig
+                ||| MethodAttributes.SpecialName,
+                typeof<Void>,
+                [||]
+            )
+
+        fakeCtor.GetILGenerator().Emit Emit.OpCodes.Ret
+        fake.CreateType () |> ignore<Type>
+
+        let runners =
+            modul.DefineType (
+                "EscapeNewobj.Runners",
+                TypeAttributes.Public
+                ||| TypeAttributes.Class
+                ||| TypeAttributes.Abstract
+                ||| TypeAttributes.Sealed
+            )
+
+        let define (name : string) (emit : Emit.ILGenerator -> unit) =
+            runners.DefineMethod(name, staticAttributes, typeof<int>, [| typeof<bool> |]).GetILGenerator ()
+            |> emit
+
+        let returns (il : Emit.ILGenerator) (value : int) =
+            il.Emit (Emit.OpCodes.Ldc_I4, value)
+            il.Emit Emit.OpCodes.Ret
+
+        // `newobj` of `target`, given an `int` if `takesInt`, and `pop`.
+        let constructs (target : Emit.OpCode -> Emit.ILGenerator -> unit) (takesInt : bool) (il : Emit.ILGenerator) =
+            if takesInt then
+                il.Emit Emit.OpCodes.Ldc_I4_0
+
+            target Emit.OpCodes.Newobj il
+            il.Emit Emit.OpCodes.Pop
+
+        let ofCtor (ctor : ConstructorInfo) (op : Emit.OpCode) (il : Emit.ILGenerator) = il.Emit (op, ctor)
+        let ofMethod (m : MethodInfo) (op : Emit.OpCode) (il : Emit.ILGenerator) = il.Emit (op, m)
+
+        // `emit`, then a return of 0.
+        let plainly (emit : Emit.ILGenerator -> unit) (il : Emit.ILGenerator) =
+            emit il
+            returns il 0
+
+        // `emit` inside a protected block whose handler catches every exception.
+        let inTry (emit : Emit.ILGenerator -> unit) (il : Emit.ILGenerator) =
+            il.BeginExceptionBlock () |> ignore<Emit.Label>
+            emit il
+            il.BeginCatchBlock typeof<exn>
+            il.Emit Emit.OpCodes.Pop
+            il.EndExceptionBlock ()
+            returns il 0
+
+        // `emit` only where the argument is true.
+        let onlyIf (emit : Emit.ILGenerator -> unit) (il : Emit.ILGenerator) =
+            let skip = il.DefineLabel ()
+            il.Emit Emit.OpCodes.Ldarg_0
+            il.Emit (Emit.OpCodes.Brfalse, skip)
+            emit il
+            il.MarkLabel skip
+            returns il 0
+
+        // `emit` where no branch reaches it.
+        let dead (emit : Emit.ILGenerator -> unit) (il : Emit.ILGenerator) =
+            let past = il.DefineLabel ()
+            il.Emit (Emit.OpCodes.Br, past)
+            emit il
+            il.MarkLabel past
+            returns il 0
+
+        let newPlain = constructs (ofCtor plainCtor) true
+        let newStatic = constructs (ofMethod stat) false
+        let newAbstractMethod = constructs (ofMethod absA) false
+        let newAbstractClass = constructs (ofCtor absCtor) true
+
+        define "NewPlain" (plainly newPlain)
+        define "NewStatic" (plainly newStatic)
+        define "NewAbstractMethod" (plainly newAbstractMethod)
+        // Abstract and static: the abstract refusal comes first.
+        define "NewStaticAbstract" (plainly (constructs (ofMethod iSA) false))
+        define "NewAbstractClass" (plainly newAbstractClass)
+        define "NewAbstractStruct" (plainly (constructs (ofCtor absSCtor) true))
+        define "NewStaticInTry" (inTry newStatic)
+        define "NewAbstractMethodInTry" (inTry newAbstractMethod)
+        define "NewAbstractClassInTry" (inTry newAbstractClass)
+        define "NewAbstractClassIfArg" (onlyIf newAbstractClass)
+        define "NewStaticDead" (dead newStatic)
+        define "NewStaticGone" (plainly (constructs (ofMethod statGone) false))
+        define "NewAbstractGone" (plainly (constructs (ofMethod absAGone) false))
+        define "NewNotCtor" (plainly (constructs (ofMethod notCtor) false))
+        define "NewFake" (plainly (constructs (ofMethod fakeCtor) false))
+
+        runners.CreateType () |> ignore<Type>
+
+        use image = new MemoryStream ()
+        builder.Save image
+        image.ToArray ()
+
+    /// The `EscapeNewobjDep` that `fabricateNewobjRefusals`' image runs against, which declares no
+    /// `EscapeNewobjDep.Gone`.
+    let private newobjRefusalsDependency () : byte[] =
+        let builder =
+            Emit.PersistedAssemblyBuilder (AssemblyName "EscapeNewobjDep", typeof<obj>.Assembly)
+
+        builder.DefineDynamicModule "EscapeNewobjDep" |> ignore<Emit.ModuleBuilder>
+        use image = new MemoryStream ()
+        builder.Save image
+        image.ToArray ()
+
+    /// Each runner of `fabricateNewobjRefusals` that the real runtime compiles or refuses, and what
+    /// its JIT does compiling it, whatever the argument.
+    let private newobjRefusals : (string * Refusal) list =
+        [
+            "NewPlain", Refusal.Compiles
+            "NewStatic", Refusal.Raises invalidProgram
+            "NewAbstractMethod", Refusal.Raises badImageFormat
+            "NewStaticAbstract", Refusal.Raises badImageFormat
+            "NewAbstractClass", Refusal.Raises invalidOperation
+            // The JIT allocates a value type without asking whether it is abstract.
+            "NewAbstractStruct", Refusal.Compiles
+            // The method's own handlers never see what compiling it raises.
+            "NewStaticInTry", Refusal.Raises invalidProgram
+            "NewAbstractMethodInTry", Refusal.Raises badImageFormat
+            "NewAbstractClassInTry", Refusal.Raises invalidOperation
+            // Nor does it matter whether a run reaches the instruction, so long as the JIT does.
+            "NewAbstractClassIfArg", Refusal.Raises invalidOperation
+            "NewStaticDead", Refusal.Compiles
+            // `getCallInfo` loads the return type before the importer refuses a static method...
+            "NewStaticGone", Refusal.Raises typeLoad
+            // ...but refuses an abstract method before it loads the return type.
+            "NewAbstractGone", Refusal.Raises badImageFormat
+        ]
+
+    /// The runners of `fabricateNewobjRefusals` whose `newobj` names an instance method that is not
+    /// an instance constructor (`NewobjTarget.NotInstanceConstructor`). Real .NET constructs and
+    /// calls some such methods and crashes the process compiling others
+    /// (`TestFabricatedNewobjRefusals`), so these are not run here.
+    let private newobjOfNonConstructors : string list = [ "NewNotCtor" ; "NewFake" ]
+
+    [<Test>]
+    let ``the JIT refuses a method whose newobj names what it will not construct, wherever it is`` () : unit =
+        let _, loggerFactory = LoggerFactory.makeTest ()
+        let image = fabricateNewobjRefusals ()
+        let dependencyImage = newobjRefusalsDependency ()
+
+        let fixture =
+            Assembly.read loggerFactory (Some "EscapeNewobj.dll") (new MemoryStream (image))
+
+        let dependency =
+            Assembly.read loggerFactory (Some "EscapeNewobjDep.dll") (new MemoryStream (dependencyImage))
+
+        // The fixture exercises what it claims to: the real runtime raises exactly that exception,
+        // for either argument, or none.
+        let context =
+            System.Runtime.Loader.AssemblyLoadContext ("EscapeNewobj", isCollectible = true)
+
+        context.add_Resolving (
+            Func<_, _, _> (fun (context : Runtime.Loader.AssemblyLoadContext) (name : AssemblyName) ->
+                match name.Name with
+                | "EscapeNewobjDep" -> context.LoadFromStream (new MemoryStream (dependencyImage))
+                | _ -> null
+            )
+        )
+
+        let runtimeFailures =
+            try
+                let ty =
+                    context.LoadFromStream(new MemoryStream (image)).GetType "EscapeNewobj.Runners"
+
+                [
+                    for name, refused in newobjRefusals do
+                        let raised =
+                            [ false ; true ]
+                            |> List.choose (fun argument ->
+                                try
+                                    ty.GetMethod(name).Invoke ((null : obj), [| box argument |]) |> ignore<obj>
+                                    None
+                                with :? TargetInvocationException as e ->
+                                    Some (e.InnerException.GetType().FullName)
+                            )
+
+                        let expected =
+                            match refused with
+                            | Refusal.Raises refusal -> List.replicate 2 refusal
+                            | Refusal.Compiles -> []
+                            | Refusal.UnlessInlined _
+                            | Refusal.RaisesBesideBinding _ ->
+                                failwith $"%s{name}: no runner of this fixture is expected %A{refused}"
+
+                        if raised <> expected then
+                            yield $"%s{name}: the real runtime raised %A{raised}, not %A{expected}"
+                ]
+            finally
+                context.Unload ()
+
+        let refusalTypes =
+            Set.ofList [ invalidProgram ; typeLoad ; badImageFormat ; invalidOperation ]
+
+        let mutable analysis = analysisOver [ fixture ; dependency ] id
+
+        let shownRefusals (shown : Set<string>) : Set<string> =
+            refusalTypes |> Set.filter (fun ty -> shown.Contains ("=" + ty))
+
+        // Of the refusals, what the runtime's making of `refusal` lets escape in its place: what
+        // running its constructor, and where the VM throws that again preserving its stack trace
+        // (`ExceptionMaking.vmMakingRaise`), what preserving raises; and where it looks up the
+        // message by resource name, what the lookup raises.
+        let made (refusal : string) : Set<string> =
+            let maker =
+                if refusal = typeLoad then
+                    typeLoadConstructor ()
+                else
+                    let dot = refusal.LastIndexOf '.'
+                    parameterlessConstructor (hostCoreLib ()) (refusal.Substring (0, dot)) (refusal.Substring (dot + 1))
+
+            let makers =
+                match ExceptionMaking.vmMakingRaise (FrameworkUnderTest.runtime ()) with
+                | VmMakingRaise.EscapesInPlace -> [ maker ]
+                | VmMakingRaise.ThrownAgainPreservingTrace -> [ maker ; internalPreserveStackTrace (hostCoreLib ()) ]
+
+            let shown =
+                makers
+                |> List.map (fun maker ->
+                    let next, escapes = EscapeAnalysis.escapes analysis maker
+                    analysis <- next
+                    render analysis escapes
+                )
+                |> Set.unionMany
+
+            let lookedUp =
+                if refusal = invalidOperation then
+                    let next, escapes = resourceLookupEscapes analysis
+                    analysis <- next
+                    render analysis escapes
+                else
+                    Set.empty
+
+            shownRefusals (Set.union shown lookedUp)
+
+        // What the analysis says of the runner `name`: what it names of the refusals, and the
+        // places in the runner itself that it cannot see through, rendered (`renderSite`).
+        let answer (name : string) : Escapes * Set<string> * Set<string> =
+            let key = methodNamed fixture "EscapeNewobj.Runners" name
+            let next, escapes = EscapeAnalysis.escapes analysis key
+            let next, sources = EscapeAnalysis.unknownSources next key
+            analysis <- next
+
+            let own =
+                sources
+                |> Set.filter (fun site -> site.Method = key)
+                |> Set.map (renderSite analysis)
+
+            escapes, shownRefusals (render analysis escapes), own
+
+        let analysisFailures =
+            [
+                for name, refused in newobjRefusals do
+                    let _, shown, own = answer name
+
+                    let reported =
+                        match refused with
+                        | Refusal.Compiles -> []
+                        | Refusal.Raises refusal -> [ refusal ]
+                        | Refusal.UnlessInlined _
+                        | Refusal.RaisesBesideBinding _ ->
+                            failwith $"%s{name}: no runner of this fixture is expected %A{refused}"
+
+                    let expected =
+                        Set.union (Set.ofList reported) (reported |> List.map made |> Set.unionMany)
+
+                    if shown <> expected || not own.IsEmpty then
+                        yield
+                            $"%s{name}: %A{Set.toList shown} of the refusals, opaque in itself at %A{Set.toList own}; expected %A{Set.toList expected}, and nothing opaque in itself"
+
+                // What such a `newobj` does, the analysis cannot say, and it says so at the
+                // method's entry, before any of it runs; it names nothing it would raise.
+                for name in newobjOfNonConstructors do
+                    let escapes, shown, own = answer name
+
+                    let runner =
+                        EscapeAnalysis.methodName analysis (methodNamed fixture "EscapeNewobj.Runners" name)
+
+                    let site = $"%s{runner} entry NewobjOfNonConstructor"
+
+                    if not escapes.Unknown || own <> Set.singleton site || not shown.IsEmpty then
+                        yield
+                            $"%s{name}: unknown %b{escapes.Unknown}, %A{Set.toList shown} of the refusals, opaque in itself at %A{Set.toList own}; expected unknown, none of the refusals, and opaque only at %s{site}"
+            ]
+
+        match runtimeFailures @ analysisFailures with
+        | [] -> ()
+        | failures -> failures |> String.concat Environment.NewLine |> failwith
+
     /// The type tokens a runner of `modifiedOperands` names.
     type private ModifiedOperands =
         {
