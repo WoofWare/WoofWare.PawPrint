@@ -3504,9 +3504,9 @@ The host-only cache test (`late callBefore=True`) gave 1, then 1 and 2, in 20 of
 So `IsVisible` comes first. It is the first stop of `DispatchProxy`, the one realistic emit consumer that two small
 stages then run end to end (with event enumeration as 5v, the method-only guest exits 0, and since 5s the property
 guest too, both measured by 5s with throwaway edits), and four other framework paths reach it. It is reflection, not
-emit, and could have a plan of its own. It is planned here because the program that needs it is `DispatchProxy`, which
-this plan follows as the framework's consumer of `TypeBuilder` (5s's question 4), and because the measurements of that
-path are already here. The runner-up, `SetParamInfo`, is the stage after 5v.
+emit, and 5s decided that it and event enumeration were reflection PRs against `main`, outside this plan. Planning it
+here reverses that (see the decisions): the measurements of `DispatchProxy`'s stops are in this plan. "5v" in the 5u
+sections means "the events stage", wherever that is planned. The runner-up, `SetParamInfo`, comes after it.
 
 **What CoreCLR does.** Read from the pinned source (`$DOTNET_RUNTIME_SRC_NET10`):
 
@@ -3562,9 +3562,15 @@ unless stated:
 | a dynamic generic `DG<T>` created: `DG<>`, `DG<int>`, `DG<Internal>`; `PubG<DNotPublic>` | true, true, false; false |
 | `ModuleBuilder.DefineType("DNested", TypeAttributes.NestedPublic)` | `ArgumentException` before any QCall, so a dynamic module cannot hold a top-level nested type |
 
+That last row is not why a dynamic module has no nested type here: PawPrint refuses `DefineNestedType` itself
+(`TypeBuilder_DefineType` with an encloser stops, because an emit scope has no NestedClass table), so every dynamic type
+5u can see is top-level.
+
 A second probe (`5u-probe2`) reaches the dynamic-methods class through CoreLib's internal `DynamicMethod.GetMethodDescriptor`
-and `RuntimeMethodHandle.GetDeclaringType`: its `Name` is `(dynamicClass)`, its `Attributes` `0x101`, and it and its
-array type are visible, on both runtimes.
+and `RuntimeMethodHandle.GetDeclaringType`: its `Attributes` is `0x101`, and it and its array type are visible, on both
+runtimes. Its `Name` is `(dynamicClass)` (vm/typestring.cpp:841; measured on both runtimes by a run of `5u-probe2` with
+no argument, saved as `net10-noargs.out` and `net11-noargs.out`, after the decisions noted that the earlier saved runs
+skipped that line).
 
 Under PawPrint at 5t's tip, every type of `5u-probe` is constructed, and named as on .NET 10 (`5u-probe shapes`), except
 the field type of `FnHolder<>`'s `delegate*<T, void>` field: reading it stops in `Signature.Init` with "CoreCLR refuses
@@ -3582,7 +3588,9 @@ answering a constant (reverted):
 | `Expression.Lambda<Func<Type>>(Expression.Constant(typeof(Internal), typeof(Type))).Compile()` | false, as on real .NET | `ReflectionInvocation_CompileMethod` |
 
 So the next stop does not catch a wrong answer: answering true for an internal interface skips the attribute and goes on
-as a public interface does. The `internal` guest is the only end-to-end check that tells the two apart.
+as a public interface does. A parked guest of the internal interface would not catch it either, since nothing runs a
+parked case or reads its stop; what pins the false answer in CI is the internal interface's row in the pure guest and
+the differential property (see the decisions).
 
 The dynamic-methods class shows a separate divergence: PawPrint refuses its `Name` (`RuntimeTypeHandle_ConstructName`)
 and its `Attributes` (`RuntimeTypeHandle.GetAttributes`) through `RuntimeTypeHandleTarget.refuseMetadataQuery`, whose
@@ -3593,13 +3601,16 @@ message says CoreCLR has nothing to answer from; but CoreCLR's `GetAttributes` r
 (`NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget`), whose cases match CoreCLR's kinds of TypeHandle: `Closed` of a
 `ConcreteTypeHandle` (`Concrete`, `Byref`, `Pointer`, `OneDimArrayZero`, `Array`, `FunctionPointer`, `Continuation`),
 `OpenGenericTypeDefinition`, `GenericParameter`, `MethodGenericParameter`, `OpenConstructed`, `Composite`, an open
-`FunctionPointer`, and `DynamicMethodsClass`. Under PawPrint, `5u-probe` and `5u-probe2` reach every case except
-`Continuation` (the open `FunctionPointer` through a method parameter's type).
+`FunctionPointer`, and `DynamicMethodsClass`. Under PawPrint, `5u-probe` reaches every case except `Continuation` and
+`DynamicMethodsClass` (the open `FunctionPointer` through a method parameter's type). The saved run of `5u-probe2`
+stops at `RuntimeTypeHandle.GetAttributes`, the line before `IsVisible`, so it shows only that the reflection route to
+the dynamic-methods class's `Type` runs.
 `NativeCall.qCallTypeHandleToConcreteTypeHandle` refuses every open case, so the handler cannot use it. The TypeDef's
 facts are in its `TypeInfo`, `TypeAttributes` and `DeclaringType` (the NestedClass row), for an image on disk and a
 dynamic module's alike. `AccessCheck.levelIsVisible` (WoofWare.PawPrint.Domain/AccessCheck.fs:114) decides one nesting
 level of an access check, which is a different question: it admits a `NotPublic` level to a friend assembly, and fails
-on the family and private levels.
+on the family and private levels. `NativeRuntimeMethodHandle.buildAccessLevelChain` already walks `DeclaringType` to
+the outermost type, privately, for that access check; 5u does not touch it.
 
 ### 5u: the options
 
@@ -3671,8 +3682,10 @@ Open questions:
 5. Whether the stage belongs in this plan, as planned here, or in a plan of its own for the reflection `DispatchProxy`
    needs, with event enumeration as that plan's second stage.
 6. Whether to add, in this stage, a parked guest of `DispatchProxy` over an `internal` interface, whose stop at
-   `TypeBuilder_DefineCustomAttribute` (measured with the false answer) is the only end-to-end check that the answer is
-   false. Recommended: yes, parked with that stop as its reason, to be un-parked by custom attributes.
+   `TypeBuilder_DefineCustomAttribute` (measured with the false answer) records the program that custom attributes
+   un-park. Recommended: yes, parked with that stop as its reason. It is not a check of the false answer while parked
+   (see the decisions), so it also checks, for when it runs, the `IgnoresAccessChecksToAttribute` that only the false
+   answer produces.
 
 ### 5u: the oracle
 
@@ -3681,32 +3694,48 @@ Written first, and seen to fail on this branch before the handler exists:
 * `TypeIsVisible.cs` in `sourcesPure` (registered in `TestPureCases.fs`, so that the real-runtime oracle runs it as
   well), with a check number for every compiled row of `5u-probe`'s table: every nesting level's visibility, the
   instantiations, the generic definitions, the generic parameters, the open constructions, the arrays, pointers, byrefs
-  and function pointers (the open ones as a method parameter's type), and `List<RuntimeType>`. It returns the number of the first failing check, so a wrong answer
-  names its type. Exits 0 on .NET 10, to be confirmed before committing.
+  and function pointers (the open ones as a method parameter's type), `List<RuntimeType>`, and a generic definition as
+  an argument, both ways (`PubG<PubG<>>` true and `PubG<InternalG<>>` false, measured on both runtimes, `5u-probe3`).
+  It returns the number of the first failing check, so a wrong answer names its type. Exits 0 on .NET 10.
 * `TypeBuilderIsVisible.cs` in `sourcesImpure` (`IsDynamicCodeSupported` on): `DPub` and `DNotPublic` as builders and
   as created types; `DG<>`, `DG<int>`, `DG<Internal>` and `PubG<DNotPublic>`; `DefineType` with `NestedPublic` throwing
-  `ArgumentException`; and the dynamic-methods class, reached as `5u-probe2` reaches it, if question 3 answers it. No
-  terminal-state check, in this guest or the last: the QCall writes nothing, and every answer is in the exit code.
+  `ArgumentException`. It has no nested dynamic type, for the reason above.
+* `DynamicMethodsClassIsVisible.cs`, a guest of its own because it reaches CoreLib's internals by name: the class and its
+  szarray (`MakeArrayType` over the class runs under PawPrint and reaches `IsVisible`, measured with `5u-probe3`). It
+  asks `IsVisible` only, never `Name` or `Attributes`. No terminal-state check in any of the three guests: the QCall
+  writes nothing, and every answer is in the exit code.
 * `DispatchProxyMethodInterface.cs` and `DispatchProxyPropertyInterface.cs` stay parked, their reasons changed to their
-  next stop, event enumeration (measured above), to be un-parked by 5v. `DispatchProxyInternalInterface.cs` is parked
-  with question 6's stop as its reason.
-* A same-image differential property against real .NET, in the test host, driving the handler directly as
-  `TestFieldHandleRegistry` drives `RuntimeFieldHandle.GetAttributes`, with PawPrint's answer equal to host
-  `Type.IsVisible` of the same type:
-  * for every TypeDef of the host's CoreLib (`HostImage`; 2647 in .NET 10.0.14's), as its `OpenGenericTypeDefinition`
-    or its `Closed` handle: an exhaustive sweep, nested and generic types included;
-  * for a Roslyn fixture generated per FsCheck case: a forest of nested types up to four deep, each top-level type public
-    or not and each nested level of any of the six nested visibilities, some generic; and, over its types and CoreLib's,
-    constructions drawn from instantiation (skipped where the host's `MakeGenericType` rejects the constraints), szarray,
-    arrays of rank 2 and 3, pointer, byref (outermost only), generic parameters of either kind, and open constructions
-    over them. A function pointer is drawn as parameter and return types: the host's comes from a field of the fixture of
-    that type (reflection cannot construct one), and PawPrint's target from `RuntimeTypeHandleTarget.functionPointer`
-    over the drawn types, so that the property does not depend on the `Signature.Init` gap below.
-  The fixed sample must reach, many times each: every visibility at the innermost level, a `NestedPublic` chain ending in
-  each non-public level, a visible definition with an invisible argument, and an invisible type under a shape.
-* Unit tests of the Domain function over generated nesting chains: true exactly when the innermost run of `NestedPublic`
-  levels ends at a `Public` type, against a model written as that sentence.
-* Mutants, each run against both guests, the differential property and the unit tests:
+  next stop, measured by naming each case once the handler exists. `DispatchProxyInternalInterface.cs` is parked with
+  question 6's stop as its reason; besides the proxy's calls it checks that the proxy's assembly carries
+  `IgnoresAccessChecksToAttribute` naming the guest's assembly, read with `GetCustomAttributesData`, which real .NET
+  exposes on both runtimes (measured with `5u-probe3`: the internal interface's proxy assembly has it, with the
+  caller's assembly name as its argument).
+* A same-image differential property against real .NET, in the test host, over the pure function of the target (the
+  handler is a stub named by the source generator, and holds no decision; the guests cover it), with PawPrint's answer
+  equal to host `Type.IsVisible` of the same type:
+  * the CoreLib sweep in two parts: the Domain rule against the host's `IsVisible` for every TypeDef of `HostImage`'s
+    CoreLib, by metadata token, with the count asserted equal to the image's; and the walk for each TypeDef as an
+    `OpenGenericTypeDefinition` or a `Closed` handle, where a type that concretisation refuses is listed by name with
+    its reason, and the test asserts that list;
+  * an enumerated nesting fixture, compiled once: every chain of a top-level class, public or not, with up to three
+    nested levels of each of the six nested visibilities (518 types, 432 of them innermost at the fourth level), and a
+    second, smaller forest with generic levels;
+  * FsCheck constructions over that fixture's types and CoreLib's, as a small tree (definition, instantiation, szarray,
+    array of rank 2 or 3, pointer, byref outermost, either kind of generic parameter, function pointer). The host's
+    `Type` and PawPrint's target are both built from the tree; the target goes through `openConstructed`, `composite`
+    and `functionPointer`, and through concretisation where every part is closed. The generator draws only what the
+    host can build (no pointer, byref or `void` as a generic argument, no array or pointer over a byref, instantiation
+    only of definitions with no constraints), so nothing is discarded after the draw. The host's function pointer types
+    come from fields of the fixture: every signature of at most two parameters over a handful of types the holder can
+    name (a public type, an internal one, a public generic over the internal one, the holder's own parameter, and
+    `void` as a return).
+  Coverage is asserted on the fixed sample for the constructions: a visible definition with an invisible argument at
+  depth one and deeper, an invisible type under each shape, an open construction with an invisible closed argument, a
+  function pointer invisible by its return type alone, and a bare definition as an argument.
+* The Domain property, over every chain of visibilities up to length five, exhaustively, against the model: true exactly
+  when every level but the last is `NestedPublic` and the last is `Public`. Unit tests of the pure function for the
+  `DynamicMethodsClass` target and a `Composite` over it, built directly.
+* Mutants, each run against the guests, the differential property and the unit tests:
   * `NestedFamily` and `NestedFamORAssem` treated as visible (`Pub.NFam`, `Pub.NFamOrAsm`);
   * the walk stopping at the immediate encloser, asking whether it is `Public` (`Pub.NPub.NPubPub`);
   * `NestedPublic` accepted without the walk (`Internal.NPub`, the public type inside `NPriv`);
@@ -3719,10 +3748,16 @@ Written first, and seen to fail on this branch before the handler exists:
     type, since its field route stops first under PawPrint);
   * an open construction's arguments skipped (`PubG<Dictionary<Internal, T>>`);
   * a `Composite` answered true without its element (`Dictionary<Internal, T>[]`);
-  * the dynamic-methods class answered false (if question 3 answers it);
+  * the dynamic-methods class answered false;
   * the rule applied to images on disk only, with a dynamic module's created type answered true (`DNotPublic`);
-  * the argument check applied to a generic type definition: expected to survive, since a definition's arguments are its
-    own parameters, which are visible; to be recorded as equivalent.
+  * each of the five non-public nested levels treated as `NestedPublic`, one at a time;
+  * a top-level `NotPublic` type answered true (`Internal`);
+  * a closed byref and a closed pointer answered true without their element (`Internal&`, `IntS*`);
+  * a closed function pointer's parameters skipped (`delegate*<Internal, void>`);
+  * a closed instantiation answered by its arguments alone (`InternalG<int>`);
+  * an open construction answered by its arguments alone (`InternalG<T>` over `PubG<>`'s parameter);
+  * a `Void` return answered false (`delegate*<int, void>`);
+  * the handler pushing the inverted answer (any guest).
 
 ### 5u: left to later stages
 
@@ -3739,4 +3774,191 @@ Written first, and seen to fail on this branch before the handler exists:
   processor architecture.
 * `Signature.Init` of a field of a generic type definition whose type is a function pointer over the type's parameter:
   PawPrint refuses it as a signature naming `!0` in a context that instantiates nothing, where real .NET constructs the
-  open function pointer type (measured above). Not specific to `IsVisible`.
+  open function pointer type (measured above). Not specific to `IsVisible`; pinned by a parked guest in a test-only PR
+  against `main`, and un-parked by the `Signature.Init` fix.
+* Nested dynamic types: when an emit scope gains a NestedClass table and `DefineNestedType` runs,
+  `TypeBuilderIsVisible.cs` gains a created nested builder of each visibility. The Domain rule needs no change if the
+  re-read `TypeInfo` carries `DeclaringType`.
+* The rest of the two docstrings of the dynamic-methods class ("no name outside a debug build"), with
+  `GetAttributes` (vm/runtimehandles.cpp:642) and `ConstructName` (vm/typestring.cpp:841).
+* `buildAccessLevelChain` could gather its levels through the Domain function 5u adds. That is not a reason to join the
+  two rules.
+* Whether the events stage is 5v here or a plan of its own.
+* The internal-interface guest's un-parking by custom attributes, with its check of the attribute.
+
+### 5u: the decisions
+
+Taken 2026-11-14.
+
+* **A: CoreCLR's walk, computed at each call, in three layers.** Checked against the pinned source:
+  * `RuntimeTypeHandle_IsVisible` (vm/runtimehandles.cpp:709) returns `TypeHandle::IsExternallyVisible` and nothing
+    else. `TypeHandle::IsExternallyVisible` (vm/typehandle.cpp:991), `MethodTable::IsExternallyVisible`
+    (vm/methodtable.cpp:1500), `FnPtrTypeDesc::IsExternallyVisible` (vm/typedesc.cpp:1775) and
+    `IsTypeDefExternallyVisible` (vm/siginfo.cpp:3189) are as the stage describes them. Nothing caches.
+  * `5u-probe`'s output is the same on .NET 10.0.14 and 11.0.0-rc.3 (`net10.out` and `net11.out` are identical), and
+    every row of the table agrees with it.
+  * B is rejected. `AccessCheck.levelIsVisible` fails by design on the private and family levels, to which
+    `IsVisible` must answer false, and `IsExternallyVisible` reads neither `InternalsVisibleTo` nor
+    `IgnoresAccessChecksTo`. Sharing a path would make a later port of family access change `IsVisible` with no test
+    of `IsVisible` in the diff.
+  * C is rejected. It stores a derived fact beside the facts it derives from, on a public record of a published
+    package, and the open forms need A's walk anyway. Its cost on `ConcreteType` is smaller than the options say (the
+    record is private and built by `ConcreteType.make`), but nothing measured calls `IsVisible` in a loop.
+  * A fourth structure was weighed: one walk in the interpreter, beside `RuntimeTypeHandleTarget.isByRefLike`, with the
+    closed shapes handled in its `Closed` arm. It writes each shape's rule once, where A writes it for a closed handle
+    and again for an open one. It is rejected because the closed walk reads only `LoadedAssemblies` and
+    `AllConcreteTypes`, so TypeSystem is the lowest project that can hold it, and the two copies are short and each
+    has its own mutants below.
+* **Conditions on A.**
+  * Domain holds the rule as a function of data: the visibility of each level of a nesting chain, innermost first,
+    answering true exactly when every level but the last is `NestedPublic` and the last is `Public`. It is total over
+    the eight values of `TypeAttributes.VisibilityMask` and fails on nothing. A second Domain function gathers that
+    chain for a `TypeInfo` from its `DumpedAssembly` by `DeclaringType`.
+  * The gathering function fails, naming the type, where an encloser's handle is absent from `TypeDefs`, and where the
+    chain grows longer than the assembly has TypeDefs (a cycle among NestedClass rows). CoreCLR answers false to a
+    failed lookup of the encloser, but for an image which it would have refused to load; a host failure is the honest
+    counterpart, and this is wider than the stage's "that arm has no counterpart", which covers only a disagreement
+    between the visibility bits and the row.
+  * TypeSystem holds the walk over a `ConcreteTypeHandle`, in a file of its own after `ContinuationSlots.fs`. `Byref`,
+    `Pointer`, `OneDimArrayZero` and `Array` ask their element. `FunctionPointer` asks every parameter type and its
+    return type, and a `MethodReturnType.Void` return is visible, because `System.Void` is a public type (`void` and
+    `delegate*<int, void>` are measured true). `Concrete` asks the rule of its definition and then each generic
+    argument. A `Concrete` handle with no row in `AllConcreteTypes` is a PawPrint fault and fails by name.
+  * The interpreter holds the walk over a `RuntimeTypeHandleTarget` as a pure function in the `RuntimeTypeHandleTarget`
+    module, beside `isByRefLike` and with its parameters. The handler in `NativeRuntimeTypeQCall` decodes the target
+    with `NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget`, calls that function, pushes the `Int32` 1 or 0, and
+    changes nothing else.
+  * No arm of any of the three is a wildcard. A new case of either union must fail to compile here.
+* **Open forms are answered now.** Each is one arm, each is measured, and a refusal would leave a walk that is partial
+  over the cases of its own input. `GenericParameter` and `MethodGenericParameter` are true whatever their owner.
+  `OpenGenericTypeDefinition` is the rule of its definition alone. `OpenConstructed` is the rule of its definition and
+  then each argument, by this same walk, so an argument which canonicalisation has collapsed to a bare definition
+  (`IWrap<INested<>>`) is answered as a definition, as CoreCLR answers the MethodTable of a generic type definition.
+  `Composite` asks its element. An open `FunctionPointer` asks its parameter types and its return type, with `Void` as
+  above.
+* **The dynamic-methods class is answered true.** `CreateMinimalMethodTable` sets `tdPublic | tdSealed` on the class,
+  `IsTypeDefExternallyVisible` returns at `IsTdPublic` before it reads any metadata, and both runtimes measure true for
+  the class and for its array. Refusing it would repeat, in a new arm, the premise that is already wrong for
+  `GetAttributes`.
+  * The arm cites `CreateMinimalMethodTable` and does not call `refuseMetadataQuery`.
+  * The docstrings of the `DynamicMethodsClass` case and of `refuseMetadataQuery` both say that the class has no
+    attributes. 5u corrects those words, since its own arm reads one. It changes neither handler that refuses; those
+    stay with "left to later stages".
+* **A runtime-async continuation fails through `ContinuationType.unasked`, at whatever depth the walk meets it.** This
+  is narrower than "refused by name": it is the BUG failure which every neighbouring query already gives, and it is
+  right for the same reason. PawPrint refuses `GetType()` on a continuation, so no `RuntimeType` names one and the
+  QCall cannot be asked. The comment on the arm records that CoreCLR's source gives false (a minimal class with no
+  attributes set), so that whoever first makes the arm reachable starts from that reading and measures it.
+* **The stage stays in this plan, and this reverses 5s.** 5s decided that `RuntimeTypeHandle_IsVisible` and event
+  enumeration were "reflection PRs against `main`, outside this plan". The stage cites "5s's question 4" as if 5s had
+  decided the opposite; that sentence is corrected below.
+  * The reason to reverse is where the record is. The measurements of `DispatchProxy`'s stops are in this plan, the
+    stream builds one stage at a time whichever document holds it, and a new plan for one QCall would hold forty lines
+    of design and a pointer back here.
+  * What 5s wanted is kept in substance. 5u's code depends on nothing of 5t's and touches none of 5t's files, so that
+    it rebases onto `main` cleanly when 5t merges. The PR is titled for what it is, `Type.IsVisible` of a
+    `RuntimeType`.
+  * Whether event enumeration is 5v here or a reflection plan of its own is decided when it is planned. Reflection over
+    events is not implemented for any assembly, which is a larger thing than one QCall. Until then "5v" in the 5u
+    sections means "the events stage".
+* **The internal-interface guest is added, parked, and it is not a check.** A parked case runs only when someone names
+  it, and at either answer it stays parked: a wrong true moves its stop from `TypeBuilder_DefineCustomAttribute` to the
+  events, and no test reads the stop. So the stage's claim that it is "the only end-to-end check" of the false answer
+  is wrong.
+  * What pins the false answer in CI is the internal interface's row in `TypeIsVisible.cs` and the differential
+    property.
+  * The guest is still worth having. It records a measured stop, it is the program which the custom-attributes stage
+    un-parks, and it costs one file and one registration.
+  * It must be able to tell the answers apart once it runs. With a wrong true and everything else implemented,
+    `DispatchProxy` skips `IgnoresAccessChecksToAttribute`, and the proxy may still load under PawPrint and exit 0. So
+    the guest also checks something that only the false answer produces, if real .NET exposes it: the attribute on the
+    proxy's assembly, read through `GetCustomAttributesData`. Measure that on .NET 10 and 11 first. If real .NET does
+    not expose it, the reason string says that the guest passes under either answer.
+* **One feature, one PR.** The Domain rule, the two walks, the handler and their tests are one feature: `IsVisible` of
+  a `RuntimeType`. The commits go in the stream's order, tests first with the failing run recorded, then Domain,
+  TypeSystem and the interpreter.
+* **Corrections to the other 5u sections.**
+  * "Which stage" cites 5s's question 4 in support. 5s decided the opposite, as above.
+  * "Under PawPrint, `5u-probe` and `5u-probe2` reach every case except `Continuation`" is not shown for the
+    dynamic-methods class. The saved run of `5u-probe2` stops at `RuntimeTypeHandle.GetAttributes` (the line before
+    `IsVisible`), so PawPrint has never been seen to ask `IsVisible` of that class or to build its array. The reflection
+    route to the `Type` does run.
+  * The class's `Name`, `(dynamicClass)`, is in no saved output: both real-runtime runs were given an argument, which
+    skips that line. It is read from the source instead (vm/typestring.cpp:841). `0x101` is measured.
+  * The table's row for `DefineType` with `NestedPublic` is right, but it is not why a dynamic module has no nested
+    type here. PawPrint refuses `DefineNestedType` itself: `TypeBuilder_DefineType` with an encloser stops because an
+    emit scope has no NestedClass table. Every dynamic type which 5u can see is top-level.
+  * "Where PawPrint will answer" omits a neighbour. `NativeRuntimeMethodHandle.buildAccessLevelChain` already walks
+    `DeclaringType` to the outermost type, privately, for the access check. 5u does not touch it.
+  * The differential property does not drive the handler. The native method is a stub which the source generator
+    names (`<_IsVisible>g____PInvoke|82_0`), with counters that differ between SDKs, and the handler holds no decision.
+    The property drives the pure function over the target; the guests cover the handler.
+  * Question 6's recommendation stands, with the claim about what the guest checks corrected as above.
+* **The oracle is sufficient with these changes.**
+  * The nesting fixture is enumerated, not drawn, and compiled once. It holds every chain of a top-level class, public
+    or not, with up to three nested levels of each of the six nested visibilities: 518 types, of which 432 are
+    innermost at the fourth level. Exhaustive beats sampled for a rule this small, a failure names a type and not a
+    seed, and one compilation replaces one for every FsCheck case. A second, smaller forest has generic levels.
+  * FsCheck then draws constructions over that fixture's types and CoreLib's, as a small tree (definition,
+    instantiation, szarray, array of rank 2 or 3, pointer, byref outermost, either kind of generic parameter, function
+    pointer). The host's `Type` and PawPrint's target are both built from the tree. The target goes through
+    `openConstructed`, `composite` and `functionPointer`, and through concretisation where every part is closed.
+  * The generator draws only what the host can build: no pointer, byref or `void` as a generic argument, no array or
+    pointer over a byref, and instantiation only of definitions with no constraints. Nothing is discarded after the
+    draw, so there is no skip rate to hide a thin sample. This replaces "skipped where the host's `MakeGenericType`
+    rejects the constraints".
+  * The host's function pointer types come from fields of the fixture, so their signatures are a fixed set: every
+    signature of at most two parameters over a handful of types which the holder can name (a public type, an internal
+    one, a public generic over the internal one, the holder's own parameter, and `void` as a return).
+  * The sweep of CoreLib has two parts. The Domain rule is compared with the host's `IsVisible` for every TypeDef of
+    `HostImage`'s CoreLib, by metadata token, with the count asserted equal to the image's. That needs no
+    concretisation, and it is exact for a generic definition too, since a definition's arguments are not consulted.
+    The walk is compared for each TypeDef as an `OpenGenericTypeDefinition` or a `Closed` handle; a type which
+    concretisation refuses is listed by name with its reason, and the test asserts that list.
+  * The Domain property runs over every chain of visibilities up to length five, exhaustively, against the model
+    written as the sentence above.
+  * Coverage is asserted on the fixed sample for the constructions only: a visible definition with an invisible
+    argument at depth one and deeper, an invisible type under each shape, an open construction with an invisible closed
+    argument, a function pointer invisible by its return type alone, and a bare definition as an argument.
+  * `TypeIsVisible.cs` gains rows for a generic definition as an argument, both answers:
+    `typeof(PubG<>).MakeGenericType(typeof(PubG<>))` and the same over `InternalG<>`. Measure both on .NET 10 first.
+  * The dynamic-methods class gets a guest of its own, not rows in `TypeBuilderIsVisible.cs`. It reaches CoreLib's
+    internals by name, and a rename there should break one small guest. It asks `IsVisible` only, never `Name` or
+    `Attributes`. If the array route stops elsewhere under PawPrint, the array row leaves the guest and "as built"
+    records the stop. Either way a unit test asks the pure function about the `DynamicMethodsClass` target and a
+    `Composite` over it, built directly.
+  * `TypeBuilderIsVisible.cs` keeps its other rows. It has no nested dynamic type, for the reason above.
+  * Mutants added:
+    * each of the five non-public nested levels treated as `NestedPublic`, one at a time (the stage has two of them);
+    * a top-level `NotPublic` type answered true (`Internal`);
+    * a closed byref and a closed pointer answered true without their element (`Internal&`, `IntS*`);
+    * a closed function pointer's parameters skipped (`delegate*<Internal, void>`);
+    * a closed instantiation answered by its arguments alone (`InternalG<int>`);
+    * an open construction answered by its arguments alone (`InternalG<T>` over `PubG<>`'s parameter);
+    * a `Void` return answered false (`delegate*<int, void>`);
+    * the handler pushing the inverted answer (any guest).
+  * The mutant "the argument check applied to a generic type definition" is dropped, not recorded as equivalent.
+    `OpenGenericTypeDefinition` carries no arguments, so the mutant cannot be written without inventing the parameters
+    it would then find visible.
+* **The two findings outside the stage are correctly outside it.**
+  * The dynamic-methods class's `GetAttributes` and `ConstructName`: the source confirms both. `GetAttributes` returns
+    `GetAttrClass()` for any MethodTable (vm/runtimehandles.cpp:642), which is the `tdPublic | tdSealed` that
+    `CreateMinimalMethodTable` set, and `TypeString` appends `(dynamicClass)` for a type with no metadata. They are two
+    other queries with a helper of their own, and only private reflection over CoreLib reaches them.
+  * The field of `FnHolder<>` whose type is `delegate*<T, void>`: `Signature.Init` of a field of a generic type
+    definition, nothing to do with visibility. It is the worse of the two, because ordinary reflection reaches it and
+    PawPrint's message asserts that CoreCLR throws `BadImageFormatException` where CoreCLR answers. It is pinned by a
+    parked pure guest in a test-only PR against `main`, as 5t pinned its duplicate overrides, so that 5u's diff does
+    not claim it.
+* **Additions to "left to later stages".**
+  * Nested dynamic types. When an emit scope gains a NestedClass table and `DefineNestedType` runs,
+    `TypeBuilderIsVisible.cs` gains a nested builder of each visibility, created. The Domain rule needs no change if
+    the re-read `TypeInfo` carries `DeclaringType`.
+  * The test-only PR's parked guest for the field of function pointer type, and the `Signature.Init` fix which un-parks
+    it.
+  * The dynamic-methods class's `GetAttributes` and `ConstructName`, with their sources as cited above, and the rest of
+    the two docstrings ("no name outside a debug build").
+  * `buildAccessLevelChain` could gather its levels through the Domain function which 5u adds. That is not a reason to
+    join the two rules.
+  * Whether the events stage is 5v here or a plan of its own.
+  * The internal-interface guest's un-parking by custom attributes, with the check that separates the two answers.
