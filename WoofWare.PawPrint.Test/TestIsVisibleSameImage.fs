@@ -408,6 +408,17 @@ public unsafe class FnFields<T>
 
     let private fnFields : Type = fixtureType "FnFields`1"
 
+    /// The function-pointer fields invisible by their return type alone: every parameter visible.
+    let private invisibleByReturnAlone (parameters : string list, ret : string) : bool =
+        (parameters |> List.forall (fun p -> p = "Pub" || p = "T"))
+        && (ret = "Internal" || ret = "PubG<Internal>")
+
+    let private returnAloneIndices : int list =
+        fnSignatures
+        |> List.indexed
+        |> List.filter (snd >> invisibleByReturnAlone)
+        |> List.map fst
+
     let private genLeaf (argument : bool) : Gen<Tree> =
         Gen.frequency
             [
@@ -415,6 +426,9 @@ public unsafe class FnFields<T>
                 2, Gen.elements definitionPool |> Gen.map (Leaf.Definition >> Tree.Leaf)
                 2, Gen.elements parameterPool |> Gen.map Tree.Leaf
                 (if argument then 0 else 2), Gen.choose (0, fnSignatures.Length - 1) |> Gen.map Tree.FnPtr
+                // A rare shape among the 105 signatures, drawn on purpose so that the fixed sample
+                // reaches it often.
+                (if argument then 0 else 1), Gen.elements returnAloneIndices |> Gen.map Tree.FnPtr
             ]
 
     /// A tree the host can build: no pointer or function pointer beneath a generic argument, byref only
@@ -443,7 +457,9 @@ public unsafe class FnFields<T>
     let private genTop : Gen<Tree> =
         Gen.sized (fun size ->
             let inner = genInner false (min size 8)
-            Gen.frequency [ 4, inner ; 1, inner |> Gen.map Tree.Byref ]
+            // A fixed opening for the rarest label: a function pointer invisible by its return alone.
+            let returnAlone = Gen.elements returnAloneIndices |> Gen.map Tree.FnPtr
+            Gen.frequency [ 8, inner ; 2, inner |> Gen.map Tree.Byref ; 1, returnAlone ]
         )
 
     let rec private hostType (tree : Tree) : Type =
@@ -691,9 +707,7 @@ public unsafe class FnFields<T>
 
             labels cover element
         | Tree.FnPtr index ->
-            let parameters, ret = fnSignatures.[index]
-
-            if (parameters |> List.forall (fun p -> p = "Pub" || p = "T")) && (ret = "Internal" || ret = "PubG<Internal>") then
+            if invisibleByReturnAlone fnSignatures.[index] then
                 cover Reach.FunctionPointerInvisibleByReturnAlone
 
     [<Test>]
@@ -722,7 +736,7 @@ public unsafe class FnFields<T>
                 Reach.FunctionPointerInvisibleByReturnAlone
                 Reach.BareDefinitionAsArgument
             ] do
-            if coverage.Count label < 5 then
+            if coverage.Count label < 15 then
                 failwith $"the fixed sample reached %A{label} only %d{coverage.Count label} times"
 
     // ----- Targets no image declares -----
