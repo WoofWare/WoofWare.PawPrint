@@ -3438,3 +3438,39 @@ The host-only cache test (`late callBefore=True`) gave 1, then 1 and 2, in 20 of
 
 * Suites at the tip, built from the whole solution: the default suite (5569 passed, 37 skipped), `Guest` (234),
   `GuestSolo` (2), `GuestPure` (1179) and `GuestImpure` (276), each run on its own, all passing.
+* Addendum, after Codex's review: the refusal moved from the static arm to the consumers that decide the call.
+  * Codex's case: `I2 : IDef` with rows `D1`, `D2`, created below 25 MethodImpl rows, then its module grown to 25;
+    `I3 : I2` supplying `D3`; `C : I3`. Measured on .NET 10.0.14 and 11.0.0-rc.3 (throwaway probe `5t-probe4`): `D3`
+    before and after the crossing, at a fresh call site and through `GetInterfaceMap` alike. The arm refused at `I2`,
+    although the default-body search discards `I2`'s candidate for `I3`'s. `C : I2` alone gives `D1` at a site that
+    resolved before the crossing and `D2` at one that did not, as the class case does.
+  * Measured too, the same way: two equally specific interfaces in the window, one or both of whose rows disagree,
+    make the call throw `AmbiguousImplementationException` before and after the crossing. Which candidates conflict
+    depends on their interfaces, not their bodies, so an order-dependent candidate in a conflict decides nothing.
+  * So this is the decisions' "second structure", now with two consumers. The static arm reports
+    `FoundBody.OrderDependent` (both bodies and both counts) where it refused, and `FoundBody.Certain` otherwise.
+    `StaticVirtualDispatch`'s walk of the chain refuses an order-dependent body, since a MethodImpl of the chain is
+    the call's answer; its default-body step refuses one only for the single surviving candidate (or the first
+    survivor of the variant pass, which is what runs), and names a conflicting one by the body a read now finds.
+    `DefaultInterfaceImplementation.search` carries the candidates unchanged in shape, `Body` now a `FoundBody`;
+    the instance search never yields an order-dependent body, and its consumer crashes if it does.
+    `EscapeAnalysis` asks `StaticVirtualDispatch.resolve`, so it gets the same answers.
+  * Tests, committed first: the guest gains Codex's case (checks 26-27) and the two ambiguities (28-29); the
+    refusal fixture gains `C : I2` with `I2` the most specific; the differential property's schedules give the rows
+    to `C`, to an interface `C` implements, or to an interface beneath a more specific one, and half of them now
+    cross 25 rows, so that every window label is reached many times. Red: the guest refused at `I2` ("the
+    MethodImpl rows of I2 that implement M give D1 in the order added and D2 in reverse ... module Overridden"), and
+    the property was falsified by `{ Shape = Overridden; Before = 8; Rows = [1; 3; 3]; Between = 7; After = 18 }`;
+    both refusal tests passed.
+  * Mutants added, each run as before:
+
+    | Mutant | Killed by |
+    |---|---|
+    | The refusal back at the level | the guest (refuses `I2` in `Overridden`); the property |
+    | An order-dependent body resolved to the one a read now finds, everywhere | both refusal tests; the property |
+    | An order-dependent body resolved to the one found in the order added, everywhere | both refusal tests; the property |
+    | The default-body step resolving an order-dependent survivor | the interface refusal test; the property |
+    | The chain walk resolving an order-dependent MethodImpl | the class refusal test; the property |
+
+  * Suites at the tip, built from the whole solution: the default suite (5570 passed, 37 skipped), `Guest` (234),
+    `GuestSolo` (2), `GuestPure` (1179) and `GuestImpure` (276), each run on its own, all passing.
