@@ -83,7 +83,7 @@ module TestAwaitSiteBinding =
     let private holds (facts : AwaitSiteFacts) (reason : AwaitNotYetBound) : bool =
         match reason with
         | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.Pattern = MatchedPattern.Await true
-        | AwaitNotYetBound.Constrained -> facts.Constrained && facts.Opcode = AwaitedCall.Callvirt
+        | AwaitNotYetBound.ConstrainedCallvirt -> facts.Constrained && facts.Opcode = AwaitedCall.Callvirt
 
     [<Test>]
     let ``A site binds exactly when stage 4e's three conditions hold, and continues as its pattern says`` () : unit =
@@ -173,7 +173,7 @@ module TestAwaitSiteBinding =
             |> Set.ofSeq
 
         reasons
-        |> shouldEqual (Set.ofList [ "ContinuesOnCapturedContext" ; "Constrained" ])
+        |> shouldEqual (Set.ofList [ "ContinuesOnCapturedContext" ; "ConstrainedCallvirt" ])
 
     /// A `callvirt` that dispatches binds the named method's variant, abstract or not: dispatch
     /// finds the receiver's implementation through the ordinary sibling (decision 19).

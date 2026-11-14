@@ -1356,9 +1356,12 @@ module internal UnaryMetadataCallOps =
                     state
 
         match awaitSite with
+        | AwaitSiteOutcome.Binds _ when pendingConstrained.IsSome ->
+            failwith
+                $"BUG: a constrained. callvirt of %O{concretizedMethod} bound its async variant, which decision 13 leaves unbound (AwaitNotYetBound.ConstrainedCallvirt)"
         | AwaitSiteOutcome.Binds bound ->
-            // No `constrained.` prefix: dispatch on the receiver finds the implementation of the
-            // variant, if the named method dispatches.
+            // Dispatch on the receiver finds the implementation of the variant, if the named method
+            // dispatches.
             enterVirtualCallee ctx bound.Variant true (Some bound.Site) state
         | AwaitSiteOutcome.NotAnAwaitSite
         | AwaitSiteOutcome.DoesNotBind _ ->
