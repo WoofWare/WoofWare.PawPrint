@@ -115,6 +115,7 @@ module NativeQCall =
             "RuntimeTypeHandle_GetInstantiation", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetInstantiation"
             "RuntimeTypeHandle_GetInterfaces", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetInterfaces"
             "RuntimeTypeHandle_IsCollectible", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_IsCollectible"
+            "RuntimeTypeHandle_IsVisible", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_IsVisible"
             "RuntimeTypeHandle_RegisterCollectibleTypeDependency",
             NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_RegisterCollectibleTypeDependency"
             "RuntimeTypeHandle_MakeByRef", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_MakeByRef"
