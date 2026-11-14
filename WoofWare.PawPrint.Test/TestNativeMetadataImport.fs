@@ -3608,11 +3608,8 @@ public interface IEventInterface
             System.Reflection.Metadata.Ecma335.TableIndex.Event
         )
 
-    /// `MetadataTokenType.MethodDef` with a Property or Event parent, as
-    /// <c>Associates.AssignAssociates</c> passes it. Alone among the token types this QCall answers,
-    /// the INT32 buffer here is not a token list: it is `ASSOCIATE_RECORD` *pairs*, and the managed
-    /// caller reads `[i * 2]` and `[i * 2 + 1]`. Re-paired here so the tests can assert what the
-    /// caller sees rather than a flat list whose stride they would have to keep in their heads.
+    /// `invokeEnumAssociates` over the loaded assembly named by `assemblyFullName`, which `state` must
+    /// hold.
     let private invokeEnumAssociatesIn
         (fixture : MetadataImportFixture)
         (assemblyFullName : string)
@@ -3631,6 +3628,11 @@ public interface IEventInterface
 
         length, pairs, storage, state
 
+    /// `MetadataTokenType.MethodDef` with a Property or Event parent, as
+    /// <c>Associates.AssignAssociates</c> passes it. Alone among the token types this QCall answers,
+    /// the INT32 buffer here is not a token list: it is `ASSOCIATE_RECORD` *pairs*, and the managed
+    /// caller reads `[i * 2]` and `[i * 2 + 1]`. Re-paired here so the tests can assert what the
+    /// caller sees rather than a flat list whose stride they would have to keep in their heads.
     let private invokeEnumAssociates
         (fixture : MetadataImportFixture)
         (parent : int32)
