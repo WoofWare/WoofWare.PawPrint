@@ -422,6 +422,14 @@ type CustomAttribute =
 
 [<RequireQualifiedAccess>]
 module CustomAttribute =
+    /// <summary>
+    /// The custom attributes of <paramref name="owner"/>, in RID order, which is the order in which CoreCLR's
+    /// read-write metadata enumerates one owner's rows, at any table size. SRM's per-owner lookup gives the right set
+    /// but, over a table that is not sorted by owner, not in a defined order.
+    /// </summary>
+    let ofOwnerInRidOrder (metadataReader : MetadataReader) (owner : EntityHandle) : CustomAttributeHandle list =
+        failwith "TODO: CustomAttribute.ofOwnerInRidOrder is not implemented yet"
+
     let make
         (metadataReader : MetadataReader)
         (handle : CustomAttributeHandle)

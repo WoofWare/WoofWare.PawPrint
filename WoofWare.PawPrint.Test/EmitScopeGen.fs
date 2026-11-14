@@ -75,6 +75,12 @@ module EmitScopeGen =
         /// the one `method` chooses: enough rows, sometimes, for a module to reach the 25 from which CoreCLR
         /// finds an association's rows in reverse.
         | MethodSemanticsRun of association : int * semantics : int * method : int * count : int
+        /// `count` custom attributes of one owner of any of the nine kinds a builder hands out, each with a
+        /// constructor among the scope's methods and member references and a blob among a few, some empty and
+        /// some malformed; consecutive rows of a run share their constructor and blob two at a time, so that a
+        /// run of two or more holds equal rows. A run is long enough, sometimes, for one owner to hold more than
+        /// 16 rows, and for a module to hold 25 or more.
+        | CustomAttributeRun of owner : int * constructor : int * blob : int * count : int
 
     /// What happened to one `Op.Param`, in the replay of CoreCLR's tables beside the scope.
     type ParamEvent =
@@ -328,6 +334,15 @@ module EmitScopeGen =
                     return Op.Event (owner, name, flags, eventType)
                 }
                 3, Gen.map3 (fun p s m -> Op.MethodSemantics (p, s, m)) choice choice choice
+                4,
+                gen {
+                    let! owner = choice
+                    let! constructor = choice
+                    let! blob = choice
+                    // Mostly one at a time, interleaved with the rows that own them; sometimes a run.
+                    let! count = Gen.frequency [ 6, Gen.constant 1 ; 1, Gen.choose (2, 30) ]
+                    return Op.CustomAttributeRun (owner, constructor, blob, count)
+                }
                 1,
                 gen {
                     let! association = choice
@@ -337,6 +352,48 @@ module EmitScopeGen =
                     return Op.MethodSemanticsRun (association, semantics, method, count)
                 }
             ]
+
+    /// Every owner of `scope` a custom attribute may have, as `HasCustomAttribute`: the assembly if the scope has
+    /// its row, the module, and every row of the seven other tables, in that order.
+    let customAttributeOwners (scope : EmitScope) : HasCustomAttribute list =
+        [
+            if (EmitScope.assembly scope).IsSome then
+                yield HasCustomAttribute.Assembly
+            yield HasCustomAttribute.Module
+            for i in 1 .. (EmitScope.typeDefs scope).Count do
+                yield HasCustomAttribute.TypeDef (TypeDefRid i)
+            for i in 1 .. (EmitScope.methodDefs scope).Count do
+                yield HasCustomAttribute.MethodDef (MethodDefRid i)
+            for i in 1 .. (EmitScope.fields scope).Count do
+                yield HasCustomAttribute.Field (FieldRid i)
+            for i in 1 .. (EmitScope.parameters scope).Count do
+                yield HasCustomAttribute.Param (ParamRid i)
+            for i in 1 .. (EmitScope.properties scope).Count do
+                yield HasCustomAttribute.Property (PropertyRid i)
+            for i in 1 .. (EmitScope.events scope).Count do
+                yield HasCustomAttribute.Event (EventRid i)
+            for i in 1 .. (EmitScope.genericParams scope).Count do
+                yield HasCustomAttribute.GenericParam (GenericParamRid i)
+        ]
+
+    /// Every constructor `scope` can name: each `MethodDef`, then each `MemberRef`.
+    let customAttributeConstructors (scope : EmitScope) : MethodDefOrRef list =
+        [
+            for i in 1 .. (EmitScope.methodDefs scope).Count do
+                yield MethodDefOrRef.MethodDef (MethodDefRid i)
+            for i in 1 .. (EmitScope.memberRefs scope).Count do
+                yield MethodDefOrRef.MemberRef (MemberRefRid i)
+        ]
+
+    /// The blobs a generated custom attribute holds: empty, no arguments, a string, and malformed ones.
+    let customAttributeBlobs : ImmutableArray<byte> list =
+        [
+            ImmutableArray.Empty
+            ImmutableArray.Create<byte> [| 1uy ; 0uy ; 0uy ; 0uy |]
+            ImmutableArray.Create<byte> [| 1uy ; 0uy ; 1uy ; byte 'a' ; 0uy ; 0uy |]
+            ImmutableArray.Create<byte> [| 2uy ; 0uy ; 0uy ; 0uy |]
+            ImmutableArray.Create<byte> [| 1uy ; 0uy ; 9uy ; byte 'a' |]
+        ]
 
     let pick (choice : int) (items : 'a list) : 'a option =
         match items with
@@ -853,6 +910,30 @@ module EmitScopeGen =
 
                 withScope scope applied
 
+        | Op.CustomAttributeRun (ownerChoice, constructorChoice, blobChoice, count) ->
+            let owners = customAttributeOwners scope
+            let constructors = customAttributeConstructors scope
+
+            if constructors.IsEmpty then
+                applied
+            else
+                let owner = (pick ownerChoice owners).Value
+
+                (applied, [ 0 .. count - 1 ])
+                ||> List.fold (fun applied i ->
+                    let value, applied =
+                        internBlob (pick (blobChoice + i / 2) customAttributeBlobs).Value applied
+
+                    let row : CustomAttributeRow =
+                        {
+                            Parent = owner
+                            Constructor = (pick (constructorChoice + i / 2) constructors).Value
+                            Value = value
+                        }
+
+                    withScope (EmitScope.addCustomAttribute row applied.Scope |> snd) applied
+                )
+
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
         let name, scope = EmitScope.internString "Generated" scope
@@ -985,6 +1066,9 @@ module EmitScopeGen =
             for i in 1 .. reader.GetTableRowCount TableIndex.GenericParam do
                 let r = reader.GetGenericParameter (MetadataTokens.GenericParameterHandle i)
                 yield (TableIndex.GenericParam, i), box (token r.Parent, r.Index, r.Attributes, heap r.Name)
+            for i in 1 .. reader.GetTableRowCount TableIndex.CustomAttribute do
+                let r = reader.GetCustomAttribute (MetadataTokens.CustomAttributeHandle i)
+                yield (TableIndex.CustomAttribute, i), box (token r.Parent, token r.Constructor, blob r.Value)
             for i in 1 .. reader.GetTableRowCount TableIndex.GenericParamConstraint do
                 let r =
                     reader.GetGenericParameterConstraint (MetadataTokens.GenericParameterConstraintHandle i)

@@ -176,6 +176,17 @@ type EventRid =
         match this with
         | EventRid rid -> rid
 
+/// The RID of an emit scope's `CustomAttribute` row: its token, in the order the attributes were defined, whatever
+/// their owners.
+[<Struct>]
+type CustomAttributeRid =
+    internal
+    | CustomAttributeRid of int
+
+    member this.Rid : int =
+        match this with
+        | CustomAttributeRid rid -> rid
+
 /// ECMA-335 II.24.2.6's `ResolutionScope` coded index, for the targets an emit scope can hold.
 [<RequireQualifiedAccess>]
 type ResolutionScope =
@@ -234,6 +245,29 @@ type HasSemantics =
         match this with
         | HasSemantics.Event rid -> (rid.Rid <<< 1) ||| 0
         | HasSemantics.Property rid -> (rid.Rid <<< 1) ||| 1
+
+/// ECMA-335 II.24.2.6's `HasCustomAttribute` coded index, for the owners a dynamic module's builders hand out.
+[<RequireQualifiedAccess>]
+type HasCustomAttribute =
+    /// The assembly: the `Assembly` table's one row, whose token is `0x20000001`.
+    | Assembly
+    /// The module: the `Module` table's one row, which the managed caller names with the token `0x00000001`.
+    | Module
+    | TypeDef of TypeDefRid
+    | MethodDef of MethodDefRid
+    | Field of FieldRid
+    | Param of ParamRid
+    | Property of PropertyRid
+    | Event of EventRid
+    | GenericParam of GenericParamRid
+
+    /// The coded index: the RID shifted left five bits, tagged as ECMA-335 II.24.2.6 tags this owner's table.
+    member this.CodedIndex : int =
+        failwith "TODO: HasCustomAttribute.CodedIndex is not implemented yet"
+
+    /// The owner's metadata token.
+    member this.Token : int =
+        failwith "TODO: HasCustomAttribute.Token is not implemented yet"
 
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
 type MetadataVersion =
@@ -415,6 +449,14 @@ type MethodSemanticsRow =
         Semantics : MethodSemanticsAttributes
         Method : MethodDefRid
         Association : HasSemantics
+    }
+
+/// A `CustomAttribute` row (ECMA-335 II.22.10). The blob is stored as given, whether or not it parses.
+type CustomAttributeRow =
+    {
+        Parent : HasCustomAttribute
+        Constructor : MethodDefOrRef
+        Value : BlobOffset
     }
 
 type private ByteContentComparer () =
@@ -630,6 +672,31 @@ module EmitScope =
             Some (EventRid rid)
         else
             None
+
+    /// The `Field` row with this RID, if the scope has one.
+    let tryFieldRid (rid : int) (scope : EmitScope) : FieldRid option =
+        if rid >= 1 && rid <= scope.Fields.Count then
+            Some (FieldRid rid)
+        else
+            None
+
+    /// The `Param` row with this RID, if the scope has one.
+    let tryParamRid (rid : int) (scope : EmitScope) : ParamRid option =
+        if rid >= 1 && rid <= scope.Params.Count then
+            Some (ParamRid rid)
+        else
+            None
+
+    /// The `GenericParam` row with this RID, if the scope has one.
+    let tryGenericParamRid (rid : int) (scope : EmitScope) : GenericParamRid option =
+        if rid >= 1 && rid <= scope.GenericParams.Count then
+            Some (GenericParamRid rid)
+        else
+            None
+
+    /// The `CustomAttribute` row with this RID, if the scope has one.
+    let tryCustomAttributeRid (rid : int) (scope : EmitScope) : CustomAttributeRid option =
+        failwith "TODO: EmitScope.tryCustomAttributeRid is not implemented yet"
 
     /// The offset `internString` would return for `value` if the heap already holds what CoreCLR's
     /// emitter stores for it, without adding it.
@@ -1113,6 +1180,24 @@ module EmitScope =
             Events = scope.Events.Add row
         }
 
+    /// <summary>
+    /// Add a <c>CustomAttribute</c> row, at the next RID, which is the token CoreCLR hands out for it, whatever owns
+    /// the rows before it. This does not model <c>RegMeta::DefineCustomAttribute</c>;
+    /// <c>EmitScopeDefinitions.defineCustomAttribute</c> does.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner, the constructor or the blob.</exception>
+    let addCustomAttribute (row : CustomAttributeRow) (scope : EmitScope) : CustomAttributeRid * EmitScope =
+        failwith "TODO: EmitScope.addCustomAttribute is not implemented yet"
+
+    /// <summary>
+    /// The type a <c>CustomAttribute</c> row's owner belongs to: a type itself; the type that declares a method,
+    /// field, property or event; the type of a parameter's method; the type, or the type of the method, that owns a
+    /// generic parameter. <c>None</c> for the assembly and the module.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner.</exception>
+    let typeOfCustomAttributeOwner (owner : HasCustomAttribute) (scope : EmitScope) : TypeDefRid option =
+        failwith "TODO: EmitScope.typeOfCustomAttributeOwner is not implemented yet"
+
     let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
         let operation = "EmitScope.addMethodSpec"
         requireMethodDefOrRef operation scope row.Method
@@ -1172,6 +1257,21 @@ module EmitScope =
     /// In the order they were added, which is not the image's: the image sorts them by association.
     let methodSemantics (scope : EmitScope) : ImmutableList<MethodSemanticsRow> = scope.MethodSemantics
 
+    /// In RID order, which is the order they were defined, whatever their owners.
+    let customAttributes (scope : EmitScope) : ImmutableList<CustomAttributeRow> =
+        failwith "TODO: EmitScope.customAttributes is not implemented yet"
+
     /// In RID order, which is definition order across the module; the image lists each type's events
     /// through an `EventPtr` when they are not already grouped.
     let events (scope : EmitScope) : ImmutableList<EventRow> = scope.Events
+
+/// Reading a `HasCustomAttribute` from the token a managed caller passes.
+[<RequireQualifiedAccess>]
+module HasCustomAttribute =
+    /// <summary>
+    /// The owner this token names in <paramref name="scope"/>: a row of one of the nine tables a builder hands out an
+    /// owner from. <c>None</c> for a token of any other table, for an <c>Assembly</c> or <c>Module</c> token whose RID
+    /// is not 1, and for a RID that names no row of the scope.
+    /// </summary>
+    let tryOfToken (token : int) (scope : EmitScope) : HasCustomAttribute option =
+        failwith "TODO: HasCustomAttribute.tryOfToken is not implemented yet"
