@@ -338,6 +338,8 @@ public unsafe class FnFields<T>
         | OpenWithInvisibleClosedArgument
         | FunctionPointerInvisibleByReturnAlone
         | BareDefinitionAsArgument
+        | InvisibleDefinitionVisibleArguments
+        | ClosedFunctionPointerVisibleWithVoidReturn
 
     let private fixtureType (name : string) : Type =
         match hostAssembly.GetType name with
@@ -419,10 +421,26 @@ public unsafe class FnFields<T>
         |> List.filter (snd >> invisibleByReturnAlone)
         |> List.map fst
 
+    /// The function-pointer fields visible as a whole with a `void` return and no type variable, so
+    /// that PawPrint's target is closed.
+    let private visibleWithVoidReturn (parameters : string list, ret : string) : bool =
+        ret = "void" && parameters |> List.forall (fun p -> p = "Pub")
+
+    let private voidReturnIndices : int list =
+        fnSignatures
+        |> List.indexed
+        |> List.filter (snd >> visibleWithVoidReturn)
+        |> List.map fst
+
+    /// Most of `nominalPool` is the fixture's invisible chains, so the visible ones are drawn on their own
+    /// as often, or an instantiation would rarely have every argument visible.
+    let private visibleNominals : Type list = nominalPool |> List.filter (fun t -> t.IsVisible)
+
     let private genLeaf (argument : bool) : Gen<Tree> =
         Gen.frequency
             [
-                6, Gen.elements nominalPool |> Gen.map (Leaf.Nominal >> Tree.Leaf)
+                3, Gen.elements nominalPool |> Gen.map (Leaf.Nominal >> Tree.Leaf)
+                3, Gen.elements visibleNominals |> Gen.map (Leaf.Nominal >> Tree.Leaf)
                 2, Gen.elements definitionPool |> Gen.map (Leaf.Definition >> Tree.Leaf)
                 2, Gen.elements parameterPool |> Gen.map Tree.Leaf
                 (if argument then 0 else 2), Gen.choose (0, fnSignatures.Length - 1) |> Gen.map Tree.FnPtr
@@ -459,7 +477,8 @@ public unsafe class FnFields<T>
             let inner = genInner false (min size 8)
             // A fixed opening for the rarest label: a function pointer invisible by its return alone.
             let returnAlone = Gen.elements returnAloneIndices |> Gen.map Tree.FnPtr
-            Gen.frequency [ 8, inner ; 2, inner |> Gen.map Tree.Byref ; 1, returnAlone ]
+            let voidReturn = Gen.elements voidReturnIndices |> Gen.map Tree.FnPtr
+            Gen.frequency [ 8, inner ; 2, inner |> Gen.map Tree.Byref ; 1, returnAlone ; 1, voidReturn ]
         )
 
     let rec private hostType (tree : Tree) : Type =
@@ -663,6 +682,9 @@ public unsafe class FnFields<T>
         match tree with
         | Tree.Leaf _ -> ()
         | Tree.Instantiate (definition, arguments) ->
+            if not definition.IsVisible && arguments |> List.forall (invisible >> not) then
+                cover Reach.InvisibleDefinitionVisibleArguments
+
             if definition.IsVisible then
                 if arguments |> List.exists invisible then
                     cover Reach.VisibleDefinitionInvisibleArgument
@@ -710,6 +732,9 @@ public unsafe class FnFields<T>
             if invisibleByReturnAlone fnSignatures.[index] then
                 cover Reach.FunctionPointerInvisibleByReturnAlone
 
+            if visibleWithVoidReturn fnSignatures.[index] then
+                cover Reach.ClosedFunctionPointerVisibleWithVoidReturn
+
     [<Test>]
     let ``PawPrint's answer for a drawn construction is the host's`` () : unit =
         let property (cover : Reach -> unit) (tree : Tree) : unit =
@@ -735,6 +760,8 @@ public unsafe class FnFields<T>
                 Reach.OpenWithInvisibleClosedArgument
                 Reach.FunctionPointerInvisibleByReturnAlone
                 Reach.BareDefinitionAsArgument
+                Reach.InvisibleDefinitionVisibleArguments
+                Reach.ClosedFunctionPointerVisibleWithVoidReturn
             ] do
             if coverage.Count label < 15 then
                 failwith $"the fixed sample reached %A{label} only %d{coverage.Count label} times"
