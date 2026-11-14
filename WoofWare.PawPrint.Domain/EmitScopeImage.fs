@@ -49,7 +49,9 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 /// form PawPrint's loader reads like any assembly on disk.
 ///
 /// Every RID in the image is the one the scope gave its row, except in `InterfaceImpl` and `MethodImpl`,
-/// which ECMA-335 requires to be sorted and which are sorted stably by class.
+/// which ECMA-335 requires to be sorted and which are sorted stably by class, and `MethodSemantics`, sorted
+/// stably by its association's coded index. A row of those three tables therefore moves when a row added
+/// later sorts before it; nothing hands out their RIDs.
 ///
 /// `GenericParam` is in the scope's order, which is the order the parameters were created and need not
 /// be ECMA-335's order by owner, so that each RID is the token CoreCLR gave the parameter. The header
@@ -64,7 +66,9 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 ///
 /// A child table whose rows are not grouped by parent, or whose parameters are not in sequence order within their method, gets a
 /// pointer table (`FieldPtr`, `MethodPtr`, `ParamPtr`), as CoreCLR's read-write metadata starts one, so the table stream is always the uncompressed `#-` kind, the only one
-/// that may hold pointer tables. Every heap offset is the one the scope handed out.
+/// that may hold pointer tables. A `PropertyMap` row is derived for each type with properties, in the order
+/// of each type's first property, as `RegMeta::DefineProperty` adds them, and the properties get a
+/// `PropertyPtr` when they are not grouped in that order. Every heap offset is the one the scope handed out.
 [<RequireQualifiedAccess>]
 module EmitScopeImage =
     let private cliHeaderSize : int = 72
@@ -133,6 +137,36 @@ module EmitScopeImage =
         |> Seq.sortBy fst
         |> Seq.map snd
         |> Array.ofSeq
+
+    // ECMA-335 II.22.28 requires `MethodSemantics` sorted by its `Association` column, the HasSemantics coded
+    // index; sorting by (coded index, position) is the stable sort. The result lists the scope's positions
+    // (from 0) in image order.
+    let private semanticsOrder (rows : ImmutableList<MethodSemanticsRow>) : int[] =
+        rows
+        |> Seq.mapi (fun i row -> (row.Association.CodedIndex, i), i)
+        |> Seq.sortBy fst
+        |> Seq.map snd
+        |> Array.ofSeq
+
+    /// Each property's `PropertyMap` row (from 0), and each map row's parent: one map row for each type with
+    /// properties, in the order of each type's first property.
+    let private propertyMaps (owners : TypeDefRid[]) : int[] * TypeDefRid[] =
+        let parents = ResizeArray<TypeDefRid> ()
+        let positions = Collections.Generic.Dictionary<TypeDefRid, int> ()
+
+        let mapOf =
+            owners
+            |> Array.map (fun owner ->
+                match positions.TryGetValue owner with
+                | true, position -> position
+                | false, _ ->
+                    let position = parents.Count
+                    positions.[owner] <- position
+                    parents.Add owner
+                    position
+            )
+
+        mapOf, parents.ToArray ()
 
     let private imageRids (classes : TypeDefRid seq) : ImmutableArray<int> =
         let order = sortedOrder classes
@@ -262,6 +296,18 @@ module EmitScopeImage =
         let genericParamConstraints = EmitScope.genericParamConstraints scope
         requireGenericParamConstraintsSorted genericParamConstraints
 
+        let properties = EmitScope.properties scope
+
+        let propertyMapOf, propertyMapParents =
+            properties |> Seq.map _.Owner |> Array.ofSeq |> propertyMaps
+
+        // A property is listed by its map row, which `pointerTable` orders it by; ties stay in RID order.
+        let propertyPtr = pointerTable propertyMapOf
+
+        let methodSemantics =
+            let rows = EmitScope.methodSemantics scope
+            rows |> semanticsOrder |> Array.map (fun i -> rows.[i])
+
         let rowCounts = Array.zeroCreate tableCount
         rowCounts.[int TableIndex.Module] <- 1
         rowCounts.[int TableIndex.TypeRef] <- (EmitScope.typeRefs scope).Count
@@ -275,6 +321,10 @@ module EmitScopeImage =
         rowCounts.[int TableIndex.InterfaceImpl] <- interfaceImpls.Length
         rowCounts.[int TableIndex.MemberRef] <- (EmitScope.memberRefs scope).Count
         rowCounts.[int TableIndex.StandAloneSig] <- (EmitScope.standAloneSigs scope).Count
+        rowCounts.[int TableIndex.PropertyMap] <- propertyMapParents.Length
+        rowCounts.[int TableIndex.PropertyPtr] <- propertyPtr.Length
+        rowCounts.[int TableIndex.Property] <- properties.Count
+        rowCounts.[int TableIndex.MethodSemantics] <- methodSemantics.Length
         rowCounts.[int TableIndex.MethodImpl] <- methodImpls.Length
         rowCounts.[int TableIndex.TypeSpec] <- (EmitScope.typeSpecs scope).Count
         rowCounts.[int TableIndex.Assembly] <- (if (EmitScope.assembly scope).IsSome then 1 else 0)
@@ -318,6 +368,9 @@ module EmitScopeImage =
 
         let typeOrMethodDefSize =
             codedIndexSize rowCounts [ TableIndex.TypeDef ; TableIndex.MethodDef ] 1
+
+        let hasSemanticsSize =
+            codedIndexSize rowCounts [ TableIndex.Event ; TableIndex.Property ] 1
 
         let tables = BlobBuilder ()
 
@@ -443,6 +496,30 @@ module EmitScopeImage =
         // StandAloneSig (II.22.36)
         for row in EmitScope.standAloneSigs scope do
             blob "StandAloneSig.Signature" row.Signature
+
+        // PropertyMap (II.22.35). Its list indexes the pointer table when there is one, which has as many
+        // rows as `Property`.
+        let propertyLists =
+            listStarts (propertyMapOf |> Array.map (fun m -> m + 1)) propertyMapParents.Length
+
+        for i in 0 .. propertyMapParents.Length - 1 do
+            index TableIndex.TypeDef "PropertyMap.Parent" propertyMapParents.[i].Rid
+            index TableIndex.Property "PropertyMap.PropertyList" propertyLists.[i]
+
+        for rid in propertyPtr do
+            index TableIndex.Property "PropertyPtr.Property" rid
+
+        // Property (II.22.34)
+        for row in properties do
+            tables.WriteUInt16 (uint16 row.Flags)
+            str "Property.Name" row.Name
+            blob "Property.Type" row.Signature
+
+        // MethodSemantics (II.22.28)
+        for row in methodSemantics do
+            tables.WriteUInt16 (uint16 row.Semantics)
+            index TableIndex.MethodDef "MethodSemantics.Method" row.Method.Rid
+            writeIndex tables hasSemanticsSize "MethodSemantics.Association" row.Association.CodedIndex
 
         // MethodImpl (II.22.27)
         for row in methodImpls do

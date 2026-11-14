@@ -156,6 +156,16 @@ type GenericParamRid =
         match this with
         | GenericParamRid rid -> rid
 
+/// The RID of an emit scope's `Property` row: its token, in definition order across the module.
+[<Struct>]
+type PropertyRid =
+    internal
+    | PropertyRid of int
+
+    member this.Rid : int =
+        match this with
+        | PropertyRid rid -> rid
+
 /// ECMA-335 II.24.2.6's `ResolutionScope` coded index, for the targets an emit scope can hold.
 [<RequireQualifiedAccess>]
 type ResolutionScope =
@@ -200,6 +210,18 @@ type TypeOrMethodDef =
         match this with
         | TypeOrMethodDef.TypeDef rid -> (rid.Rid <<< 1) ||| 0
         | TypeOrMethodDef.MethodDef rid -> (rid.Rid <<< 1) ||| 1
+
+/// ECMA-335 II.24.2.6's `HasSemantics` coded index, for the targets an emit scope can hold: what a
+/// `MethodSemantics` row's method is an accessor of.
+[<RequireQualifiedAccess>]
+type HasSemantics =
+    | Property of PropertyRid
+
+    /// The coded index: the RID shifted left one bit, tagged 0 for an Event and 1 for a Property.
+    /// ECMA-335 II.22.28 sorts the `MethodSemantics` table by it.
+    member this.CodedIndex : int =
+        match this with
+        | HasSemantics.Property rid -> (rid.Rid <<< 1) ||| 1
 
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
 type MetadataVersion =
@@ -351,6 +373,26 @@ type GenericParamConstraintRow =
         Constraint : TypeDefOrRef
     }
 
+/// A `Property` row (ECMA-335 II.22.34), with the type that owns it. A scope holds no `PropertyMap` or
+/// `PropertyPtr` rows: the writer derives both from the owners.
+type PropertyRow =
+    {
+        Owner : TypeDefRid
+        /// Stored in a two-byte column.
+        Flags : PropertyAttributes
+        Name : StringOffset
+        Signature : BlobOffset
+    }
+
+/// A `MethodSemantics` row (ECMA-335 II.22.28): a method that is an accessor of a property.
+type MethodSemanticsRow =
+    {
+        /// Stored in a two-byte column.
+        Semantics : MethodSemanticsAttributes
+        Method : MethodDefRid
+        Association : HasSemantics
+    }
+
 type private ByteContentComparer () =
     interface IEqualityComparer<ImmutableArray<byte>> with
         member _.Equals (x : ImmutableArray<byte>, y : ImmutableArray<byte>) : bool =
@@ -400,6 +442,8 @@ type EmitScope =
             MethodSpecs : ImmutableList<MethodSpecRow>
             GenericParams : ImmutableList<GenericParamRow>
             GenericParamConstraints : ImmutableList<GenericParamConstraintRow>
+            Properties : ImmutableList<PropertyRow>
+            MethodSemantics : ImmutableList<MethodSemanticsRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -548,6 +592,13 @@ module EmitScope =
         else
             None
 
+    /// The `Property` row with this RID, if the scope has one.
+    let tryPropertyRid (rid : int) (scope : EmitScope) : PropertyRid option =
+        if rid >= 1 && rid <= scope.Properties.Count then
+            Some (PropertyRid rid)
+        else
+            None
+
     /// The offset `internString` would return for `value` if the heap already holds what CoreCLR's
     /// emitter stores for it, without adding it.
     let tryStringOffset (value : string) (scope : EmitScope) : StringOffset option =
@@ -646,6 +697,8 @@ module EmitScope =
                 MethodSpecs = ImmutableList.Empty
                 GenericParams = ImmutableList.Empty
                 GenericParamConstraints = ImmutableList.Empty
+                Properties = ImmutableList.Empty
+                MethodSemantics = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -951,6 +1004,50 @@ module EmitScope =
             MethodImpls = scope.MethodImpls.Add row
         }
 
+    /// <summary>
+    /// Add a <c>Property</c> row, at the next RID, which is the token CoreCLR hands out for it, whatever
+    /// owns the rows before it.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope lacks the owner, the name or the signature, or the flags do not fit the column's two bytes.
+    /// </exception>
+    let addProperty (row : PropertyRow) (scope : EmitScope) : PropertyRid * EmitScope =
+        let operation = "EmitScope.addProperty"
+        requireRid operation "TypeDef" scope.TypeDefs.Count row.Owner.Rid
+        requireString operation scope row.Name
+        requireBlob operation scope row.Signature
+
+        if int row.Flags < 0 || int row.Flags > 0xFFFF then
+            invalidArg (nameof row) $"%s{operation}: the flags 0x%x{int row.Flags} do not fit the column's two bytes"
+
+        PropertyRid (scope.Properties.Count + 1),
+        { scope with
+            Properties = scope.Properties.Add row
+        }
+
+    /// <summary>
+    /// Add a <c>MethodSemantics</c> row. Nothing hands out its RID: the image sorts the table by
+    /// association.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope lacks the method or the property, or the semantics do not fit the column's two bytes.
+    /// </exception>
+    let addMethodSemantics (row : MethodSemanticsRow) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addMethodSemantics"
+        requireRid operation "MethodDef" scope.MethodDefs.Count row.Method.Rid
+
+        match row.Association with
+        | HasSemantics.Property rid -> requireRid operation "Property" scope.Properties.Count rid.Rid
+
+        if int row.Semantics < 0 || int row.Semantics > 0xFFFF then
+            invalidArg
+                (nameof row)
+                $"%s{operation}: the semantics 0x%x{int row.Semantics} do not fit the column's two bytes"
+
+        { scope with
+            MethodSemantics = scope.MethodSemantics.Add row
+        }
+
     let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
         let operation = "EmitScope.addMethodSpec"
         requireMethodDefOrRef operation scope row.Method
@@ -1002,3 +1099,10 @@ module EmitScope =
 
     /// In the order they were added, which is not the image's: the image sorts them by class.
     let methodImpls (scope : EmitScope) : ImmutableList<MethodImplRow> = scope.MethodImpls
+
+    /// In RID order, which is definition order across the module; the image lists each type's properties
+    /// through a `PropertyPtr` when they are not already grouped.
+    let properties (scope : EmitScope) : ImmutableList<PropertyRow> = scope.Properties
+
+    /// In the order they were added, which is not the image's: the image sorts them by association.
+    let methodSemantics (scope : EmitScope) : ImmutableList<MethodSemanticsRow> = scope.MethodSemantics

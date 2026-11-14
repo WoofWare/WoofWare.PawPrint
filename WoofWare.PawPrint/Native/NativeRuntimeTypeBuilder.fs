@@ -15,6 +15,9 @@ module NativeRuntimeTypeBuilder =
     /// `mdtMethodDef`, the table byte of a `MethodDef` token.
     let private methodDefTable : int = 0x06
 
+    /// `mdtProperty`, the table byte of a `Property` token.
+    let private propertyTable : int = 0x17
+
     /// The dynamic module's scope, which only a `RuntimeModuleBuilder`'s module has.
     let private dynamicScope (operation : string) (moduleName : string) (state : IlMachineState) : EmitScope =
         match state.TypeSystem._LoadedAssemblies.TryDynamicScope moduleName with
@@ -342,6 +345,149 @@ module NativeRuntimeTypeBuilder =
                 ctx.Thread
             |> NativeHandlerResult.completed
             |> Some
+        | "TypeBuilder_DefineProperty",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.UInt16)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection", "PropertyAttributes", attributesGenerics)
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Byte)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty && attributesGenerics.IsEmpty
+            ->
+            let operation = "TypeBuilder_DefineProperty"
+
+            if instruction.Arguments.Length <> 6 then
+                failwith $"%s{operation}: expected six native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+
+            // `RegMeta::DefineProperty` takes a TypeDef and nothing else; the managed caller passes its
+            // TypeBuilder's, never the global type's nil token.
+            let owner =
+                let token = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+                if token >>> 24 &&& 0xFF <> typeDefTable then
+                    failwith
+                        $"%s{operation}: the parent 0x%08x{token} is not a TypeDef token, and the managed caller passes only its TypeBuilder's"
+
+                match EmitScope.tryTypeDefRid (token &&& 0x00FFFFFF) held with
+                | Some typeDef -> typeDef
+                | None -> failwith $"%s{operation}: the parent 0x%08x{token} names no TypeDef row of the module's scope"
+
+            // The QCall reads the name to its first NUL, and the managed caller refuses an empty or
+            // NUL-led name only after this has returned, so an empty name is stored.
+            let name =
+                match NativeCall.managedPointerOfPointerArgument operation "wszName" instruction.Arguments.[2] with
+                | ManagedPointerSource.Null ->
+                    failwith $"%s{operation}: a null property name; the managed caller has already read the name"
+                | namePtr -> NativeCall.readNullTerminatedUtf16 operation ctx.BaseClassTypes state namePtr
+
+            let attributes = NativeCall.int32Argument operation instruction.Arguments.[3]
+
+            // The managed caller passes its signature buffer, which may be longer than the signature.
+            let signature =
+                NativeCall.readCountedBytes
+                    operation
+                    ctx.BaseClassTypes
+                    state
+                    (NativeCall.managedPointerOfPointerArgument operation "pSignature" instruction.Arguments.[4])
+                    (NativeCall.int32Argument operation instruction.Arguments.[5])
+                |> ImmutableArray.CreateRange
+
+            let property, extended =
+                EmitScopeDefinitions.defineProperty owner name signature attributes held
+
+            let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+            state
+            |> IlMachineState.pushToEvalStack
+                (CliType.Numeric (CliNumericType.Int32 ((propertyTable <<< 24) ||| property.Rid)))
+                ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
+        | "TypeBuilder_DefineMethodSemantics",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection",
+                                                        "MethodSemanticsAttributes",
+                                                        semanticsGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Void when moduleGenerics.IsEmpty && semanticsGenerics.IsEmpty ->
+            let operation = "TypeBuilder_DefineMethodSemantics"
+
+            if instruction.Arguments.Length <> 4 then
+                failwith $"%s{operation}: expected four native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+
+            // The managed callers pass their PropertyBuilder's token, or an EventBuilder's, which
+            // `TypeBuilder_DefineEvent`'s refusal means cannot exist yet.
+            let associationToken = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+            let association =
+                match associationToken >>> 24 &&& 0xFF with
+                | table when table = propertyTable ->
+                    match EmitScope.tryPropertyRid (associationToken &&& 0x00FFFFFF) held with
+                    | Some property -> HasSemantics.Property property
+                    | None ->
+                        failwith
+                            $"%s{operation}: the association 0x%08x{associationToken} names no Property row of the module's scope"
+                | _ ->
+                    failwith
+                        $"%s{operation}: the association 0x%08x{associationToken} is not a Property token, and the managed callers pass only a PropertyBuilder's or an EventBuilder's, and no EventBuilder can exist while TypeBuilder_DefineEvent is refused"
+
+            // `_DefineMethodSemantics` takes the semantics as two bytes.
+            let semantics =
+                enum<MethodSemanticsAttributes> (
+                    NativeCall.int32Argument operation instruction.Arguments.[2] &&& 0xFFFF
+                )
+
+            // The managed caller passes `MethodBuilder.MetadataToken`, whatever module the builder is of;
+            // CoreCLR stores its RID unread. A token of this module's method is CoreCLR's row, whichever
+            // module's builder it came from.
+            let method =
+                let token = NativeCall.int32Argument operation instruction.Arguments.[3]
+                let rid = token &&& 0x00FFFFFF
+
+                if token >>> 24 &&& 0xFF <> methodDefTable then
+                    failwith
+                        $"TODO: %s{operation}: the accessor 0x%08x{token} of 0x%08x{associationToken} is not a MethodDef token; CoreCLR stores its RID as a MethodDef's, which only a user-derived MethodBuilder can pass"
+
+                if rid = 0 then
+                    failwith
+                        $"TODO: %s{operation}: the accessor of 0x%08x{associationToken} is the nil token 0x%08x{token}, for which CoreCLR writes no row; only a user-derived MethodBuilder passes one"
+
+                match EmitScope.tryMethodDefRid rid held with
+                | Some method -> method
+                | None ->
+                    failwith
+                        $"TODO: %s{operation}: the accessor 0x%08x{token} of 0x%08x{associationToken} names no MethodDef row of %s{moduleName}, which has %d{(EmitScope.methodDefs held).Count}; CoreCLR stores the RID unchecked, and reflection over the property throws ArgumentOutOfRangeException unless a method defined later brings it into range. A MethodBuilder of another module, or a user-derived one, passes such a token"
+
+            let extended =
+                EmitScopeDefinitions.defineMethodSemantics association semantics method held
+
+            let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+            NativeHandlerResult.completed state |> Some
         | "TypeBuilder_SetMethodImpl",
           "System.Private.CoreLib",
           "System.Reflection.Emit",

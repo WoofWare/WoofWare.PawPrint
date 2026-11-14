@@ -454,3 +454,63 @@ module EmitScopeDefinitions =
     /// </summary>
     let setMethodImplFlags (method : MethodDefRid) (flags : MethodImplAttributes) (scope : EmitScope) : EmitScope =
         EmitScope.setMethodImplFlags method (flags &&& enum<MethodImplAttributes> 0xFFFF) scope
+
+    /// `prReservedMask`: `prRTSpecialName`, `prHasDefault` and the unused bits, which only the emitter sets.
+    let private reservedPropertyFlags : int = 0xF400
+
+    /// <summary>
+    /// Define a property of <paramref name="owner"/>, as <c>RegMeta::DefineProperty</c> does in a dynamic
+    /// module, whose emitter does not check for a duplicate (<c>MDDupProperty</c> is not set): a new row, at
+    /// the next RID, however many of the type's properties share its name and signature, holding the name
+    /// and the signature as given.
+    /// </summary>
+    /// <remarks>
+    /// The flags are as <c>_SetPropertyProps</c> stores them: 0 for <c>-1</c>, which leaves them unset;
+    /// otherwise without <c>prReservedMask</c>, which the emitter keeps for itself, in the column's two
+    /// bytes. An empty name is stored, as the QCall stores the part of a name before its first NUL.
+    /// </remarks>
+    let defineProperty
+        (owner : TypeDefRid)
+        (name : string)
+        (signature : ImmutableArray<byte>)
+        (flags : int)
+        (scope : EmitScope)
+        : PropertyRid * EmitScope
+        =
+        let flags =
+            if flags = -1 then
+                0
+            else
+                flags &&& ~~~reservedPropertyFlags &&& 0xFFFF
+
+        let name, scope = EmitScope.internString name scope
+        let signature, scope = EmitScope.internBlob signature scope
+
+        EmitScope.addProperty
+            {
+                Owner = owner
+                Flags = enum<PropertyAttributes> flags
+                Name = name
+                Signature = signature
+            }
+            scope
+
+    /// <summary>
+    /// Make <paramref name="method"/> an accessor of <paramref name="association"/>, as
+    /// <c>RegMeta::_DefineMethodSemantics</c> does for <c>TypeBuilder_DefineMethodSemantics</c>: a new row
+    /// every time, with no search, whatever type the method belongs to.
+    /// </summary>
+    let defineMethodSemantics
+        (association : HasSemantics)
+        (semantics : MethodSemanticsAttributes)
+        (method : MethodDefRid)
+        (scope : EmitScope)
+        : EmitScope
+        =
+        EmitScope.addMethodSemantics
+            {
+                Semantics = semantics
+                Method = method
+                Association = association
+            }
+            scope

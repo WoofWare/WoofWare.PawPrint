@@ -55,8 +55,9 @@ module TestEmitScopeExtension =
     /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its
     /// generic parameters, its methods with their implementation flags, parameters, generic parameters
     /// and bodies, and its fields, as handles into the image, and its interface
-    /// implementations and method impls in table order. Those two tables are sorted, so their RIDs
-    /// move as rows of lower classes are added; the runtime keeps no handle into them, only what each
+    /// implementations and method impls in table order; and its properties, each with its accessors in
+    /// table order. The interface, method impl and accessor tables are sorted, so their RIDs move as rows
+    /// of lower classes or properties are added; the runtime keeps no handle into them, only what each
     /// row names.
     let private typeView (pe : PEReader) (reader : MetadataReader) (typeDef : TypeDefRid) =
         let handle = MetadataTokens.TypeDefinitionHandle typeDef.Rid
@@ -117,12 +118,28 @@ module TestEmitScopeExtension =
                     yield token row.MethodBody, token row.MethodDeclaration
             ]
 
+        let semantics = methodSemanticsRows pe reader
+
+        let properties =
+            [
+                for p in definition.GetProperties () do
+                    let rid = rowNumber (PropertyDefinitionHandle.op_Implicit p)
+                    let association = (rid <<< 1) ||| 1
+
+                    yield
+                        rid,
+                        semantics
+                        |> List.filter (fun (_, _, a) -> a = association)
+                        |> List.map (fun (s, m, _) -> s, m)
+            ]
+
         token definition.BaseType,
         genericParamsView reader genericParamOwners (GenericParamOwner.TypeDef handle),
         methods,
         fields,
         interfaces,
-        impls
+        impls,
+        properties
 
     let private createdTypeNamed (violation : EmitScopeExtensionViolation) : TypeDefRid option =
         match violation with
@@ -922,3 +939,156 @@ module TestEmitScopeExtension =
         // Entries count from the first the scope interned, after the space every heap starts with.
         EmitScopeExtension.violations ImmutableHashSet.Empty before rewritten
         |> shouldEqual [ EmitScopeExtensionViolation.HeapEntryChanged (HeapIndex.UserString, 1) ]
+
+    /// `<Module>`, then `First` (TypeDef 2) and `Second` (TypeDef 3), each with one method (MethodDefs 1 and
+    /// 2) and one property (Properties 1 and 2).
+    let private withProperties () : EmitScope * PropertyRid * PropertyRid =
+        let define (name : string) (scope : EmitScope) : TypeDefRid * EmitScope =
+            match EmitScopeDefinitions.defineTopLevelTypeDef name Reflection.TypeAttributes.Public None [] scope with
+            | TypeDefDefinition.Defined (rid, scope) -> rid, scope
+            | TypeDefDefinition.Duplicate _ -> failwith $"%s{name} is defined twice"
+
+        let signature = ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x08uy |]
+        let propertySignature = ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |]
+        let scope = EmitScope.create "Props" Guid.Empty
+        let first, scope = define "First" scope
+        let second, scope = define "Second" scope
+
+        let _, scope =
+            EmitScopeDefinitions.defineMethod first "get_A" signature Reflection.MethodAttributes.Public scope
+
+        let _, scope =
+            EmitScopeDefinitions.defineMethod second "get_B" signature Reflection.MethodAttributes.Public scope
+
+        let a, scope =
+            EmitScopeDefinitions.defineProperty first "A" propertySignature 0 scope
+
+        let b, scope =
+            EmitScopeDefinitions.defineProperty second "B" propertySignature 0 scope
+
+        scope, a, b
+
+    [<Test>]
+    let ``a property added to a created type is refused`` () : unit =
+        let before, _, _ = withProperties ()
+
+        let after =
+            EmitScopeDefinitions.defineProperty
+                (TypeDefRid 2)
+                "Late"
+                (ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |])
+                0
+                before
+            |> snd
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 3)) before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 2)) before after
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.Property, 3, TypeDefRid 2)
+            ]
+
+    [<Test>]
+    let ``an accessor is refused exactly when its property's type is created`` () : unit =
+        let before, a, _ = withProperties ()
+
+        // `Second`'s method as an accessor of `First`'s property: CoreCLR checks only the property's type.
+        let after =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Property a)
+                Reflection.MethodSemanticsAttributes.Getter
+                (MethodDefRid 2)
+                before
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 3)) before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 2)) before after
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.MethodSemantics, 1, TypeDefRid 2)
+            ]
+
+    [<Test>]
+    let ``a created type's accessor rows may move`` () : unit =
+        let scope, a, b = withProperties ()
+
+        // `Second`'s property, the later one, has its accessor first; `Second` is created.
+        let before =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Property b)
+                Reflection.MethodSemanticsAttributes.Getter
+                (MethodDefRid 2)
+                scope
+
+        // `First`'s accessor sorts before it, so `Second`'s row moves from image RID 1 to 2.
+        let after =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Property a)
+                Reflection.MethodSemanticsAttributes.Getter
+                (MethodDefRid 1)
+                before
+
+        let afterPe, afterReader = readImage (EmitScopeImage.write after)
+        use _ = afterPe
+
+        methodSemanticsRows afterPe afterReader
+        |> shouldEqual [ 2, 1, (1 <<< 1) ||| 1 ; 2, 2, (2 <<< 1) ||| 1 ]
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 3)) before after
+        |> shouldEqual []
+
+    [<Test>]
+    let ``a changed property or accessor is reported at its position`` () : unit =
+        let scope, a, _ = withProperties ()
+
+        let before =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Property a)
+                Reflection.MethodSemanticsAttributes.Getter
+                (MethodDefRid 1)
+                scope
+
+        let rewritten =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Property a)
+                Reflection.MethodSemanticsAttributes.Setter
+                (MethodDefRid 1)
+                scope
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty before rewritten
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.MethodSemantics, 1) ]
+
+        let oneProperty =
+            let define (name : string) (scope : EmitScope) : TypeDefRid * EmitScope =
+                match
+                    EmitScopeDefinitions.defineTopLevelTypeDef name Reflection.TypeAttributes.Public None [] scope
+                with
+                | TypeDefDefinition.Defined (rid, scope) -> rid, scope
+                | TypeDefDefinition.Duplicate _ -> failwith $"%s{name} is defined twice"
+
+            let s = EmitScope.create "Props" Guid.Empty
+            let first, s = define "First" s
+            let second, s = define "Second" s
+            let signature = ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x08uy |]
+
+            let _, s =
+                EmitScopeDefinitions.defineMethod first "get_A" signature Reflection.MethodAttributes.Public s
+
+            let _, s =
+                EmitScopeDefinitions.defineMethod second "get_B" signature Reflection.MethodAttributes.Public s
+
+            EmitScopeDefinitions.defineProperty
+                second
+                "A"
+                (ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |])
+                0
+                s
+            |> snd
+
+        // The same name and signature, but another owner.
+        EmitScopeExtension.violations ImmutableHashSet.Empty scope oneProperty
+        |> List.contains (EmitScopeExtensionViolation.RowChanged (TableIndex.Property, 1))
+        |> shouldEqual true

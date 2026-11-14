@@ -513,14 +513,21 @@ module NativeMetadataImport =
     /// <c>AssignAssociates</c> switches on the raw value and assigns <c>addOn</c> for an AddOn row
     /// even on a *property*.
     ///
-    /// Deliberately a full scan collecting every match, where CoreCLR binary-searches for one row and
-    /// expands to the contiguous group around it (metamodel.h:689-755), which is sound only because
-    /// ECMA-335 II.24.2.6 requires this table to be sorted by Association — a claim CoreCLR does not
-    /// verify. On a conforming image the two agree exactly; on a non-conforming one PawPrint finds
-    /// rows CoreCLR's binary search could miss.
+    /// The rows come back in the order CoreCLR finds them, which depends on which metadata reader it has:
+    ///
+    /// * An image on disk is read-only metadata, which binary-searches for one row and expands to the
+    ///   contiguous group around it (metamodel.h:689-755): the rows in RID order. That is sound only
+    ///   because ECMA-335 II.24.2.6 requires this table to be sorted by Association, a claim CoreCLR does
+    ///   not verify. PawPrint scans the whole table instead, which agrees exactly on a conforming image and
+    ///   on a non-conforming one finds rows CoreCLR's binary search could miss.
+    /// * A dynamic module is read-write metadata (<c>CMiniMdRW::FindMethodSemanticsHelper</c>), which
+    ///   finds the rows through a lookup hash once the table holds 25 rows, in reverse; PawPrint's image of
+    ///   one holds the rows in CoreCLR's order, and <c>ReadWriteMetadataLookup.rowsOfKey</c> gives the order
+    ///   it finds them in.
     let private methodSemanticsForAssociation
         (operation : string)
         (assembly : DumpedAssembly)
+        (isDynamic : bool)
         (parent : int32)
         : int32 list
         =
@@ -637,10 +644,15 @@ module NativeMetadataImport =
                     reader.ReadInt32 ()
 
             if rowAssociation = target then
-                associates.Add (metadataTokenTypeMethodDef ||| method)
-                associates.Add semantics
+                associates.Add (metadataTokenTypeMethodDef ||| method, semantics)
 
-        List.ofSeq associates
+        let found =
+            if isDynamic then
+                ReadWriteMetadataLookup.rowsOfKey rows (List.ofSeq associates)
+            else
+                List.ofSeq associates
+
+        found |> List.collect (fun (method, semantics) -> [ method ; semantics ])
 
     let private fieldDefinition
         (operation : string)
@@ -1153,7 +1165,11 @@ module NativeMetadataImport =
                     // pairs, `[method; semantics; …]`, and `*length` counts INT32s rather than
                     // records. Everything downstream — the short buffer, the large-result escape
                     // hatch, `*length` — is indifferent to that, because it only ever moves INT32s.
-                    methodSemanticsForAssociation operation assembly parent
+                    methodSemanticsForAssociation
+                        operation
+                        assembly
+                        (state.TypeSystem._LoadedAssemblies.TryDynamicScope assemblyFullName).IsSome
+                        parent
                 else
                     failwith
                         $"TODO: %s{operation} does not yet support token type 0x%08x{tokenType} with parent 0x%08x{parent}"

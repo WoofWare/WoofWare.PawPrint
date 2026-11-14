@@ -10,10 +10,11 @@ open System.Reflection.Metadata.Ecma335
 /// </summary>
 /// <remarks>
 /// A row's <c>position</c> is its RID in the scope, which is its RID in the image, except in
-/// <c>InterfaceImpl</c> and <c>MethodImpl</c>: there it is the 1-based position at which the scope
-/// added the row, because the image sorts those tables by class. A row of those tables therefore
-/// moves when a later row sorts before it, and that is not a violation: the runtime keeps no handle
-/// into them, only what each row names, and a class's rows keep their order.
+/// <c>InterfaceImpl</c>, <c>MethodImpl</c> and <c>MethodSemantics</c>: there it is the 1-based position at
+/// which the scope added the row, because the image sorts the first two by class and the third by
+/// association. A row of those tables therefore moves when a later row sorts before it, and that is not a
+/// violation: the runtime keeps no handle into them, only what each row names, and a class's or an
+/// association's rows keep their order.
 /// </remarks>
 [<RequireQualifiedAccess>]
 type EmitScopeExtensionViolation =
@@ -25,9 +26,10 @@ type EmitScopeExtensionViolation =
     /// string or blob, and the space every user string heap starts with, not counted.
     | HeapEntryChanged of heap : HeapIndex * entry : int
 
-    /// A row the later scope adds is a member of a type already created: a field or method it
-    /// declares, a parameter of one of its methods, one of its interface implementations or method
-    /// impls, or a generic parameter of it or of one of its methods, or a constraint of one.
+    /// A row the later scope adds is a member of a type already created: a field, method or property
+    /// it declares, a parameter of one of its methods, one of its interface implementations or method
+    /// impls, a generic parameter of it or of one of its methods, or a constraint of one, or an accessor
+    /// of one of its properties, whatever type the accessor's method belongs to.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
     /// A row of the earlier scope differs in the later one only in a column the emitter fills in after
@@ -158,6 +160,12 @@ module EmitScopeExtension =
         let methodOwner (method : MethodDefRid) : TypeDefRid =
             (EmitScope.methodDefs after).[method.Rid - 1].Owner
 
+        // The type an accessor row belongs to: its property's. CoreCLR checks only the property's type
+        // before adding one, and nothing reads the table by method.
+        let associationOwner (row : MethodSemanticsRow) : TypeDefRid =
+            match row.Association with
+            | HasSemantics.Property property -> (EmitScope.properties after).[property.Rid - 1].Owner
+
         // The type a generic parameter belongs to: its owner, or its owner's declaring type.
         let genericParamOwner (parameter : GenericParamRow) : TypeDefRid =
             match parameter.Owner with
@@ -210,6 +218,28 @@ module EmitScopeExtension =
 
             yield! rewritten TableIndex.MemberRef (EmitScope.memberRefs before) (EmitScope.memberRefs after)
             yield! rewritten TableIndex.StandAloneSig (EmitScope.standAloneSigs before) (EmitScope.standAloneSigs after)
+
+            yield! rewritten TableIndex.Property (EmitScope.properties before) (EmitScope.properties after)
+
+            yield!
+                addedToCreated
+                    TableIndex.Property
+                    (EmitScope.properties before).Count
+                    (EmitScope.properties after)
+                    (fun row -> row.Owner)
+
+            yield!
+                rewritten
+                    TableIndex.MethodSemantics
+                    (EmitScope.methodSemantics before)
+                    (EmitScope.methodSemantics after)
+
+            yield!
+                addedToCreated
+                    TableIndex.MethodSemantics
+                    (EmitScope.methodSemantics before).Count
+                    (EmitScope.methodSemantics after)
+                    associationOwner
             yield! rewritten TableIndex.TypeSpec (EmitScope.typeSpecs before) (EmitScope.typeSpecs after)
 
             yield! rewritten TableIndex.MethodImpl (EmitScope.methodImpls before) (EmitScope.methodImpls after)

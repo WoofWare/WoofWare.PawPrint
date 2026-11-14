@@ -69,6 +69,7 @@
         <Compile Include="RuntimeCompatibility.fs" />
         <Compile Include="Debuggable.fs" />
         <Compile Include="IlDumpRendering.fs" />
+        <Compile Include="ReadWriteMetadataLookup.fs" />
         <Compile Include="EmitScope.fs" />
         <Compile Include="EmitScopeReferences.fs" />
         <Compile Include="EmitScopeDefinitions.fs" />

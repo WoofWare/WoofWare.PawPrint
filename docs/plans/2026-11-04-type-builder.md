@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p implemented (#2234); stage 5q implemented (#2235); stage 5r in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p implemented (#2234); stage 5q implemented (#2235); stage 5r implemented (#2236); stage 5s in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -2445,3 +2445,526 @@ Built 2026-11-13 as decided above.
 * Left to later stages, besides those above: `ModuleHandle_ResolveField`; a guest exception
   (`MissingMethodException`, `MissingFieldException`) for a MemberRef that binds to nothing; and the
   `BadImageFormatException` for a call to a generic method definition.
+
+### 5s: a TypeBuilder's properties
+
+**Which stage.** Surveyed on this branch (5r's, over `main` at cd3265704) by reading every "left to later stages" list
+above against the code, and by running small guests of the shapes realistic Reflection.Emit programs use, on .NET 10.0.12
+and under `WoofWare.PawPrint.App` (throwaway probe `5s-survey`). Every survey guest exits 0 on .NET 10. Nothing a list
+above names has been done since it was written, except what a later stage records doing. Still outstanding:
+
+| Item | Where PawPrint refuses it | Size |
+|---|---|---|
+| Properties: `TypeBuilder_DefineProperty`, `TypeBuilder_DefineMethodSemantics` | no handler: `NativeCall.failUnimplemented` (`Native/NativeCall.fs:1027`) | medium: a Property table, a derived PropertyMap and PropertyPtr, a sorted MethodSemantics table, two handlers |
+| Parameters: `TypeBuilder_SetParamInfo` (`DefineParameter`) | no handler | small: the scope's Param table and the writer's ParamPtr exist already (stage 1) |
+| Custom attributes: `TypeBuilder_DefineCustomAttribute` (and so a generic parameter's, 5l) | no handler | large: a sorted table over every HasCustomAttribute parent, and the pseudo-attributes the managed side turns into flags |
+| Constants: `TypeBuilder_SetConstantValue` (`EnumBuilder.DefineLiteral`, `SetConstant` on a field, parameter or property) | no handler | medium: a Constant table sorted by parent, a value blob per element type |
+| Events: `TypeBuilder_DefineEvent` | no handler; and reflection over any type's events stops at `MetadataImport.Enum` of an Event (`Native/NativeMetadataImport.fs:1159`), compiled assemblies included | medium, after event enumeration |
+| Nested types (`DefineNestedType`) | `Native/NativeRuntimeTypeBuilder.fs:181`; `Native/NativeRuntimeModuleBuilder.fs:419` | medium: a sorted NestedClass table, and `GetTypeRef`'s lookup through it |
+| A P/Invoke method: `TypeBuilder_SetPInvokeData` | `Native/NativeRuntimeTypeBuilder.fs:266` (parked `TypeBuilderDefinePInvokeMethod.cs`) | medium: ImplMap and ModuleRef rows, and `MethodInfo.read` of a P/Invoke row without its import |
+| A bodiless method with non-IL implementation flags | `Native/NativeRuntimeTypeBuilder.fs:393` (parked `TypeBuilderNonIlImplementationFlags.cs`) | small to medium |
+| Explicit layout: `TypeBuilder_SetClassLayout`, `TypeBuilder_SetFieldLayoutOffset` | no handler | medium: two sorted tables, and the type loader reading them for a dynamic type |
+| `TypeBuilder_GetTokenFromSig` (`EmitCalli`, `GetSignatureMetadataToken`) | no handler | small: the StandAloneSig table exists |
+| `ModuleBuilder_GetArrayMethodToken` (a multi-dimensional array's `Get`, `Set`, `Address`) | no handler | small to medium |
+| `ModuleBuilder_SetFieldRVAContent` (`DefineInitializedData`) | no handler | medium: FieldRVA and a data section |
+| `<Module>` and `CreateGlobalFunctions` (3b, 3c) | `Native/NativeRuntimeTypeBuilder.fs:874` | medium |
+| A vararg call site's MemberRef (5e, 5f, 5r) | `Native/NativeRuntimeModuleBuilder.fs:350`, and `:325` for a MethodDef parent | small to medium |
+| `ModuleBuilder_GetMemberRef` with a TypeDef parent (a user-derived builder, 5n, 5r) | `Native/NativeRuntimeModuleBuilder.fs:577` | small |
+| A TypeSpec in a signature translated from the module into itself (5n) | `Native/NativeRuntimeModuleBuilder.fs:88` | small to medium |
+| A translated TypeRef with a nil, `Module` or `ModuleRef` scope, an AssemblyRef naming the emitting assembly, or a rejected key (5h) | `Native/NativeRuntimeModuleBuilder.fs:51` to `:63` | small each, rare |
+| Variance of a generic parameter (5l, 5o) | `Native/NativeRuntimeTypeBuilder.fs:902` to `:908` | medium: variance in casting and dispatch |
+| A `struct` flag's constraints (5m) | parked `TypeBuilderGenericParamStructFlag.cs` | small |
+| `ldtoken` of a generic method definition (5r) | `MethodTokenBinding.fs:144` (also `:163`, `:283`, `:374`) | medium; not specific to emit |
+| A MemberRef that binds to nothing raising `MissingMethodException` or `MissingFieldException` (5r) | `WoofWare.PawPrint.TypeSystem/MemberReferenceInstantiation.fs:106` | small to medium; not specific to emit |
+| `RuntimeMethodHandle_GetMethodBody`, `ModuleHandle_ResolveField` (5r) | no handler | small each; reflection |
+
+Measured under PawPrint: a runtime DTO (a field, a property, a getter and a setter, read back by `GetProperty` and
+`GetValue`) stops at `TypeBuilder_DefineProperty`; `DefineParameter` at `TypeBuilder_SetParamInfo`;
+`SetCustomAttribute` at `TypeBuilder_DefineCustomAttribute`; `EnumBuilder` at `TypeBuilder_SetConstantValue`;
+`DefineEvent` at `TypeBuilder_DefineEvent`; `DefineNestedType` at the NestedClass TODO; and a method with a local runs.
+`DispatchProxy.Create` (CoreLib's own consumer of `TypeBuilder`, in `System.Reflection.DispatchProxy`) over an interface
+with one method stops at `RuntimeTypeHandle_IsVisible`, which `DispatchProxyGenerator` asks of the interface, and then at
+`MetadataImport.Enum` of the interface's events. With both answered by throwaway edits (reverted) it exits 0: the proxy
+runs. Over an interface with a property, it then stops at `TypeBuilder_DefineProperty`. Its proxy builder calls
+`DefineProperty`, `SetGetMethod`, `SetSetMethod`, `DefineEvent` and the event accessors, and no `DefineParameter`,
+`SetCustomAttribute` or `SetConstant` (read from its IL with `WoofWare.PawPrint.IlDump`).
+
+So properties are the next stage. A property is the first thing that stops both of the commonest shapes, a generated
+data type and an interface proxy; `DispatchProxy` reaches them for any interface with a property; and nothing else is
+needed first. The runners-up:
+
+* `SetParamInfo` is smaller, since the Param table and its pointer table already exist, and generators that copy a
+  method's parameter names call it routinely. But a program rarely reads the names back, and the generators that call
+  it (Castle's, for instance) need properties and custom attributes too. It is a good next stage after this one.
+* Custom attributes are as common, but are several features: a sorted table, every kind of parent, the pseudo-attributes,
+  and the attribute's own constructor reference. They want their own options.
+* Constants, which `EnumBuilder` needs: a narrower set of programs.
+* Events: reflection over events is not implemented for any assembly, so they wait on that.
+* `RuntimeTypeHandle_IsVisible` and event enumeration: small and worth doing for `DispatchProxy`, but they are reflection
+  QCalls rather than emit, and each is its own PR outside this plan.
+
+**What CoreCLR does.** Read from `RuntimeTypeBuilder.DefinePropertyCore` (RuntimeTypeBuilder.cs:1390),
+`RuntimePropertyBuilder` (`SetMethodSemantics`, line 69), `SignatureHelper.GetPropertySigHelper`,
+`TypeBuilder_DefineProperty` and `TypeBuilder_DefineMethodSemantics` (vm/comdynamic.cpp:543 and :610),
+`RegMeta::DefineProperty` (md/compiler/emit.cpp:2662), `RegMeta::_SetPropertyProps` and `_DefineMethodSemantics`
+(md/compiler/regmeta_emit.cpp:1633 and :975), `RegMeta::DefineMethodSemanticsHelper` (md/compiler/helper.cpp:158),
+`CMiniMdRW::AddPropertyToPropertyMap` and `FindMethodSemanticsHelper` (md/enc/metamodelrw.cpp:4892 and :5000), and
+`Associates.AssignAssociates`:
+
+* `DefinePropertyCore` refuses once the type is created (`ThrowIfCreated`, before the QCall), builds the signature with
+  `GetPropertySigHelper` and passes the attributes as the caller gave them. The signature's first byte is `0x08`, with
+  `HASTHIS` only when the caller's calling convention has `HasThis`; `TypeBuilder.DefineProperty(name, attributes,
+  returnType, parameterTypes)` passes `(CallingConventions)0`, so an instance property's signature usually says static.
+  Types are named by the module's tokens (5j for its own types, `VAR` for a type parameter).
+* `TypeBuilder_DefineProperty` calls `RegMeta::DefineProperty` with no default value, no getter, no setter and no other
+  methods. It does not look for an existing row: `MDDupProperty` (0x100) is in neither `MDDupDefault` nor what
+  vm/assembly.cpp:88 adds for a dynamic module. It finds the type's PropertyMap row, adding one at the type's first
+  property, adds the Property row (so a property's token is in definition order across the module), and appends it to
+  the map's run, starting a `PropertyPtr` when the map is not the last one (`AddChildRowDirectForParent`, else
+  `AddChildRowIndirectForParent`), as FieldPtr and MethodPtr are started. No API shows a dynamic module's PropertyMap
+  or PropertyPtr, so the map's order and when a PropertyPtr starts are read from this source and cannot be measured;
+  their oracle is a model of it. `_SetPropertyProps` clears `prReservedMask` (0xF400: `RTSpecialName`, `HasDefault` and
+  the unused bits) and keeps the low 16 bits, except that it leaves the flags unset when the attributes are
+  `0xFFFFFFFF`: `PropertyAttributes` is an `int` enum, so `(PropertyAttributes)(-1)` writes flags 0. With nil accessors
+  and `bClear` false (the call is the emitter's own, after `SetCallerDefine`) it adds no MethodSemantics row.
+* `RuntimePropertyBuilder`'s constructor checks the name only after the QCall has returned, and the QCall reads the name
+  to its first NUL, so `DefineProperty("\0x", ...)` writes a row with an empty name, consumes a token, and then throws
+  `ArgumentException`.
+* `SetGetMethod`, `SetSetMethod` and `AddOtherMethod` each check only that the property's own type is not created, ask
+  the `MethodBuilder` for its `MetadataToken` (which gives it, and every earlier method of its type, a MethodDef row, as
+  5o reads), and call `TypeBuilder_DefineMethodSemantics` with the property's token, the semantics and that token.
+  `_DefineMethodSemantics` (with `bClear` false) appends a row every time: no search, and nothing checks that the method
+  belongs to the property's type, or to the module.
+* A read-write scope finds a property's rows by the table's sort if it is sorted, else by a hash, else by a scan in RID
+  order (`FindMethodSemanticsHelper`). `_DefineMethodSemantics` calls `AddMethodSemanticsToHash` after every row, and
+  `GenericAddToHash` builds the hash once the table holds 25 rows (`INDEX_ROW_COUNT_THRESHOLD`, md/enc/metamodelrw.cpp:33
+  and :5514); its buckets chain each entry at the front, in RID order. So while the module has fewer than 25
+  MethodSemantics rows an association's rows come back in the order added, and from 25 rows in reverse.
+  `AssignAssociates` walks them and keeps the last getter and the last setter it meets, and the other methods in the
+  order met: the last added below 25 rows, the first added from 25.
+* ECMA-335: Property (II.22.34), PropertyMap (II.22.35, not required to be sorted) and MethodSemantics (II.22.28,
+  required sorted by its `Association` column, a HasSemantics coded index: Event tag 0, Property tag 1).
+* SRM, read from the .NET 10.0.12 `System.Reflection.Metadata.dll` with `WoofWare.PawPrint.IlDump`:
+  `PropertyMapTableReader.FindPropertyMapRowIdFor` searches the PropertyMap linearly, so a map in first-property order
+  is read; `FindTypeContainingProperty` binary-searches the `PropertyList` column, which ascends in that order; a
+  `PropertyPtrTableReader` exists; and `MethodSemanticsTableReader`'s constructor calls `CheckSorted` and throws
+  `TableNotSorted` unless the header declares the table sorted. PawPrint's associate enumeration scans the table's rows
+  in order (`NativeMetadataImport.fs`, `methodSemanticsForAssociation`), so it reports an association's rows in their
+  image order.
+
+**Measured on .NET 10.0.12** with a throwaway probe (`5s-probe`), in a module `Props` with `A`, `B`, `D`, `E` (TypeDefs
+2 to 5) and later `C<T>`, reading each Property row (name, flags, signature) through CoreLib's internal
+`MetadataImport.GetPropertyProps`, and each `PropertyBuilder`'s token from its `m_tkProperty` (`PropertyBuilder` does not
+override `MetadataToken`, which throws):
+
+| Emitted | Observed |
+|---|---|
+| `A.DefineProperty("P1", None, int)`, `B.DefineProperty("Q1", SpecialName \| RTSpecialName \| HasDefault, string)`, `A.DefineProperty("P2", None, HasThis, long)` | `0x17000001`, `0x17000002`, `0x17000003`; created `A` lists `P1`, `P2` (and later ones), `B` lists `Q1` |
+| the flags of `Q1` | the builder reports `0x1600`, the row and the created `PropertyInfo` `0x0200` |
+| `P1`'s signature (default convention, instance getter) | `08 00 08` |
+| `P2`'s (`HasThis`) | `28 00 0A` |
+| `S` (`Standard`, static getter) | `08 00 08`; `GetValue(null)` runs |
+| `Item` with parameters `int, string` | `08 02 08 08 0E`; `GetIndexParameters` has 2 |
+| `Self` of type `A`, with a parameter of type `B` | `08 01 12 08 12 0C` |
+| `C<T>.V` of type `T` | `08 00 13 00`; `C<int>`'s `V` is `Int32`, and reads the field |
+| `Dup` twice, same signature | `0x17000004` and `0x17000005`, two rows; reflection lists only the first (`GetProperty("Dup", all)` is `0x17000004`) |
+| a property with no accessors (`Dup`, `Self`) | not public to reflection: `GetProperty("Dup")` is null |
+| `Q1.SetGetMethod(get_Q1)` of `B`, then `P1.SetSetMethod(set_P1)`, `P1.SetGetMethod(get_P1)` of `A` | `get_Q1` `0x06000001`, `get_P1` `0x06000002`, `set_P1` `0x06000003`; `P1`'s `SetValue(30)` then `GetValue` gives 30 |
+| `P2`: `SetGetMethod(g1)`, `AddOtherMethod(o2)`, `SetGetMethod(g2)`, `AddOtherMethod(o1)`, `AddOtherMethod(o3)` | the getter is `g2`, and `GetAccessors(true)` is `g2, o2, o1, o3`: the rows in the order added, the last getter kept |
+| `D.d0` and `D.get_X` defined, then `E.e0.MetadataToken`, then `D.X.SetGetMethod(get_X)` | `e0` `0x0600000B`, `d0` `0x0600000C`, `get_X` `0x0600000D`, `X` `0x17000009` |
+| `DefineProperty` after `CreateType` | `InvalidOperationException`, before the QCall |
+| a property of `FA` whose getter is a method of `FB`, both of another module `Foreign` | the row is written and both types are created; `FA.GetProperty` throws `ArgumentException` ("Type handle 'FA' and method handle with declaring type 'FB' are incompatible"). `RuntimeType.GetMethodBase` accepts a method of a type the reflected type derives from, so the exception is for unrelated types |
+
+A second probe (`5s-probe2`):
+
+| Emitted | Observed |
+|---|---|
+| an interface `IHas` with `Value` and an abstract getter, then `Impl : IHas` with its own `Value` (`DispatchProxy`'s shape) | `0x17000001` and `0x17000002`; the interface's `PropertyInfo.GetValue` on an `Impl` gives 42 |
+| a property of module `X` whose getter is a `MethodBuilder` of module `Y` (`0x06000003`; `X` has one method) | accepted, and `X`'s type is created; reflecting over the property throws `ArgumentOutOfRangeException` ("Token 6000003 is not valid in the scope of module") |
+
+Under PawPrint, the same probes stop at `TypeBuilder_DefineProperty`'s missing handler. The reading side exists: a
+compiled class with an instance property, a static one, an indexer and a property of a generic class reflects, reads
+and writes the same under PawPrint as on .NET 10 (`5s-survey static-props`). What a compiled assembly never shows
+PawPrint is a PropertyPtr table, a property signature without `HASTHIS` on an instance property, and a MethodSemantics
+table in an emitted image.
+
+Measured on .NET 10.0.12 after the decisions below, which named these as read from the source only (`5s-reversal`). Each
+row-count case is a fresh module, because `RuntimeType` and `RuntimePropertyInfo` cache, and each property is read once,
+after its module's last row. `P` is given `g1`, `o1`, `g2`, `o2`, `o3`, and other properties one getter each, to make the
+module's MethodSemantics row count:
+
+| Emitted | Observed |
+|---|---|
+| 5 rows; 24 rows with `P`'s first; 24 rows with `P`'s last | getter `g2`, `GetAccessors(true)` `g2, o1, o2, o3` |
+| 25 rows with `P`'s first; 25 rows with `P`'s last; 26 rows with `P`'s first | getter `g1`, `GetAccessors(true)` `g1, o3, o2, o1` |
+| `DefineProperty("M1", (PropertyAttributes)(-1), ...)`; `(PropertyAttributes)0x7FFF0200` | `0x0000`; `0x0200` |
+| `A`, then `"\0x"`, then `B` | the second throws `ArgumentException`; `B` is `0x17000003`, and the created type lists `A`, a property named `""` (`0x17000002`) and `B` |
+| `Derived : Base` (`Base` created) with a property whose getter is `Base.get_FromBase` | the getter is `Base.get_FromBase`, and `GetValue` gives its value |
+| module `X`'s `Wild` with module `Y`'s `y0` (`0x06000001`) as getter, `X`'s `get_Own` being `0x06000001` | `Wild`'s getter is `get_Own`, and gives 7 |
+| `SetGetMethod` after the property's type is created | `InvalidOperationException` |
+
+So the reversal holds as read, from exactly 25 rows, wherever the property's rows are.
+
+### 5s: the options
+
+Not yet decided. Every option adds the handlers for `TypeBuilder_DefineProperty` and `TypeBuilder_DefineMethodSemantics`
+in `NativeRuntimeTypeBuilder`, each checking the module and the token it is given, storing the signature bytes as the
+managed caller wrote them and the flags with `prReservedMask` cleared, and refusing an Event association by name (there
+is no Event table, and `DefineEvent` is refused before one could exist). They differ in what the emit scope holds.
+
+**A. A Property table and a MethodSemantics table, each row naming what owns it; the writer derives the rest.** As a
+Field row names its type and a Param row its method, a `PropertyRow` holds its owner (`TypeDefRid`), flags, name and
+signature, and `PropertyRid`s are given out in definition order. A `MethodSemanticsRow` holds the semantics, a
+`MethodDefRid` and its association (a HasSemantics union whose only case for now is a `PropertyRid`), added once per
+call in call order, with no search. The writer derives the PropertyMap (one row per owner, in the order of each owner's
+first property, as CoreCLR adds them) and the PropertyPtr (exactly when a property's owner is not the owner most recently
+given a map row, CoreCLR's rule), and sorts MethodSemantics stably by association, as it sorts InterfaceImpl and
+MethodImpl (3e, 3f). `EmitScopeExtension` refuses a Property row of a created type and a MethodSemantics row whose
+property is of a created type, and admits MethodSemantics rows moving, as InterfaceImpl's and MethodImpl's do.
+
+* Correctness: every measured token, flag, signature and accessor order above. A MethodSemantics row has no token, so its
+  position in the image is not visible; an association's rows keep their order.
+* Blast radius if wrong: properties of dynamic types, and an image SRM refuses to open if the sort is wrong (which every
+  guest with two properties set out of order would show).
+* Reversibility: new tables and two handlers; nothing existing changes shape.
+* Information: CoreCLR's rows, in its order. The PropertyMap's order, and whether there is a PropertyPtr, are not visible
+  to a guest; they are kept as CoreCLR's because the top-level decision says pointer tables are emitted exactly when
+  CoreCLR would.
+* Size: the two row types and their adders in `EmitScopeDefinitions`, three tables in `EmitScopeImage`, the extension
+  rules, the generator, the two handlers, the guest.
+
+**B. The accessors as a column of the property.** `PropertyRow` carries its accessors, a list of (semantics,
+`MethodDefRid`) that `DefineMethodSemantics` appends to, as `SetMethodIL` fills in a method's body; the scope holds no
+MethodSemantics table, and the writer emits each property's accessors as its run of MethodSemantics rows, already in
+association order.
+
+* Correctness: as A for everything a guest can see.
+* An association cannot name a missing property, by construction rather than by `addMethodSemantics`' RID check.
+* But it is not CoreCLR's structure: `DefineMethodSemanticsHelper` takes any association, and the handler has to dispatch
+  on its kind to a different row type. The extension check gains an append-only column, a third kind beside "added" and
+  "filled in". When events come, `EventRow` needs the same column, and the writer merges the two into one sorted table.
+* Information: loses the order of rows across associations, which no guest can see.
+* Reversibility: as A, but turning it into A later rewrites the row type and the extension rule.
+
+**C. Split in two: `DefineProperty` alone now (Property, PropertyMap, PropertyPtr), `DefineMethodSemantics` as the next
+stage.**
+
+* Each PR is smaller, and the PropertyPtr rule is reviewed on its own.
+* But the first guest can check only tokens, names, flags and signatures, and that a property with no accessors is not
+  public; no realistic program stops after `DefineProperty`. `DispatchProxy` and the DTO both call `SetGetMethod` straight
+  after it, so C unblocks nothing until its second half lands.
+
+**Recommended: A.** It is CoreCLR's model and the scope's existing pattern (rows naming their owner; tables the image
+sorts sorted by the writer), every piece of the image it adds has an existing precedent to copy (FieldPtr for
+PropertyPtr, MethodImpl for MethodSemantics), and the events stage then adds a second case to the association union
+rather than a second accessor column. B's guarantee is the same one A gets from the RID check every adder already makes.
+C splits a feature whose first half no program uses alone.
+
+Open questions:
+
+1. A, B or C.
+2. A getter that is a `MethodBuilder` of another module, whose token names a different method of this module, or none.
+   CoreCLR writes the row and reflection throws `ArgumentOutOfRangeException` later. Under A or B the RID is checked
+   against the scope, so the handler must either refuse a token beyond the module's MethodDefs by name (a TODO naming
+   CoreCLR's behaviour), or hold an unchecked MethodDef token in the row and model the later exception. The first is
+   recommended: no generator does this, and modelling it would make the row's method column untyped.
+3. An accessor that is a method of another type of the same module. The RID is in range, so A admits it as CoreCLR does,
+   and real .NET's reflection then throws `ArgumentException` from `RuntimeType.GetMethodBase`. Whether PawPrint raises
+   the same is not measured. Should the guest pin it (and so the stage make it pass), should it be a parked guest, or
+   should it be left unpinned?
+4. Whether `DispatchProxy` guests are wanted, and when: one over a method-only interface needs `RuntimeTypeHandle_IsVisible`
+   and event enumeration first (two small PRs outside this plan, both measured above to be all it needs); one over an
+   interface with a property needs those and this stage.
+5. Whether the duplicate property (`Dup` twice) goes in the guest. CoreCLR writes two rows, so A does too; reflection hides
+   the second. It is the only case that kills a mutant which searches for an existing row, other than the unit test.
+
+### 5s: the oracle
+
+Written first, and seen to fail on this branch before the handlers exist:
+
+* `TypeBuilderDefineProperty.cs` (in `sourcesImpure`, registered in `TestImpureCases.fs`, `IsDynamicCodeSupported` on),
+  the first probe without the internal `MetadataImport` reads, in the measured order, so that every token is the
+  probe's: the interleaved `P1`, `Q1`, `P2`; `Q1`'s flags; the default, `HasThis` and `Standard` conventions; the indexer;
+  `Self`; `Dup` twice (question 5); `P2`'s two getters and three other methods; `D`'s and `E`'s token order; `C<T>.V`;
+  `DefineProperty` after `CreateType`. It checks each created property's `MetadataToken`, `Attributes`, `PropertyType` and
+  `GetIndexParameters`, the getters and `GetAccessors(true)` order, the MethodDef tokens, and reads and writes each
+  property with an accessor. It also emits a method that calls `P1`'s getter and setter directly, and the interface property
+  of the second probe, read through the interface's `PropertyInfo`. Exits 0 on .NET 10, to be confirmed before
+  committing.
+* Its terminal-state check reads `Props`' scope: each Property row (owner, name, flags, signature bytes, as measured),
+  each MethodSemantics row in the order added (semantics, method, property), and from the image that SRM reads back, the
+  PropertyMap rows' owners in first-property order and the PropertyPtr's presence and contents. That is the only oracle for
+  the map's order and the pointer table, which no guest can see.
+* `TestEmitScopeDefinitions` (or a new `TestEmitScopeProperties`): `defineProperty` against a model over generated
+  interleavings of properties across types: each gets the next RID, flags are stored with `prReservedMask` cleared, no
+  search. `defineMethodSemantics` against a model: one row per call, in call order; a refused RID for a property or
+  method the scope lacks.
+* The generator draws properties across owners in any interleaving and MethodSemantics rows in any order, so the
+  image's round trip covers the three tables, with properties beyond the new ones: for every type, SRM's
+  `TypeDefinition.GetProperties` is the model's properties of that type in definition order; every property's row reads
+  back; `methodSemanticsForAssociation`'s scan gives each property's rows in the order added; and the image has a
+  PropertyPtr exactly when the model's CoreCLR rule says so. SRM opening the image at all checks the MethodSemantics sort.
+* A differential property against real .NET, in-process: a generated schedule of `DefineProperty`, `SetGetMethod`,
+  `SetSetMethod` and `AddOtherMethod` calls over a few types (distinct names, accessors of the property's own type), run
+  on the host's `TypeBuilder` and created, and through the scope; for every created type, the host's
+  `GetProperties(DeclaredOnly | all)` names and `MetadataToken`s, and each property's getter, setter and accessor order,
+  equal what the image gives. This is what checks "definition order across the module" and "rows in the order added"
+  beyond the guest's few cases.
+* `TestEmitScopeExtension`: a Property row added to a created type, and a MethodSemantics row for a property of a
+  created type, are each a violation; a MethodSemantics row that moves because a later row sorts before it is not.
+* Mutants, each run against the guest, the emit-scope tests and the differential property:
+  * the property's RID off by one, and the token's table byte wrong;
+  * the reserved flags kept (`Q1`'s `0x1600`);
+  * a search for an existing property added (`Dup`'s second token; question 5, otherwise only the unit test);
+  * the PropertyPtr omitted, so that `A`'s run covers `Q1`;
+  * the PropertyMap in TypeDef order rather than first-property order (expected to survive the guest, which cannot see
+    it; killed by the terminal-state check and the round trip's CoreCLR-rule check);
+  * MethodSemantics not sorted (SRM refuses the image when `Q1`'s row precedes `P1`'s);
+  * the sort keyed on (association, method), not stable on association alone (`P2`'s accessors become `g2, o1, o2, o3`);
+  * the getter and setter semantics swapped;
+  * the association's HasSemantics tag written as an Event's (every getter is lost);
+  * a `HASTHIS` bit added to, or dropped from, the stored signature;
+  * the extended scope not kept by one handler;
+  * the extension check not refusing a Property row of a created type (killed only by `TestEmitScopeExtension`, since
+    the managed caller refuses first).
+
+### 5s: left to later stages
+
+* Events: `TypeBuilder_DefineEvent`, the Event, EventMap and EventPtr tables, and the Event case of the association,
+  after reflection can enumerate events (`MetadataImport.Enum`, `NativeMetadataImport.fs:1159`).
+* `PropertyBuilder.SetConstant`, through `TypeBuilder_SetConstantValue`, with the Constant table, which enums and literal
+  fields want too.
+* `PropertyBuilder.SetCustomAttribute`, through `TypeBuilder_DefineCustomAttribute`.
+* `RuntimeTypeHandle_IsVisible` and event enumeration, which `DispatchProxy` reaches before any `TypeBuilder` QCall; then
+  `DispatchProxy` guests (question 4).
+* `TypeBuilder_SetParamInfo`, the next stage by the survey above.
+
+### 5s: the decisions
+
+Taken 2026-11-13.
+
+* **A: Property and MethodSemantics rows naming their owners; the writer derives PropertyMap and PropertyPtr and
+  sorts MethodSemantics.** Checked against the pinned source: `RegMeta::DefineProperty` searches only under
+  `MDDupProperty`, which neither `MDDupDefault` nor vm/assembly.cpp:88 sets; it adds the map row at the type's first
+  property and before the Property row; `_DefineMethodSemantics` with `bClear` false appends and reads nothing of the
+  method but its RID.
+  * B keeps everything a guest can see, but it is a second structure for one CoreCLR table. The read rule corrected
+    below depends on the module's count of MethodSemantics rows, which under B is a sum over every property's (and
+    later every event's) column. The events stage would have to merge two columns into one sorted table. Its
+    guarantee, that an association names a property that exists, is the one which A's RID check already gives.
+  * C's first half is used by no program, and its guest could check only tokens and signatures.
+  * A split by layer (the Domain rows, the writer and their properties first; the handlers and the guest second) was
+    also considered, and is the cut to make if the PR outgrows review. It is not the default: Domain is a published
+    package, and the new adders would ship with nothing calling them and with no guest showing that PawPrint's own
+    loader reads the image.
+  * Conditions on A. The scope holds no PropertyMap or PropertyPtr rows; both are derived from the Property rows'
+    owners, so a map that disagrees with its properties cannot be represented. The PropertyPtr is `pointerTable` over
+    each property's map position (the rank of its owner's first property), not over its owner's TypeDef RID. The
+    MethodSemantics sort is stable on the HasSemantics coded value (`rid <<< 1 ||| 1` for a property), not on the
+    property's RID, so that the Event case sorts correctly when it arrives. The header's `Sorted` bit for
+    MethodSemantics stays clear, so that SRM checks the order. `EmitScopeImage`'s docstring and
+    `EmitScopeExtensionViolation`'s remarks are rewritten to name MethodSemantics among the tables whose rows move.
+* **Correction: an association's rows are read in the order added only while the module has fewer than 25
+  MethodSemantics rows.** Read, not measured. `_DefineMethodSemantics` calls `AddMethodSemanticsToHash` after every
+  row; `GenericAddToHash` builds the lookup hash once the table holds 25 rows (`INDEX_ROW_COUNT_THRESHOLD`,
+  md/enc/metamodelrw.cpp:33 and :5514). `AddRecord` clears the table's sorted flag, so `FindMethodSemanticsHelper`
+  takes the hash arm from then on. `CMetaDataHashTemplate::Add` and `ReHash` (md/inc/metadatahash.h) both chain each
+  entry at the front of its bucket, in heap order, which is RID order. So from the 25th row the walk gives an
+  association's rows in descending RID order. `Associates.AssignAssociates` then keeps the first getter added, not
+  the last, and lists the other methods in reverse. The planner's probes add about a dozen rows and never crossed
+  the threshold. A generated data type with thirteen read-write properties has 26 rows, so realistic modules are in
+  this regime, though only a property with two rows of one semantics can show it.
+  * The first step of the stage is to measure it on .NET 10: three modules, each with a property given `g1`, `o1`,
+    `g2`, `o2`, `o3`, and enough other accessors to make 5, 24 and 25 rows. Each property is read once, after its
+    module's last row, because `RuntimePropertyInfo` caches its accessors.
+  * If the measurement agrees, PawPrint models it where CoreCLR has it, on the read path:
+    `methodSemanticsForAssociation` reverses the matching rows when the assembly is a dynamic module
+    (`TryDynamicScope`) whose table has 25 or more rows. The rule is one pure function, in the lowest project that
+    can hold it, called by the handler and by the differential property below. The image stays CoreCLR's rows in
+    CoreCLR's order. Writing the read order into the image instead was rejected: a created type's rows would then
+    change places within their association when a later row crossed the threshold, and the image would no longer be
+    what CoreCLR holds.
+  * This is the one place where reflection over a created type depends on rows added to the module afterwards. It is
+    CoreCLR's behaviour, and PawPrint gets it by applying the rule to the image current at the read.
+  * If the measurement disagrees with the reading, or shows more than "reversed from 25", stop and report before
+    writing code. The fallback is a refusal by name in the enumeration (a dynamic module, 25 or more rows, and an
+    association with two rows of one semantics), not an order that is guessed.
+* **An accessor whose token names no MethodDef row of the module is refused by name.** The handler sees only a token
+  and cannot know the `MethodBuilder`'s module, as CoreCLR cannot.
+  * A token whose RID is in range gets its row, whatever module the builder came from; that is CoreCLR's row. The
+    guest pins one: probe 2's shape with `y0` in place of `y2`, so that `X`'s `Wild` gets `X`'s MethodDef 1,
+    `get_Own`, as its getter. Measure on .NET 10 first.
+  * A RID beyond the module's MethodDefs at the time of the call, a nil token, and a token of another table are each
+    a TODO failure which names the condition and CoreCLR's behaviour. CoreCLR stores the RID unchecked, writes no row
+    for a nil token, and throws `ArgumentOutOfRangeException` from reflection, unless a method defined later brings
+    the RID into range. A user-derived `MethodBuilder`, or another module's, is the only thing which reaches these.
+  * Storing an unchecked RID was rejected: the row's method column would stop being a `MethodDefRid`, the writer
+    would emit an index naming no row, and what reflection then does depends on methods defined afterwards.
+  * The refusal is pinned by a refusal test in a fixture about properties, with probe 2's `y2` shape.
+* **An accessor of another type of the same module is admitted, and what PawPrint then does is measured, in a guest
+  of its own.** A admits it whether tested or not, and admitted but unmeasured is the worse state.
+  * `TypeBuilderPropertyForeignAccessor.cs`: `FA`'s property with `FB`'s method as getter, `FB` created before
+    `SetGetMethod` is called (the property's type is the only one the managed side checks), then `FA.GetProperty`
+    expecting `ArgumentException`.
+  * Run under PawPrint once the handlers exist. If it exits 0, it is registered as passing. If it stops at an
+    unimplemented primitive, it is parked with that stop as its reason. If PawPrint gives the guest any other answer
+    (no exception, or a different one), stop and report: that is a divergence which this stage would be introducing.
+  * Correction to the plan: the exception is for unrelated types. `RuntimeType.GetMethodBase` accepts a method whose
+    declaring type the reflected type derives from, so a base type's method as accessor should resolve. Read, not
+    measured; the variant joins this guest once measured.
+* **No `DispatchProxy` guest in 5s, and 5s does not wait for one.** `RuntimeTypeHandle_IsVisible` and event
+  enumeration are reflection PRs against `main`, outside this plan and in either order.
+  * The two guests (a method-only interface; an interface with a property) go into a test-only PR against `main`,
+    parked with their present first stop as the reason, so that they cannot be forgotten and 5s's diff does not claim
+    them.
+  * After 5s is built, the property-interface proxy is run once with the two throwaway edits, and its next stop is
+    recorded in "as built". The plan measures each next stop and does not predict it; "needs those and this stage"
+    is so far a prediction.
+* **The duplicate property stays in the guest.** It is measured, it is part of the measured token sequence
+  (`0x17000004` and `0x17000005`), and it is the only guest-level killer of a search for an existing row.
+* **Corrections to "what CoreCLR does".**
+  * `_SetPropertyProps` leaves the flags unset when the attributes are `0xFFFFFFFF`. `PropertyAttributes` is an
+    `int` enum, so `DefineProperty(name, (PropertyAttributes)(-1), ...)` writes flags 0, not `0x0BFF`. Read, not
+    measured; the handler models it, and the unit model and the differential property draw it.
+  * `RuntimePropertyBuilder`'s constructor checks the name after the QCall has returned. `DefineProperty("\0x", ...)`
+    therefore writes a row whose name is empty (the QCall reads to the first NUL), consumes a token, and then throws
+    `ArgumentException`. The handler must not refuse an empty name. Measure, then pin at the end of the guest, on a
+    type of its own so that no measured token moves.
+  * "PropertyMap in first-property order" and "a PropertyPtr exactly when" are read from `RegMeta::DefineProperty`
+    and `AddChildRowDirectForParent`, and cannot be measured: no API shows a dynamic module's PropertyMap. The oracle
+    for them is a model of the source, and the plan should say so.
+* **Conditions on the handlers.** `TypeBuilder_DefineProperty` takes a TypeDef token of the scope and nothing else: a
+  nil parent is a PawPrint fault, not `<Module>`, so `methodParent` is not reused. It stores the signature bytes
+  unread. The flag rule (the `-1` case, `prReservedMask` cleared, the low sixteen bits kept) lives in
+  `EmitScopeDefinitions.defineProperty`, so that the Domain tests and the differential property cover it.
+  `TypeBuilder_DefineMethodSemantics` reads the association's table and RID, the method's RID, and the semantics as
+  two bytes. A Property token out of range is a PawPrint fault. An Event token is a fault too, since `DefineEvent` is
+  refused before an `EventBuilder` can exist. Neither handler consults whether a type is created; the extension check
+  does that.
+* **The extension rule keys on the property's owner alone.** A Property row added to a created type, and a
+  MethodSemantics row whose property is of a created type, are violations. A MethodSemantics row naming a method of a
+  created type, for a property of a type not yet created, is not: CoreCLR checks only the property's type, and
+  nothing reads MethodSemantics by method.
+* **The oracle is sufficient with these additions.**
+  * The differential property is the right second oracle, and it is the one which would have found the 25-row rule.
+    It must be built so that it can. Its schedules reach both sides of 25 rows, with repeated getters and setters and
+    several other methods on one property. It reads the image through the shared enumeration rule and not through a
+    model of its own. It draws flags from the whole `int` range. It forces every `MethodBuilder`'s `MetadataToken`,
+    in order, before the first property call, and adds the scope's methods in that order, so that MethodDef RIDs
+    agree without modelling 5o's lazy tokens. It uses abstract methods of abstract types, so that no body is needed,
+    and `RunAndCollect` assemblies. It covers the Domain and the read rule, not the handlers' reading of their
+    arguments, which only the guests cover; the plan says so.
+  * The round trip's "CoreCLR rule" for the PropertyPtr is a replay of `AddChildRowDirectForParent` one property at a
+    time, not `pointerTable` again. Otherwise the mutant "map in TypeDef order" is checked against its own
+    arithmetic.
+  * That mutant surviving the guest is accepted: the map's order is invisible to a guest. It must be killed twice,
+    by the terminal-state check and by the replay.
+  * Guest additions, each measured first: a second module which crosses 25 rows, with a property given two getters
+    and three other methods; `SetGetMethod` after `CreateType` (`InvalidOperationException`); the in-range accessor
+    from another module; the empty name.
+  * `TestEmitScopeExtension` gains the case of the created method's owner, which is not a violation.
+  * Mutants added: the reversal's threshold at 24 or at 26; the reversal never applied; the reversal applied to an
+    assembly which is not dynamic; the `-1` flags masked rather than zeroed; the extension rule also keyed on the
+    method's owner; the PropertyPtr keyed on the owner's TypeDef RID; the sort keyed on the property's RID with the
+    tag dropped; an empty name refused; `DefineProperty` treating a nil parent as `<Module>`.
+  * "The reversal applied to an assembly which is not dynamic" needs an on-disk image with two rows of one semantics
+    on one property and 25 rows in all, which no compiler writes. Fabricate one if the existing fixtures for
+    fabricated images can reach `MetadataImport.Enum`; otherwise record it as surviving, with the reason.
+  * "The sort keyed on the property's RID with the tag dropped" is expected to survive until the Event case exists.
+    Record it for the events stage.
+* **One feature, one PR.** The two QCalls, the three tables and the read rule are one feature: a property that can be
+  read back. The commits go in the order tests, Domain, handlers, with the failing run recorded.
+* **Additions to "left to later stages".**
+  * 3e's MethodImpl rows go through the same hash (`AddMethodImplToHash`, `FindMethodImplHelper`), so in a dynamic
+    module with 25 or more MethodImpl rows CoreCLR enumerates a class's rows in reverse. PawPrint keeps them in the
+    order added. Whether any behaviour depends on that order is not known; it wants its own measurement.
+  * Event rows will count towards the 25, and CustomAttribute has the same hash.
+  * Modelling an accessor token that names no row: `ArgumentOutOfRangeException` from reflection, and the nil token's
+    silent no-op.
+  * A base type's method as an accessor, until measured.
+  * The plan's item "whichever of questions 2 and 3 is not taken up" is replaced by the two items above and by
+    whatever `TypeBuilderPropertyForeignAccessor.cs` is parked on.
+
+### 5s: as built
+
+Built 2026-11-13 as decided above, after the measurements the decisions asked for (recorded under "5s: a
+TypeBuilder's properties"), which agree with the reading: the reversal is from exactly 25 rows, wherever the property's
+rows are.
+
+* `EmitScope` holds `PropertyRow`s (owner, flags, name, signature; `PropertyRid` in definition order) and
+  `MethodSemanticsRow`s (semantics, `MethodDefRid`, and a `HasSemantics` whose one case is `Property`).
+  `EmitScopeDefinitions.defineProperty` stores the flags as `_SetPropertyProps` does and searches for nothing;
+  `defineMethodSemantics` adds a row per call. `EmitScopeImage` derives the PropertyMap (first-property order) and the
+  PropertyPtr (`pointerTable` over each property's map position), and sorts MethodSemantics stably on the coded
+  index, its `Sorted` bit clear. `EmitScopeExtension` refuses a Property row of a created type and a MethodSemantics
+  row whose property is of one, keyed on the property's owner alone.
+* The read rule is `ReadWriteMetadataLookup.rowsOfKey`, in Domain: it takes the table's row count and one key's rows in
+  RID order, and is named for what it models rather than for properties, since CoreCLR's read-write metadata applies
+  the same hash to MethodImpl and CustomAttribute (the user asked for that shape, for the MethodImpl stage that
+  follows). Only `methodSemanticsForAssociation` calls it in 5s, for an assembly that `TryDynamicScope` knows; its
+  docstring now says which reader CoreCLR has for each kind of image.
+* `TypeBuilder_DefineProperty` and `TypeBuilder_DefineMethodSemantics` are as decided. The refusals of an accessor
+  token (a RID beyond the module's MethodDefs, a nil token, another table) are TODO failures naming CoreCLR's
+  behaviour; the refusal test (`TestTypeBuilderPropertyRefusals`) pins the RID beyond, with probe 2's `y2`.
+* `TypeBuilderDefineProperty.cs` is the first probe in the measured order, with the decisions' additions: `SetGetMethod`
+  after `CreateType`; `X`'s `Wild` with `y0`; the empty name, last in `Props`; and modules either side of the
+  threshold. Beyond the decisions, each added after the first mutant run let a mutant through: it reads each
+  `PropertyBuilder`'s token from its private `m_tkProperty` (the probe's way, since `MetadataToken` throws); it gives
+  `Other` (TypeDef 9) a property, with flags of `-1`, before `Named` (TypeDef 8) gets its own, so that the PropertyMap's
+  first-property order and the PropertyPtr differ from TypeDef order; and it reads a 24-row module, `Fewer`, beside the
+  25-row `Many`. It also has a method of `Caller` calling `P1`'s accessors. The guest happens not to invoke any method through
+  reflection twice, so whether the plan's caution about a second invocation is stale (#2180) was not checked here.
+* `TypeBuilderPropertyForeignAccessor.cs` exits 0 under PawPrint as on .NET 10: `FA.GetProperty` throws
+  `ArgumentException` from CoreLib's own `RuntimeType.GetMethodBase`, and `Derived`'s property with `Base`'s getter
+  (measured: it resolves, and gives 9) reads back. It is registered as passing.
+* `TestEmitScopeProperties` holds the Domain models, the read rule's property, and the differential property against
+  real .NET's `TypeBuilder` in the test host (`RunAndCollect`, abstract types, every method's token forced first).
+  Its model of reflection includes `PopulateProperties`' vtable-slot rule, which lists a property only if no earlier
+  property's public getter (or else setter) shares its slot: generated properties often share an accessor. Its fixed
+  sample reaches 25 rows with a repeated semantics 56 times, below 25 rows 67 times, and a PropertyPtr 66 times.
+* `TestFabricatedPropertyAccessorOrder` is the decisions' on-disk image: `PersistedAssemblyBuilder` writes a property
+  with three other methods among 25 MethodSemantics rows, and both runtimes list them in RID order.
+* `TestEmitScopeImage`'s round trip reads each Property row, each type's properties, each property's accessors, and
+  the PropertyMap and PropertyPtr against `EmitScopeGen.propertyMapReplay`, a replay of `AddChildRowDirectForParent`
+  one property at a time. `TestEmitScopeExtension`'s generated property compares each created type's properties and
+  their accessors too.
+* `DispatchProxy`, run once with the two throwaway edits (`RuntimeTypeHandle_IsVisible` answering true, `MetadataImport.Enum`
+  of events answering none), reverted: over an interface with a property it exits 0 (`Value=42`), as it does over one
+  with a method; the DTO of the survey exits 0 without them.
+* Each mutant was run against the emit-scope tests, `TestTypeBuilderPropertyRefusals`,
+  `TestFabricatedPropertyAccessorOrder` and both guests:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The property's token one RID too high (handler) | the guest; the refusal test, whose accessor call then names no property |
+  | The token's table byte `0x18`, emitted and accepted back alike | the guest's read of `m_tkProperty`, once added; before it, survived |
+  | The reserved flags kept | the guest (`Q1`); the Domain model; the differential property |
+  | A search for an existing property | the guest (`Dup`); the Domain model |
+  | No PropertyPtr | the guest; the round trip; the differential property; the generated extension property |
+  | The PropertyMap in TypeDef order | the terminal-state check, once `Other` and `Named` were added (before, survived, the order being the same); the round trip's replay |
+  | MethodSemantics not sorted | the guest (SRM: "Metadata table MethodSemantics not sorted"); the round trip and every image-reading property |
+  | The sort keyed on (association, method) | the guest; the round trip; the differential property |
+  | Getter and setter swapped | the guest |
+  | The association written with an Event's tag | the guest; the round trip; the differential property |
+  | `HASTHIS` added to the stored signature | the terminal-state check |
+  | `DefineMethodSemantics`' extended scope not kept | the guest |
+  | The extension check not refusing a property of a created type | `TestEmitScopeExtension` alone, since the managed caller refuses first |
+  | The threshold at 24 | the guest's `Fewer`, once added; the read rule's property; the differential property |
+  | The threshold at 26 | the guest's `Many`; the read rule's property; the differential property |
+  | The reversal never applied | the guest's `Many` |
+  | The reversal applied to an image on disk too | `TestFabricatedPropertyAccessorOrder` |
+  | `-1` masked rather than zeroed | the guest's `Other.O`, once added; the Domain model; the differential property |
+  | The extension rule also keyed on the accessor's owner | `TypeBuilderPropertyForeignAccessor.cs` (`FB` is created before its method becomes `FA`'s accessor); `TestEmitScopeExtension` |
+  | The PropertyPtr keyed on the owner's TypeDef RID | the guest, once `Other` and `Named` were added; the round trip; the differential property |
+  | The sort on the property's RID, the tag dropped | survives, as the decisions expected: nothing tells it from the coded index until the Event case exists. The events stage must kill it |
+  | An empty name refused | the guest |
+  | `DefineProperty` reading a nil parent as `<Module>` | survives: no managed caller passes a nil parent, and the handler's refusal of one is a PawPrint fault, not a guest's behaviour |
+
+* Suites at the tip, built from the whole solution: the default suite (5564 passed, 38 skipped), `Guest` (235),
+  `GuestSolo` (2), `GuestPure` (1179) and `GuestImpure` (274), each run on its own, all passing.
+* `GenericParam` and `GenericParamConstraint` are not in the 25-row hash, although `FindGenericParamHelper` and
+  `FindGenericParamConstraintHelper` (md/enc/metamodelrw.cpp:5196-5321) have hash arms: no `Add*ToHash` exists for
+  either table (md/inc/metamodelrw.h), so those arms never run, and the VM's enumeration (md/enc/mdinternalrw.cpp:1091-1133)
+  uses neither helper but `SearchTableForMultipleRows` for parameters and a stable VirtualSort for constraints. Measured
+  after 30 rows of other types, on .NET 10 and under PawPrint alike: parameters and constraints come back in RID order.
+  Nothing is left to do for them.
