@@ -238,8 +238,8 @@ method) may add more:
   site has one, fails the compilation of the method holding it with `InvalidProgramException`,
   past all its handlers and before the JIT loads any type of the signature (CoreCLR prepares a
   method as a function pointer first for an `ldvirtftn`, or an `ldftn` of a method specification,
-  which may fail before), unless resolving a `call` or `ldftn` of an abstract method refuses that
-  first (`BadImageFormatException`); a method with one never compiles at all, so none of its body
+  which may fail before), unless resolving a `call`, `ldftn` or `newobj` of an abstract method
+  refuses that first (`BadImageFormatException`); a method with one never compiles at all, so none of its body
   runs. `ldtoken` converts no signature. The call is not followed, nor anything it would call;
 * of a call of unmanaged code, once it has loaded the return type, the JIT reads the calling
   convention (`UnmanagedConventionRead`), wherever in the code it compiles the call is: a `calli`
@@ -258,14 +258,21 @@ method) may add more:
   a `newarr` of a byref-like element type (`TypeLoadException`), and a `box` of a byref-like type
   that it does not fold away (`InvalidProgramException`). It folds one followed in its block by a
   `brtrue` or `brfalse`, by `isinst` and then one of those where it decides the cast, or by an
-  `unbox.any` (after an `isinst`, or not) of the boxed type. The code it compiles is what control
-  reaches once it folds the branches on capability queries, so the answer has the refusal of an
-  instruction behind any other branch. A call of an abstract method never runs, so it is not
-  followed. Where a type variable names the type, the instance decides: in the open definition,
-  where the parameter allows a byref-like type, it is "unknown". Shared code sees a byref-like
-  type in its canonical form, which the JIT's comparisons of types do not decide, so it refuses
-  the box there unless it inlines the method into a caller that sees the type as it is; the
-  answer has the refusal;
+  `unbox.any` (after an `isinst`, or not) of the boxed type. It refuses a `newobj` that it will
+  not construct (`NewobjTarget`) too: one of an abstract method (`BadImageFormatException`), before
+  it loads the return type, and, once it has loaded the return type, one of a static method
+  (`InvalidProgramException`) or of an abstract class's constructor
+  (`InvalidOperationException`). A value type flagged abstract it constructs. Of a `newobj` of an
+  instance method that is not an instance constructor, real .NET constructs and calls some, and
+  crashes the process compiling the method holding others, which the analysis does not name
+  (`Opacity.NewobjOfNonConstructor`). The code it compiles is what control reaches once it folds
+  the branches on capability queries, so the answer has the refusal of an instruction behind any
+  other branch. Neither a call of an abstract method nor a `newobj` the JIT refuses runs, so
+  neither is followed. Where a type variable names the type, the instance decides: in the open
+  definition, where the parameter allows a byref-like type, it is "unknown". Shared code sees a
+  byref-like type in its canonical form, which the JIT's comparisons of types do not decide, so it
+  refuses the box there unless it inlines the method into a caller that sees the type as it is;
+  the answer has the refusal;
 * binding a token into another assembly that has a module initializer runs it, which may throw
   `TypeInitializationException`, and so does a `constrained.` call that dispatch lands in another
   assembly. A module initializer is a type initializer, and the answer has what it raises and

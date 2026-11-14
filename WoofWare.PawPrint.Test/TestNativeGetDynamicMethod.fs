@@ -56,6 +56,24 @@ public class Box<T>
 {
     public static int Answer() => 42;
 }
+
+public class Made
+{
+    public readonly int V;
+
+    public Made(int v) { V = v; }
+
+    public int Twice(int x) => 2 * x;
+
+    public static int Halve(int x) => x / 2;
+}
+
+public abstract class Shape
+{
+    public Shape(int v) { }
+
+    public abstract int Area(int scale);
+}
 """
 
     let private prepareGuest
@@ -557,6 +575,10 @@ public class Box<T>
         /// entry. Which method it names is read when the instruction
         /// runs, by which time `GetMethodDescriptor` has assigned that field.
         | DynamicMethodObject
+        /// A `System.Reflection.Emit.DynamicMethod` that has been minted: every field zeroed but
+        /// `_methodHandle`, which is <paramref name="stub"/>, the `RuntimeMethodInfoStub` the mint
+        /// wrote back.
+        | MintedDynamicMethodObject of stub : ManagedHeapAddress
         /// A boxed `System.RuntimeFieldHandle`, as `DynamicScope.GetTokenFor(RuntimeFieldHandle)`
         /// adds — the shape a module-level global, or `DynamicILInfo.GetTokenFor`, produces.
         ///
@@ -793,6 +815,18 @@ public class Box<T>
                     | ScopeEntry.DynamicMethodObject ->
                         let addr, state =
                             allocateZeroed loggerFactory baseClassTypes baseClassTypes.DynamicMethod state
+
+                        CliType.ObjectRef (Some addr), state
+                    | ScopeEntry.MintedDynamicMethodObject stub ->
+                        let addr, state =
+                            allocateZeroed loggerFactory baseClassTypes baseClassTypes.DynamicMethod state
+
+                        let state =
+                            IlMachineState.setOwnInstanceField
+                                addr
+                                "_methodHandle"
+                                (CliType.ObjectRef (Some stub))
+                                state
 
                         CliType.ObjectRef (Some addr), state
                     | ScopeEntry.VarArgMethodObject ->
@@ -1688,7 +1722,8 @@ public class Box<T>
         |> List.map fst
         |> List.choose (fun op ->
             match op with
-            | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt), operand) ->
+            | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt | UnaryMetadataTokenIlOp.Newobj),
+                                       operand) ->
                 match operand with
                 | MetadataOperand.FromDynamicScope index -> Some index
                 | MetadataOperand.FromMetadata token ->
@@ -1969,38 +2004,6 @@ public class Box<T>
 
         scopeLdtokenOperands (definition.GetBody ()) |> shouldEqual [ 2 ]
 
-    /// An opcode not yet wired for scope operands is refused at mint, by the opcode alone: here a
-    /// `newobj` naming a perfectly good *method* entry. The message is the only diagnostic a guest
-    /// that trips it gets, so it says what real .NET does: answers a `newobj` naming a
-    /// `DynamicMethod` with InvalidProgramException (measured) rather than constructing anything.
-    [<Test>]
-    let ``a newobj naming a dynamic-method entry is refused as unsupported rather than as wrong-kind`` () : unit =
-        let loggerFactory, prepared, state = loadFixture ()
-
-        // ldnull; newobj <scope 2>; ret
-        let body =
-            { doublingBody with
-                Code =
-                    Array.concat
-                        [
-                            [| 0x14uy ; 0x73uy |]
-                            System.BitConverter.GetBytes (2 ||| 0x0A000000)
-                            [| 0x2Auy |]
-                        ]
-                Scope =
-                    [
-                        ScopeEntry.Null
-                        ScopeEntry.Blob [| 0x00uy |]
-                        ScopeEntry.DynamicMethodObject
-                    ]
-            }
-
-        let message = mintExpectingFailureIn loggerFactory prepared body state
-
-        message |> shouldContainText "Newobj"
-        message |> shouldContainText "TODO"
-        message |> shouldContainText "InvalidProgramException"
-
     /// `call` and `callvirt` accept every entry `ResolveToken` resolves in method position: a
     /// `DynamicMethod`, bare or in the `VarArgMethod` wrapper `EmitCall` stores, and a reflected
     /// method, bare or in the `GenericMethodInfo` stored for a generic or array declaring type.
@@ -2040,6 +2043,43 @@ public class Box<T>
 
                 if operands <> [ 2 ] then
                     failwith $"%s{opcodeName} naming %A{entry} decoded to scope operands %A{operands}"
+
+    /// `newobj` resolves its token exactly as `call` does (`CORINFO_TOKENKIND_NewObj` is the
+    /// method kind with a bit added), so it accepts the same four entries; what it then makes of
+    /// the method is decided when the instruction runs, and a `DynamicMethod` is refused there.
+    [<Test>]
+    let ``newobj naming any method entry is minted`` () : unit =
+        for entry in
+            [
+                ScopeEntry.DynamicMethodObject
+                ScopeEntry.VarArgMethodObject
+                ScopeEntry.MethodHandleObject None
+                ScopeEntry.GenericMethodInfoObject (None, None)
+            ] do
+            let loggerFactory, prepared, state = loadFixture ()
+
+            // ldnull; newobj <scope 2>; ret
+            let body =
+                { doublingBody with
+                    Code =
+                        Array.concat
+                            [
+                                [| 0x14uy ; 0x73uy |]
+                                System.BitConverter.GetBytes (2 ||| 0x06000000)
+                                [| 0x2Auy |]
+                            ]
+                    Scope = [ ScopeEntry.Null ; ScopeEntry.Blob [| 0x00uy |] ; entry ]
+                }
+
+            let stubAddress, _, state =
+                mintOne loggerFactory prepared "Probe" doublingSignature body state
+
+            let _, definition = definitionBehindStub state stubAddress
+
+            let operands = scopeMethodOperands (definition.GetBody ())
+
+            if operands <> [ 2 ] then
+                failwith $"newobj naming %A{entry} decoded to scope operands %A{operands}"
 
     /// Minting reads none of the scope's entries. CoreCLR reads them only when it compiles the
     /// method, at its first invocation, and a guest can rewrite the scope before then (measured: a
@@ -2453,6 +2493,125 @@ public class Box<T>
 
             why |> shouldContainText "m_value is null"
         | other -> failwith $"expected BadImageFormatException, got %A{other}"
+
+    /// The guest's non-generic type <paramref name="typeName"/>, as a closed type handle.
+    let private closedGuestType
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (prepared : Program.PreparedProgram)
+        (typeName : string)
+        (state : IlMachineState)
+        : RuntimeTypeHandleTarget * IlMachineState
+        =
+        let assembly =
+            prepared.State.LoadedAssembly prepared.State.EntryAssembly.FullName
+            |> Option.defaultWith (fun () -> failwith "the guest assembly is not loaded")
+
+        let state, handle =
+            IlMachineState.concretizeType
+                loggerFactory
+                prepared.BaseClassTypes
+                state
+                assembly.DefinitionFullName
+                ImmutableArray.Empty
+                ImmutableArray.Empty
+                (TypeDefn.FromDefinition ((requiredTopLevelType assembly "" typeName).Identity, SignatureTypeKind.Class))
+
+        RuntimeTypeHandleTarget.Closed handle, state
+
+    /// A boxed `RuntimeMethodHandle` entry naming the guest's <paramref name="typeName"/>'s
+    /// <paramref name="methodName"/>, as `Emit(OpCode, ConstructorInfo)` and
+    /// `Emit(OpCode, MethodInfo)` store one for a type that is neither generic nor an array.
+    let private reflectedEntry
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (prepared : Program.PreparedProgram)
+        (typeName : string)
+        (methodName : string)
+        (state : IlMachineState)
+        : ScopeEntry * IlMachineState
+        =
+        let declaring, state = closedGuestType loggerFactory prepared typeName state
+
+        let stub, state =
+            stubFor loggerFactory prepared declaring (guestMethod prepared typeName methodName) state
+
+        ScopeEntry.MethodHandleObject (Some stub), state
+
+    /// The stack shape the analysis computes for `ldarg.0; newobj <entry>; ret`, minted with
+    /// `entry` as scope entry 2. The `newobj` is at offset 1 and the `ret` at offset 6.
+    let private newobjShape
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (prepared : Program.PreparedProgram)
+        (entry : ScopeEntry)
+        (state : IlMachineState)
+        : StackShape
+        =
+        let body =
+            { doublingBody with
+                Code =
+                    Array.concat
+                        [
+                            [| 0x02uy ; 0x73uy |]
+                            System.BitConverter.GetBytes (2 ||| 0x06000000)
+                            [| 0x2Auy |]
+                        ]
+                Scope = [ ScopeEntry.Null ; ScopeEntry.Blob [| 0x00uy |] ; entry ]
+            }
+
+        let stubAddress, _, state =
+            mintOne loggerFactory prepared "Probe" doublingSignature body state
+
+        let handle, _ = definitionBehindStub state stubAddress
+
+        StackShapeOfMethod.analyseDynamic prepared.BaseClassTypes state handle
+
+    /// A `newobj` of a reflected constructor of one parameter pops that one argument and pushes
+    /// the object it makes: the constructor's `this` is the object being made, not a value on the
+    /// stack, so it is not counted among what the instruction pops.
+    [<Test>]
+    let ``a newobj of a reflected constructor pops its parameters and pushes the object`` () : unit =
+        let loggerFactory, prepared, state = loadFixture ()
+        let entry, state = reflectedEntry loggerFactory prepared "Made" ".ctor" state
+
+        let shape = newobjShape loggerFactory prepared entry state
+
+        if not shape.Invalid.IsEmpty then
+            failwith $"expected every offset typed, got %A{shape.Invalid}"
+
+        // The argument `ldarg.0` pushed, and then the object in its place.
+        shape.Entry |> Map.tryFind 1 |> Option.map List.length |> shouldEqual (Some 1)
+        shape.Entry |> Map.tryFind 6 |> Option.map List.length |> shouldEqual (Some 1)
+
+    /// A `newobj` the instruction refuses whatever the stack holds gets no shape, as a refused
+    /// `call` does: CoreCLR raises the refusal with none of the arguments pushed (measured for a
+    /// static method of one parameter, in `sourcesImpure/DynamicMethodNewobj.cs`), so a shape
+    /// would have the analysis stop the run for an underflow first. That is each method
+    /// `NewobjTarget` refuses, and a `DynamicMethod`, minted or not, which is static.
+    [<Test>]
+    let ``a newobj the instruction refuses has no stack shape`` () : unit =
+        let loggerFactory, prepared, state = loadFixture ()
+
+        // A DynamicMethod that has been minted, for an entry naming it.
+        let mintedTarget, _, state =
+            mintOne loggerFactory prepared "Target" doublingSignature doublingBody state
+
+        let cases : (string * (IlMachineState -> ScopeEntry * IlMachineState)) list =
+            [
+                "a static method", reflectedEntry loggerFactory prepared "Made" "Halve"
+                "an instance method that is not a constructor", reflectedEntry loggerFactory prepared "Made" "Twice"
+                "an abstract method", reflectedEntry loggerFactory prepared "Shape" "Area"
+                "an abstract class's constructor", reflectedEntry loggerFactory prepared "Shape" ".ctor"
+                "a DynamicMethod not yet minted", (fun state -> ScopeEntry.DynamicMethodObject, state)
+                "a minted DynamicMethod", (fun state -> ScopeEntry.MintedDynamicMethodObject mintedTarget, state)
+            ]
+
+        for name, makeEntry in cases do
+            let entry, state = makeEntry state
+            let shape = newobjShape loggerFactory prepared entry state
+
+            match Map.tryFind 1 shape.Invalid with
+            | Some (StackShapeError.MissingTokenShape (1, _)) -> ()
+            | other ->
+                failwith $"%s{name}: expected no shape at the newobj, got %A{other} (entry stacks %A{shape.Entry})"
 
     /// The regions a body was minted with.
     let private regionsOf

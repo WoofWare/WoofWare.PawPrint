@@ -23,9 +23,8 @@ public class Program
     public static int Main(string[] args)
     {
         // `ldarg.0; throw` rethrows whatever the caller handed in. Both opcodes are token-free,
-        // which is what makes this a *usable* way to raise from inside a dynamic method: the more
-        // natural routes need a metadata token (`newobj` for the exception, `callvirt` for a member
-        // that throws), and a dynamic method carrying one is refused when it is minted.
+        // so the frame under test is the dynamic method's alone: no constructor or callee runs
+        // inside it to put a frame of its own on the trace.
         //
         // Taking the exception as a parameter depends on nothing but `throw`: which exception
         // reaches the handler is chosen by the caller rather than by arithmetic, so this stays

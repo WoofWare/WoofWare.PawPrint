@@ -379,6 +379,30 @@ module internal UnaryMetadataObjectOps =
             ExceptionEscape.Propagate
             state
 
+    /// What `NewobjTarget.classify` answers for a `newobj` whose token or scope entry binds
+    /// `method`: read from the method's own metadata and from that of the type declaring it.
+    let newobjTargetOf
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (method : WoofWare.PawPrint.MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
+        : NewobjTarget
+        =
+        let declaringType =
+            let assembly =
+                state.LoadedAssembly method.DeclaringAssemblyFullName
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"BUG: newobj names %O{method}, whose assembly %s{method.DeclaringAssemblyFullName} is not loaded"
+                )
+
+            assembly.TypeDefs.[method.RequiredDeclaringType.Definition.Get]
+
+        NewobjTarget.classify
+            (MethodInfo.requireMetadata "newobj" method).MethodAttributes
+            method.Name
+            declaringType.TypeAttributes
+            (LoadedTypeInfo.isValueType baseClassTypes state.TypeSystem._LoadedAssemblies declaringType)
+
     /// Ask `NewobjTarget` what CoreCLR's JIT makes of a `newobj` of `concretizedCtor`, the
     /// executing instruction's bound method, and raise the refusal it gives, if any; otherwise
     /// construct, as `constructObject` describes.
@@ -393,22 +417,7 @@ module internal UnaryMetadataObjectOps =
         // asks only `NewobjTarget.refusesAsAbstractClass`: its lookup also binds a `.ctor` without
         // `RTSpecialName`, which real .NET's accessor stub (a `newobj`) constructs and `classify`
         // would stop at.
-        let ctorType =
-            let assembly =
-                state.LoadedAssembly concretizedCtor.DeclaringAssemblyFullName
-                |> Option.defaultWith (fun () ->
-                    failwith
-                        $"BUG: newobj bound %O{concretizedCtor}, whose assembly %s{concretizedCtor.DeclaringAssemblyFullName} is not loaded"
-                )
-
-            assembly.TypeDefs.[concretizedCtor.RequiredDeclaringType.Definition.Get]
-
-        let target =
-            NewobjTarget.classify
-                (MethodInfo.requireMetadata "newobj" concretizedCtor).MethodAttributes
-                concretizedCtor.Name
-                ctorType.TypeAttributes
-                (LoadedTypeInfo.isValueType ctx.BaseClassTypes state.TypeSystem._LoadedAssemblies ctorType)
+        let target = newobjTargetOf ctx.BaseClassTypes state concretizedCtor
 
         match target with
         | NewobjTarget.AbstractMethod ->
@@ -534,9 +543,26 @@ module internal UnaryMetadataObjectOps =
         match ctx.Operand with
         | ResolvedMetadataOperand.FromMetadata (activeAssy, metadataToken) ->
             executeMetadataNewobj ctx activeAssy metadataToken state
-        | ResolvedMetadataOperand.ScopeMethod handle ->
-            failwith
-                $"TODO: newobj names the DynamicScope's %O{handle}, but a newobj in a dynamic method is not implemented; IlDecoding.scopeOperandKind refuses its body when it is minted, so the two have gone out of step"
+        | ResolvedMetadataOperand.ScopeMethod (MethodHandle.FromMetadata identity) ->
+            // A reflected method. The identity is already the method, instantiation and all, so
+            // none of the metadata arm's token resolution applies: no MemberRef to resolve and no
+            // binding against the executing method's generic context. Nor its array shortcut: an
+            // identity names a MethodDef row, and an array type's constructor has none.
+            let state, concretizedCtor, declaringTypeHandle =
+                MethodHandleResolution.concretizeClosedMetadataIdentity
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    "newobj naming a DynamicScope entry"
+                    identity
+                    state
+
+            constructOrRefuse ctx concretizedCtor declaringTypeHandle state
+        | ResolvedMetadataOperand.ScopeMethod (MethodHandle.FromDynamic _) ->
+            // `UnaryMetadataIlOp.execute` has already minted the target, as `ResolveToken` mints it
+            // before the JIT looks at it. A DynamicMethod is always static, which `NewobjTarget`
+            // refuses as `StaticMethod`, so this is the refusal a static method of an image gets
+            // (measured: the target is minted, then the `newobj` raises InvalidProgramException).
+            UnaryMetadataCallOps.raiseCompilationFailure ctx CompilationFailure.NewobjOfStaticMethod state
         | ResolvedMetadataOperand.ScopeType _
         | ResolvedMetadataOperand.ScopeField _
         | ResolvedMetadataOperand.ScopeTypeTarget _ ->
