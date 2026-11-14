@@ -1495,9 +1495,6 @@ module TestImpureCases =
                 3, methodDef 5, memberRef 2
             ]
 
-    /// `TypeBuilderCreateInterface.cs` has created its three interfaces, `N.IEmpty` (TypeDef 2),
-    /// `IDerived` (TypeDef 3) and `IAfter` (TypeDef 4), which the runtime must have recorded as
-    /// created, so that the dynamic module's scope can no longer change their members.
     /// `TypeBuilderStaticVirtualOverrideOrder.cs` resolves each case against the MethodImpl row count of a
     /// module of its own, which no guest can read. This checks that each module ends with the count its name
     /// promises, so that a filler which wrote no row cannot turn a 25-row case into a 24-row one unseen, and
@@ -1553,6 +1550,9 @@ module TestImpureCases =
                 2, MethodDefOrRef.MethodDef (MethodDefRid 2), MethodDefOrRef.MemberRef (MemberRefRid 1)
             ]
 
+    /// `TypeBuilderCreateInterface.cs` has created its three interfaces, `N.IEmpty` (TypeDef 2),
+    /// `IDerived` (TypeDef 3) and `IAfter` (TypeDef 4), which the runtime must have recorded as
+    /// created, so that the dynamic module's scope can no longer change their members.
     let private assertInterfacesCreated (state : IlMachineState) : unit =
         let loaded = state.TypeSystem._LoadedAssemblies
         let name = "Dyn, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
