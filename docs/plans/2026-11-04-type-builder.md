@@ -4056,3 +4056,267 @@ Built 2026-11-14 as decided above, after the measurements the decisions asked fo
   it runs in parallel", which named `TestIsVisibleSameImage`; with that declared, it passed (5583 passed, 37 skipped).
   `TestIsVisibleSameImage` alone peaks at 1.3 GB resident (`/usr/bin/time -l`), well under the 8 GiB cap, so the
   closed-handle sweep of CoreLib stays exhaustive.
+
+### 5v: event enumeration
+
+**Which stage.** 5u's list puts event enumeration next, and leaves open whether it belongs here. Checked on this branch
+(5u's, 47c41e4b8): `MetadataImport.Enum` refuses token type `0x14000000` (`Native/NativeMetadataImport.fs:1175`),
+`MetadataImport.GetEventProps` has no handler, `MetadataImport.GetName` refuses an Event token (its comment at `:1409`
+says the arm comes with the enumeration), and `TypeBuilder_DefineEvent` has no handler. Reflection over events is
+therefore refused for every assembly, compiled ones included, and `DefineEvent` could not be read back if it were
+written.
+
+The question the stage turns on is whether `DispatchProxy` needs the emit side. It does not, for the two parked
+guests. Read from `ProxyBuilder.AddInterfaceImpl`'s IL (`WoofWare.PawPrint.IlDump` over the .NET 10.0.14
+`System.Reflection.DispatchProxy.dll`): it calls `GetRuntimeEvents` on the interface twice, and calls
+`TypeBuilder.DefineEvent`, `SetAddOnMethod`, `SetRemoveOnMethod` and `SetRaiseMethod` once for each event it finds, so
+an interface without events reaches only the enumeration, and gets none back. Measured under PawPrint with a throwaway
+arm for the Enum alone (reverted): `DispatchProxyMethodInterface.cs` exits 0. The emit side is reached only by an
+interface that has an event (below).
+
+So 5v is the read side: the three primitives `RuntimeType.GetEvents` reaches. The emit side, `TypeBuilder_DefineEvent`
+with its tables and the Event case of the association, is the next stage, 5w, sketched under "left to later stages"
+with what has been measured for it. Doing both at once would be a 5s-sized emit feature (new tables, a derived map
+and pointer table, a writer, an extension rule, a differential property) stacked on a reflection feature that every
+compiled assembly reaches without it.
+
+**What CoreCLR does.** Read from the pinned source (`$DOTNET_RUNTIME_SRC_NET10`):
+
+* `RuntimeType.RuntimeTypeCache.PopulateEvents` (RuntimeType.CoreCLR.cs:1142) walks the class hierarchy, or only the
+  interface itself for an interface, after stepping a generic parameter up to its base type. For each type with a
+  token it calls `MetadataImport.EnumEvents`, which is `MetadataImport_Enum` with `mdtEvent` and the TypeDef
+  (MdImport.cs:374). Under a name filter it reads each event's name through `MetadataImport.GetName`. It constructs a
+  `RuntimeEventInfo` per token, drops an inherited private one, and drops a later event whose name it has already
+  seen. All of that is managed code, which PawPrint interprets.
+* `MetadataImport_Enum` (vm/managedmdimport.cpp:539) takes its generic arm for `mdtEvent`: `EnumInit` then `EnumNext`.
+  Read-only metadata (md/runtime/mdinternalro.cpp:410) and read-write metadata (md/enc/mdinternalrw.cpp:1195) both find
+  the type's EventMap row and give its run, through `EventPtr` when the module has one, in that order. No lookup hash
+  is involved: `EventMap` has no `Add*ToHash` (md/inc/metamodelrw.h:631-734). A type with no EventMap row gives none.
+* `RuntimeEventInfo`'s constructor (RuntimeEventInfo.cs:28) calls `MetadataImport.GetEventProps`, an FCall
+  (vm/ecalllist.h:110, vm/managedmdimport.cpp:279) which returns the row's `#Strings` name and its raw `EventFlags`,
+  and then `Associates.AssignAssociates` with the Event token, which `methodSemanticsForAssociation` already answers
+  (5s), including the read-write rule from 25 rows. The Event row's `EventType` column is read by nothing:
+  `EventInfo.EventHandlerType` (EventInfo.cs:43) is the first parameter of the add method that derives from
+  `Delegate`, and is a `NullReferenceException` when there is no add method.
+* `MetadataImport.GetName` of an Event token is `GetEventProps` for the name alone (vm/managedmdimport.cpp:242).
+
+So three primitives: the enumeration, `GetEventProps`, and the Event arm of `GetName`. Everything else `GetEvents`,
+`GetEvent`, `AddEventHandler` and the accessors do is managed code over those and over the existing associates.
+
+**Measured on .NET 10.0.14** with a throwaway probe (`5v-probe`), every line identical on 11.0.0-rc.3 (rolled forward
+from the net10.0 build). `Pub` has a public, a private, a public static, a protected, an attributed and a
+custom-accessor event; `Derived : Base` has its own event and a `new` event hiding one of `Base`'s, and `Base` a public,
+a private and a static one; `G<T>` and a struct have one each; `IEv` is an interface with one, and `ExplicitImpl`
+implements it explicitly:
+
+| Asked | Observed |
+|---|---|
+| `GetEvents(all)` of an interface with methods only, `object`, `int[]` | none |
+| `Pub.GetEvents()`; `GetEvents(all)` | the four public ones in token order, the static one included; all six (`0x14000002` to `0x14000007`) in token order. Every `Attributes` is 0, `IsSpecialName` false, `IsMulticast` true, `RaiseMethod` null and no other methods |
+| `GetEvent("E1")`, `GetEvent("e1", IgnoreCase \| Public \| Instance)`, the private one by name without and with `NonPublic`, a missing name | found; found; null and found; null |
+| `AddEventHandler`, the event raised, `RemoveEventHandler`, raised again; then the custom-accessor event's `AddEventHandler` | the handler ran once; the custom `add` ran |
+| `Derived.GetEvents()`, and with `all` | `DerivedE`, `Derived.Shadowed` (`Action<int>`), `BaseE`: `Base.Shadowed` is dropped by name, `BasePriv` as an inherited private, `BaseStatic` without `FlattenHierarchy` |
+| the same with `FlattenHierarchy`; with `DeclaredOnly` | `BaseStatic` added, with `ReflectedType` `Derived`; only the two declared |
+| `G<int>`'s event; `G<>`'s | `Action<Int32>`; `Action<T>`, both token `0x1400000E` |
+| `IEv`'s; `ExplicitImpl`'s with `all` | `Changed`; `IEv.Changed`, with accessors `IEv.add_Changed` and `IEv.remove_Changed` |
+| the attributed event's `GetCustomAttributes` and `GetCustomAttributesData` | the attribute's argument; one entry |
+| `GetEvents(all)` of `T` in `Holder<T> where T : Derived`; of an unconstrained parameter; of `Derived[]` | `Derived`'s three, with `ReflectedType` `T`; none; none |
+| a dynamic type deriving from a compiled class with a public, a private and a protected event (`5v-emit nodyn`) | none declared; inherited `Pub` and `Prot`, with `ReflectedType` the dynamic type |
+
+No compiler writes a raise method, an other method, event flags or two events of one name, so a second probe writes an
+image with `PersistedAssemblyBuilder` (`5v-fabwrite`) and a third, compiled against it, reflects over it
+(`5v-fabread`). The type has 24 events (more than `MetadataImport.Enum`'s 16-entry inline buffer) and 32
+MethodSemantics rows:
+
+| Written | Observed on .NET 10.0.14 and 11.0.0-rc.3 |
+|---|---|
+| `Ev` with flags `SpecialName \| RTSpecialName`, an add, a remove, a raise, and other methods `otherB` then `otherA` | `Attributes` `0x0600` (an image on disk keeps the flag that `DefineEvent` clears, below), `IsSpecialName` true; the raise method; others `otherB, otherA`; `AddEventHandler` then the raise method through `Invoke` runs the handler once |
+| two events named `Dup`, each with its own add | only the first is listed, and `GetEvent("Dup")` is it |
+| `Many` with adds `a1`, `a2` and others `o1`, `o2`, `o3`, among 32 rows | add `a2`, others `o1, o2, o3`: RID order, as 5s measured for a property on disk |
+
+Under PawPrint at this branch's tip, every scenario reaches the Enum TODO, since each asks `GetEvents` of a type with a
+token. With throwaway arms for the three primitives, each reading the image's metadata (`TypeDefinition.GetEvents`,
+`GetEventDefinition`), every scenario's output, the probe's `all` run and `5v-fabread`'s included, is byte-identical to
+.NET 10's. With the Enum arm alone, a proxy over an interface with an event stopped at "Unimplemented native method
+(InternalCall) ... MetadataImport::GetEventProps"; the `GetEventProps` and `GetName` arms were then added together (the
+second because `PopulateEvents`' name filter calls it and `GetName` refuses an Event token; that stop was not measured
+on its own). With all three, nothing further stopped. So the stage is those three arms and nothing else on the read
+side. A control, with the arms reverted and the App rebuilt: `DispatchProxyMethodInterface.cs` stops at the Enum TODO
+again.
+
+**What `DispatchProxy` reaches next.** Measured with the three throwaway arms (`5v-proxy`, and the parked guests),
+each program exiting 0 on .NET 10.0.14 and 11.0.0-rc.3:
+
+| Program | Under PawPrint |
+|---|---|
+| `DispatchProxyMethodInterface.cs` | exits 0 (with the Enum arm alone) |
+| one proxy over an interface with a read-write property (`5v-proxy once-prop`) | exits 0 |
+| `DispatchProxyPropertyInterface.cs` | its first four checks pass, then the second `DispatchProxy.Create` (line 100) stops at "TODO: a dynamic method's Newobj names DynamicScope entry 4 (token 0x06000004), but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" |
+| two proxies over a method-only interface (`5v-proxy twice-method`) | the same stop |
+| `typeof(StringBuilder).GetConstructor(int).Invoke` twice, with `IsDynamicCodeSupported` on (`5v-proxy ctor-twice`) | the same stop, at entry 6 |
+| the same without the switch in the runtimeconfig (`5v-ctor ctor-twice`) | exits 0 |
+| a proxy over `INotify` (an event and a method), and over `IDerivedEv : IBaseEv` with the event on the base | "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineEvent)". On .NET the first proxy's type has `Changed`, token `0x14000001`, with `add_Changed` and `remove_Changed` |
+
+The second-`Create` stop is not about events or properties. `MethodBaseInvoker` interprets a constructor's first
+reflection call and emits an invoke stub for the second when dynamic code is supported, and the stub is `newobj` of the
+reflected constructor (`InvokerEmitUtil.cs:225`), which `IlDecoding.fs:107` refuses. A guest with
+`IsDynamicCodeSupported` on, as every `TypeBuilder` guest has, reaches it as soon as it reflection-invokes one
+constructor twice; no test pins it. `DispatchProxyPropertyInterface.cs`'s parked reason says it "exited 0 once
+`TypeBuilder_DefineProperty` was implemented (measured with stage 5s)", but what 5s measured was its survey's single
+proxy: the guest's second `Create` was added with the guest (#2238), and has never been run past the events. 5v
+therefore un-parks only `DispatchProxyMethodInterface.cs`.
+
+### 5v: the options
+
+Every option implements the same three primitives in `NativeMetadataImport`, refuses a parent that is not a TypeDef
+of the assembly, and changes nothing about the associates, which 5s's `methodSemanticsForAssociation` already reads
+for an Event parent. They differ in where the event facts are read from.
+
+**A. Read the image at each call, as the property arms do.** `eventDefinitionsForTypeDefinition`, beside
+`propertyDefinitionsForTypeDefinition` (`:339`), validates the TypeDef and returns `TypeDefinition.GetEvents` as tokens,
+which follows the EventMap run and an `EventPtr` if there is one. A `GetEventProps` arm, beside `GetPropertyProps`,
+bounds-checks the row as `propertyDefinition` does and writes the raw flags and the `#Strings` name. `GetName` gains an
+Event arm from the same bounds-checked row, and its comment at `:1409` goes. The three functions, and
+`methodSemanticsForAssociation`, are `internal` rather than `private`, so that the tests (which `InternalsVisibleTo`
+already admits) can call them.
+
+* Correctness: every row above, measured with exactly this structure.
+* Blast radius if wrong: reflection over events, of every assembly. Nothing reflects over events today, so nothing
+  that runs now can change.
+* Reversibility: three arms and one widened visibility; nothing existing changes shape.
+* Information: the image is the only source, so a dynamic module's events are read from the image current at the call,
+  as its properties and associates are.
+* Size: the arms, the guests, the fabricated test, the property.
+
+**B. Answer from Domain's parsed events.** `TypeInfo.Events` (`TypeInfo.fs:157`) already holds each type's
+`EventDefn`s (handle, name, flags), parsed at load, and today only IlDump reads them. The Enum maps a type's
+`Events`; `GetEventProps` and `GetName` need an Event token's row, so `DumpedAssembly` gains an `Events` index beside
+`Fields`, and `typeOwningEvent`'s scan of every TypeDef (`:869`, used by `GetParentToken`) becomes a lookup.
+
+* Correctness: the same answers, if the parsed index is current.
+* Information: one parse of the table. But properties are read from the image directly, so two sibling tables would
+  be read two ways; making them agree means moving properties too, a migration this stage does not need.
+* Blast radius: a public record of a published package grows a field, and every builder of a `DumpedAssembly` (the
+  reader, the re-read of a dynamic module's image, fixtures) must fill it. For a dynamic module, once 5w adds events,
+  the index must be rebuilt with every image, or a type created after the index was built has no events.
+* Reversibility: removing the field later is a breaking change to Domain.
+
+**C. The Enum arm alone.** The smallest change that un-parks `DispatchProxyMethodInterface.cs`, whose interface has no
+events. Any type with an event then stops at `GetEventProps` rather than at the Enum. It leaves the feature partial: the
+three primitives are one feature, `GetEvents` of a type that has events, and the other two are a dozen lines each.
+
+**Recommended: A.** It is the structure the property arms already have, it reads the image that the associates read,
+and it needs no Domain change. B's index has no measured need and makes sibling tables disagree in how they are read. C
+un-parks one guest and leaves every type with an event refused one primitive later.
+
+Open questions:
+
+1. A, B or C.
+2. Read side alone as 5v, emit side as 5w (recommended), or both in one stage. The read side un-parks one guest and
+   reflects over every compiled assembly's events; the emit side is 5s's shape again, and its first guest needs the
+   read side to read anything back.
+3. This plan, or a plan of its own for reflection. Recommended: this plan, as 5u decided for `IsVisible`, since the
+   `DispatchProxy` measurements are here and 5w is emit. The PR is titled for what it is: reflection over events.
+4. What comes after 5v: 5w (`DefineEvent`, which unblocks a proxy over an interface with an event), or the reflected
+   constructor named by an invoke stub's `newobj` (which un-parks `DispatchProxyPropertyInterface.cs`, and every
+   `TypeBuilder` guest that constructs one type twice by reflection). The second is not emit, and not specific to
+   `DispatchProxy`; whether it belongs in this plan is the same question as 3.
+5. Whether to pin that `newobj` stop now with a parked impure guest (`ConstructorInfo.Invoke` twice with
+   `IsDynamicCodeSupported` on, measured above) in a test-only PR against `main`, as 5t and 5u pinned their findings
+   outside the stage. Recommended: yes.
+6. Whether the guest of a proxy over an interface with an event is added in 5v, parked at `TypeBuilder_DefineEvent`
+   (measured), so that 5w has its program waiting. Recommended: yes; it costs a file and a registration.
+
+### 5v: the oracle
+
+Written first, and seen to fail on this branch before the arms exist:
+
+* `TypeEvents.cs` in `sourcesPure` (registered by `TestPureCases.fs`, so the real-runtime oracle runs it too), with a
+  check number for every compiled row of `5v-probe`'s table: names, tokens, `Attributes`, `EventHandlerType`, the
+  accessors' names, `DeclaringType` and `ReflectedType` of each event listed; the binding-flag cases; the name filter
+  both ways and case-insensitively; `AddEventHandler` and `RemoveEventHandler` with the raise counted, and the custom
+  accessor; the hierarchy cases (the hidden `Shadowed`, the dropped private, `FlattenHierarchy`, `DeclaredOnly`); the
+  generic instantiation and definition; the struct; the interface and the explicit implementation; the attribute; the
+  generic parameters and the array. It returns the number of the first failing check. The probe's output is the same
+  on .NET 10 and 11; the guest's exit code is to be confirmed on both before committing.
+* `TypeBuilderInheritedEvents.cs` in `sourcesImpure` (`IsDynamicCodeSupported` on): `5v-emit nodyn`, a dynamic type
+  deriving from a compiled class with events, so that the Enum is asked of a dynamic module's TypeDef (none) and then
+  of the base's.
+* `TestFabricatedEventAccessors`, beside `TestFabricatedPropertyAccessorOrder` and written the same way
+  (`PersistedAssemblyBuilder`, then the guest under PawPrint and on real .NET): `5v-fabwrite`'s type, with every row of
+  its table checked. It is the only check of a raise method, of other methods, of flags, of two events of one name, of
+  a type with more than 16 events (the Enum's long-result path), and of an event's accessors in RID order among 25 or
+  more rows of an image on disk.
+* `DispatchProxyMethodInterface.cs` is registered as passing. `DispatchProxyPropertyInterface.cs` stays parked with
+  the second-`Create` stop as its reason, corrected as above. If question 6 is taken, `DispatchProxyEventInterface.cs`
+  (`5v-proxy event`, with checks of the proxy's events) is parked at `TypeBuilder_DefineEvent`.
+* A same-image property in the test host (`TestEventsSameImage`), over the internal functions of option A, against host
+  reflection of the same image:
+  * every TypeDef of `HostImage`'s CoreLib, compared by token, the count asserted equal to the image's TypeDef table:
+    the enumeration is the tokens of host `GetEvents(all | DeclaredOnly)` in order, and each event's name, flags,
+    add, remove, raise and other methods (through `methodSemanticsForAssociation`) are the host's. CoreLib,
+    System.ObjectModel and System.Console together hold only 20 types with events, 45 events, and no raise method, other
+    method or flag (counted with `5v-probe corelib`), so the sweep mostly checks that every other type gives none;
+  * an FsCheck property over images written by `PersistedAssemblyBuilder` in the test host and read back with
+    `Assembly.read`: a few types, each with up to five events of distinct names (the host hides a repeated name, so
+    repeats stay in the fabricated test), flags drawn from all sixteen bits, and accessors drawn with repetition
+    (several adds, raises and other methods on one event) so that the table reaches 25 rows; the host loads the same
+    bytes into a collectible `AssemblyLoadContext`. The fixed sample asserts its coverage: an event with a raise method,
+    one with other methods, one with two adds, a type with more than 16 events, and an image with 25 or more rows.
+  The property drives the functions, not the handlers' reading of their arguments, which only the guests cover.
+* Mutants, each run against the guests, the fabricated test and the property:
+  * the Enum answering none for every type (`TypeEvents.cs`; not `DispatchProxyMethodInterface.cs`, whose interface
+    has no events);
+  * the Enum giving the next TypeDef's events (`Pub`'s first check; the sweep);
+  * the Enum answering for an image on disk only, refusing a dynamic module (`TypeBuilderInheritedEvents.cs`);
+  * the long-result path dropped, so that a type with more than 16 events loses the rest (the fabricated test; the
+    property's large type);
+  * `GetEventProps` reading the neighbouring row (`TypeEvents.cs`);
+  * `GetEventProps` clearing `RTSpecialName`, as `DefineEvent` does on the emit side (the fabricated `0x0600`; the
+    property's flags);
+  * `GetEventProps` writing the flags into the name's slot and the name into nothing, or the two out-pointers swapped
+    (`TypeEvents.cs`);
+  * the `GetName` arm giving the neighbouring row's name (`TypeEvents.cs`'s name filter);
+  * `methodSemanticsForAssociation` encoding an Event parent with the Property tag (every add is lost: `TypeEvents.cs`);
+  * the read-write reversal applied to an Event parent on disk (the fabricated `Many`).
+
+### 5v: left to later stages
+
+* 5w, `TypeBuilder_DefineEvent`: an Event table, a derived EventMap and EventPtr, and `HasSemantics.Event` (tag 0) in
+  `TypeBuilder_DefineMethodSemantics`, whose refusal of an Event association (`NativeRuntimeTypeBuilder.fs:456`) goes.
+  Read from the source, it is 5s's shape with these differences:
+  * `RegMeta::_DefineEvent` (md/compiler/regmeta_emit.cpp:1256) searches only under `MDDupEvent`, which neither
+    `MDDupDefault` nor vm/assembly.cpp:88 sets; it adds the map row before the Event row, and
+    `AddEventToEventMap` (md/enc/metamodelrw.cpp:4927) is `AddPropertyToPropertyMap` with the event tables, so the map
+    order and the pointer rule are 5s's.
+  * `_SetEventProps1` (:1346) clears `evReservedMask`, which is `RTSpecialName` alone (0x0400, inc/corhdr.h:544), not
+    5s's `0xF400`, and keeps the low sixteen bits, except that `0xFFFFFFFF` leaves the flags unset.
+  * The row has an `EventType` column, a TypeDefOrRef from `GetTypeTokenInternal`, which may add a TypeRef or TypeSpec
+    row before the QCall. No reflection API reads the column.
+  * `DefineEventCore` checks for a leading NUL before the QCall (RuntimeTypeBuilder.cs:1433), unlike
+    `DefinePropertyCore`, so such a name consumes no token.
+
+  Measured on .NET 10.0.14 and 11.0.0-rc.3 alike (`5v-emit`; the two outputs are identical):
+
+  | Emitted | Observed |
+  |---|---|
+  | `A.DefineEvent("E1", Action)`, `B.DefineEvent("F1", SpecialName \| RTSpecialName, EventHandler)`, `A.DefineEvent("E2", Action<int>)` | `0x14000001` to `0x14000003`; `E2`'s `DefineEvent` made the TypeSpec `0x1B000001`, which `GetTypeMetadataToken(typeof(Action<int>))` then returns, and `Func<int>` is `0x1B000002` |
+  | `F1`'s flags | `0x0200` on the created event |
+  | `Dup` twice | `0x14000004` and `0x14000005`; reflection lists the first |
+  | `"\0x"`; a null event type; then `AfterNul` | `ArgumentException`; `ArgumentNullException`; `AfterNul` is `0x14000006`, so neither consumed a token |
+  | flags `(EventAttributes)(-1)`; `0x7FFF0600` | `0x0000`; `0x0200` |
+  | `Weird` with event type `int` and an add method taking `Action` | `EventHandlerType` is `Action`: the column is not read |
+  | an event with no add method | `EventHandlerType` throws `NullReferenceException`; the event is not listed by `GetEvents()` |
+  | a property `P` (RID 1) given its getter, then `E1` (RID 1) given remove, add, raise, `other2`, `other1` | `P`'s getter gives 11; `E1`'s accessors as set, others `other2, other1`; `AddEventHandler` then the raise method through `Invoke` runs the handler once |
+  | an event given adds `a1`, `a2` and others `o1`, `o2`, `o3`, in modules of 5, 24 (either side of the other rows), 25 (either side) and 26 MethodSemantics rows | below 25: add `a2`, others `o1, o2, o3`; from 25: add `a1`, others `o3, o2, o1` |
+  | 20 property rows, then that event's five rows | reversed: property and event rows count together |
+  | `DefineEvent`, and `SetAddOnMethod`, after `CreateType` | `InvalidOperationException` each |
+  | an interface's event with abstract accessors | listed, with its accessors |
+
+  The property-then-event case is the guest-level killer of 5s's surviving mutant, the MethodSemantics sort keyed on
+  the RID with the tag dropped: `P`'s row (coded 3) is added before `E1`'s (coded 2), so the mutant leaves them out of
+  order, and SRM refuses the image. The 5w guests are this table, `DispatchProxyEventInterface.cs` (question 6), and
+  5s's differential property extended to events.
+* The reflected constructor named by an invoke stub's `newobj` (`IlDecoding.fs:107`), which un-parks
+  `DispatchProxyPropertyInterface.cs` (question 4), with its pinning guest (question 5).
+* `typeOwningEvent` (`:869`) scans every TypeDef for `GetParentToken`. Nothing measured asks that of an event; it stays.
