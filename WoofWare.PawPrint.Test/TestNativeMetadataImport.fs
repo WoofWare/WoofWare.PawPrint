@@ -5112,3 +5112,574 @@ public interface IEventInterface
                 Assert.Throws (fun () -> invokeGetDefaultValue fixture token fixture.State |> ignore)
 
             ex.Message |> shouldContainText "was not present in"
+
+    /// The shapes `MetadataImport.GetFieldOffset` tells apart. `Explicit.D` is at an odd offset and
+    /// `C` overlaps `B`; `Explicit.S` is static and has no FieldLayout row although its type is
+    /// explicitly laid out. C# writes no row for a field of a sequential struct or of a class.
+    let private fieldOffsetSource =
+        """
+using System.Runtime.InteropServices;
+
+[StructLayout(LayoutKind.Explicit)]
+public struct Explicit
+{
+    [FieldOffset(0)] public int A;
+    [FieldOffset(4)] public long B;
+    [FieldOffset(4)] public int C;
+    [FieldOffset(13)] public byte D;
+    public static int S;
+}
+
+[StructLayout(LayoutKind.Explicit)]
+public class ExplicitClass
+{
+    [FieldOffset(8)] public object O;
+    [FieldOffset(0)] public int I;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct Sequential
+{
+    public int X;
+    public long Y;
+}
+
+public class Plain
+{
+    public int P;
+    public static string Q;
+}
+
+public class NoFields
+{
+}
+"""
+
+    /// What `MetadataImport.GetFieldOffset` wrote: its HRESULT, the offset out-parameter, and the
+    /// `found` out-parameter.
+    type private FieldOffsetAnswer =
+        {
+            ReturnValue : EvalStackValue
+            Offset : int32
+            Found : bool
+        }
+
+    /// What the offset out-parameter holds before the call, so that a handler which writes it
+    /// without finding a row is seen to.
+    let private fieldOffsetSentinel : int32 = 0x5EED5EED
+
+    let private invokeGetFieldOffsetIn
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (typeToken : int32)
+        (fieldToken : int32)
+        (state : IlMachineState)
+        : FieldOffsetAnswer * IlMachineState
+        =
+        let state, metadataImportType, method =
+            metadataImportMethod fixture state "GetFieldOffset" 5
+
+        let state =
+            concretizeCorelibType fixture.LoggerFactory fixture.BaseClassTypes state fixture.BaseClassTypes.Boolean
+
+        let offsetOut, state = allocateInt32Out fixture fieldOffsetSentinel state
+
+        let booleanHandle =
+            AllConcreteTypes.getRequiredNonGenericHandle state.TypeSystem.ConcreteTypes fixture.BaseClassTypes.Boolean
+
+        // `true` beforehand, so that a handler which never writes `found` is seen not to.
+        let foundArray, state =
+            IlMachineState.allocateArray
+                (ConcreteTypeHandle.OneDimArrayZero booleanHandle)
+                (fun () -> CliType.ofBool true)
+                1
+                state
+
+        let foundOut =
+            ManagedPointerSource.Byref
+                {
+                    Root = ByrefRoot.ArrayElement (foundArray, 0)
+                    Projections = []
+                }
+
+        let state =
+            invokeMetadataImportNative
+                fixture
+                metadataImportType
+                method
+                [
+                    metadataImportHandleOf assemblyFullName
+                    CliType.Numeric (CliNumericType.Int32 typeToken)
+                    CliType.Numeric (CliNumericType.Int32 fieldToken)
+                    CliType.RuntimePointer (CliRuntimePointer.Managed offsetOut)
+                    CliType.RuntimePointer (CliRuntimePointer.Managed foundOut)
+                ]
+                state
+
+        let returnValue, state = IlMachineState.popEvalStack (ThreadId 0) state
+
+        let found =
+            match ManagedHeap.getArrayValue foundArray 0 state.ManagedHeap with
+            | CliType.Bool 0uy -> false
+            | CliType.Bool 1uy -> true
+            | other -> failwith $"expected a Boolean in the found out-parameter, got %O{other}"
+
+        {
+            ReturnValue = returnValue
+            Offset = readInt32Out fixture.BaseClassTypes state offsetOut
+            Found = found
+        },
+        state
+
+    /// The answer CoreCLR's FCall gives for a FieldLayout row's offset, or for no row.
+    let private expectedFieldOffsetAnswer (offset : int32 option) : FieldOffsetAnswer =
+        match offset with
+        | Some offset ->
+            {
+                ReturnValue = EvalStackValue.Int32 (Int32Source.Verbatim 0)
+                Offset = offset
+                Found = true
+            }
+        | None ->
+            {
+                ReturnValue = EvalStackValue.Int32 (Int32Source.Verbatim 0)
+                Offset = fieldOffsetSentinel
+                Found = false
+            }
+
+    /// The `FieldOffsetAttribute` that host reflection synthesises for `field`.
+    let private hostFieldOffset (field : System.Reflection.FieldInfo) : int32 option =
+        match field.GetCustomAttributes (typeof<System.Runtime.InteropServices.FieldOffsetAttribute>, false) with
+        | [||] -> None
+        | [| :? System.Runtime.InteropServices.FieldOffsetAttribute as attribute |] -> Some attribute.Value
+        | other -> failwith $"host reflection gave %d{other.Length} FieldOffsetAttributes for %O{field}"
+
+    let private allDeclaredFields : System.Reflection.BindingFlags =
+        System.Reflection.BindingFlags.Public
+        ||| System.Reflection.BindingFlags.NonPublic
+        ||| System.Reflection.BindingFlags.Instance
+        ||| System.Reflection.BindingFlags.Static
+        ||| System.Reflection.BindingFlags.DeclaredOnly
+
+    /// For every type of `hostAssembly` and every field of every one of its types, checks PawPrint's
+    /// `GetFieldOffset` against host reflection: the field's own type gets the attribute's offset, if
+    /// it has one, and every other type gets "not found", as CoreCLR's walk of only that type's
+    /// fields does. Returns how many questions were answered "found".
+    let private assertFieldOffsetsAgreeWithHost
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (hostAssembly : System.Reflection.Assembly)
+        (state : IlMachineState)
+        : int * IlMachineState
+        =
+        let hostTypes = hostAssembly.GetTypes ()
+        let mutable state = state
+        let mutable found = 0
+
+        for declaring in hostTypes do
+            for field in declaring.GetFields allDeclaredFields do
+                let ownOffset = hostFieldOffset field
+
+                for asked in hostTypes do
+                    let answer, nextState =
+                        invokeGetFieldOffsetIn fixture assemblyFullName asked.MetadataToken field.MetadataToken state
+
+                    state <- nextState
+
+                    let expected =
+                        if asked.MetadataToken = declaring.MetadataToken then
+                            ownOffset
+                        else
+                            None
+
+                    if answer <> expectedFieldOffsetAnswer expected then
+                        failwith
+                            $"GetFieldOffset(%s{asked.FullName}, %s{declaring.FullName}.%s{field.Name}): expected %O{expected}, got %O{answer}"
+
+                    if answer.Found then
+                        found <- found + 1
+
+        found, state
+
+    [<Test>]
+    let ``MetadataImport GetFieldOffset agrees with the host runtime for every type and field`` () : unit =
+        let fixture = makeFixture ()
+
+        let image =
+            Roslyn.compileAssembly
+                "FieldOffsetTestAssembly"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ fieldOffsetSource ]
+
+        let assembly, state = withImage fixture image
+
+        let context =
+            System.Runtime.Loader.AssemblyLoadContext ("FieldOffsets", isCollectible = true)
+
+        try
+            let hostAssembly = context.LoadFromStream (new MemoryStream (image))
+
+            let found, _ =
+                assertFieldOffsetsAgreeWithHost fixture assembly.Name.FullName hostAssembly state
+
+            // `Explicit` A, B, C, D and `ExplicitClass` O, I, each asked of its own type alone.
+            found |> shouldEqual 6
+        finally
+            context.Unload ()
+
+    [<Test>]
+    let ``MetadataImport GetFieldOffset reports found, not found, and a field of another type`` () : unit =
+        let fixture = makeFixture ()
+
+        let image =
+            Roslyn.compileAssembly
+                "FieldOffsetTestAssembly"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ fieldOffsetSource ]
+
+        let assembly, state = withImage fixture image
+        let name = assembly.Name.FullName
+
+        let explicitType = requiredTopLevelType assembly "" "Explicit"
+        let sequentialType = requiredTopLevelType assembly "" "Sequential"
+
+        let field (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>) (fieldName : string) : int32 =
+            typeInfo.Fields
+            |> List.find (fun field -> field.Name = fieldName)
+            |> fun field -> fieldDefToken field.Handle
+
+        let ask (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>) (fieldToken : int32) : FieldOffsetAnswer =
+            invokeGetFieldOffsetIn fixture name (typeDefToken typeInfo.TypeDefHandle) fieldToken state
+            |> fst
+
+        ask explicitType (field explicitType "D")
+        |> shouldEqual (expectedFieldOffsetAnswer (Some 13))
+
+        ask explicitType (field explicitType "B")
+        |> shouldEqual (expectedFieldOffsetAnswer (Some 4))
+
+        // Not found: a static field of an explicit-layout type, and a field of a sequential one.
+        ask explicitType (field explicitType "S")
+        |> shouldEqual (expectedFieldOffsetAnswer None)
+
+        ask sequentialType (field sequentialType "X")
+        |> shouldEqual (expectedFieldOffsetAnswer None)
+
+        // A field with a row, asked of a type that does not declare it.
+        ask sequentialType (field explicitType "D")
+        |> shouldEqual (expectedFieldOffsetAnswer None)
+
+        // CoreCLR compares the target with each field token of the type, so a target that is not a
+        // FieldDef at all is simply not among them.
+        ask explicitType (typeDefToken explicitType.TypeDefHandle)
+        |> shouldEqual (expectedFieldOffsetAnswer None)
+
+    [<Test>]
+    let ``MetadataImport GetFieldOffset agrees with the host runtime for every CoreLib field`` () : unit =
+        let fixture = makeFixture ()
+        let corelib = fixture.BaseClassTypes.Corelib
+        let name = corelib.Name.FullName
+        let mr = corelib.PeReader.GetMetadataReader ()
+
+        let hostTypes = typeof<obj>.Assembly.GetTypes ()
+        let typeDefRows = MetadataReaderExtensions.GetTableRowCount (mr, TableIndex.TypeDef)
+
+        // Every TypeDef but `<Module>`, whose fields are asked below.
+        hostTypes.Length |> shouldEqual (typeDefRows - 1)
+
+        let moduleFields =
+            (mr.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle 1)).GetFields ()
+            |> Seq.map fieldDefToken
+            |> List.ofSeq
+
+        let mutable state = fixture.State
+        let mutable fields = 0
+        let mutable found = 0
+
+        for token in moduleFields do
+            let answer, nextState = invokeGetFieldOffsetIn fixture name 0x02000001 token state
+            state <- nextState
+            answer |> shouldEqual (expectedFieldOffsetAnswer None)
+            fields <- fields + 1
+
+        for declaring in hostTypes do
+            for field in declaring.GetFields allDeclaredFields do
+                let expected = hostFieldOffset field
+
+                let answer, nextState =
+                    invokeGetFieldOffsetIn fixture name declaring.MetadataToken field.MetadataToken state
+
+                state <- nextState
+
+                if answer <> expectedFieldOffsetAnswer expected then
+                    failwith
+                        $"GetFieldOffset(%s{declaring.FullName}.%s{field.Name}): expected %O{expected}, got %O{answer}"
+
+                fields <- fields + 1
+
+                if answer.Found then
+                    found <- found + 1
+
+                    // The same field asked of a neighbouring TypeDef, which does not declare it.
+                    let other =
+                        if declaring.MetadataToken = (0x02000000 ||| typeDefRows) then
+                            declaring.MetadataToken - 1
+                        else
+                            declaring.MetadataToken + 1
+
+                    let answer, nextState =
+                        invokeGetFieldOffsetIn fixture name other field.MetadataToken state
+
+                    state <- nextState
+                    answer |> shouldEqual (expectedFieldOffsetAnswer None)
+
+        // The sweep reaches every field, and both answers occur often.
+        fields
+        |> shouldEqual (MetadataReaderExtensions.GetTableRowCount (mr, TableIndex.Field))
+
+        found |> shouldBeGreaterThan 50
+        fields - found |> shouldBeGreaterThan 1000
+
+    [<Test>]
+    let ``MetadataImport GetFieldOffset rejects a type token that is not a TypeDef of the assembly`` () : unit =
+        // CoreCLR's read-only reader takes only the row number of the token, asserting its table in
+        // debug builds alone, and a row past the table's end is an error HRESULT that the managed
+        // wrapper turns into BadImageFormatException. The only managed caller passes a field's
+        // `DeclaringType.MetadataToken`, so either is a token PawPrint should never have minted.
+        let fixture = makeFixture ()
+        let corelib = fixture.BaseClassTypes.Corelib
+        let name = corelib.Name.FullName
+
+        let typeDefRows =
+            MetadataReaderExtensions.GetTableRowCount (corelib.PeReader.GetMetadataReader (), TableIndex.TypeDef)
+
+        for token in [ 0x06000001 ; 0x02000000 ; 0x02000000 ||| (typeDefRows + 1) ] do
+            let ex =
+                Assert.Catch (fun () -> invokeGetFieldOffsetIn fixture name token 0x04000001 fixture.State |> ignore)
+
+            ex.Message |> shouldContainText "MetadataImport.GetFieldOffset"
+
+    /// The layout of a drawn type. Explicit layout is left out: CoreCLR refuses to load such a type
+    /// unless every instance field has a non-negative row, and the host oracle must load the type.
+    [<RequireQualifiedAccess>]
+    type private DrawnLayout =
+        | AutoClass
+        | SequentialClass
+        | SequentialStruct
+
+    /// A drawn type: its layout, and for each of its `int32` fields the offset of its FieldLayout
+    /// row, if it has one.
+    type private DrawnLayoutType =
+        {
+            Layout : DrawnLayout
+            Rows : int32 option list
+        }
+
+    [<RequireQualifiedAccess>]
+    type private DrawnFieldOffsetCoverage =
+        | NegativeOffset
+        | NonNegativeOffset
+        | FieldWithoutRow
+        | TypeWithoutFields
+        | ValueType
+
+    let private drawnLayoutTypeGen : Gen<DrawnLayoutType> =
+        gen {
+            let! layout =
+                Gen.elements [ DrawnLayout.AutoClass ; DrawnLayout.SequentialClass ; DrawnLayout.SequentialStruct ]
+
+            let offsetGen =
+                Gen.frequency
+                    [
+                        2, Gen.choose (0, 64)
+                        1, Gen.elements [ -1 ; System.Int32.MinValue ; System.Int32.MaxValue ]
+                        2, ArbMap.defaults |> ArbMap.generate<int32>
+                    ]
+
+            let rowGen = Gen.frequency [ 1, Gen.constant None ; 2, Gen.map Some offsetGen ]
+            let! fieldCount = Gen.choose (0, 4)
+            let! rows = Gen.listOfLength fieldCount rowGen
+
+            return
+                {
+                    Layout = layout
+                    Rows = rows
+                }
+        }
+
+    /// An image declaring `N.T<i>` for each drawn type, with `int32` fields `F<j>`, and a FieldLayout
+    /// row for each field whose drawn offset is `Some`. Hand-written, because a C# compiler writes
+    /// no row with a negative offset, nor one for a field of a type that is not explicitly laid out.
+    let private writeDrawnLayoutImage (types : DrawnLayoutType list) : byte array =
+        let builder = MetadataBuilder ()
+
+        let signature =
+            let blob = BlobBuilder ()
+            BlobEncoder(blob).Field().Type().Int32 ()
+            builder.GetOrAddBlob blob
+
+        builder.AddModule (
+            0,
+            builder.GetOrAddString "DrawnLayouts.dll",
+            builder.GetOrAddGuid (System.Guid "5eed5eed-0000-0000-0000-000000000000"),
+            GuidHandle (),
+            GuidHandle ()
+        )
+        |> ignore<ModuleDefinitionHandle>
+
+        builder.AddAssembly (
+            builder.GetOrAddString "DrawnLayouts",
+            System.Version (1, 0, 0, 0),
+            StringHandle (),
+            BlobHandle (),
+            enum<System.Reflection.AssemblyFlags> 0,
+            System.Reflection.AssemblyHashAlgorithm.None
+        )
+        |> ignore<AssemblyDefinitionHandle>
+
+        let systemRuntime : EntityHandle =
+            builder.AddAssemblyReference (
+                builder.GetOrAddString "System.Runtime",
+                System.Version (8, 0, 0, 0),
+                StringHandle (),
+                builder.GetOrAddBlob [| 0xb0uy ; 0x3fuy ; 0x5fuy ; 0x7fuy ; 0x11uy ; 0xd5uy ; 0x0auy ; 0x3auy |],
+                enum<System.Reflection.AssemblyFlags> 0,
+                BlobHandle ()
+            )
+            |> AssemblyReferenceHandle.op_Implicit
+
+        let objectRef : EntityHandle =
+            builder.AddTypeReference (systemRuntime, builder.GetOrAddString "System", builder.GetOrAddString "Object")
+            |> TypeReferenceHandle.op_Implicit
+
+        let valueTypeRef : EntityHandle =
+            builder.AddTypeReference (systemRuntime, builder.GetOrAddString "System", builder.GetOrAddString "ValueType")
+            |> TypeReferenceHandle.op_Implicit
+
+        builder.AddTypeDefinition (
+            enum<System.Reflection.TypeAttributes> 0,
+            StringHandle (),
+            builder.GetOrAddString "<Module>",
+            EntityHandle (),
+            MetadataTokens.FieldDefinitionHandle 1,
+            MetadataTokens.MethodDefinitionHandle 1
+        )
+        |> ignore<TypeDefinitionHandle>
+
+        let mutable nextField = 1
+
+        types
+        |> List.iteri (fun typeIndex drawn ->
+            let attributes, baseType =
+                match drawn.Layout with
+                | DrawnLayout.AutoClass -> System.Reflection.TypeAttributes.Public, objectRef
+                | DrawnLayout.SequentialClass ->
+                    System.Reflection.TypeAttributes.Public
+                    ||| System.Reflection.TypeAttributes.SequentialLayout,
+                    objectRef
+                | DrawnLayout.SequentialStruct ->
+                    System.Reflection.TypeAttributes.Public
+                    ||| System.Reflection.TypeAttributes.SequentialLayout
+                    ||| System.Reflection.TypeAttributes.Sealed,
+                    valueTypeRef
+
+            builder.AddTypeDefinition (
+                attributes,
+                builder.GetOrAddString "N",
+                builder.GetOrAddString $"T%d{typeIndex}",
+                baseType,
+                MetadataTokens.FieldDefinitionHandle nextField,
+                MetadataTokens.MethodDefinitionHandle 1
+            )
+            |> ignore<TypeDefinitionHandle>
+
+            drawn.Rows
+            |> List.iteri (fun fieldIndex row ->
+                let field =
+                    builder.AddFieldDefinition (
+                        System.Reflection.FieldAttributes.Public,
+                        builder.GetOrAddString $"F%d{fieldIndex}",
+                        signature
+                    )
+
+                match row with
+                | Some offset -> builder.AddFieldLayout (field, offset)
+                | None -> ()
+
+                nextField <- nextField + 1
+            )
+        )
+
+        let peBuilder =
+            System.Reflection.PortableExecutable.ManagedPEBuilder (
+                System.Reflection.PortableExecutable.PEHeaderBuilder (
+                    imageCharacteristics = System.Reflection.PortableExecutable.Characteristics.Dll
+                ),
+                MetadataRootBuilder builder,
+                BlobBuilder ()
+            )
+
+        let blob = BlobBuilder ()
+        peBuilder.Serialize blob |> ignore<BlobContentId>
+        blob.ToArray ()
+
+    [<Test>]
+    let ``MetadataImport GetFieldOffset agrees with the host runtime over drawn images`` () : unit =
+        let fixture = makeFixture ()
+
+        let property (cover : DrawnFieldOffsetCoverage -> unit) (types : DrawnLayoutType list) : unit =
+            for drawn in types do
+                if drawn.Rows.IsEmpty then
+                    cover DrawnFieldOffsetCoverage.TypeWithoutFields
+
+                match drawn.Layout with
+                | DrawnLayout.SequentialStruct -> cover DrawnFieldOffsetCoverage.ValueType
+                | DrawnLayout.AutoClass
+                | DrawnLayout.SequentialClass -> ()
+
+                for row in drawn.Rows do
+                    match row with
+                    | None -> cover DrawnFieldOffsetCoverage.FieldWithoutRow
+                    | Some offset when offset < 0 -> cover DrawnFieldOffsetCoverage.NegativeOffset
+                    | Some _ -> cover DrawnFieldOffsetCoverage.NonNegativeOffset
+
+            let image = writeDrawnLayoutImage types
+            let assembly, state = withImage fixture image
+
+            let context =
+                System.Runtime.Loader.AssemblyLoadContext ("DrawnLayouts", isCollectible = true)
+
+            try
+                let hostAssembly = context.LoadFromStream (new MemoryStream (image))
+
+                // The host reads each drawn row back, so the oracle below is not vacuous.
+                types
+                |> List.iteri (fun typeIndex drawn ->
+                    (hostAssembly.GetType ($"N.T%d{typeIndex}", true)).GetFields allDeclaredFields
+                    |> Array.map hostFieldOffset
+                    |> List.ofArray
+                    |> shouldEqual drawn.Rows
+                )
+
+                assertFieldOffsetsAgreeWithHost fixture assembly.Name.FullName hostAssembly state
+                |> ignore<int * IlMachineState>
+            finally
+                context.Unload ()
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 200)
+                (Arb.fromGen (Gen.choose (1, 4) |> Gen.bind (fun n -> Gen.listOfLength n drawnLayoutTypeGen)))
+                property
+
+        for label in
+            [
+                DrawnFieldOffsetCoverage.NegativeOffset
+                DrawnFieldOffsetCoverage.NonNegativeOffset
+                DrawnFieldOffsetCoverage.FieldWithoutRow
+                DrawnFieldOffsetCoverage.TypeWithoutFields
+                DrawnFieldOffsetCoverage.ValueType
+            ] do
+            coverage.Count label |> shouldBeGreaterThan 15
