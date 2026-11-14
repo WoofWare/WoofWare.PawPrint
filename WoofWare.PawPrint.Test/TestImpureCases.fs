@@ -571,6 +571,38 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, measured on .NET 10 to exit 0. It stops first where `DispatchProxyMethodInterface.cs` does: "Unimplemented native method (PInvokeImpl QCall!RuntimeTypeHandle_IsVisible)" (measured, on both runtimes). With that and `MetadataImport.Enum` of the interface's events answered by throwaway edits, it stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineProperty)" (measured), as the proxy type redeclares the interface's property. Un-parked by those two and `TypeBuilder_DefineProperty`, with whatever the property's accessors then reach."""
+            {
+                FileName = "TypeBuilderDuplicateStaticVirtualOverride.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """PawPrint does not verify a dynamic type's MethodImpl rows at `CreateType`. Two `DefineMethodOverride` rows name one static abstract interface method, each with its own body; on real .NET 10 and 11, `CreateType` throws `TypeLoadException` (message "Undefined resource string ID:0x80004005"), and the guest exits 0 (measured; a control with the second row removed exits 1). PawPrint creates the type and the guest exits 1, "CreateType threw nothing" (measured, on both runtimes). Un-parked by verifying the rows at `CreateType`."""
+            {
+                FileName = "TypeBuilderDuplicateInstanceOverride.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """PawPrint does not verify a dynamic type's MethodImpl rows at `CreateType`. Two `DefineMethodOverride` rows name one instance interface method, with different bodies; on real .NET 10 and 11, `CreateType` throws `TypeLoadException` ("Method 'B2' on type 'C' ... is overriding a method that has been overridden"), and the guest exits 0 (measured; a control with the second row removed exits 1). PawPrint creates the type and the guest exits 1, "CreateType threw nothing" (measured, on both runtimes). Un-parked by verifying the rows at `CreateType`."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
