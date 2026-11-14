@@ -324,6 +324,17 @@ module RuntimeTypeHandleTarget =
             loadedAssemblies.ByDefinitionName(identity.AssemblyFullName).TypeDefs.[identity.TypeDefinition.Get]
             |> LoadedTypeInfo.isByRefLike baseClassTypes loadedAssemblies
 
+    /// CoreCLR's `TypeHandle::IsExternallyVisible` (typehandle.cpp:991), which `Type.IsVisible` of a
+    /// `RuntimeType` asks through the `RuntimeTypeHandle_IsVisible` QCall: whether the target is visible
+    /// outside its assembly.
+    let isExternallyVisible
+        (loadedAssemblies : LoadedAssemblies)
+        (concreteTypes : AllConcreteTypes)
+        (target : RuntimeTypeHandleTarget)
+        : bool
+        =
+        failwith "TODO 5u: not yet implemented"
+
     /// Is this target the definition <paramref name="definition"/> applied to exactly its own
     /// formal parameters, in declaration order? CoreCLR calls that the *typical instantiation*,
     /// and represents it as the generic type definition itself rather than as a distinct

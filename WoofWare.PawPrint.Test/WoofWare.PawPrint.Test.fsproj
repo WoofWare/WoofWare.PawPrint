@@ -297,6 +297,8 @@
     <Compile Include="TestOpenDeclaringConstraintSatisfaction.fs" />
     <Compile Include="TestCompositeTypeVariableCasts.fs" />
     <Compile Include="TestMakeTypeRefusal.fs" />
+    <Compile Include="TestTypeVisibility.fs" />
+    <Compile Include="TestIsVisibleSameImage.fs" />
     <Compile Include="TestGcHandleRegistry.fs" />
     <Compile Include="TestSha256.fs" />
     <Compile Include="TestEvpDigestRegistry.fs" />

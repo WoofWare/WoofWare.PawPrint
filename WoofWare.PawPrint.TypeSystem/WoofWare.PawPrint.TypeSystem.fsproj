@@ -25,6 +25,7 @@
         <Compile Include="StateResult.fs" />
         <Compile Include="TypeConcretisation.fs" />
         <Compile Include="ContinuationSlots.fs" />
+        <Compile Include="ConcreteTypeVisibility.fs" />
         <Compile Include="TypeOperand.fs" />
         <Compile Include="VtableSlot.fs" />
         <Compile Include="MethodTableLayout.fs" />
