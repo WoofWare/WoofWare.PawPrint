@@ -321,6 +321,41 @@ module NativeMetadataImport =
             failwith
                 $"%s{operation}: expected TypeDef token for MetadataImport.GetNamespace, got %O{token} from 0x%08x{mdToken}"
 
+    /// The answer of CoreCLR's <c>MetaDataImport::GetClassLayout</c>: the PackingSize and ClassSize
+    /// of the ClassLayout row (ECMA-335 II.22.8) of the TypeDef <paramref name="mdToken"/>, or 0 for
+    /// each when it has no row. The nil TypeDef token, which a function pointer type reports as its
+    /// <c>MetadataToken</c>, has no row.
+    ///
+    /// Fails for any other token that is not a TypeDef of <paramref name="assembly"/>.
+    let private classLayoutOfTypeDefinition
+        (operation : string)
+        (assembly : DumpedAssembly)
+        (mdToken : int32)
+        : struct (int32 * int32)
+        =
+        match MetadataToken.ofInt mdToken with
+        | MetadataToken.TypeDefinition typeDefHandle when typeDefHandle.IsNil ->
+            // CoreCLR searches the ClassLayout table for row number 0, which no row's Parent names.
+            struct (0, 0)
+        | MetadataToken.TypeDefinition typeDefHandle ->
+            // CoreCLR's read-only reader searches the ClassLayout table by the token's row number
+            // alone, so a row past the TypeDef table's end would be answered as having no row. The
+            // only managed caller passes a `RuntimeType`'s own `MetadataToken`, which is nil or a
+            // TypeDef of its module, so such a token is one PawPrint should never have minted.
+            let mutable typeInfo =
+                Unchecked.defaultof<TypeInfo<GenericParamFromMetadata, TypeDefn>>
+
+            if not (assembly.TypeDefs.TryGetValue (typeDefHandle, &typeInfo)) then
+                failwith
+                    $"%s{operation}: TypeDef token 0x%08x{mdToken} was not present in %s{assembly.DefinitionFullName}"
+
+            // `Layout.Default` is also a row of PackingSize 0 and ClassSize 0, which CoreCLR
+            // reports identically.
+            match typeInfo.Layout with
+            | Layout.Default -> struct (0, 0)
+            | Layout.Custom (size = size ; packingSize = packingSize) -> struct (packingSize, size)
+        | token -> failwith $"%s{operation}: expected TypeDef token, got %O{token} from 0x%08x{mdToken}"
+
     let private fieldDefinitionsForTypeDefinition
         (operation : string)
         (assembly : DumpedAssembly)
@@ -2405,6 +2440,44 @@ module NativeMetadataImport =
             let flags = int genericParam.Attributes
 
             let state = writeInt32AtPointer ctx.BaseClassTypes state attributesOut flags
+
+            let state =
+                IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim 0)) ctx.Thread state
+
+            NativeHandlerResult.completed state |> Some
+        | "System.Private.CoreLib",
+          "System.Reflection",
+          "MetadataImport",
+          "GetClassLayout",
+          [ ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.IntPtr
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcreteByref (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32)
+            ConcreteByref (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
+            // CoreCLR's FCall (managedmdimport.cpp:144) writes both out-parameters, 0 for a type
+            // with no ClassLayout row, and answers S_OK. Its only managed caller is
+            // `PseudoCustomAttribute.GetStructLayoutCustomAttribute`, behind
+            // `Type.StructLayoutAttribute`.
+            let operation = "MetadataImport.GetClassLayout"
+            let assemblyFullName = metadataImportHandleOfArg operation instruction.Arguments.[0]
+            let assembly = metadataImportAssembly operation state assemblyFullName
+
+            let typeDef =
+                match CliType.unwrapPrimitiveLikeDeep instruction.Arguments.[1] with
+                | CliType.Numeric (CliNumericType.Int32 typeDef) -> typeDef
+                | other -> failwith $"%s{operation}: expected Int32 typeTokenDef argument, got %O{other}"
+
+            let packSizeOut =
+                NativeCall.managedPointerOfPointerArgument operation "packSize out pointer" instruction.Arguments.[2]
+
+            let classSizeOut =
+                NativeCall.managedPointerOfPointerArgument operation "classSize out pointer" instruction.Arguments.[3]
+
+            let struct (packSize, classSize) =
+                classLayoutOfTypeDefinition operation assembly typeDef
+
+            let state = writeInt32AtPointer ctx.BaseClassTypes state packSizeOut packSize
+            let state = writeInt32AtPointer ctx.BaseClassTypes state classSizeOut classSize
 
             let state =
                 IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim 0)) ctx.Thread state
