@@ -160,6 +160,43 @@ module TestCustomAttributeBlob =
 
     // ----- readFixedArgs ----------------------------------------------------
 
+    /// The `CorSerializationType` byte of a primitive serialization type (`corhdr.h`).
+    let private primitiveTag (pt : PrimitiveType) : byte =
+        match pt with
+        | PrimitiveType.Boolean -> 0x02uy
+        | PrimitiveType.Char -> 0x03uy
+        | PrimitiveType.SByte -> 0x04uy
+        | PrimitiveType.Byte -> 0x05uy
+        | PrimitiveType.Int16 -> 0x06uy
+        | PrimitiveType.UInt16 -> 0x07uy
+        | PrimitiveType.Int32 -> 0x08uy
+        | PrimitiveType.UInt32 -> 0x09uy
+        | PrimitiveType.Int64 -> 0x0Auy
+        | PrimitiveType.UInt64 -> 0x0Buy
+        | PrimitiveType.Single -> 0x0Cuy
+        | PrimitiveType.Double -> 0x0Duy
+        | PrimitiveType.String -> 0x0Euy
+        | other -> failwithf "primitiveTag: %O has no CorSerializationType" other
+
+    let private encodeName (s : string) : byte array =
+        let utf8 = Encoding.UTF8.GetBytes s
+        Array.append (encodePackedLen utf8.Length) utf8
+
+    /// The FieldOrPropType bytes a TAGGED_OBJECT's tag is written as.
+    let private encodeTaggedType (tag : CustomAttribTaggedType) : byte array =
+        let element (element : CustomAttribTaggedElementType) : byte array =
+            match element with
+            | CustomAttribTaggedElementType.Primitive pt -> [| primitiveTag pt |]
+            | CustomAttribTaggedElementType.Type -> [| 0x50uy |]
+            | CustomAttribTaggedElementType.Object -> [| 0x51uy |]
+            | CustomAttribTaggedElementType.Enum name -> Array.append [| 0x55uy |] (encodeName name)
+
+        match tag with
+        | CustomAttribTaggedType.Primitive pt -> [| primitiveTag pt |]
+        | CustomAttribTaggedType.Type -> [| 0x50uy |]
+        | CustomAttribTaggedType.Enum name -> Array.append [| 0x55uy |] (encodeName name)
+        | CustomAttribTaggedType.SzArray elt -> Array.append [| 0x1Duy |] (element elt)
+
     /// Encode a single CustomAttribFixedArg per ECMA-335 II.23.3.
     let rec private encodeFixedArg (arg : CustomAttribFixedArg) : byte array =
         match arg with
@@ -195,6 +232,7 @@ module TestCustomAttributeBlob =
         // no name. That identity is the point of the `enum arg encodes exactly as its underlying
         // primitive` test below.
         | CustomAttribFixedArg.Enum underlying -> encodeFixedArg underlying
+        | CustomAttribFixedArg.Tagged (tag, value) -> Array.append (encodeTaggedType tag) (encodeFixedArg value)
 
     /// Recover the declaration-site `CustomAttribArgShape` for a fixed arg. For SZARRAYs we
     /// recurse into the first element; empty and null arrays would lose the
@@ -215,6 +253,7 @@ module TestCustomAttributeBlob =
         | CustomAttribFixedArg.R8 _ -> CustomAttribArgShape.Primitive PrimitiveType.Double
         | CustomAttribFixedArg.String _ -> CustomAttribArgShape.Primitive PrimitiveType.String
         | CustomAttribFixedArg.Type _ -> CustomAttribArgShape.Type
+        | CustomAttribFixedArg.Tagged _ -> CustomAttribArgShape.TaggedObject
         | CustomAttribFixedArg.Array (Some (head :: _)) -> CustomAttribArgShape.SzArray (shapeOfArg head)
         | CustomAttribFixedArg.Enum underlying ->
             match shapeOfArg underlying with
@@ -326,11 +365,14 @@ module TestCustomAttributeBlob =
         | Ok r -> failwithf "expected Error, got Ok %A" r
 
     [<Test>]
-    let ``readFixedArgs rejects unsupported primitive`` () : unit =
-        let blob = ImmutableArray.Create<byte> ([| 0x01uy ; 0x00uy |])
+    let ``readFixedArgs rejects object as a primitive shape`` () : unit =
+        // An `object` parameter is TAGGED_OBJECT, a shape of its own; the primitive shape
+        // over-admits `Object` and must not decode as anything.
+        let blob =
+            ImmutableArray.Create<byte> ([| 0x01uy ; 0x00uy ; 0x08uy ; 1uy ; 0uy ; 0uy ; 0uy |])
 
         match CustomAttribute.readFixedArgs [ CustomAttribArgShape.Primitive PrimitiveType.Object ] blob with
-        | Error msg -> msg |> shouldContainText "TODO"
+        | Error msg -> msg |> shouldContainText "TaggedObject"
         | Ok r -> failwithf "expected Error, got Ok %A" r
 
     let private genFixedArg : Gen<CustomAttribFixedArg> =
@@ -523,6 +565,387 @@ module TestCustomAttributeBlob =
             && (positions |> List.distinct |> List.length) = positions.Length
 
         Check.One (propertyConfig, Prop.forAll (ArbMap.defaults |> ArbMap.arbitrary<(bool * bool) list>) property)
+
+    // ----- TAGGED_OBJECT (0x51) decoding ------------------------------------
+
+    let private enumUnderlyings : EnumUnderlyingType list =
+        [
+            EnumUnderlyingType.Boolean
+            EnumUnderlyingType.Char
+            EnumUnderlyingType.SByte
+            EnumUnderlyingType.Byte
+            EnumUnderlyingType.Int16
+            EnumUnderlyingType.UInt16
+            EnumUnderlyingType.Int32
+            EnumUnderlyingType.UInt32
+            EnumUnderlyingType.Int64
+            EnumUnderlyingType.UInt64
+        ]
+
+    /// An enum's name in these tests says what it resolves to, so a test can answer a resolution
+    /// from the name alone, sharing no traversal with the decoder: "E<index>_<n>" is an enum whose
+    /// underlying type is `enumUnderlyings.[index]`, and any other name is not an enum.
+    let private answerFor (name : string) : CustomAttribResolvedName =
+        if name.StartsWith "E" && name.Contains "_" then
+            CustomAttribResolvedName.Enum enumUnderlyings.[int (name.Substring (1, name.IndexOf '_' - 1))]
+        else
+            CustomAttribResolvedName.NotEnum
+
+    let private genSerString : Gen<string option> =
+        Gen.frequency
+            [
+                1, Gen.constant None
+                1, Gen.constant (Some "")
+                8,
+                ArbMap.defaults
+                |> ArbMap.generate<NonNull<string>>
+                |> Gen.map (fun (NonNull s) -> Some s)
+            ]
+
+    let private taggablePrimitives : PrimitiveType list =
+        [
+            PrimitiveType.Boolean
+            PrimitiveType.Char
+            PrimitiveType.SByte
+            PrimitiveType.Byte
+            PrimitiveType.Int16
+            PrimitiveType.UInt16
+            PrimitiveType.Int32
+            PrimitiveType.UInt32
+            PrimitiveType.Int64
+            PrimitiveType.UInt64
+            PrimitiveType.Single
+            PrimitiveType.Double
+            PrimitiveType.String
+        ]
+
+    /// A value of exactly the variant `readElem` decodes `pt` to.
+    let private genPrimitiveValue (pt : PrimitiveType) : Gen<CustomAttribFixedArg> =
+        match pt with
+        | PrimitiveType.Boolean -> ArbMap.defaults |> ArbMap.generate<bool> |> Gen.map CustomAttribFixedArg.Bool
+        | PrimitiveType.Char -> ArbMap.defaults |> ArbMap.generate<char> |> Gen.map CustomAttribFixedArg.Char
+        | PrimitiveType.SByte -> ArbMap.defaults |> ArbMap.generate<sbyte> |> Gen.map CustomAttribFixedArg.I1
+        | PrimitiveType.Byte -> ArbMap.defaults |> ArbMap.generate<byte> |> Gen.map CustomAttribFixedArg.U1
+        | PrimitiveType.Int16 -> ArbMap.defaults |> ArbMap.generate<int16> |> Gen.map CustomAttribFixedArg.I2
+        | PrimitiveType.UInt16 -> ArbMap.defaults |> ArbMap.generate<uint16> |> Gen.map CustomAttribFixedArg.U2
+        | PrimitiveType.Int32 -> ArbMap.defaults |> ArbMap.generate<int32> |> Gen.map CustomAttribFixedArg.I4
+        | PrimitiveType.UInt32 -> ArbMap.defaults |> ArbMap.generate<uint32> |> Gen.map CustomAttribFixedArg.U4
+        | PrimitiveType.Int64 -> ArbMap.defaults |> ArbMap.generate<int64> |> Gen.map CustomAttribFixedArg.I8
+        | PrimitiveType.UInt64 -> ArbMap.defaults |> ArbMap.generate<uint64> |> Gen.map CustomAttribFixedArg.U8
+        | PrimitiveType.Single ->
+            ArbMap.defaults
+            |> ArbMap.generate<NormalFloat>
+            |> Gen.map (fun (NormalFloat f) -> CustomAttribFixedArg.R4 (float32 f))
+        | PrimitiveType.Double ->
+            ArbMap.defaults
+            |> ArbMap.generate<NormalFloat>
+            |> Gen.map (fun (NormalFloat f) -> CustomAttribFixedArg.R8 f)
+        | PrimitiveType.String -> genSerString |> Gen.map CustomAttribFixedArg.String
+        | other -> failwithf "genPrimitiveValue: %O is not a serialization type" other
+
+    let private genTypeValue : Gen<CustomAttribFixedArg> =
+        Gen.frequency
+            [
+                1, Gen.constant (CustomAttribFixedArg.Type None)
+                4,
+                Gen.choose (0, 999)
+                |> Gen.map (fun n -> CustomAttribFixedArg.Type (Some $"T%d{n}"))
+            ]
+
+    /// An enum's name, encoding its underlying type, and a value of that width.
+    let private genEnumName : Gen<string * EnumUnderlyingType> =
+        Gen.zip (Gen.choose (0, enumUnderlyings.Length - 1)) (Gen.choose (0, 999))
+        |> Gen.map (fun (i, n) -> $"E%d{i}_%d{n}", enumUnderlyings.[i])
+
+    let private genEnumValue (underlying : EnumUnderlyingType) : Gen<CustomAttribFixedArg> =
+        genPrimitiveValue (EnumUnderlyingType.toPrimitive underlying)
+        |> Gen.map CustomAttribFixedArg.Enum
+
+    let private genArrayOf (element : Gen<CustomAttribFixedArg>) : Gen<CustomAttribFixedArg> =
+        Gen.frequency
+            [
+                1, Gen.constant (CustomAttribFixedArg.Array None)
+                1, Gen.constant (CustomAttribFixedArg.Array (Some []))
+                4,
+                Gen.choose (1, 3)
+                |> Gen.bind (fun n -> Gen.listOfLength n element)
+                |> Gen.map (Some >> CustomAttribFixedArg.Array)
+            ]
+
+    /// Every kind of TAGGED_OBJECT `readElem` decodes, `object[]`s of them nested to `depth`.
+    let rec private genTagged (depth : int) : Gen<CustomAttribFixedArg> =
+        let scalar =
+            [
+                Gen.elements taggablePrimitives
+                |> Gen.bind (fun pt ->
+                    genPrimitiveValue pt
+                    |> Gen.map (fun v -> CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Primitive pt, v))
+                )
+                genTypeValue
+                |> Gen.map (fun v -> CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Type, v))
+                genEnumName
+                |> Gen.bind (fun (name, underlying) ->
+                    genEnumValue underlying
+                    |> Gen.map (fun v -> CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Enum name, v))
+                )
+                Gen.elements taggablePrimitives
+                |> Gen.bind (fun pt ->
+                    genArrayOf (genPrimitiveValue pt)
+                    |> Gen.map (fun v ->
+                        CustomAttribFixedArg.Tagged (
+                            CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Primitive pt),
+                            v
+                        )
+                    )
+                )
+                genArrayOf genTypeValue
+                |> Gen.map (fun v ->
+                    CustomAttribFixedArg.Tagged (CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Type, v)
+                )
+                genEnumName
+                |> Gen.bind (fun (name, underlying) ->
+                    genArrayOf (genEnumValue underlying)
+                    |> Gen.map (fun v ->
+                        CustomAttribFixedArg.Tagged (
+                            CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum name),
+                            v
+                        )
+                    )
+                )
+            ]
+
+        let nested =
+            if depth <= 0 then
+                []
+            else
+                [
+                    genArrayOf (genTagged (depth - 1))
+                    |> Gen.map (fun v ->
+                        CustomAttribFixedArg.Tagged (
+                            CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Object,
+                            v
+                        )
+                    )
+                ]
+
+        Gen.oneof (scalar @ nested)
+
+    /// Fixed args of every kind, tagged ones included, each with the shape it is decoded with.
+    let private genMixedArgs : Gen<(CustomAttribArgShape * CustomAttribFixedArg) list> =
+        let one =
+            Gen.frequency
+                [
+                    4, genTagged 2 |> Gen.map (fun a -> CustomAttribArgShape.TaggedObject, a)
+                    1, genTypeValue |> Gen.map (fun a -> CustomAttribArgShape.Type, a)
+                    1,
+                    genArrayOf (genTagged 1)
+                    |> Gen.map (fun a -> CustomAttribArgShape.SzArray CustomAttribArgShape.TaggedObject, a)
+                    1,
+                    Gen.elements taggablePrimitives
+                    |> Gen.bind (fun pt ->
+                        genPrimitiveValue pt |> Gen.map (fun a -> CustomAttribArgShape.Primitive pt, a)
+                    )
+                ]
+
+        Gen.listOf one
+
+    [<Test>]
+    let ``readFixedArgsResolving round-trips tagged values once every name is answered`` () : unit =
+        let property (shapedArgs : (CustomAttribArgShape * CustomAttribFixedArg) list) : bool =
+            let shapes, args = List.unzip shapedArgs
+            let blob = buildFixedArgsBlob args [||]
+            let answers = CustomAttribute.typeNamesToResolve args |> List.map answerFor
+
+            match CustomAttribute.readFixedArgsResolving shapes answers blob with
+            | Ok (CustomAttribFixedArgsParse.Parsed (decoded, offset)) -> decoded = args && offset = blob.Length
+            | _ -> false
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen genMixedArgs) property)
+
+    [<Test>]
+    let ``readFixedArgsResolving stops at the first enum whose resolution is missing, listing the names so far``
+        ()
+        : unit
+        =
+        // With the first k names answered, decoding gets as far as the first enum name at index k
+        // or later, and asks for the names up to and including it; with none such it finishes.
+        // Answers beyond the first k are never consulted.
+        let property (shapedArgs : (CustomAttribArgShape * CustomAttribFixedArg) list) : bool =
+            let shapes, args = List.unzip shapedArgs
+            let blob = buildFixedArgsBlob args [||]
+            let names = CustomAttribute.typeNamesToResolve args
+
+            [ 0 .. names.Length ]
+            |> List.forall (fun k ->
+                let answers = names |> List.take k |> List.map answerFor
+
+                let blocking =
+                    names
+                    |> List.indexed
+                    |> List.tryFind (fun (i, name) ->
+                        i >= k
+                        && (
+                            match answerFor name with
+                            | CustomAttribResolvedName.Enum _ -> true
+                            | CustomAttribResolvedName.NotEnum -> false
+                        )
+                    )
+
+                match CustomAttribute.readFixedArgsResolving shapes answers blob, blocking with
+                | Ok (CustomAttribFixedArgsParse.Parsed (decoded, offset)), None ->
+                    decoded = args && offset = blob.Length
+                | Ok (CustomAttribFixedArgsParse.AwaitingResolution asked), Some (i, _) ->
+                    asked = List.take (i + 1) names
+                | _ -> false
+            )
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen genMixedArgs) property)
+
+    [<Test>]
+    let ``readFixedArgsResolving rejects every truncation of a tagged value`` () : unit =
+        let property (arg : CustomAttribFixedArg) : bool =
+            let blob = buildFixedArgsBlob [ arg ] [||]
+            let answers = CustomAttribute.typeNamesToResolve [ arg ] |> List.map answerFor
+
+            [ 2 .. blob.Length - 1 ]
+            |> List.forall (fun length ->
+                let truncated =
+                    ImmutableArray.Create<byte> (blob.AsSpan().Slice(0, length).ToArray ())
+
+                match
+                    CustomAttribute.readFixedArgsResolving [ CustomAttribArgShape.TaggedObject ] answers truncated
+                with
+                | Error _ -> true
+                | Ok _ -> false
+            )
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen (genTagged 2)) property)
+
+    [<Test>]
+    let ``readFixedArgsResolving refuses an enum name that resolved to something else`` () : unit =
+        let arg =
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.Enum "NotAnEnum",
+                CustomAttribFixedArg.Enum (CustomAttribFixedArg.I4 1)
+            )
+
+        let blob = buildFixedArgsBlob [ arg ] [||]
+
+        match
+            CustomAttribute.readFixedArgsResolving
+                [ CustomAttribArgShape.TaggedObject ]
+                [ CustomAttribResolvedName.NotEnum ]
+                blob
+        with
+        | Error msg -> msg |> shouldContainText "NotAnEnum"
+        | other -> failwithf "expected Error, got %A" other
+
+    [<Test>]
+    let ``readFixedArgsResolving decodes what Roslyn writes for an enum passed as object`` () : unit =
+        // `[Obj(ByteFlag.Big, 1018)]` with `ByteFlag : byte`, `Big = 200`, and an int tail.
+        let blob =
+            Array.concat
+                [
+                    [| 0x01uy ; 0x00uy ; 0x55uy |]
+                    encodeName "ByteFlag"
+                    [| 200uy |]
+                    System.BitConverter.GetBytes 1018
+                ]
+            |> ImmutableArray.Create<byte>
+
+        let shapes =
+            [
+                CustomAttribArgShape.TaggedObject
+                CustomAttribArgShape.Primitive PrimitiveType.Int32
+            ]
+
+        CustomAttribute.readFixedArgsResolving shapes [] blob
+        |> shouldEqual (Ok (CustomAttribFixedArgsParse.AwaitingResolution [ "ByteFlag" ]))
+
+        CustomAttribute.readFixedArgsResolving shapes [ CustomAttribResolvedName.Enum EnumUnderlyingType.Byte ] blob
+        |> shouldEqual (
+            Ok (
+                CustomAttribFixedArgsParse.Parsed (
+                    [
+                        CustomAttribFixedArg.Tagged (
+                            CustomAttribTaggedType.Enum "ByteFlag",
+                            CustomAttribFixedArg.Enum (CustomAttribFixedArg.U1 200uy)
+                        )
+                        CustomAttribFixedArg.I4 1018
+                    ],
+                    blob.Length
+                )
+            )
+        )
+
+    [<Test>]
+    let ``readFixedArgs fails on a tagged enum, which needs resolution`` () : unit =
+        let blob =
+            Array.concat [ [| 0x01uy ; 0x00uy ; 0x55uy |] ; encodeName "ByteFlag" ; [| 200uy |] ]
+            |> ImmutableArray.Create<byte>
+
+        match CustomAttribute.readFixedArgs [ CustomAttribArgShape.TaggedObject ] blob with
+        | Error msg ->
+            msg |> shouldContainText "ByteFlag"
+            msg |> shouldContainText "resolution"
+        | Ok r -> failwithf "expected Error, got Ok %A" r
+
+    [<Test>]
+    let ``readFixedArgsResolving resolves an enum array's element type even when the array is null`` () : unit =
+        // CoreCLR's `GetTypeHandleFromBlob` resolves the element type before `GetDataFromBlob` reads
+        // the length, so the name is resolved, and listed, whatever the length turns out to be.
+        let blob =
+            Array.concat
+                [
+                    [| 0x01uy ; 0x00uy ; 0x1Duy ; 0x55uy |]
+                    encodeName "E8_1"
+                    [| 0xFFuy ; 0xFFuy ; 0xFFuy ; 0xFFuy |]
+                ]
+            |> ImmutableArray.Create<byte>
+
+        let expected =
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum "E8_1"),
+                CustomAttribFixedArg.Array None
+            )
+
+        CustomAttribute.readFixedArgsResolving [ CustomAttribArgShape.TaggedObject ] [] blob
+        |> shouldEqual (Ok (CustomAttribFixedArgsParse.AwaitingResolution [ "E8_1" ]))
+
+        CustomAttribute.readFixedArgsResolving [ CustomAttribArgShape.TaggedObject ] [ answerFor "E8_1" ] blob
+        |> shouldEqual (Ok (CustomAttribFixedArgsParse.Parsed ([ expected ], blob.Length)))
+
+        CustomAttribute.typeNamesToResolve [ expected ] |> shouldEqual [ "E8_1" ]
+
+    [<Test>]
+    let ``readFixedArgsResolving refuses the tags CoreCLR cannot box`` () : unit =
+        // Each is a TAGGED_OBJECT whose tag real .NET answers by dereferencing a null type handle,
+        // boxing a reference, or throwing CustomAttributeFormatException; a trailing int32 gives a
+        // decoder that ignored the tag something to read.
+        let cases : (string * byte array) list =
+            [
+                "a nested TAGGED_OBJECT", [| 0x51uy ; 0x08uy ; 1uy ; 0uy ; 0uy ; 0uy |]
+                "an enum named by the null sentinel", [| 0x55uy ; 0xFFuy ; 1uy ; 0uy ; 0uy ; 0uy |]
+                "an enum array named by the null sentinel",
+                [| 0x1Duy ; 0x55uy ; 0xFFuy ; 0xFFuy ; 0xFFuy ; 0xFFuy ; 0xFFuy |]
+                "an array of ELEMENT_TYPE_CLASS", [| 0x1Duy ; 0x12uy ; 0uy ; 0uy ; 0uy ; 0uy |]
+                "an array of arrays", [| 0x1Duy ; 0x1Duy ; 0x08uy ; 0uy ; 0uy ; 0uy ; 0uy |]
+                "an array of an unknown tag", [| 0x1Duy ; 0x01uy ; 0uy ; 0uy ; 0uy ; 0uy |]
+                "an unknown tag", [| 0x01uy ; 1uy ; 0uy ; 0uy ; 0uy |]
+                "ELEMENT_TYPE_CLASS", [| 0x12uy ; 1uy ; 0uy ; 0uy ; 0uy |]
+            ]
+
+        for name, body in cases do
+            let blob = Array.append [| 0x01uy ; 0x00uy |] body |> ImmutableArray.Create<byte>
+
+            match
+                CustomAttribute.readFixedArgsResolving
+                    [ CustomAttribArgShape.TaggedObject ]
+                    (List.replicate 4 (CustomAttribResolvedName.Enum EnumUnderlyingType.Int32))
+                    blob
+            with
+            | Error _ -> ()
+            | other -> failwithf "%s: expected Error, got %A" name other
 
     // ----- SZARRAY decoding ------------------------------------------------
 

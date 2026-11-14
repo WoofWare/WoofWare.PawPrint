@@ -280,6 +280,15 @@ module AttributeFormatting =
         // signature resolved, which `tryShapeWithoutResolution` cannot do.
         | CustomAttribFixedArg.Type None -> "null"
         | CustomAttribFixedArg.Type (Some name) -> sprintf "typeof(%s)" name
+        // A tagged value's own rendering already says which primitive it is, by its suffix. An
+        // enum's does not, so the tag's name goes in front; this dumper cannot resolve that name,
+        // so `readFixedArgs` refuses such a blob and it is unreachable today.
+        | CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Enum name, value) ->
+            sprintf "(%s)%s" name (formatFixedArg value)
+        | CustomAttribFixedArg.Tagged (CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum name), value) ->
+            sprintf "(%s[])%s" name (formatFixedArg value)
+        | CustomAttribFixedArg.Tagged ((CustomAttribTaggedType.Primitive _ | CustomAttribTaggedType.Type | CustomAttribTaggedType.SzArray _),
+                                       value) -> formatFixedArg value
 
     /// Dump the attribute's raw <c>Value</c> blob as space-separated hex bytes.
     /// Used when the structured decoder can't make progress.

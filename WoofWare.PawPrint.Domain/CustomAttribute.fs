@@ -4,14 +4,51 @@ open System.Collections.Immutable
 open System.Reflection.Metadata
 
 /// <summary>
+/// The element type named by the <c>SZARRAY</c> tag of a <c>TAGGED_OBJECT</c>, among the element
+/// types CoreCLR can allocate an array of there.
+/// </summary>
+/// <remarks>
+/// CoreCLR resolves this tag to a type handle before it reads the array's length
+/// (<c>GetTypeHandleFromBlob</c>, <c>customattribute.cpp</c>), so an enum's name is resolved even
+/// for a null array.
+/// </remarks>
+[<RequireQualifiedAccess>]
+type CustomAttribTaggedElementType =
+    /// <c>BOOLEAN</c> (0x02) .. <c>R8</c> (0x0D), and <c>STRING</c> (0x0E).
+    | Primitive of PrimitiveType
+    /// <c>TYPE</c> (0x50): a <c>System.Type[]</c>.
+    | Type
+    /// <c>TAGGED_OBJECT</c> (0x51): an <c>object[]</c>, each of whose elements carries its own tag.
+    | Object
+    /// <c>ENUM</c> (0x55), and the reflection name of the enum type.
+    | Enum of typeName : string
+
+/// <summary>
+/// The type a <c>TAGGED_OBJECT</c> (0x51) value's own <c>FieldOrPropType</c> names: the type the
+/// value is boxed as when it reaches an <c>object</c>-typed parameter.
+/// </summary>
+/// <remarks>
+/// Only the tags CoreCLR can box (<c>GetDataFromBlob</c>'s <c>typeObject</c> arm) are
+/// representable. A nested <c>TAGGED_OBJECT</c>, an enum named by the null sentinel, and an array
+/// of arrays are not: real .NET dereferences a null type handle or boxes a reference for those,
+/// and the decoder refuses them.
+/// </remarks>
+[<RequireQualifiedAccess>]
+type CustomAttribTaggedType =
+    /// <c>BOOLEAN</c> (0x02) .. <c>R8</c> (0x0D), boxed as that primitive, and <c>STRING</c> (0x0E),
+    /// which is a reference already.
+    | Primitive of PrimitiveType
+    /// <c>TYPE</c> (0x50).
+    | Type
+    /// <c>ENUM</c> (0x55), and the reflection name of the enum type, which the value is boxed as.
+    | Enum of typeName : string
+    /// <c>SZARRAY</c> (0x1D) and the element's tag.
+    | SzArray of element : CustomAttribTaggedElementType
+
+/// <summary>
 /// One decoded fixed argument from a <c>CustomAttrib</c> blob (ECMA-335 II.23.3).
 /// Each variant corresponds to a <c>CorSerializationType</c> the metadata blob can carry.
 /// </summary>
-/// <remarks>
-/// <c>TAGGED_OBJECT</c> (0x51) has no variant yet; a caller that meets one fails when building
-/// its <see cref="T:WoofWare.PawPrint.CustomAttribArgShape"/>. The current set covers attributes
-/// whose ctors take primitives, strings, enums, <c>System.Type</c>, and SZARRAYs of those.
-/// </remarks>
 [<RequireQualifiedAccess>]
 type CustomAttribFixedArg =
     | Bool of bool
@@ -53,6 +90,11 @@ type CustomAttribFixedArg =
     /// lists the names a caller must resolve before lowering. <c>None</c> is the SerString null
     /// sentinel, which CoreCLR hands to the constructor as a null <c>Type</c>.
     | Type of typeName : string option
+    /// <c>TAGGED_OBJECT</c> (0x51): an <c>object</c>-typed argument, carrying the tag its bytes gave
+    /// and the value decoded by that tag. The value is the variant the tag names: a primitive or
+    /// <c>String</c> for <c>Primitive</c>, <c>Type</c> for <c>Type</c>, <c>Enum</c> for <c>Enum</c>,
+    /// and an <c>Array</c> of those (of <c>Tagged</c> for an <c>object[]</c>) for <c>SzArray</c>.
+    | Tagged of tag : CustomAttribTaggedType * value : CustomAttribFixedArg
 
 /// <summary>
 /// The types ECMA-335 II.14.3 admits as an enum's underlying type: "the underlying type shall be
@@ -120,10 +162,8 @@ module EnumUnderlyingType =
 /// is encoded as a bare value of its underlying type, with nothing to say how wide that is. So the
 /// decoder cannot work from the ctor's <c>TypeDefn</c>s alone — resolving those needs assembly
 /// lookup, which the parser deliberately does not have. Callers resolve first and hand the decoder
-/// this plan instead, which is decodable by construction.
-///
-/// <c>TAGGED_OBJECT</c> (0x51) arguments have no variant here yet; a caller that meets one fails
-/// when building the plan, which is where the diagnostic belongs.
+/// this plan instead, which is decodable by construction, except that a <c>TaggedObject</c> can
+/// itself name an enum; see <c>CustomAttribute.readFixedArgsResolving</c>.
 /// </remarks>
 [<RequireQualifiedAccess>]
 type CustomAttribArgShape =
@@ -134,6 +174,34 @@ type CustomAttribArgShape =
     /// decoded value has to say so.
     | Type
     | SzArray of elements : CustomAttribArgShape
+    /// An <c>object</c> parameter: <c>TAGGED_OBJECT</c> (0x51), whose bytes carry their own
+    /// <c>FieldOrPropType</c> in front of the value.
+    | TaggedObject
+
+/// <summary>
+/// What one type name in a <c>CustomAttrib</c> blob resolved to, as far as decoding the rest of
+/// the blob depends on it.
+/// </summary>
+/// <remarks>
+/// The bytes after an enum named inside a <c>TAGGED_OBJECT</c> are that enum's underlying values,
+/// whose width only the resolved type can say; nothing else a resolution produces changes how the
+/// blob reads.
+/// </remarks>
+[<RequireQualifiedAccess>]
+type CustomAttribResolvedName =
+    | Enum of underlying : EnumUnderlyingType
+    | NotEnum
+
+/// <summary>The outcome of <c>CustomAttribute.readFixedArgsResolving</c> on a well-formed prefix.</summary>
+[<RequireQualifiedAccess>]
+type CustomAttribFixedArgsParse =
+    /// Every fixed argument was decoded: the values in declaration order, and the offset of the first
+    /// byte after them.
+    | Parsed of args : CustomAttribFixedArg list * next : int
+    /// The decoder reached an enum named inside a <c>TAGGED_OBJECT</c> whose resolution was not
+    /// among those supplied. <c>names</c> is every type name met so far, in blob order, ending with
+    /// that enum's; the caller resolves the ones it has not yet resolved and decodes again.
+    | AwaitingResolution of names : string list
 
 /// <summary>
 /// One serialization type as it appears in a <c>CustomAttrib</c> blob (ECMA-335 II.23.3), with any
@@ -566,337 +634,23 @@ module CustomAttribute =
                     Ok (Some s, bodyStart + length)
 
     /// <summary>
-    /// The part of shape resolution that needs no type resolution at all: primitives, and SZARRAYs
-    /// whose element type is itself resolvable this way. <c>None</c> for any parameter whose shape
-    /// depends on identifying a named type — an enum, a <c>System.Type</c>, an <c>object</c>.
+    /// The part of shape resolution that needs no type resolution at all: primitives, <c>object</c>,
+    /// and SZARRAYs whose element type is itself resolvable this way. <c>None</c> for any parameter
+    /// whose shape depends on identifying a named type — an enum or a <c>System.Type</c>.
     /// </summary>
     /// <remarks>
     /// Callers that can resolve types use this first and fall back to resolution only on
     /// <c>None</c>. Callers that cannot resolve types (the IL dumper) treat <c>None</c> as
-    /// "cannot decode this blob".
+    /// "cannot decode this blob". An <c>object</c> parameter's shape is known without resolution,
+    /// but its value may name an enum, which <c>readFixedArgs</c> then cannot decode.
     /// </remarks>
     let rec tryShapeWithoutResolution (paramType : TypeDefn) : CustomAttribArgShape option =
         match paramType with
+        | TypeDefn.PrimitiveType PrimitiveType.Object -> Some CustomAttribArgShape.TaggedObject
         | TypeDefn.PrimitiveType pt -> Some (CustomAttribArgShape.Primitive pt)
         | TypeDefn.OneDimensionalArrayLowerBoundZero elt ->
             tryShapeWithoutResolution elt |> Option.map CustomAttribArgShape.SzArray
         | _ -> None
-
-    /// <summary>
-    /// Decode a single <c>Elem</c> (ECMA-335 II.23.3) at <paramref name="offset"/>, returning the
-    /// value and the offset of the first byte after it.
-    /// </summary>
-    /// <remarks>
-    /// Fixed args and named args encode their values identically — both are <c>Elem</c> — so this
-    /// serves both. What differs is only where the <see cref="T:WoofWare.PawPrint.CustomAttribArgShape"/>
-    /// comes from: a fixed arg takes it from the ctor signature, a named arg from the
-    /// <c>FieldOrPropType</c> in the blob. Mirrors CoreCLR's <c>GetDataFromBlob</c>, which the
-    /// native side likewise shares between the two.
-    /// </remarks>
-    let rec readElem
-        (shape : CustomAttribArgShape)
-        (blob : ImmutableArray<byte>)
-        (offset : int)
-        : Result<CustomAttribFixedArg * int, string>
-        =
-        let len = blob.Length
-
-        let readPrimitive
-            (size : int)
-            (offset : int)
-            (build : ImmutableArray<byte> -> int -> CustomAttribFixedArg)
-            : Result<CustomAttribFixedArg * int, string>
-            =
-            if offset + size > len then
-                Error (
-                    sprintf
-                        "CustomAttrib blob: primitive of size %d at offset %d would overrun blob length %d"
-                        size
-                        offset
-                        len
-                )
-            else
-                Ok (build blob offset, offset + size)
-
-        let readUInt32 (offset : int) : Result<uint32 * int, string> =
-            if offset + 4 > len then
-                Error (sprintf "CustomAttrib blob: uint32 at offset %d would overrun blob length %d" offset len)
-            else
-                let v =
-                    uint32 blob.[offset]
-                    ||| (uint32 blob.[offset + 1] <<< 8)
-                    ||| (uint32 blob.[offset + 2] <<< 16)
-                    ||| (uint32 blob.[offset + 3] <<< 24)
-
-                Ok (v, offset + 4)
-
-        let readPrimitiveValue (pt : PrimitiveType) (offset : int) : Result<CustomAttribFixedArg * int, string> =
-            match pt with
-            // Divergence: CoreCLR boxes the raw blob byte, so a hand-crafted blob can produce a
-            // `System.Boolean` holding 2, whereas this normalises to an F# `bool` and hence to 0/1.
-            // Only hand-written IL can produce such a blob.
-            | PrimitiveType.Boolean -> readPrimitive 1 offset (fun b o -> CustomAttribFixedArg.Bool (b.[o] <> 0uy))
-            | PrimitiveType.Char ->
-                readPrimitive
-                    2
-                    offset
-                    (fun b o ->
-                        let v = uint16 b.[o] ||| (uint16 b.[o + 1] <<< 8)
-                        CustomAttribFixedArg.Char (char v)
-                    )
-            | PrimitiveType.SByte -> readPrimitive 1 offset (fun b o -> CustomAttribFixedArg.I1 (sbyte b.[o]))
-            | PrimitiveType.Byte -> readPrimitive 1 offset (fun b o -> CustomAttribFixedArg.U1 b.[o])
-            | PrimitiveType.Int16 ->
-                readPrimitive
-                    2
-                    offset
-                    (fun b o ->
-                        let v = uint16 b.[o] ||| (uint16 b.[o + 1] <<< 8)
-                        CustomAttribFixedArg.I2 (int16 v)
-                    )
-            | PrimitiveType.UInt16 ->
-                readPrimitive
-                    2
-                    offset
-                    (fun b o ->
-                        let v = uint16 b.[o] ||| (uint16 b.[o + 1] <<< 8)
-                        CustomAttribFixedArg.U2 v
-                    )
-            | PrimitiveType.Int32 ->
-                readPrimitive
-                    4
-                    offset
-                    (fun b o ->
-                        let v =
-                            uint32 b.[o]
-                            ||| (uint32 b.[o + 1] <<< 8)
-                            ||| (uint32 b.[o + 2] <<< 16)
-                            ||| (uint32 b.[o + 3] <<< 24)
-
-                        CustomAttribFixedArg.I4 (int32 v)
-                    )
-            | PrimitiveType.UInt32 ->
-                readPrimitive
-                    4
-                    offset
-                    (fun b o ->
-                        let v =
-                            uint32 b.[o]
-                            ||| (uint32 b.[o + 1] <<< 8)
-                            ||| (uint32 b.[o + 2] <<< 16)
-                            ||| (uint32 b.[o + 3] <<< 24)
-
-                        CustomAttribFixedArg.U4 v
-                    )
-            | PrimitiveType.Int64 ->
-                readPrimitive
-                    8
-                    offset
-                    (fun b o ->
-                        let lo =
-                            uint32 b.[o]
-                            ||| (uint32 b.[o + 1] <<< 8)
-                            ||| (uint32 b.[o + 2] <<< 16)
-                            ||| (uint32 b.[o + 3] <<< 24)
-
-                        let hi =
-                            uint32 b.[o + 4]
-                            ||| (uint32 b.[o + 5] <<< 8)
-                            ||| (uint32 b.[o + 6] <<< 16)
-                            ||| (uint32 b.[o + 7] <<< 24)
-
-                        CustomAttribFixedArg.I8 (int64 (uint64 lo ||| (uint64 hi <<< 32)))
-                    )
-            | PrimitiveType.UInt64 ->
-                readPrimitive
-                    8
-                    offset
-                    (fun b o ->
-                        let lo =
-                            uint32 b.[o]
-                            ||| (uint32 b.[o + 1] <<< 8)
-                            ||| (uint32 b.[o + 2] <<< 16)
-                            ||| (uint32 b.[o + 3] <<< 24)
-
-                        let hi =
-                            uint32 b.[o + 4]
-                            ||| (uint32 b.[o + 5] <<< 8)
-                            ||| (uint32 b.[o + 6] <<< 16)
-                            ||| (uint32 b.[o + 7] <<< 24)
-
-                        CustomAttribFixedArg.U8 (uint64 lo ||| (uint64 hi <<< 32))
-                    )
-            | PrimitiveType.Single ->
-                readPrimitive
-                    4
-                    offset
-                    (fun b o ->
-                        let bits =
-                            uint32 b.[o]
-                            ||| (uint32 b.[o + 1] <<< 8)
-                            ||| (uint32 b.[o + 2] <<< 16)
-                            ||| (uint32 b.[o + 3] <<< 24)
-
-                        CustomAttribFixedArg.R4 (System.BitConverter.Int32BitsToSingle (int32 bits))
-                    )
-            | PrimitiveType.Double ->
-                readPrimitive
-                    8
-                    offset
-                    (fun b o ->
-                        let lo =
-                            uint32 b.[o]
-                            ||| (uint32 b.[o + 1] <<< 8)
-                            ||| (uint32 b.[o + 2] <<< 16)
-                            ||| (uint32 b.[o + 3] <<< 24)
-
-                        let hi =
-                            uint32 b.[o + 4]
-                            ||| (uint32 b.[o + 5] <<< 8)
-                            ||| (uint32 b.[o + 6] <<< 16)
-                            ||| (uint32 b.[o + 7] <<< 24)
-
-                        let bits = uint64 lo ||| (uint64 hi <<< 32)
-                        CustomAttribFixedArg.R8 (System.BitConverter.Int64BitsToDouble (int64 bits))
-                    )
-            | PrimitiveType.String ->
-                match readSerString blob offset with
-                | Error e -> Error e
-                | Ok (s, next) -> Ok (CustomAttribFixedArg.String s, next)
-            | other ->
-                Error (
-                    sprintf
-                        "CustomAttrib blob: TODO: primitive type %O is not yet supported as a CustomAttrib Elem"
-                        other
-                )
-
-        match shape with
-        | CustomAttribArgShape.Primitive pt -> readPrimitiveValue pt offset
-        | CustomAttribArgShape.Type ->
-            // ECMA-335 II.23.3: a System.Type argument is stored as the SerString of its
-            // reflection name, and CoreCLR reads it with the same `GetStringSize` it uses for a
-            // string argument, answering a null type for the null sentinel
-            // (customattribute.cpp:437-441).
-            match readSerString blob offset with
-            | Error e -> Error e
-            | Ok (name, next) -> Ok (CustomAttribFixedArg.Type name, next)
-        | CustomAttribArgShape.Enum underlying ->
-            // ECMA-335 II.23.3: "if the parameter kind is an enum, ... the value is stored
-            // using the underlying type of the enum". There is no tag; the width comes
-            // entirely from `underlying`, which is why the caller has to resolve it.
-            match readPrimitiveValue (EnumUnderlyingType.toPrimitive underlying) offset with
-            | Error e -> Error e
-            | Ok (value, next) -> Ok (CustomAttribFixedArg.Enum value, next)
-        | CustomAttribArgShape.SzArray eltShape ->
-            match readUInt32 offset with
-            | Error e -> Error e
-            | Ok (0xFFFFFFFFu, next) -> Ok (CustomAttribFixedArg.Array None, next)
-            | Ok (numElem, next) ->
-                let rec readElems
-                    (remaining : int)
-                    (cursor : int)
-                    (acc : CustomAttribFixedArg list)
-                    : Result<CustomAttribFixedArg list * int, string>
-                    =
-                    if remaining = 0 then
-                        Ok (List.rev acc, cursor)
-                    else
-                        match readElem eltShape blob cursor with
-                        | Error e -> Error e
-                        | Ok (value, after) -> readElems (remaining - 1) after (value :: acc)
-
-                match readElems (int numElem) next [] with
-                | Error e -> Error e
-                | Ok (elts, after) -> Ok (CustomAttribFixedArg.Array (Some elts), after)
-
-    /// <summary>
-    /// Decode the fixed-args section of a <c>CustomAttrib</c> blob (ECMA-335 II.23.3).
-    /// The blob must start with the two-byte prolog <c>0x0001</c>, followed by one
-    /// fixed-arg value for each entry in <paramref name="paramShapes"/> (in declared order),
-    /// encoded per ECMA-335 II.23.3 / <c>CorSerializationType</c>.
-    /// </summary>
-    /// <param name="paramShapes">
-    /// The constructor's parameter types in declaration order, already resolved to
-    /// <see cref="T:WoofWare.PawPrint.CustomAttribArgShape"/>. See that type for why the raw
-    /// <c>TypeDefn</c>s are not enough.
-    /// </param>
-    /// <param name="blob">The raw <c>CustomAttrib</c> blob.</param>
-    /// <returns>
-    /// On success: the decoded fixed-arg values in declaration order, and the offset of the
-    /// first byte after the fixed-args section (i.e. where the <c>NumNamed</c> count, if any,
-    /// begins). On failure: a diagnostic message.
-    /// </returns>
-    /// <remarks>
-    /// Mirrors the per-arg loop in CoreCLR's <c>CustomAttribute_CreateCustomAttributeInstance</c>
-    /// (<c>customattribute.cpp:900</c>), which dispatches via <c>GetDataFromBlob</c>.
-    /// </remarks>
-    let readFixedArgs
-        (paramShapes : CustomAttribArgShape list)
-        (blob : ImmutableArray<byte>)
-        : Result<CustomAttribFixedArg list * int, string>
-        =
-        let len = blob.Length
-
-        if len < 2 then
-            Error "CustomAttrib blob is shorter than the 2-byte prolog"
-        else
-
-        let prolog = uint16 blob.[0] ||| (uint16 blob.[1] <<< 8)
-
-        if prolog <> 0x0001us then
-            Error (sprintf "CustomAttrib blob has unexpected prolog 0x%04X (expected 0x0001)" prolog)
-        else
-
-        let rec loop
-            (remaining : CustomAttribArgShape list)
-            (offset : int)
-            (acc : CustomAttribFixedArg list)
-            : Result<CustomAttribFixedArg list * int, string>
-            =
-            match remaining with
-            | [] -> Ok (List.rev acc, offset)
-            | head :: tail ->
-                match readElem head blob offset with
-                | Error e -> Error e
-                | Ok (value, next) -> loop tail next (value :: acc)
-
-        loop paramShapes 2 []
-
-    /// <summary>
-    /// The type names in <paramref name="args"/> that a caller must resolve before the arguments
-    /// can be lowered, in the order they appear in the blob: every non-null
-    /// <c>CustomAttribFixedArg.Type</c>, including those inside arrays. The null sentinel needs no
-    /// resolution and is not listed.
-    /// </summary>
-    /// <remarks>
-    /// One entry per occurrence rather than per distinct name: CoreCLR resolves each occurrence
-    /// separately (<c>ReadArray</c> calls <c>GetDataFromBlob</c> once per element), and an
-    /// <c>AssemblyLoadContext.TypeResolve</c> handler would observe the difference.
-    /// </remarks>
-    let rec typeNamesToResolve (args : CustomAttribFixedArg list) : string list =
-        args
-        |> List.collect (fun arg ->
-            match arg with
-            | CustomAttribFixedArg.Type (Some name) -> [ name ]
-            | CustomAttribFixedArg.Type None -> []
-            | CustomAttribFixedArg.Array (Some elements) -> typeNamesToResolve elements
-            | CustomAttribFixedArg.Array None -> []
-            // An enum's payload is one of the integral variants, never a type.
-            | CustomAttribFixedArg.Enum _ -> []
-            | CustomAttribFixedArg.Bool _
-            | CustomAttribFixedArg.Char _
-            | CustomAttribFixedArg.I1 _
-            | CustomAttribFixedArg.U1 _
-            | CustomAttribFixedArg.I2 _
-            | CustomAttribFixedArg.U2 _
-            | CustomAttribFixedArg.I4 _
-            | CustomAttribFixedArg.U4 _
-            | CustomAttribFixedArg.I8 _
-            | CustomAttribFixedArg.U8 _
-            | CustomAttribFixedArg.R4 _
-            | CustomAttribFixedArg.R8 _
-            | CustomAttribFixedArg.String _ -> []
-        )
 
     /// <summary>
     /// Read one array element tag at <paramref name="offset"/> — the tag byte, plus an enum's type
@@ -1005,6 +759,435 @@ module CustomAttribute =
         match readSerializationType blob offset with
         | Error e -> Error e
         | Ok (elt, next) -> Ok (CustomAttribFieldOrPropType.Scalar elt, next)
+
+    /// Read one primitive or <c>SerString</c> value of type <paramref name="pt"/> at
+    /// <paramref name="offset"/>, returning it and the offset of the first byte after it.
+    let private readPrimitiveValue
+        (blob : ImmutableArray<byte>)
+        (pt : PrimitiveType)
+        (offset : int)
+        : Result<CustomAttribFixedArg * int, string>
+        =
+        let len = blob.Length
+
+        let readPrimitive
+            (size : int)
+            (build : ImmutableArray<byte> -> int -> CustomAttribFixedArg)
+            : Result<CustomAttribFixedArg * int, string>
+            =
+            if offset + size > len then
+                Error (
+                    sprintf
+                        "CustomAttrib blob: primitive of size %d at offset %d would overrun blob length %d"
+                        size
+                        offset
+                        len
+                )
+            else
+                Ok (build blob offset, offset + size)
+
+        let u16 (b : ImmutableArray<byte>) (o : int) : uint16 =
+            uint16 b.[o] ||| (uint16 b.[o + 1] <<< 8)
+
+        let u32 (b : ImmutableArray<byte>) (o : int) : uint32 =
+            uint32 b.[o]
+            ||| (uint32 b.[o + 1] <<< 8)
+            ||| (uint32 b.[o + 2] <<< 16)
+            ||| (uint32 b.[o + 3] <<< 24)
+
+        let u64 (b : ImmutableArray<byte>) (o : int) : uint64 =
+            uint64 (u32 b o) ||| (uint64 (u32 b (o + 4)) <<< 32)
+
+        match pt with
+        // Divergence: CoreCLR boxes the raw blob byte, so a hand-crafted blob can produce a
+        // `System.Boolean` holding 2, whereas this normalises to an F# `bool` and hence to 0/1.
+        // Only hand-written IL can produce such a blob.
+        | PrimitiveType.Boolean -> readPrimitive 1 (fun b o -> CustomAttribFixedArg.Bool (b.[o] <> 0uy))
+        | PrimitiveType.Char -> readPrimitive 2 (fun b o -> CustomAttribFixedArg.Char (char (u16 b o)))
+        | PrimitiveType.SByte -> readPrimitive 1 (fun b o -> CustomAttribFixedArg.I1 (sbyte b.[o]))
+        | PrimitiveType.Byte -> readPrimitive 1 (fun b o -> CustomAttribFixedArg.U1 b.[o])
+        | PrimitiveType.Int16 -> readPrimitive 2 (fun b o -> CustomAttribFixedArg.I2 (int16 (u16 b o)))
+        | PrimitiveType.UInt16 -> readPrimitive 2 (fun b o -> CustomAttribFixedArg.U2 (u16 b o))
+        | PrimitiveType.Int32 -> readPrimitive 4 (fun b o -> CustomAttribFixedArg.I4 (int32 (u32 b o)))
+        | PrimitiveType.UInt32 -> readPrimitive 4 (fun b o -> CustomAttribFixedArg.U4 (u32 b o))
+        | PrimitiveType.Int64 -> readPrimitive 8 (fun b o -> CustomAttribFixedArg.I8 (int64 (u64 b o)))
+        | PrimitiveType.UInt64 -> readPrimitive 8 (fun b o -> CustomAttribFixedArg.U8 (u64 b o))
+        | PrimitiveType.Single ->
+            readPrimitive
+                4
+                (fun b o -> CustomAttribFixedArg.R4 (System.BitConverter.Int32BitsToSingle (int32 (u32 b o))))
+        | PrimitiveType.Double ->
+            readPrimitive
+                8
+                (fun b o -> CustomAttribFixedArg.R8 (System.BitConverter.Int64BitsToDouble (int64 (u64 b o))))
+        | PrimitiveType.String ->
+            match readSerString blob offset with
+            | Error e -> Error e
+            | Ok (s, next) -> Ok (CustomAttribFixedArg.String s, next)
+        | PrimitiveType.Object ->
+            Error
+                "CustomAttrib blob: an object-typed Elem is TAGGED_OBJECT, which is CustomAttribArgShape.TaggedObject rather than a primitive shape"
+        | PrimitiveType.TypedReference
+        | PrimitiveType.IntPtr
+        | PrimitiveType.UIntPtr ->
+            Error (
+                sprintf
+                    "CustomAttrib blob: %O has no CorSerializationType, so no CustomAttrib Elem can have that type"
+                    pt
+            )
+
+    /// <summary>
+    /// The <see cref="T:WoofWare.PawPrint.CustomAttribTaggedType"/> a <c>TAGGED_OBJECT</c>'s
+    /// <c>FieldOrPropType</c> names, or why CoreCLR cannot box a value of it.
+    /// </summary>
+    /// <remarks>
+    /// CoreCLR reads this tag the way <c>readFieldOrPropType</c> does — one byte, and one more after
+    /// <c>SZARRAY</c> — in <c>GetDataFromBlob</c>'s <c>typeObject</c> arm. Every refusal below is a
+    /// blob only hand-crafted metadata can produce.
+    /// </remarks>
+    let private taggedTypeOf (fieldOrPropType : CustomAttribFieldOrPropType) : Result<CustomAttribTaggedType, string> =
+        match fieldOrPropType with
+        | CustomAttribFieldOrPropType.Scalar (CustomAttribSerializationType.Primitive pt) ->
+            Ok (CustomAttribTaggedType.Primitive pt)
+        | CustomAttribFieldOrPropType.Scalar CustomAttribSerializationType.Type -> Ok CustomAttribTaggedType.Type
+        | CustomAttribFieldOrPropType.Scalar (CustomAttribSerializationType.Enum (Some name)) ->
+            Ok (CustomAttribTaggedType.Enum name)
+        | CustomAttribFieldOrPropType.Scalar (CustomAttribSerializationType.Enum None) ->
+            // `GetTypeHandleFromBlob` answers a null handle for the null sentinel, and the
+            // `typeObject` arm then calls `AsMethodTable()->GetInternalCorElementType()` through it.
+            Error
+                "CustomAttrib blob: a TAGGED_OBJECT names an enum by the SerString null sentinel; CoreCLR dereferences a null type handle there"
+        | CustomAttribFieldOrPropType.Scalar CustomAttribSerializationType.TaggedObject ->
+            // The `typeObject` arm's default case boxes, as `System.Object`, the object reference the
+            // nested read returned, which is not a value CoreCLR means to produce.
+            Error "CustomAttrib blob: a TAGGED_OBJECT's tag is itself TAGGED_OBJECT, which CoreCLR cannot box"
+        | CustomAttribFieldOrPropType.SzArray (CustomAttribArrayElement.Element element) ->
+            match element with
+            | CustomAttribSerializationType.Primitive pt ->
+                Ok (CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Primitive pt))
+            | CustomAttribSerializationType.Type ->
+                Ok (CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Type)
+            | CustomAttribSerializationType.TaggedObject ->
+                Ok (CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Object)
+            | CustomAttribSerializationType.Enum (Some name) ->
+                Ok (CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum name))
+            | CustomAttribSerializationType.Enum None ->
+                // CoreCLR answers a null array without looking at the null handle, and dereferences
+                // it for any other; this refuses both.
+                Error
+                    "CustomAttrib blob: a TAGGED_OBJECT array names its enum element type by the SerString null sentinel; CoreCLR dereferences the null type handle unless the array is null"
+        | CustomAttribFieldOrPropType.SzArray (CustomAttribArrayElement.Unrecognised 0x12uy) ->
+            // `GetTypeHandleFromBlob` maps ELEMENT_TYPE_CLASS to System.Type, the encoding it
+            // rewrites a TYPE element tag to; no compiler writes it into the blob.
+            Error
+                "CustomAttrib blob: TODO: a TAGGED_OBJECT array's element tag is ELEMENT_TYPE_CLASS (0x12), which CoreCLR reads as System.Type; not modelled"
+        | CustomAttribFieldOrPropType.SzArray (CustomAttribArrayElement.Unrecognised tag) ->
+            Error (
+                sprintf
+                    "CustomAttrib blob: a TAGGED_OBJECT array's element tag 0x%02X names no element type CoreCLR can allocate (it throws CustomAttributeFormatException)"
+                    tag
+            )
+
+    /// Why <c>readElemResolving</c> stopped short of a value.
+    [<RequireQualifiedAccess>]
+    type private ElemStop =
+        | Malformed of reason : string
+        /// Every type name met so far, most recent first, the head being an enum's whose resolution
+        /// was not supplied.
+        | Awaiting of namesMostRecentFirst : string list
+
+    /// <summary>
+    /// Decode one <c>Elem</c> at <paramref name="offset"/>, threading the type names met so far
+    /// (most recent first) through the decode.
+    /// </summary>
+    /// <remarks>
+    /// A name is recorded when the decoder meets it, which is blob order and the order CoreCLR
+    /// resolves them in. The <c>n</c>th name met is answered by the <c>n</c>th entry of
+    /// <paramref name="answers"/>, whatever kind of name it is; only an enum's answer is read.
+    /// </remarks>
+    let rec private readElemResolving
+        (answers : CustomAttribResolvedName list)
+        (shape : CustomAttribArgShape)
+        (blob : ImmutableArray<byte>)
+        (offset : int)
+        (names : string list)
+        : Result<CustomAttribFixedArg * int * string list, ElemStop>
+        =
+        let malformed (result : Result<CustomAttribFixedArg * int, string>) =
+            match result with
+            | Error e -> Error (ElemStop.Malformed e)
+            | Ok (value, next) -> Ok (value, next, names)
+
+        // Record an enum's name, and answer the width of its underlying type if it was resolved.
+        let enumUnderlying (name : string) : Result<EnumUnderlyingType * string list, ElemStop> =
+            let names' = name :: names
+
+            match List.tryItem names.Length answers with
+            | None -> Error (ElemStop.Awaiting names')
+            | Some (CustomAttribResolvedName.Enum underlying) -> Ok (underlying, names')
+            | Some CustomAttribResolvedName.NotEnum ->
+                Error (
+                    ElemStop.Malformed (
+                        sprintf
+                            "CustomAttrib blob: a TAGGED_OBJECT names \"%s\" as an enum, but it resolved to a type that is not one"
+                            name
+                    )
+                )
+
+        match shape with
+        | CustomAttribArgShape.Primitive pt -> readPrimitiveValue blob pt offset |> malformed
+        | CustomAttribArgShape.Type ->
+            // ECMA-335 II.23.3: a System.Type argument is stored as the SerString of its
+            // reflection name, and CoreCLR reads it with the same `GetStringSize` it uses for a
+            // string argument, answering a null type for the null sentinel
+            // (customattribute.cpp:437-441).
+            match readSerString blob offset with
+            | Error e -> Error (ElemStop.Malformed e)
+            | Ok (None, next) -> Ok (CustomAttribFixedArg.Type None, next, names)
+            | Ok (Some name, next) -> Ok (CustomAttribFixedArg.Type (Some name), next, name :: names)
+        | CustomAttribArgShape.Enum underlying ->
+            // ECMA-335 II.23.3: "if the parameter kind is an enum, ... the value is stored
+            // using the underlying type of the enum". There is no tag; the width comes
+            // entirely from `underlying`, which is why the caller has to resolve it.
+            match readPrimitiveValue blob (EnumUnderlyingType.toPrimitive underlying) offset with
+            | Error e -> Error (ElemStop.Malformed e)
+            | Ok (value, next) -> Ok (CustomAttribFixedArg.Enum value, next, names)
+        | CustomAttribArgShape.SzArray eltShape ->
+            if offset + 4 > blob.Length then
+                Error (
+                    ElemStop.Malformed (
+                        sprintf "CustomAttrib blob: uint32 at offset %d would overrun blob length %d" offset blob.Length
+                    )
+                )
+            else
+
+            let numElem =
+                uint32 blob.[offset]
+                ||| (uint32 blob.[offset + 1] <<< 8)
+                ||| (uint32 blob.[offset + 2] <<< 16)
+                ||| (uint32 blob.[offset + 3] <<< 24)
+
+            if numElem = 0xFFFFFFFFu then
+                Ok (CustomAttribFixedArg.Array None, offset + 4, names)
+            else
+
+            let rec readElems
+                (remaining : uint32)
+                (cursor : int)
+                (names : string list)
+                (acc : CustomAttribFixedArg list)
+                : Result<CustomAttribFixedArg * int * string list, ElemStop>
+                =
+                if remaining = 0u then
+                    Ok (CustomAttribFixedArg.Array (Some (List.rev acc)), cursor, names)
+                else
+                    match readElemResolving answers eltShape blob cursor names with
+                    | Error e -> Error e
+                    | Ok (value, after, names) -> readElems (remaining - 1u) after names (value :: acc)
+
+            readElems numElem (offset + 4) names []
+        | CustomAttribArgShape.TaggedObject ->
+            match
+                readFieldOrPropType blob offset
+                |> Result.bind (fun (t, next) -> taggedTypeOf t |> Result.map (fun t -> t, next))
+            with
+            | Error e -> Error (ElemStop.Malformed e)
+            | Ok (tag, next) ->
+
+            let tagged (valueShape : CustomAttribArgShape) (names : string list) =
+                match readElemResolving answers valueShape blob next names with
+                | Error e -> Error e
+                | Ok (value, after, names) -> Ok (CustomAttribFixedArg.Tagged (tag, value), after, names)
+
+            match tag with
+            | CustomAttribTaggedType.Primitive pt -> tagged (CustomAttribArgShape.Primitive pt) names
+            | CustomAttribTaggedType.Type -> tagged CustomAttribArgShape.Type names
+            | CustomAttribTaggedType.Enum name ->
+                match enumUnderlying name with
+                | Error e -> Error e
+                | Ok (underlying, names) -> tagged (CustomAttribArgShape.Enum underlying) names
+            | CustomAttribTaggedType.SzArray element ->
+                match element with
+                | CustomAttribTaggedElementType.Primitive pt ->
+                    tagged (CustomAttribArgShape.SzArray (CustomAttribArgShape.Primitive pt)) names
+                | CustomAttribTaggedElementType.Type ->
+                    tagged (CustomAttribArgShape.SzArray CustomAttribArgShape.Type) names
+                | CustomAttribTaggedElementType.Object ->
+                    tagged (CustomAttribArgShape.SzArray CustomAttribArgShape.TaggedObject) names
+                | CustomAttribTaggedElementType.Enum name ->
+                    match enumUnderlying name with
+                    | Error e -> Error e
+                    | Ok (underlying, names) ->
+                        tagged (CustomAttribArgShape.SzArray (CustomAttribArgShape.Enum underlying)) names
+
+    /// <summary>
+    /// Decode a single <c>Elem</c> (ECMA-335 II.23.3) at <paramref name="offset"/>, returning the
+    /// value and the offset of the first byte after it. Errors if the value is a
+    /// <c>TAGGED_OBJECT</c> naming an enum, whose width needs type resolution: see
+    /// <c>readFixedArgsResolving</c>.
+    /// </summary>
+    /// <remarks>
+    /// Fixed args and named args encode their values identically — both are <c>Elem</c> — so this
+    /// serves both. What differs is only where the <see cref="T:WoofWare.PawPrint.CustomAttribArgShape"/>
+    /// comes from: a fixed arg takes it from the ctor signature, a named arg from the
+    /// <c>FieldOrPropType</c> in the blob. Mirrors CoreCLR's <c>GetDataFromBlob</c>, which the
+    /// native side likewise shares between the two.
+    /// </remarks>
+    let readElem
+        (shape : CustomAttribArgShape)
+        (blob : ImmutableArray<byte>)
+        (offset : int)
+        : Result<CustomAttribFixedArg * int, string>
+        =
+        match readElemResolving [] shape blob offset [] with
+        | Ok (value, next, _) -> Ok (value, next)
+        | Error (ElemStop.Malformed e) -> Error e
+        | Error (ElemStop.Awaiting names) ->
+            Error (
+                sprintf
+                    "CustomAttrib blob: a TAGGED_OBJECT names the enum \"%s\", whose width needs type resolution"
+                    (List.head names)
+            )
+
+    /// <summary>
+    /// Decode the fixed-args section of a <c>CustomAttrib</c> blob (ECMA-335 II.23.3), given what
+    /// the type names met so far resolved to.
+    /// The blob must start with the two-byte prolog <c>0x0001</c>, followed by one
+    /// fixed-arg value for each entry in <paramref name="paramShapes"/> (in declared order),
+    /// encoded per ECMA-335 II.23.3 / <c>CorSerializationType</c>.
+    /// </summary>
+    /// <param name="paramShapes">
+    /// The constructor's parameter types in declaration order, already resolved to
+    /// <see cref="T:WoofWare.PawPrint.CustomAttribArgShape"/>. See that type for why the raw
+    /// <c>TypeDefn</c>s are not enough.
+    /// </param>
+    /// <param name="answers">
+    /// What the first type names in the blob resolved to, in blob order: the names
+    /// <c>AwaitingResolution</c> listed, or a prefix of them. Names of every kind count, a
+    /// <c>System.Type</c> argument's as well as an enum's.
+    /// </param>
+    /// <param name="blob">The raw <c>CustomAttrib</c> blob.</param>
+    /// <returns>
+    /// <c>Parsed</c> with the decoded values and the offset of the first byte after the fixed-args
+    /// section (where the <c>NumNamed</c> count, if any, begins), whose type names are then those
+    /// <c>typeNamesToResolve</c> lists; <c>AwaitingResolution</c> if an enum inside a
+    /// <c>TAGGED_OBJECT</c> is not among the answers; or a diagnostic for a malformed blob.
+    /// </returns>
+    /// <remarks>
+    /// Mirrors the per-arg loop in CoreCLR's <c>CustomAttribute_CreateCustomAttributeInstance</c>
+    /// (<c>customattribute.cpp:900</c>), which dispatches via <c>GetDataFromBlob</c>. CoreCLR
+    /// resolves each name as it reaches it; this decoder, which cannot resolve, stops instead, so
+    /// that a caller resolves the names in the same order and decodes again with one more answer.
+    /// </remarks>
+    let readFixedArgsResolving
+        (paramShapes : CustomAttribArgShape list)
+        (answers : CustomAttribResolvedName list)
+        (blob : ImmutableArray<byte>)
+        : Result<CustomAttribFixedArgsParse, string>
+        =
+        let len = blob.Length
+
+        if len < 2 then
+            Error "CustomAttrib blob is shorter than the 2-byte prolog"
+        else
+
+        let prolog = uint16 blob.[0] ||| (uint16 blob.[1] <<< 8)
+
+        if prolog <> 0x0001us then
+            Error (sprintf "CustomAttrib blob has unexpected prolog 0x%04X (expected 0x0001)" prolog)
+        else
+
+        let rec loop
+            (remaining : CustomAttribArgShape list)
+            (offset : int)
+            (names : string list)
+            (acc : CustomAttribFixedArg list)
+            : Result<CustomAttribFixedArgsParse, string>
+            =
+            match remaining with
+            | [] -> Ok (CustomAttribFixedArgsParse.Parsed (List.rev acc, offset))
+            | head :: tail ->
+                match readElemResolving answers head blob offset names with
+                | Error (ElemStop.Malformed e) -> Error e
+                | Error (ElemStop.Awaiting names) -> Ok (CustomAttribFixedArgsParse.AwaitingResolution (List.rev names))
+                | Ok (value, next, names) -> loop tail next names (value :: acc)
+
+        loop paramShapes 2 [] []
+
+    /// <summary>
+    /// Decode the fixed-args section of a <c>CustomAttrib</c> blob (ECMA-335 II.23.3), for a caller
+    /// that cannot resolve type names: as <c>readFixedArgsResolving</c> with no answers, failing
+    /// where that would ask for one.
+    /// </summary>
+    /// <returns>
+    /// On success: the decoded fixed-arg values in declaration order, and the offset of the
+    /// first byte after the fixed-args section (i.e. where the <c>NumNamed</c> count, if any,
+    /// begins). On failure: a diagnostic message.
+    /// </returns>
+    let readFixedArgs
+        (paramShapes : CustomAttribArgShape list)
+        (blob : ImmutableArray<byte>)
+        : Result<CustomAttribFixedArg list * int, string>
+        =
+        match readFixedArgsResolving paramShapes [] blob with
+        | Error e -> Error e
+        | Ok (CustomAttribFixedArgsParse.Parsed (args, next)) -> Ok (args, next)
+        | Ok (CustomAttribFixedArgsParse.AwaitingResolution names) ->
+            Error (
+                sprintf
+                    "CustomAttrib blob: a TAGGED_OBJECT names the enum \"%s\", whose width needs type resolution"
+                    (List.last names)
+            )
+
+    /// <summary>
+    /// The type names in <paramref name="args"/> that a caller must resolve before the arguments
+    /// can be lowered, in the order they appear in the blob: every non-null
+    /// <c>CustomAttribFixedArg.Type</c>, including those inside arrays, and every enum a
+    /// <c>TAGGED_OBJECT</c> names, including one naming the element type of a null array. The null
+    /// sentinel needs no resolution and is not listed.
+    /// </summary>
+    /// <remarks>
+    /// One entry per occurrence rather than per distinct name: CoreCLR resolves each occurrence
+    /// separately (<c>ReadArray</c> calls <c>GetDataFromBlob</c> once per element), and an
+    /// <c>AssemblyLoadContext.TypeResolve</c> handler would observe the difference.
+    /// </remarks>
+    let rec typeNamesToResolve (args : CustomAttribFixedArg list) : string list =
+        args
+        |> List.collect (fun arg ->
+            match arg with
+            | CustomAttribFixedArg.Type (Some name) -> [ name ]
+            | CustomAttribFixedArg.Type None -> []
+            | CustomAttribFixedArg.Array (Some elements) -> typeNamesToResolve elements
+            | CustomAttribFixedArg.Array None -> []
+            | CustomAttribFixedArg.Tagged (tag, value) ->
+                // The tag precedes the value, so an enum's name comes before anything inside it.
+                let enumName =
+                    match tag with
+                    | CustomAttribTaggedType.Enum name
+                    | CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum name) -> [ name ]
+                    | CustomAttribTaggedType.Primitive _
+                    | CustomAttribTaggedType.Type
+                    | CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Primitive _)
+                    | CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Type
+                    | CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Object -> []
+
+                enumName @ typeNamesToResolve [ value ]
+            // An enum's payload is one of the integral variants, never a type.
+            | CustomAttribFixedArg.Enum _ -> []
+            | CustomAttribFixedArg.Bool _
+            | CustomAttribFixedArg.Char _
+            | CustomAttribFixedArg.I1 _
+            | CustomAttribFixedArg.U1 _
+            | CustomAttribFixedArg.I2 _
+            | CustomAttribFixedArg.U2 _
+            | CustomAttribFixedArg.I4 _
+            | CustomAttribFixedArg.U4 _
+            | CustomAttribFixedArg.I8 _
+            | CustomAttribFixedArg.U8 _
+            | CustomAttribFixedArg.R4 _
+            | CustomAttribFixedArg.R8 _
+            | CustomAttribFixedArg.String _ -> []
+        )
 
     /// <summary>
     /// Read the leading part of a <c>NamedArg</c> (ECMA-335 II.23.3) at <paramref name="offset"/>:
