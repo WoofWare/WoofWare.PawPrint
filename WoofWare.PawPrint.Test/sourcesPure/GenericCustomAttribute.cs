@@ -249,23 +249,24 @@ public class GenericCustomAttribute
         }
     }
 
+    // Only filtered reads here: an unfiltered read of a field's attributes (`GetCustomAttributes(false)`,
+    // `GetCustomAttributesData()`) also asks for its pseudo-attributes, which asks
+    // `MetadataImport.GetFieldOffset`, whatever the attributes are. `FieldCustomAttributesUnfiltered.cs`
+    // holds that path.
     static void FieldTarget()
     {
         FieldInfo f = typeof(Decorated).GetField("Field");
 
-        object[] all = f.GetCustomAttributes(false);
-        Check(all.Length == 2);
-
-        OneAttribute<string> one = ByTail<OneAttribute<string>>(all, x => x.Tail, 20);
+        object[] ones = f.GetCustomAttributes(typeof(OneAttribute<string>), false);
+        Check(ones.Length == 1);
+        OneAttribute<string> one = ByTail<OneAttribute<string>>(ones, x => x.Tail, 20);
         Check(one != null && one.Value == "f" && one.ExtraField == "ef" && one.Extra == null);
 
+        Check(f.GetCustomAttributes(typeof(TagAttribute<>), false).Length == 1);
         Check(f.GetCustomAttribute<TagAttribute<Box<Point>>>().Tail == 21);
         Check(f.IsDefined(typeof(OneAttribute<string>), false));
         Check(!f.IsDefined(typeof(OneAttribute<int>), false));
         Check(!f.IsDefined(typeof(TwoAttribute<,>), false));
-
-        CustomAttributeData data = DataOf(f.GetCustomAttributesData(), typeof(OneAttribute<string>));
-        Check(data != null && (string)data.ConstructorArguments[0].Value == "f");
     }
 
     static void MethodTarget()

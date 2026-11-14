@@ -75,18 +75,84 @@ module NativeCustomAttribute =
                 $"TODO: %s{operation} %s{label} pointer must be a plain ArrayElement byref (no projections); other shapes (e.g. raw native pointers, byte-view projections) are not yet supported, got %O{other}"
 
     /// <summary>
-    /// Resolve one constructor parameter type to the plan by which its argument is decoded and
-    /// then lowered.
+    /// The plan by which an argument of the given constructor parameter type, already concretised
+    /// under the attribute type's instantiation, is decoded and then lowered.
     /// </summary>
     /// <remarks>
     /// The fixed-args section of a <c>CustomAttrib</c> blob is not self-describing (ECMA-335
     /// II.23.3): an enum argument is written as a bare value of its underlying type, and an
     /// SZARRAY's elements carry no type at all. Both come from the metadata, which is why this
     /// lives here — beside the machine state — rather than in the parser.
-    ///
-    /// A primitive parameter costs no type load; only enums and arrays concretise anything.
     /// </remarks>
-    let rec private resolveArgPlan
+    let rec private planOfConcreteParameter
+        (operation : string)
+        (ctx : NativeCallContext)
+        (state : IlMachineState)
+        (handle : ConcreteTypeHandle)
+        : IlMachineState * CustomAttribArgPlan
+        =
+        match handle with
+        | ConcretePrimitive state.TypeSystem.ConcreteTypes pt -> state, CustomAttribArgPlan.Primitive pt
+        | ConcreteOneDimArrayZero elementHandle ->
+            // CoreCLR's fixed-arg loop hands `GetDataFromBlob` the *element* type handle
+            // (`customattribute.cpp:961`), and `ReadArray` allocates an array of exactly that
+            // element type. So the element plan is the same question one level down.
+            let state, elementPlan = planOfConcreteParameter operation ctx state elementHandle
+
+            state, CustomAttribArgPlan.SzArray (elementHandle, elementPlan)
+        | CorelibType state.TypeSystem.ConcreteTypes ("System", "Type", typeGenerics) when typeGenerics.IsEmpty ->
+            // CoreCLR's fixed-arg loop classifies the parameter by its signature element type and
+            // maps `ELEMENT_TYPE_CLASS` on `CLASS__TYPE` to `SERIALIZATION_TYPE_TYPE`
+            // (customattribute.cpp:757); a subclass of `System.Type` is not that class and falls
+            // through to `badBlob`, so only the exact type is admitted here too.
+            state, CustomAttribArgPlan.Type
+        | _ ->
+
+        let describe (state : IlMachineState) : string =
+            AllConcreteTypes.describe state.TypeSystem._LoadedAssemblies state.TypeSystem.ConcreteTypes handle
+
+        let state, isEnum =
+            IlMachineRuntimeMetadata.isEnumValueType ctx.LoggerFactory ctx.BaseClassTypes state handle
+
+        if not isEnum then
+            // What is left here is every parameter type the fixed-args grammar has no encoding
+            // for. `object` (TAGGED_OBJECT, 0x51) is the one that real metadata carries and that
+            // PawPrint does not yet decode; a multidimensional or non-SZ array parameter also
+            // lands here, and CoreCLR refuses that one too, since `GetDataFromBlob` has no
+            // `ELEMENT_TYPE_ARRAY` case and falls through to `badBlob`.
+            failwith
+                $"TODO: %s{operation}: ctor parameter of type %s{describe state} is neither a primitive, an SZARRAY, System.Type, nor an enum, so the fixed-args grammar cannot decode it; TAGGED_OBJECT (0x51) fixed args in particular are not yet supported"
+
+        let state, underlyingHandle =
+            IlMachineRuntimeMetadata.enumUnderlyingHandle ctx.LoggerFactory ctx.BaseClassTypes state handle
+            |> Option.defaultWith (fun () ->
+                failwith
+                    $"%s{operation}: ctor parameter of type %s{describe state} is an enum, but its underlying type could not be read; an enum's sole instance field must be `value__`"
+            )
+
+        match underlyingHandle with
+        | ConcretePrimitive state.TypeSystem.ConcreteTypes underlying ->
+            match EnumUnderlyingType.ofPrimitive underlying with
+            | Some underlying -> state, CustomAttribArgPlan.Enum underlying
+            | None ->
+                // ECMA-335 II.14.3 requires a built-in integer type here, and the CLR type loader
+                // enforces it, so only hand-crafted metadata can get us here.
+                failwith
+                    $"%s{operation}: ctor parameter of type %s{describe state} is an enum whose underlying type %O{underlying} is not a legal enum underlying type"
+        | other ->
+            failwith
+                $"%s{operation}: ctor parameter of type %s{describe state} is an enum whose `value__` did not concretize to a primitive, got %O{other}"
+
+    /// <summary>
+    /// Resolve one constructor parameter type to the plan by which its argument is decoded and
+    /// then lowered.
+    /// </summary>
+    /// <remarks>
+    /// The parameter is classified once concretised under the attribute type's instantiation, as
+    /// CoreCLR classifies it (its <c>MetaSig</c> carries that type context), so a parameter typed
+    /// by one of the attribute type's own generic parameters is planned as its argument.
+    /// </remarks>
+    let private resolveArgPlan
         (operation : string)
         (ctx : NativeCallContext)
         (ctorAssembly : DumpedAssembly)
@@ -100,29 +166,6 @@ module NativeCustomAttribute =
         // `FilterCustomAttributeRecord` never surfaces one.
         let methodGenerics : ConcreteTypeHandle ImmutableArray = ImmutableArray.Empty
 
-        match paramType with
-        | TypeDefn.PrimitiveType pt -> state, CustomAttribArgPlan.Primitive pt
-        | TypeDefn.OneDimensionalArrayLowerBoundZero elt ->
-            // CoreCLR's fixed-arg loop hands `GetDataFromBlob` the *element* type handle
-            // (`customattribute.cpp:961`), and `ReadArray` allocates an array of exactly that
-            // element type. So the element is what has to be concretised, and the element plan is
-            // the same question one level down.
-            let state, elementHandle =
-                IlMachineTypeResolution.concretizeType
-                    ctx.LoggerFactory
-                    ctx.BaseClassTypes
-                    state
-                    ctorAssembly.DefinitionFullName
-                    declaringTypeGenerics
-                    methodGenerics
-                    elt
-
-            let state, elementPlan =
-                resolveArgPlan operation ctx ctorAssembly declaringTypeGenerics state elt
-
-            state, CustomAttribArgPlan.SzArray (elementHandle, elementPlan)
-        | _ ->
-
         let state, handle =
             IlMachineTypeResolution.concretizeType
                 ctx.LoggerFactory
@@ -133,46 +176,7 @@ module NativeCustomAttribute =
                 methodGenerics
                 paramType
 
-        match handle with
-        | CorelibType state.TypeSystem.ConcreteTypes ("System", "Type", typeGenerics) when typeGenerics.IsEmpty ->
-            // CoreCLR's fixed-arg loop classifies the parameter by its signature element type and
-            // maps `ELEMENT_TYPE_CLASS` on `CLASS__TYPE` to `SERIALIZATION_TYPE_TYPE`
-            // (customattribute.cpp:757); a subclass of `System.Type` is not that class and falls
-            // through to `badBlob`, so only the exact type is admitted here too.
-            state, CustomAttribArgPlan.Type
-        | _ ->
-
-        let state, isEnum =
-            IlMachineRuntimeMetadata.isEnumValueType ctx.LoggerFactory ctx.BaseClassTypes state handle
-
-        if not isEnum then
-            // What is left here is every parameter type the fixed-args grammar has no encoding
-            // for. `object` (TAGGED_OBJECT, 0x51) is the one that real metadata carries and that
-            // PawPrint does not yet decode; a multidimensional or non-SZ array parameter also
-            // lands here, and CoreCLR refuses that one too, since `GetDataFromBlob` has no
-            // `ELEMENT_TYPE_ARRAY` case and falls through to `badBlob`.
-            failwith
-                $"TODO: %s{operation}: ctor parameter of type %O{paramType} is neither a primitive, an SZARRAY, System.Type, nor an enum, so the fixed-args grammar cannot decode it; TAGGED_OBJECT (0x51) fixed args in particular are not yet supported"
-
-        let state, underlyingHandle =
-            IlMachineRuntimeMetadata.enumUnderlyingHandle ctx.LoggerFactory ctx.BaseClassTypes state handle
-            |> Option.defaultWith (fun () ->
-                failwith
-                    $"%s{operation}: ctor parameter of type %O{paramType} is an enum, but its underlying type could not be read; an enum's sole instance field must be `value__`"
-            )
-
-        match underlyingHandle with
-        | ConcretePrimitive state.TypeSystem.ConcreteTypes underlying ->
-            match EnumUnderlyingType.ofPrimitive underlying with
-            | Some underlying -> state, CustomAttribArgPlan.Enum underlying
-            | None ->
-                // ECMA-335 II.14.3 requires a built-in integer type here, and the CLR type loader
-                // enforces it, so only hand-crafted metadata can get us here.
-                failwith
-                    $"%s{operation}: ctor parameter of type %O{paramType} is an enum whose underlying type %O{underlying} is not a legal enum underlying type"
-        | other ->
-            failwith
-                $"%s{operation}: ctor parameter of type %O{paramType} is an enum whose `value__` did not concretize to a primitive, got %O{other}"
+        planOfConcreteParameter operation ctx state handle
 
     /// <summary>
     /// Resolve a named argument's blob-declared <c>FieldOrPropType</c> to the primitive its value
@@ -182,7 +186,7 @@ module NativeCustomAttribute =
     /// </summary>
     /// <remarks>
     /// <c>resolveArgPlan</c> above is the fixed-arg counterpart, resolving a ctor parameter's
-    /// <c>TypeDefn</c>. Both exist because an enum's value width lives in the enum's metadata
+    /// type. Both exist because an enum's value width lives in the enum's metadata
     /// rather than in the blob.
     /// </remarks>
     let private resolveNamedArgPrimitive (operation : string) (elemType : CustomAttribFieldOrPropType) : PrimitiveType =
@@ -324,7 +328,7 @@ module NativeCustomAttribute =
                 let attrTypeAddr =
                     dereferenceObjectHandle operation ctx.BaseClassTypes state "pCaType" instruction.Arguments.[1]
 
-                let ctorStubAddr =
+                let ctorAddr =
                     dereferenceObjectHandle operation ctx.BaseClassTypes state "pCtor" instruction.Arguments.[2]
 
                 // `ref IntPtr ppBlob` is a managed byref to an IntPtr cell. The byref itself
@@ -409,38 +413,36 @@ module NativeCustomAttribute =
                     failwith
                         $"TODO: %s{operation}: value-typed attribute %s{attrTypeInfo.Namespace}.%s{attrTypeInfo.Name} would need unboxing for `this` slot; CoreCLR's value-type branch is unreachable from the BCL filter and is not yet modelled here"
 
-                // Resolve the ctor metadata via the method-handle registry. The stub's `m_value`
-                // field (a `RuntimeMethodHandleInternal`) carries a registry id minted by whichever
-                // QCall produced the handle, and that's the canonical identity available regardless
-                // of whether the stub was allocated F#-side (via `IlMachineState.getOrAllocateMethod`)
-                // or by the BCL itself (via `ModuleHandle.ResolveMethodHandle(...).GetMethodInfo()`).
-                let ctorStubObj = ManagedHeap.get ctorStubAddr state.ManagedHeap
-
-                let stubValueField =
-                    IlMachineState.requiredOwnInstanceFieldId state ctorStubObj.ConcreteType "m_value"
-
-                let stubMValue =
-                    AllocatedNonArrayObject.DereferenceFieldById stubValueField ctorStubObj
-
-                let methodRegistryId =
-                    MethodHandleResolution.methodHandleIdOfRuntimeMethodHandleInternal operation stubMValue
-                    |> Option.defaultWith (fun () ->
-                        failwith
-                            $"%s{operation}: RuntimeMethodInfoStub at %O{ctorStubAddr} carried a null RuntimeMethodHandleInternal"
-                    )
-
+                // CoreCLR reads `pCtor` as a `REFLECTMETHODREF` (customattribute.cpp
+                // `CustomAttribute_CreateCustomAttributeInstance`), so any of CoreLib's
+                // `IRuntimeMethodInfo` implementers may arrive: `FilterCustomAttributeRecord` hands
+                // over a `RuntimeMethodInfoStub` for a non-generic attribute type, and, for a generic
+                // one, the `RuntimeConstructorInfo` that `Module.ResolveMethod(...).MethodHandle
+                // .GetMethodInfo()` returns.
+                //
                 // An attribute's constructor is always a metadata method: it is named by a
                 // MethodDef/MemberRef token in the custom-attribute blob we are decoding, so a
                 // no-metadata (`DynamicMethod`) handle cannot reach here.
                 let identity =
-                    match MethodHandleRegistry.resolveMethodFromId methodRegistryId state.MethodHandles with
-                    | Some (MethodHandle.FromMetadata identity) -> identity
-                    | Some (MethodHandle.FromDynamic dynamicHandle) ->
+                    match
+                        MethodHandleResolution.resolveMethodHandleFromMethodInfoObject
+                            operation
+                            state
+                            (CliType.ObjectRef (Some ctorAddr))
+                    with
+                    | MethodHandle.FromMetadata identity -> identity
+                    | MethodHandle.FromDynamic dynamicHandle ->
                         failwith
-                            $"%s{operation}: RuntimeMethodHandleInternal id %d{methodRegistryId} (from stub at %O{ctorStubAddr}) names %O{dynamicHandle}, a Reflection.Emit method; an attribute constructor is named by a token in the blob being decoded, so this is a bug in whatever produced the stub"
-                    | None ->
-                        failwith
-                            $"%s{operation}: RuntimeMethodHandleInternal id %d{methodRegistryId} (from stub at %O{ctorStubAddr}) did not resolve to a registered MethodHandle"
+                            $"%s{operation}: the constructor at %O{ctorAddr} names %O{dynamicHandle}, a Reflection.Emit method; an attribute constructor is named by a token in the blob being decoded, so this is a bug in whatever produced the constructor object"
+
+                // CoreCLR invokes the constructor on the attribute type
+                // (`MethodDescCallSite ctorCallSite(pCtorMD, th)`), and the decoder below reads its
+                // parameter types under that type's instantiation, so the two must be one type.
+                match identity.GetDeclaringType () with
+                | RuntimeTypeHandleTarget.Closed declaring when declaring = instantiatedHandle -> ()
+                | other ->
+                    failwith
+                        $"%s{operation}: the constructor at %O{ctorAddr} is declared by %O{other}, not by the attribute type %O{instantiatedHandle}"
 
                 let ctorAssemblyName = identity.GetAssemblyFullName ()
 
