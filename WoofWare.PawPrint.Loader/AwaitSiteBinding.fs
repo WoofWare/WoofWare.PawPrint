@@ -80,8 +80,9 @@ type AwaitSiteFacts =
 type AwaitNotYetBound =
     /// The await continues on the captured context.
     | ContinuesOnCapturedContext
-    /// The call has a `constrained.` prefix.
-    | Constrained
+    /// The call is a `callvirt` with a `constrained.` prefix: of an instance method, through a
+    /// receiver whose type the prefix names.
+    | ConstrainedCallvirt
 
 /// Decision 13's classification of a matched await site: an await in a user's runtime-async body,
 /// or a tail shape in an async version.
@@ -105,9 +106,11 @@ module AwaitSiteBinding =
 
     /// What a matched await site binds, from `facts`. An unmodelled variant is named before any
     /// reason the site is not yet bound; of those, the first of these is named: the captured
-    /// context, the `constrained.` prefix. A site that dispatches binds the named method's variant,
-    /// whose implementation on the receiver dispatch finds through its ordinary sibling (decision 19
-    /// of `docs/plans/2026-11-11-runtime-async.md`).
+    /// context, a `callvirt`'s `constrained.` prefix. A site that dispatches binds the named
+    /// method's variant, whose implementation on the receiver dispatch finds through its ordinary
+    /// sibling (decision 19 of `docs/plans/2026-11-11-runtime-async.md`); so does a `call` with a
+    /// `constrained.` prefix, as of a static virtual method, whose implementation the prefix
+    /// resolves the same way.
     ///
     /// The named method may be abstract only where the call dispatches, or a `constrained.` prefix
     /// resolves it; CoreCLR's JIT refuses to compile a call naming one otherwise
@@ -134,13 +137,14 @@ module AwaitSiteBinding =
 
         if continuesOnCapturedContext then
             AwaitSiteBinding.NotYetBound AwaitNotYetBound.ContinuesOnCapturedContext
-        elif facts.Constrained then
-            AwaitSiteBinding.NotYetBound AwaitNotYetBound.Constrained
+        elif facts.Constrained && facts.Opcode = AwaitedCall.Callvirt then
+            AwaitSiteBinding.NotYetBound AwaitNotYetBound.ConstrainedCallvirt
         else
 
         match body with
-        | AsyncVariantBody.Abstract when not dispatches ->
-            failwith "logic error: an abstract method named by a call that does not dispatch was refused above"
+        | AsyncVariantBody.Abstract when not dispatches && not facts.Constrained ->
+            failwith
+                "logic error: an abstract method named by a call that neither dispatches nor has a constrained. prefix was refused above"
         | AsyncVariantBody.Abstract
         | AsyncVariantBody.RuntimeAsyncIl
         | AsyncVariantBody.AsyncVersion ->

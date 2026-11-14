@@ -70,7 +70,8 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 /// `EmitScopeDefinitions.defineParam`: for those scopes, and no others, CoreCLR has one exactly when the rows sorted
 /// by (method, Sequence, RID) are not in RID order. A `PropertyMap` row is derived for each type with properties, in the order
 /// of each type's first property, as `RegMeta::DefineProperty` adds them, and the properties get a
-/// `PropertyPtr` when they are not grouped in that order. Every heap offset is the one the scope handed out.
+/// `PropertyPtr` when they are not grouped in that order; an `EventMap` row and an `EventPtr` likewise for
+/// events, as `RegMeta::_DefineEvent` adds them. Every heap offset is the one the scope handed out.
 [<RequireQualifiedAccess>]
 module EmitScopeImage =
     let private cliHeaderSize : int = 72
@@ -150,9 +151,11 @@ module EmitScopeImage =
         |> Seq.map snd
         |> Array.ofSeq
 
-    /// Each property's `PropertyMap` row (from 0), and each map row's parent: one map row for each type with
-    /// properties, in the order of each type's first property.
-    let private propertyMaps (owners : TypeDefRid[]) : int[] * TypeDefRid[] =
+    /// Each member's map row (from 0), and each map row's parent, given the members' owners in RID order:
+    /// one map row for each type with members, in the order of each type's first member. This is the rule
+    /// of `PropertyMap` as `RegMeta::DefineProperty` adds its rows, and of `EventMap` as
+    /// `RegMeta::_DefineEvent` adds its rows.
+    let private ownerMaps (owners : TypeDefRid[]) : int[] * TypeDefRid[] =
         let parents = ResizeArray<TypeDefRid> ()
         let positions = Collections.Generic.Dictionary<TypeDefRid, int> ()
 
@@ -301,10 +304,18 @@ module EmitScopeImage =
         let properties = EmitScope.properties scope
 
         let propertyMapOf, propertyMapParents =
-            properties |> Seq.map _.Owner |> Array.ofSeq |> propertyMaps
+            properties |> Seq.map _.Owner |> Array.ofSeq |> ownerMaps
 
         // A property is listed by its map row, which `pointerTable` orders it by; ties stay in RID order.
         let propertyPtr = pointerTable propertyMapOf
+
+        let events = EmitScope.events scope
+
+        let eventMapOf, eventMapParents =
+            events |> Seq.map _.Owner |> Array.ofSeq |> ownerMaps
+
+        // An event is listed by its map row, as a property is.
+        let eventPtr = pointerTable eventMapOf
 
         let methodSemantics =
             let rows = EmitScope.methodSemantics scope
@@ -323,6 +334,9 @@ module EmitScopeImage =
         rowCounts.[int TableIndex.InterfaceImpl] <- interfaceImpls.Length
         rowCounts.[int TableIndex.MemberRef] <- (EmitScope.memberRefs scope).Count
         rowCounts.[int TableIndex.StandAloneSig] <- (EmitScope.standAloneSigs scope).Count
+        rowCounts.[int TableIndex.EventMap] <- eventMapParents.Length
+        rowCounts.[int TableIndex.EventPtr] <- eventPtr.Length
+        rowCounts.[int TableIndex.Event] <- events.Count
         rowCounts.[int TableIndex.PropertyMap] <- propertyMapParents.Length
         rowCounts.[int TableIndex.PropertyPtr] <- propertyPtr.Length
         rowCounts.[int TableIndex.Property] <- properties.Count
@@ -498,6 +512,24 @@ module EmitScopeImage =
         // StandAloneSig (II.22.36)
         for row in EmitScope.standAloneSigs scope do
             blob "StandAloneSig.Signature" row.Signature
+
+        // EventMap (II.22.12). Its list indexes the pointer table when there is one, which has as many rows
+        // as `Event`.
+        let eventLists =
+            listStarts (eventMapOf |> Array.map (fun m -> m + 1)) eventMapParents.Length
+
+        for i in 0 .. eventMapParents.Length - 1 do
+            index TableIndex.TypeDef "EventMap.Parent" eventMapParents.[i].Rid
+            index TableIndex.Event "EventMap.EventList" eventLists.[i]
+
+        for rid in eventPtr do
+            index TableIndex.Event "EventPtr.Event" rid
+
+        // Event (II.22.13)
+        for row in events do
+            tables.WriteUInt16 (uint16 row.Flags)
+            str "Event.Name" row.Name
+            typeDefOrRef "Event.EventType" (Some row.EventType)
 
         // PropertyMap (II.22.35). Its list indexes the pointer table when there is one, which has as many
         // rows as `Property`.

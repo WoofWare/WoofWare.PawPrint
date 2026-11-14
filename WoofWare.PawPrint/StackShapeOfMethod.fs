@@ -358,8 +358,37 @@ module StackShapeOfMethod =
                 )
             | Ok (ScopeMethodResolution.NeedsMinting callee) ->
                 unmintedCalleeShape baseClassTypes operation state callee |> Result.map Some
+        | UnaryMetadataTokenIlOp.Newobj ->
+            // As for `call`: an entry the instruction refuses gets no shape, and neither does a
+            // method `NewobjTarget` refuses whatever the stack holds. Real .NET raises that refusal
+            // with none of the arguments pushed (measured for a static method of one parameter),
+            // so a shape here would have the analysis refuse the underflow first.
+            let refused (callee : string) (outcome : string) : Result<TokenShape option, string> =
+                Error $"%s{operation} names %s{callee}, so the instruction raises or stops (%s{outcome}) when it runs"
+
+            match DynamicScopeOperand.tryMethod baseClassTypes operation index state handle with
+            | Error (ScopeEntryRefusal.GuestException (_, why))
+            | Error (ScopeEntryRefusal.Unsupported why) -> Error why
+            | Ok (ScopeMethodResolution.Resolved (MethodHandle.FromDynamic _))
+            | Ok (ScopeMethodResolution.NeedsMinting _) ->
+                // Always static, so the instruction mints it and then refuses it.
+                refused "a DynamicMethod" "InvalidProgramException"
+            | Ok (ScopeMethodResolution.Resolved (MethodHandle.FromMetadata identity)) ->
+                let definition =
+                    MethodHandleResolution.methodInfoOfMetadataIdentity operation state identity
+
+                let target = UnaryMetadataObjectOps.newobjTargetOf baseClassTypes state definition
+
+                match target with
+                | NewobjTarget.Constructs ->
+                    // The constructor's `this` is the object being made, not an argument on the
+                    // stack.
+                    Ok (Some (TokenShape.Callee (definition.Signature.ParameterTypes.Length, None)))
+                | NewobjTarget.AbstractMethod
+                | NewobjTarget.StaticMethod
+                | NewobjTarget.NotInstanceConstructor
+                | NewobjTarget.AbstractClass -> refused "a reflected method" $"%O{target}"
         | UnaryMetadataTokenIlOp.Calli
-        | UnaryMetadataTokenIlOp.Newobj
         | UnaryMetadataTokenIlOp.Jmp ->
             // The decoder refuses a minted body carrying a scope operand on these, so none
             // executes; see `IlDecoding.scopeOperandKind`.
@@ -441,7 +470,7 @@ module StackShapeOfMethod =
 
     /// A body minted by `Reflection.Emit`: the signature and locals come from the definition the
     /// mint registered, and each token's effect from the `DynamicScope` entry it names.
-    let private analyseDynamic
+    let internal analyseDynamic
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
         (handle : DynamicMethodHandle)

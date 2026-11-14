@@ -111,9 +111,13 @@ module StaticVirtualDispatch =
     /// CoreCLR's answer there depends on whether it resolved the call before the change. An order-dependent
     /// body that a more specific one displaces, or that only takes part in a conflict, decides nothing.
     ///
+    /// For the async variant of a method, the implementation is the async variant of the method's
+    /// ordinary sibling's implementation, refused by name where
+    /// `AsyncVariantDispatch.ofSiblingImplementation` says.
+    ///
     /// A type the search reaches that does not bind is the failure, returned with what loaded before
     /// it.
-    let resolve
+    let rec resolve
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -124,6 +128,29 @@ module StaticVirtualDispatch =
         =
         if not method.IsStatic then
             failwith $"%s{operation}: %s{method.Name} is not static"
+
+        match method with
+        | MethodInfo.Metadata (_, facts, MethodVariant.AsyncVariant) ->
+            match
+                AsyncVariantDispatch.ordinarySibling loggerFactory dotnetRuntimeDirs baseClassTypes method facts state
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok ordinary ->
+
+            match resolve loggerFactory dotnetRuntimeDirs baseClassTypes constrained ordinary state with
+            | state, Error failure -> state, Error failure
+            | state, Ok found ->
+                AsyncVariantDispatch.ofSiblingImplementation
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    operation
+                    method
+                    constrained
+                    found
+                    state
+        | MethodInfo.Metadata (_, _, MethodVariant.Ordinary)
+        | MethodInfo.Synthesised _ ->
 
         let target =
             match
@@ -139,13 +166,6 @@ module StaticVirtualDispatch =
 
         if (TypeSystemState.tryGetConcreteTypeInfo state constrained).IsNone then
             failwith $"%s{operation}: the constrained type %O{constrained} has no TypeDef row"
-
-        match method.TryVariant with
-        | Some MethodVariant.AsyncVariant ->
-            failwith
-                $"TODO: %s{operation} of the async variant of %s{method.Name}: CoreCLR gives a promise-returning virtual method's async variant a slot of its own, which PawPrint's tables do not have (runtime-async plan, stage 4)"
-        | Some MethodVariant.Ordinary
-        | None -> ()
 
         let slot : SlotIdentity = method.DeclaringAssemblyFullName, method.IdentityKey
 

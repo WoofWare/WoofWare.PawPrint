@@ -101,6 +101,134 @@ module DispatchFailure =
         | DispatchFailure.NotImplemented method -> $"no implementation of %s{name method}"
         | DispatchFailure.StaticNotImplemented method -> $"no implementation of the static %s{name method}"
 
+/// Dispatch of an async variant (decision 19 of `docs/plans/2026-11-11-runtime-async.md`). CoreCLR
+/// gives a promise-returning virtual method's variant a slot of its own, which the variant of
+/// whatever fills the ordinary sibling's slot fills, for virtual and static virtual methods alike
+/// (`MethodTableBuilder`, methodtablebuilder.cpp; `MethodTable::ResolveVirtualStaticMethod`,
+/// methodtable.cpp). PawPrint's tables have no such slot: dispatch of a variant resolves its
+/// ordinary sibling, then takes the same step.
+[<RequireQualifiedAccess>]
+module AsyncVariantDispatch =
+
+    /// The ordinary sibling of `variant`, an async variant whose row is `facts`, instantiated as
+    /// `variant` is.
+    let ordinarySibling
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (variant : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (facts : MetadataMethodFacts)
+        (state : TypeSystemState)
+        : TypeSystemState *
+          Result<
+              WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>,
+              TypeBindingFailure
+           >
+        =
+        let declaringAssy =
+            state.LoadedAssembly variant.DeclaringAssemblyFullName
+            |> Option.defaultWith (fun () ->
+                failwith $"BUG: dispatch of %O{variant}, whose declaring assembly is not loaded"
+            )
+
+        match
+            MethodConcretisation.concretizeMethodWithAllGenerics
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                variant.DeclaringTypeGenerics
+                declaringAssy.Methods.[facts.Handle]
+                variant.Generics
+                state
+        with
+        | state, Error failure -> state, Error failure
+        | state, Ok (ordinary, _) -> state, Ok ordinary
+
+    /// What `operation` of `variant`, an async variant, finds on `dispatchedOn`, where it found
+    /// `siblingImplementation` for the variant's ordinary sibling: the async variant of the method
+    /// found, or whatever else was found. Refused by name, because CoreCLR runs something there
+    /// that PawPrint does not model: a method found that has no async variant, as an override
+    /// returning a subclass of `Task` has, where CoreCLR runs the variant the override inherits;
+    /// and one whose variant returns something other than `variant` does, as a covariant `Task<T>`
+    /// override of `Task` does, where CoreCLR runs a return-dropping thunk.
+    let ofSiblingImplementation
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (variant : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (dispatchedOn : ConcreteTypeHandle)
+        (siblingImplementation : VirtualImplementation)
+        (state : TypeSystemState)
+        : TypeSystemState * Result<VirtualImplementation, TypeBindingFailure>
+        =
+        match siblingImplementation with
+        | VirtualImplementation.NotOverridden
+        | VirtualImplementation.NotImplemented
+        | VirtualImplementation.Ambiguous _
+        | VirtualImplementation.Reabstracted _
+        | VirtualImplementation.Unmodelled _ -> state, Ok siblingImplementation
+        | VirtualImplementation.Found found ->
+
+        let describe = $"%s{MethodOwner.describe variant.Owner}::%s{variant.Name}"
+        let implementing = found.Definition
+
+        let implementingAssy =
+            state.LoadedAssembly implementing.DeclaringAssemblyFullName
+            |> Option.defaultWith (fun () ->
+                failwith
+                    $"BUG: %s{operation} of %s{describe} chose %O{implementing}, whose declaring assembly is not loaded"
+            )
+
+        let assemblies, implementingVariant =
+            RuntimeAsyncMethod.asyncVariantOf
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes.Corelib
+                implementingAssy
+                implementing
+                state._LoadedAssemblies
+
+        let state =
+            { state with
+                _LoadedAssemblies = assemblies
+            }
+
+        match implementingVariant with
+        | Error (AsyncVariantRefusal.ReturnTypeUnbound failure)
+        | Error (AsyncVariantRefusal.BaseTypeUnbound failure) -> state, Error failure
+        | Error refusal ->
+            failwith
+                $"TODO: %s{operation} of the async variant of %s{describe} on %O{dispatchedOn} reaches %O{implementing}, which has no async variant (%A{refusal}). CoreCLR's builder fills that slot with the variant the override inherits, which PawPrint does not model (decision 19 of docs/plans/2026-11-11-runtime-async.md)"
+        | Ok implementingVariant ->
+
+        match
+            MethodConcretisation.concretizeMethodWithAllGenerics
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                found.TypeGenerics
+                implementingVariant
+                found.MethodGenerics
+                state
+        with
+        | state, Error failure -> state, Error failure
+        | state, Ok (concrete, _) ->
+
+        // The two return different values only where the implementation's promise type differs
+        // from its declaration's, as a covariant return (`Task<T>` for `Task`).
+        if concrete.Signature.ReturnType <> variant.Signature.ReturnType then
+            failwith
+                $"TODO: %s{operation} of the async variant of %s{describe}, returning %O{variant.Signature.ReturnType}, on %O{dispatchedOn} reaches the async variant of %O{implementing}, returning %O{concrete.Signature.ReturnType}. CoreCLR's builder runs a return-dropping thunk there, which PawPrint does not model (decision 19 of docs/plans/2026-11-11-runtime-async.md)"
+
+        state,
+        Ok (
+            VirtualImplementation.Found
+                { found with
+                    Definition = implementingVariant
+                }
+        )
+
 /// Which method a virtual or interface call runs on a receiver of a known concrete type, as
 /// CoreCLR's `MethodTable::FindDispatchImpl` decides it: the receiver's dispatch table and
 /// MethodImpls, its dispatch map, default interface bodies, variance, and the SZ-array carve-out.
@@ -1437,30 +1565,17 @@ module ConcreteVirtualDispatch =
 
         match methodToCall with
         | MethodInfo.Metadata (_, facts, MethodVariant.AsyncVariant) ->
-            // CoreCLR gives the variant a slot of its own, which the variant of whatever overrides
-            // the ordinary sibling fills (`MethodTableBuilder`, methodtablebuilder.cpp); PawPrint's
-            // tables have no such slot, and take the same step from the ordinary sibling's.
-            let describe = $"%s{MethodOwner.describe methodToCall.Owner}::%s{methodToCall.Name}"
-
-            let declaringAssy =
-                state.LoadedAssembly methodToCall.DeclaringAssemblyFullName
-                |> Option.defaultWith (fun () ->
-                    failwith
-                        $"BUG: virtual dispatch of the async variant of %s{describe}, whose declaring assembly is not loaded"
-                )
-
             match
-                MethodConcretisation.concretizeMethodWithAllGenerics
+                AsyncVariantDispatch.ordinarySibling
                     loggerFactory
                     dotnetRuntimeDirs
                     baseClassTypes
-                    methodToCall.DeclaringTypeGenerics
-                    declaringAssy.Methods.[facts.Handle]
-                    methodToCall.Generics
+                    methodToCall
+                    facts
                     state
             with
             | state, Error failure -> state, Error failure
-            | state, Ok (ordinary, _) ->
+            | state, Ok ordinary ->
 
             match
                 tryResolveVirtualImplementationForSlot
@@ -1474,65 +1589,16 @@ module ConcreteVirtualDispatch =
                     state
             with
             | state, Error failure -> state, Error failure
-            | state, Ok (VirtualImplementation.Found found) ->
-                let implementing = found.Definition
-
-                let implementingAssy =
-                    state.LoadedAssembly implementing.DeclaringAssemblyFullName
-                    |> Option.defaultWith (fun () ->
-                        failwith
-                            $"BUG: dispatch of %s{describe} chose %O{implementing}, whose declaring assembly is not loaded"
-                    )
-
-                let assemblies, implementingVariant =
-                    RuntimeAsyncMethod.asyncVariantOf
-                        loggerFactory
-                        dotnetRuntimeDirs
-                        baseClassTypes.Corelib
-                        implementingAssy
-                        implementing
-                        state._LoadedAssemblies
-
-                let state =
-                    { state with
-                        _LoadedAssemblies = assemblies
-                    }
-
-                match implementingVariant with
-                | Error (AsyncVariantRefusal.ReturnTypeUnbound failure)
-                | Error (AsyncVariantRefusal.BaseTypeUnbound failure) -> state, Error failure
-                | Error refusal ->
-                    failwith
-                        $"TODO: dispatch of the async variant of %s{describe} on %O{dispatchTypeHandle} reaches %O{implementing}, which has no async variant (%A{refusal}). CoreCLR's builder fills that slot with the variant the override inherits, which PawPrint does not model (decision 19 of docs/plans/2026-11-11-runtime-async.md)"
-                | Ok implementingVariant ->
-
-                match
-                    MethodConcretisation.concretizeMethodWithAllGenerics
-                        loggerFactory
-                        dotnetRuntimeDirs
-                        baseClassTypes
-                        found.TypeGenerics
-                        implementingVariant
-                        found.MethodGenerics
-                        state
-                with
-                | state, Error failure -> state, Error failure
-                | state, Ok (concrete, _) ->
-
-                // The two return different values only where the override's promise type differs
-                // from its declaration's, as a covariant return (`Task<T>` for `Task`).
-                if concrete.Signature.ReturnType <> methodToCall.Signature.ReturnType then
-                    failwith
-                        $"TODO: dispatch of the async variant of %s{describe}, returning %O{methodToCall.Signature.ReturnType}, on %O{dispatchTypeHandle} reaches the async variant of %O{implementing}, returning %O{concrete.Signature.ReturnType}. CoreCLR's builder runs a return-dropping thunk there, which PawPrint does not model (decision 19 of docs/plans/2026-11-11-runtime-async.md)"
-
-                state,
-                Ok (
-                    VirtualImplementation.Found
-                        { found with
-                            Definition = implementingVariant
-                        }
-                )
-            | state, Ok other -> state, Ok other
+            | state, Ok found ->
+                AsyncVariantDispatch.ofSiblingImplementation
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    "virtual dispatch"
+                    methodToCall
+                    dispatchTypeHandle
+                    found
+                    state
         | MethodInfo.Metadata (_, _, MethodVariant.Ordinary)
         | MethodInfo.Synthesised _ ->
 

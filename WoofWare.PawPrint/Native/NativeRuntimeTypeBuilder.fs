@@ -15,6 +15,9 @@ module NativeRuntimeTypeBuilder =
     /// `mdtMethodDef`, the table byte of a `MethodDef` token.
     let private methodDefTable : int = 0x06
 
+    /// `mdtEvent`, the table byte of an `Event` token.
+    let private eventTable : int = 0x14
+
     /// `mdtParamDef`, the table byte of a `Param` token.
     let private paramTable : int = 0x08
 
@@ -418,6 +421,81 @@ module NativeRuntimeTypeBuilder =
                 ctx.Thread
             |> NativeHandlerResult.completed
             |> Some
+        | "TypeBuilder_DefineEvent",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.UInt16)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection", "EventAttributes", attributesGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty && attributesGenerics.IsEmpty
+            ->
+            let operation = "TypeBuilder_DefineEvent"
+
+            if instruction.Arguments.Length <> 5 then
+                failwith $"%s{operation}: expected five native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+
+            // `RegMeta::_DefineEvent` takes a TypeDef and nothing else; the managed caller passes its
+            // TypeBuilder's.
+            let owner =
+                let token = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+                if token >>> 24 &&& 0xFF <> typeDefTable then
+                    failwith
+                        $"%s{operation}: the parent 0x%08x{token} is not a TypeDef token, and the managed caller passes only its TypeBuilder's"
+
+                match EmitScope.tryTypeDefRid (token &&& 0x00FFFFFF) held with
+                | Some typeDef -> typeDef
+                | None -> failwith $"%s{operation}: the parent 0x%08x{token} names no TypeDef row of the module's scope"
+
+            // The QCall reads the name to its first NUL. `TypeBuilder.DefineEvent` refuses a null or empty
+            // name, and `DefineEventCore` one whose first character is NUL, before the QCall, so neither a
+            // null pointer nor an empty name can arrive from the managed caller.
+            let name =
+                match NativeCall.managedPointerOfPointerArgument operation "wszName" instruction.Arguments.[2] with
+                | ManagedPointerSource.Null ->
+                    failwith $"%s{operation}: a null event name; the managed caller has already read the name"
+                | namePtr -> NativeCall.readNullTerminatedUtf16 operation ctx.BaseClassTypes state namePtr
+
+            if name.Length = 0 then
+                failwith
+                    $"%s{operation}: an empty event name, which the managed caller refuses before the QCall; PawPrint misread the name"
+
+            let attributes = NativeCall.int32Argument operation instruction.Arguments.[3]
+
+            // The managed caller passes `GetTypeTokenInternal`'s token, a TypeSpec, a TypeDef of the module or
+            // a TypeRef, and never a nil one.
+            let eventType =
+                let token = NativeCall.int32Argument operation instruction.Arguments.[4]
+
+                match typeDefOrRef operation "the event type" token held with
+                | Some target -> target
+                | None ->
+                    failwith
+                        $"%s{operation}: the event type is the nil token 0x%08x{token}, but GetTypeTokenInternal hands out no nil token"
+
+            let ev, extended =
+                EmitScopeDefinitions.defineEvent owner name eventType attributes held
+
+            let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+            state
+            |> IlMachineState.pushToEvalStack
+                (CliType.Numeric (CliNumericType.Int32 ((eventTable <<< 24) ||| ev.Rid)))
+                ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
         | "TypeBuilder_DefineMethodSemantics",
           "System.Private.CoreLib",
           "System.Reflection.Emit",
@@ -442,8 +520,8 @@ module NativeRuntimeTypeBuilder =
 
             let held = dynamicScope operation moduleName state
 
-            // The managed callers pass their PropertyBuilder's token, or an EventBuilder's, which
-            // `TypeBuilder_DefineEvent`'s refusal means cannot exist yet.
+            // The managed callers pass their PropertyBuilder's token or their EventBuilder's, each the token
+            // its own module handed out.
             let associationToken = NativeCall.int32Argument operation instruction.Arguments.[1]
 
             let association =
@@ -454,9 +532,15 @@ module NativeRuntimeTypeBuilder =
                     | None ->
                         failwith
                             $"%s{operation}: the association 0x%08x{associationToken} names no Property row of the module's scope"
+                | table when table = eventTable ->
+                    match EmitScope.tryEventRid (associationToken &&& 0x00FFFFFF) held with
+                    | Some ev -> HasSemantics.Event ev
+                    | None ->
+                        failwith
+                            $"%s{operation}: the association 0x%08x{associationToken} names no Event row of the module's scope"
                 | _ ->
                     failwith
-                        $"%s{operation}: the association 0x%08x{associationToken} is not a Property token, and the managed callers pass only a PropertyBuilder's or an EventBuilder's, and no EventBuilder can exist while TypeBuilder_DefineEvent is refused"
+                        $"%s{operation}: the association 0x%08x{associationToken} is neither a Property nor an Event token, and the managed callers pass only a PropertyBuilder's or an EventBuilder's"
 
             // `_DefineMethodSemantics` takes the semantics as two bytes.
             let semantics =
@@ -483,7 +567,7 @@ module NativeRuntimeTypeBuilder =
                 | Some method -> method
                 | None ->
                     failwith
-                        $"TODO: %s{operation}: the accessor 0x%08x{token} of 0x%08x{associationToken} names no MethodDef row of %s{moduleName}, which has %d{(EmitScope.methodDefs held).Count}; CoreCLR stores the RID unchecked, and reflection over the property throws ArgumentOutOfRangeException unless a method defined later brings it into range. A MethodBuilder of another module, or a user-derived one, passes such a token"
+                        $"TODO: %s{operation}: the accessor 0x%08x{token} of 0x%08x{associationToken} names no MethodDef row of %s{moduleName}, which has %d{(EmitScope.methodDefs held).Count}; CoreCLR stores the RID unchecked, and reflection over the association throws ArgumentOutOfRangeException unless a method defined later brings it into range. A MethodBuilder of another module, or a user-derived one, passes such a token"
 
             let extended =
                 EmitScopeDefinitions.defineMethodSemantics association semantics method held

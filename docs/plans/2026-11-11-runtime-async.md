@@ -1111,11 +1111,50 @@ Each stage is one pull request, with its tests first.
     `ReadExactlyAsync`, will not do: no `Async` body lies under that await, and its trace is the
     same bound or not.
 
+    As built:
+    * The 2 instance-method sites are ASP.NET Core's `await using` of the `AsyncServiceScope`
+      struct (`ExceptionHandlerMiddlewareImpl.HandleException` and `StatusCodePagesExtensions`'
+      handler: `constrained. AsyncServiceScope callvirt IAsyncDisposable::DisposeAsync`, measured
+      on RC3). Both continue on the captured context, so neither can bind before 4f, and nothing
+      outside ASP.NET Core awaits an instance method through `constrained.`. Stage 4e therefore
+      binds the `constrained.` `call` of a static virtual method only; a `constrained.` `callvirt`
+      stays unbound (`AwaitNotYetBound.ConstrainedCallvirt`) until 4f, whose ASP.NET Core guest
+      reaches the value-type path.
+    * Decision 13's classification binds a `constrained.` `call`, whatever variant the named method
+      has, abstract included. `CallSiteBinding` resolves the bound variant through the prefix as
+      it resolves any static virtual method, and the call calls what that gives. A tail shape
+      whose call has the prefix names no exact callee for decision 17's `canTailCall` facts;
+      where the implementation the prefix resolves is flagged `RequireSecObject`, the call is
+      refused by name, since whether the JIT knows that callee exactly depends on code sharing.
+    * `StaticVirtualDispatch.resolve` takes decision 19's step: it resolves the ordinary sibling
+      and gives the variant of what that finds. The step is `AsyncVariantDispatch`, which
+      `ConcreteVirtualDispatch` now shares, with the two refusals of 4d.
+
+    The guest, `RuntimeAsyncConstrainedStaticAwait.cs`, run on real .NET 10 and 11 RC3 first:
+    `TarWriter.WriteEntryAsync` of an entry whose data stream cannot seek, whose read completes
+    with no data (the archive is the entry's 512-byte header), then of one whose read faults. Real
+    RC3's resumed frames are `<CopyToAsync>g__Core|30_0`, `WriteWithUnseekableDataStreamCoreAsync`,
+    `WriteEntryCoreAsync`, with an awaiter between the last two, since `WriteEntryCoreAsync`'s
+    await of its callee binds no variant. The guest checks the formatted trace, that the awaiter's
+    `GetResult` is the last hidden frame before `Core`, and that only the dispatcher's frames lie
+    between `Core` and `WriteWithUnseekableDataStreamCoreAsync`. With the classification leaving
+    every `constrained.` site unbound, as before the stage, PawPrint exits 14 on .NET 11. It
+    formats the trace with `new StackTrace(fault, false)`, as the guests of 4d do:
+    `Exception.StackTrace` is the string PawPrint rendered at the raise (`docs/divergences.md`,
+    "Rendered stack traces apply none of `StackTrace.ToString`'s display policy").
+
+    `TestAwaitSiteBinding` checks the classification against stage 4e's rule, and
+    `TestAsyncVariantDispatch` checks static virtual dispatch of variants: a MethodImpl on the
+    type, on its base, and on a struct, and a default body, inherited and reimplemented.
+
 13. **(4f) Awaits that continue on the captured context.** A matched site without
     `ConfigureAwait(false)` binds as the others do, and its continuation gets a continuation-context
     slot and `FinishSuspensionWithContinuationContext` (decision 18). With this the classification's
     third kind has no case left, and is deleted: every matched site binds unless CoreCLR's VM
-    supplies no variant there.
+    supplies no variant there. A `constrained.` `callvirt` binds too (from 4e): its receiver
+    transformation runs on the variant, whose implementation on a value type is the variant of
+    the value type's own implementation, or of what its box dispatches to. ASP.NET Core's two
+    `await using` sites of `AsyncServiceScope` reach the first.
 
     The guest first: `Parallel.ForEachAsync` over an `IAsyncEnumerable<T>` of the guest's, with
     `ParallelOptions.TaskScheduler` a scheduler of the guest's that counts what it is given, and a

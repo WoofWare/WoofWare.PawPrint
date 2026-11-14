@@ -586,38 +586,6 @@ module TestImpureCases =
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
             {
-                FileName = "DispatchProxyPropertyInterface.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, then a second proxy of the same type, measured on .NET 10 and 11 to exit 0. Its first four checks pass; the second `Create` (line 100) stops at "TODO: a dynamic method's Newobj names DynamicScope entry ... but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured by naming the case, after reflection over events). The proxy type's constructor is reflection-invoked a second time, and with dynamic code supported `MethodBaseInvoker` then emits an invoke stub whose `newobj` names the reflected constructor; nothing about events or properties is involved, and `ReflectionConstructorInvokeTwice.cs` pins the same stop. Un-parked by resolving a reflected constructor named by an invoke stub's `newobj`."""
-            {
-                FileName = "DispatchProxyEventInterface.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`DispatchProxy.Create` over an interface with an event of its own, extending an interface with a second, measured on .NET 10 and 11 to exit 0 (a control with check 3 inverted exits 3 on both). One proxy, so that a second `Create`'s reflected constructor cannot stand in front of the events. It stops defining the proxy type's events, at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineEvent)" (measured by naming the case, after reflection over events). Un-parked by `TypeBuilder_DefineEvent`."""
-            {
                 FileName = "DispatchProxyInternalInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -665,22 +633,6 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """PawPrint does not verify a dynamic type's MethodImpl rows at `CreateType`. Two `DefineMethodOverride` rows name one instance interface method, with different bodies; on real .NET 10 and 11, `CreateType` throws `TypeLoadException` ("Method 'B2' on type 'C' ... is overriding a method that has been overridden"), and the guest exits 0 (measured; a control with the second row removed exits 1). PawPrint creates the type and the guest exits 1, "CreateType threw nothing" (measured, on both runtimes). Un-parked by verifying the rows at `CreateType`."""
-            {
-                FileName = "ReflectionConstructorInvokeTwice.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`ConstructorInfo.Invoke` through one `ConstructorInfo` of the guest's own class, twice, measured on real .NET 10 and 11 to exit 0 (a control with check 6 inverted exits 6 on both). The first invocation runs through the runtime's invoker; the second runs the `InvokeStub_` dynamic method CoreLib emits (`InvokerEmitUtil`), whose body is `newobj` of the reflected constructor, and which on real .NET calls the constructor from the second invocation on (measured). PawPrint stops at the second invocation, on both runtimes, when it reads that stub's body: "a dynamic method's Newobj names DynamicScope entry ..., but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured). Un-parked by resolving a dynamic method's `newobj` of a reflected constructor."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
@@ -1872,6 +1824,7 @@ module TestImpureCases =
             let property =
                 match row.Association with
                 | HasSemantics.Property property -> property.Rid
+                | HasSemantics.Event ev -> failwith $"Props defines no event, but an accessor names Event %d{ev.Rid}"
 
             int row.Semantics, row.Method.Rid, property
         )
@@ -1895,11 +1848,96 @@ module TestImpureCases =
         let pe, reader = EmitScopeGen.readImage (EmitScopeImage.write scope)
         use _ = pe
 
-        EmitScopeGen.propertyMapRows pe reader
+        EmitScopeGen.mapRows pe reader System.Reflection.Metadata.Ecma335.TableIndex.PropertyMap
         |> shouldEqual [ 2, 1 ; 3, 8 ; 4, 9 ; 6, 10 ; 9, 11 ; 8, 12 ]
 
-        EmitScopeGen.propertyPtrRows pe reader
+        EmitScopeGen.pointerRows pe reader System.Reflection.Metadata.Ecma335.TableIndex.PropertyPtr
         |> shouldEqual (Some [ 1 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 2 ; 9 ; 10 ; 11 ; 12 ; 13 ; 14 ])
+
+    /// `TypeBuilderDefineEvent.cs` has defined events in modules `Ref`, `Flags`, `Inter` and `S11`, among
+    /// others. No API shows an Event row's event type, a dynamic module's EventMap or EventPtr, or the
+    /// MethodSemantics rows in the order added, so this checks them as the guest's measured tokens imply:
+    /// `Ref`'s Event rows, each with its owner (`A` is TypeDef 2, `G` 3 and `B` 4), name, flags and event type
+    /// (TypeRef 2 is `Action`, 5 `EventHandler`; each TypeSpec RID is the one the guest's TypeSpec probes
+    /// leave for it, the two `Action<int>` events sharing 10); `Flags`' flags column; `Inter`'s EventMap, in
+    /// first-event order (`B`, `A`, `C`, `E`), and the EventPtr that `A`'s interleaved events need; and
+    /// `S11`'s MethodSemantics rows, a property's and an event's of one RID interleaved.
+    let private assertEventRows (state : IlMachineState) : unit =
+        let scopeOf (name : string) =
+            state.TypeSystem._LoadedAssemblies.TryDynamicScope
+                $"%s{name}, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+            |> Option.defaultWith (fun () -> failwith $"the guest's dynamic assembly %s{name} is not loaded")
+
+        let rows (scope : EmitScope) =
+            EmitScope.events scope
+            |> Seq.map (fun row -> row.Owner.Rid, EmitScope.stringAt row.Name scope, int row.Flags, row.EventType)
+            |> List.ofSeq
+
+        let action = TypeDefOrRef.TypeRef (TypeRefRid 2)
+        let typeSpec (rid : int) = TypeDefOrRef.TypeSpec (TypeSpecRid rid)
+
+        rows (scopeOf "Ref")
+        |> shouldEqual
+            [
+                2, "E0", 0, action
+                2, "E1", 0, action
+                2, "a", 0, action
+                2, "ByRef", 0, typeSpec 2
+                2, "Ptr", 0, typeSpec 4
+                2, "Arr", 0, typeSpec 6
+                2, "Open", 0, typeSpec 8
+                2, "AI1", 0, typeSpec 10
+                2, "AI2", 0, typeSpec 10
+                3, "OfT", 0, typeSpec 12
+                2, "OfA", 0, TypeDefOrRef.TypeDef (TypeDefRid 2)
+                2, "OfG", 0, typeSpec 15
+                2, "EH", 0, TypeDefOrRef.TypeRef (TypeRefRid 5)
+                2, "E1", 0, action
+                2, "Acc", 0, action
+                4, "F", 0, action
+            ]
+
+        rows (scopeOf "Flags")
+        |> List.map (fun (_, _, flags, _) -> flags)
+        |> shouldEqual (
+            [ for i in 0..15 -> if i = 10 then 0 else 1 <<< i ]
+            @ List.replicate 16 0
+            @ [ 0 ; 0x0200 ; 0xFBFF ; 0xFBFE ; 0xFBFF ; 0x0200 ; 0 ; 0xFBFE ; 0xFBFF ]
+        )
+
+        let pe, reader = EmitScopeGen.readImage (EmitScopeImage.write (scopeOf "Inter"))
+        use _ = pe
+
+        EmitScopeGen.mapRows pe reader System.Reflection.Metadata.Ecma335.TableIndex.EventMap
+        |> shouldEqual [ 3, 1 ; 2, 3 ; 4, 7 ; 6, 10 ]
+
+        EmitScopeGen.pointerRows pe reader System.Reflection.Metadata.Ecma335.TableIndex.EventPtr
+        |> shouldEqual (Some [ 1 ; 5 ; 2 ; 4 ; 6 ; 8 ; 3 ; 7 ; 10 ; 9 ; 11 ])
+
+        EmitScope.methodSemantics (scopeOf "S11")
+        |> Seq.map (fun row ->
+            let association =
+                match row.Association with
+                | HasSemantics.Property property -> "Property", property.Rid
+                | HasSemantics.Event ev -> "Event", ev.Rid
+
+            int row.Semantics, row.Method.Rid, association
+        )
+        |> List.ofSeq
+        |> shouldEqual
+            [
+                2, 1, ("Property", 1)
+                8, 2, ("Event", 1)
+                4, 3, ("Property", 1)
+                16, 4, ("Event", 1)
+                4, 5, ("Event", 1)
+                1, 6, ("Property", 1)
+                8, 7, ("Event", 1)
+                2, 8, ("Property", 1)
+                4, 9, ("Event", 1)
+                32, 10, ("Event", 1)
+                32, 11, ("Event", 1)
+            ]
 
     /// A scope's Param rows in RID order, each its method's RID, its Sequence, its Flags and its name; and, from
     /// the image, the `ParamPtr` table, if it has one.
@@ -6535,6 +6573,79 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `ConstructorInfo.Invoke` of one constructor twice, so that the second runs the
+                // `InvokeStub_` dynamic method CoreLib emits, whose body is `newobj` of the reflected
+                // constructor. Dynamic-code switch overridden to true like its siblings; measured to exit 0
+                // on real .NET 10 and 11.
+                FileName = "ReflectionConstructorInvokeTwice.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // Each shape of constructor reflection invokes through that stub, three times each.
+                // Dynamic-code switch overridden to true like its siblings; measured to exit 0 on real
+                // .NET 10 and 11.
+                FileName = "ReflectionConstructorInvokeShapes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // A `newobj` in a `DynamicMethod`'s body naming a scope entry: reflected constructors,
+                // and each method the JIT refuses to construct with. Dynamic-code switch overridden to
+                // true like its siblings; measured to exit 0 on real .NET 10 and 11.
+                FileName = "DynamicMethodNewobj.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `DispatchProxy.Create` over an interface with a property, twice: the second `Create`
+                // invokes the proxy type's constructor through the invoke stub. Dynamic-code switch
+                // overridden to true like its siblings; measured to exit 0 on real .NET 10 and 11.
+                FileName = "DispatchProxyPropertyInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `RuntimeTypeHandle_IsVisible` of the dynamic-methods class, reached through CoreLib's
                 // internals by name, and of its array type. Dynamic-code switch overridden to true like the
                 // other `DynamicMethod` guests; measured to exit 0 on real .NET 10 and 11.
@@ -6608,6 +6719,46 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertPropertyRows
+            }
+            {
+                // `DispatchProxy.Create` over an interface with an event of its own, extending an interface
+                // with a second: `ProxyBuilder` defines an event on the proxy type for each. Dynamic-code
+                // switch overridden to true like its siblings; measured to exit 0 on real .NET 10 and 11 (a
+                // control with check 3 inverted exits 3 on both).
+                FileName = "DispatchProxyEventInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `TypeBuilder_DefineEvent` and the Event association of `TypeBuilder_DefineMethodSemantics`:
+                // events of several types, their accessors interleaved with a property's, modules either side
+                // of 25 MethodSemantics rows, and what reflection reads back; `assertEventRows` reads the rows
+                // no guest can see. Dynamic-code switch overridden
+                // to true like its siblings; measured to exit 0 on real .NET 10 and 11 (a control with check
+                // 3 inverted exits 3 on both).
+                FileName = "TypeBuilderDefineEvent.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertEventRows
             }
             {
                 // A property whose accessor is a method of another type of the module: reflection throws

@@ -7,15 +7,12 @@ using System.Reflection.Emit;
 // resolves each `catch` clause's type -- a `DynamicScope` index, not a metadata token -- when the
 // method is first prepared for execution, which is where CoreCLR's JIT resolves it.
 //
-// Two constraints shape every case, and both are about what a dynamic method body can reach
-// today rather than about exception handling. A dynamic method body cannot *construct* an exception --
-// `newobj` naming a reflected `ConstructorInfo` emits and mints, but PawPrint's decoder refuses
-// `newobj` in a dynamic body outright (measured; on real .NET this shape constructs the object) -- so
-// exception objects are passed in, and the signature is `(object, object) -> int`: `object` is one
-// of `SignatureHelper.IsSimpleType`'s types, so the signature needs no `ELEMENT_TYPE_INTERNAL`.
-// And a dynamic method body cannot touch a field, so a cleanup clause running on the *exceptional*
-// path has no local left to report through: it reports by throwing a *different* exception, which
-// the caller then sees instead of the original. That channel needs only `ldarg` and `throw`.
+// Exception objects are passed in rather than constructed in the body, so that each case is about
+// the regions alone, and the signature is `(object, object) -> int`: `object` is one of
+// `SignatureHelper.IsSimpleType`'s types, so the signature needs no `ELEMENT_TYPE_INTERNAL`. A
+// cleanup clause running on the *exceptional* path has no local left to report through, so it
+// reports by throwing a *different* exception, which the caller then sees instead of the original.
+// That channel needs only `ldarg` and `throw`.
 
 public class Program
 {
