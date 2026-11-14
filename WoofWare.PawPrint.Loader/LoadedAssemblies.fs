@@ -13,16 +13,33 @@ open System.Reflection.PortableExecutable
 open Microsoft.Extensions.Logging
 open Microsoft.FSharp.Core
 
+/// What the load context records about a type of a dynamic assembly when the runtime creates it.
+type private TypeCreation =
+    {
+        /// The number of `MethodImpl` rows the assembly's scope held then.
+        MethodImplRowsAtCreation : int
+    }
+
+/// <summary>
+/// The number of <c>MethodImpl</c> rows a dynamic assembly's scope held when one of its types was created, and
+/// holds now (<c>LoadedAssemblies.TryMethodImplRowCounts</c>).
+/// </summary>
+type MethodImplRowCounts =
+    {
+        AtCreation : int
+        Now : int
+    }
+
 /// <summary>
 /// What the load context holds for a dynamic assembly beyond its <c>DumpedAssembly</c>: the emit scope
-/// that assembly's image is written from, which of its types the runtime has created, and which loaded
-/// assembly each of its <c>AssemblyRef</c> rows was emitted for.
+/// that assembly's image is written from, which of its types the runtime has created and what was true
+/// when it did, and which loaded assembly each of its <c>AssemblyRef</c> rows was emitted for.
 /// </summary>
 [<NoEquality ; NoComparison>]
 type private DynamicAssemblyContent =
     {
         Scope : EmitScope
-        Created : ImmutableHashSet<TypeDefRid>
+        Created : ImmutableDictionary<TypeDefRid, TypeCreation>
         /// The definition identity of the assembly each recorded row names, as CoreCLR's module keeps
         /// it in its rid map (<c>ForceStoreAssemblyRef</c>).
         AssemblyRefTargets : ImmutableDictionary<AssemblyRefRid, string>
@@ -145,8 +162,39 @@ type LoadedAssemblies =
     /// </summary>
     member this.IsCreatedType (fullName : string) (typeDef : TypeDefRid) : bool =
         match this.Dynamic.TryGetValue fullName with
-        | true, content -> content.Created.Contains typeDef
+        | true, content -> content.Created.ContainsKey typeDef
         | false, _ -> false
+
+    /// <summary>
+    /// For a type of a dynamic assembly, the number of <c>MethodImpl</c> rows the assembly's scope held when
+    /// the runtime created the type, and holds now, read together so that neither can come from another
+    /// assembly. <c>None</c> if the type is not of a dynamic assembly.
+    /// </summary>
+    /// <remarks>Crashes if the assembly is dynamic and the type is not created.</remarks>
+    member this.TryMethodImplRowCounts (identity : ResolvedTypeIdentity) : MethodImplRowCounts option =
+        match this.Dynamic.TryGetValue identity.AssemblyFullName with
+        | false, _ -> None
+        | true, content ->
+            let rid = MetadataTokens.GetRowNumber identity.TypeDefinition.Get
+
+            let creation =
+                match EmitScope.tryTypeDefRid rid content.Scope with
+                | None -> None
+                | Some typeDef ->
+                    match content.Created.TryGetValue typeDef with
+                    | true, creation -> Some creation
+                    | false, _ -> None
+
+            match creation with
+            | Some creation ->
+                {
+                    AtCreation = creation.MethodImplRowsAtCreation
+                    Now = (EmitScope.methodImpls content.Scope).Count
+                }
+                |> Some
+            | None ->
+                failwith
+                    $"TryMethodImplRowCounts: TypeDef %d{rid} of the dynamic assembly %s{identity.AssemblyFullName} is not a created type of its scope, so nothing has read its rows"
 
     /// <summary>
     /// True if <paramref name="identity"/> is a type of a dynamic assembly that the runtime has not
@@ -160,7 +208,7 @@ type LoadedAssemblies =
             let rid = MetadataTokens.GetRowNumber identity.TypeDefinition.Get
 
             match EmitScope.tryTypeDefRid rid content.Scope with
-            | Some typeDef -> not (content.Created.Contains typeDef)
+            | Some typeDef -> not (content.Created.ContainsKey typeDef)
             | None ->
                 failwith
                     $"BUG: TypeDef %d{rid} of the dynamic assembly %s{identity.AssemblyFullName} is not in its scope, from which its image was written"
@@ -346,7 +394,7 @@ type LoadedAssemblies =
             let content : DynamicAssemblyContent =
                 {
                     Scope = scope
-                    Created = ImmutableHashSet.Empty
+                    Created = ImmutableDictionary.Empty
                     AssemblyRefTargets = ImmutableDictionary.Empty
                 }
 
@@ -380,7 +428,7 @@ type LoadedAssemblies =
         =
         let content = this.DynamicContent "WithEmitScope" fullName
 
-        match EmitScopeExtension.violations content.Created content.Scope scope with
+        match EmitScopeExtension.violations (ImmutableHashSet.CreateRange content.Created.Keys) content.Scope scope with
         | [] -> ()
         | violations ->
             let described = violations |> List.map string |> String.concat "; "
@@ -410,7 +458,8 @@ type LoadedAssemblies =
     /// <summary>
     /// Record that the runtime has created this type of the dynamic assembly with this definition
     /// identity, as CoreCLR's <c>TypeBuilder_TermCreateClass</c> does: from now on its members are
-    /// fixed, and <c>WithEmitScope</c> refuses a scope that changes them.
+    /// fixed, and <c>WithEmitScope</c> refuses a scope that changes them. The number of <c>MethodImpl</c>
+    /// rows the assembly's current scope holds is recorded with it (<c>TryMethodImplRowCounts</c>).
     /// </summary>
     /// <remarks>Crashes if the type is not in the assembly's scope, or is already created.</remarks>
     member this.WithCreatedType (fullName : string) (typeDef : TypeDefRid) : LoadedAssemblies =
@@ -420,15 +469,20 @@ type LoadedAssemblies =
             failwith
                 $"Refusing to create TypeDef %d{typeDef.Rid} of %s{fullName}: it is not in the scope, which has %d{(EmitScope.typeDefs content.Scope).Count} types"
 
-        if content.Created.Contains typeDef then
+        if content.Created.ContainsKey typeDef then
             failwith $"Refusing to create TypeDef %d{typeDef.Rid} of %s{fullName}: it is already created"
+
+        let creation : TypeCreation =
+            {
+                MethodImplRowsAtCreation = (EmitScope.methodImpls content.Scope).Count
+            }
 
         { this with
             Dynamic =
                 this.Dynamic.SetItem (
                     fullName,
                     { content with
-                        Created = content.Created.Add typeDef
+                        Created = content.Created.Add (typeDef, creation)
                     }
                 )
         }

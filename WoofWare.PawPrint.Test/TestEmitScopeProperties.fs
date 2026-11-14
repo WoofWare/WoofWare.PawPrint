@@ -236,6 +236,61 @@ module TestEmitScopeProperties =
         Assert.Throws<ArgumentException> (fun () -> ReadWriteMetadataLookup.rowsOfKey 1 [ 1 ; 2 ] |> ignore<int list>)
         |> ignore<ArgumentException>
 
+    [<Test>]
+    let ``a key's rows since creation have two orders only if the table crossed 25 rows after its owner was created``
+        ()
+        : unit
+        =
+        ReadWriteMetadataLookup.rowsOfKeySinceCreation 2 24 [ 1 ; 2 ]
+        |> shouldEqual (RowsSinceCreation.OneOrder [ 1 ; 2 ])
+
+        ReadWriteMetadataLookup.rowsOfKeySinceCreation 25 30 [ 1 ; 2 ]
+        |> shouldEqual (RowsSinceCreation.OneOrder [ 2 ; 1 ])
+
+        ReadWriteMetadataLookup.rowsOfKeySinceCreation 24 25 [ 1 ; 2 ]
+        |> shouldEqual (RowsSinceCreation.TwoOrders ([ 1 ; 2 ], [ 2 ; 1 ]))
+
+        let property (atCreation : int) (added : int) (matching : int list) : unit =
+            let matching = matching |> List.truncate atCreation
+            let now = atCreation + added
+
+            match ReadWriteMetadataLookup.rowsOfKeySinceCreation atCreation now matching with
+            | RowsSinceCreation.OneOrder order ->
+                (now < 25 || atCreation >= 25) |> shouldEqual true
+                order |> shouldEqual (ReadWriteMetadataLookup.rowsOfKey now matching)
+            | RowsSinceCreation.TwoOrders (inOrderAdded, reversed) ->
+                (atCreation < 25 && now >= 25) |> shouldEqual true
+                inOrderAdded |> shouldEqual matching
+                reversed |> shouldEqual (List.rev matching)
+
+        Check.One (
+            Config.QuickThrowOnFailure.WithMaxTest 500,
+            Prop.forAll
+                (Arb.fromGen (
+                    Gen.zip3 (Gen.choose (0, 60)) (Gen.choose (0, 30)) (Gen.listOf choice |> Gen.map List.ofSeq)
+                ))
+                (fun (atCreation, added, matching) -> property atCreation added matching)
+        )
+
+        // Rows are only added, and a key's rows all precede its owner's creation.
+        Assert.Throws<ArgumentException> (fun () ->
+            ReadWriteMetadataLookup.rowsOfKeySinceCreation 5 4 [ 1 ]
+            |> ignore<RowsSinceCreation<int>>
+        )
+        |> ignore<ArgumentException>
+
+        Assert.Throws<ArgumentException> (fun () ->
+            ReadWriteMetadataLookup.rowsOfKeySinceCreation -1 4 ([] : int list)
+            |> ignore<RowsSinceCreation<int>>
+        )
+        |> ignore<ArgumentException>
+
+        Assert.Throws<ArgumentException> (fun () ->
+            ReadWriteMetadataLookup.rowsOfKeySinceCreation 1 30 [ 1 ; 2 ]
+            |> ignore<RowsSinceCreation<int>>
+        )
+        |> ignore<ArgumentException>
+
     /// One call a schedule makes, on real .NET's `TypeBuilder` and on a scope alike.
     type private Call =
         /// `DefineProperty` on type `owner`, with these flags.

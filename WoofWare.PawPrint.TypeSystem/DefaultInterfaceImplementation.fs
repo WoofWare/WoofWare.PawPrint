@@ -15,12 +15,70 @@ module internal DefaultInterfaceImplementation =
 
     let private operation = "default interface body search"
 
+    /// The bodies a static virtual's MethodImpl rows on one type of a dynamic module give, where CoreCLR's answer
+    /// depends on when it read the rows: the type was created while its module had fewer than 25 MethodImpl rows,
+    /// the module has 25 or more now, and the rows give one body in the order added and another in reverse.
+    /// CoreCLR caches a resolution where it makes one, so a call site that resolved before the module reached 25
+    /// rows runs the first, and one that resolves now runs the second.
+    type internal OrderDependentBody =
+        {
+            /// The body the rows give in the order added, as a read before the module reached 25 rows found it.
+            InOrderAdded : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+            /// The body the rows give in reverse, as a read now finds it.
+            Now : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+            /// The name of the type whose rows these are.
+            Level : string
+            /// The definition identity of that type's module.
+            Module : string
+            /// The name of the method the rows implement.
+            Method : string
+            /// The module's MethodImpl row count when the type was created.
+            RowsAtCreation : int
+            /// The module's MethodImpl row count now.
+            RowsNow : int
+        }
+
+    /// The body a type's MethodImpl rows supply for a method.
+    [<RequireQualifiedAccess>]
+    type internal FoundBody =
+        /// The body every read of the rows finds.
+        | Certain of WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+        /// CoreCLR's answer depends on when it read the rows. Only a static method's rows give this.
+        | OrderDependent of OrderDependentBody
+
+    /// Refuse a call whose answer is an order-dependent body, naming the condition.
+    let internal refuseOrderDependent (body : OrderDependentBody) : 'a =
+        failwith
+            $"TODO: static virtual dispatch: the MethodImpl rows of %s{body.Level} that implement %s{body.Method} give %s{body.InOrderAdded.Name} in the order added and %s{body.Now.Name} in reverse; %s{body.Level} was created when its module %s{body.Module} had %d{body.RowsAtCreation} MethodImpl rows, and the module now has %d{body.RowsNow}. CoreCLR walks them in the order added below 25 rows and in reverse from 25, and caches a resolution where it makes one, so its answer depends on whether it resolved this call before the module reached 25 rows"
+
+    /// The body a call runs where `found` is the final answer: an order-dependent one is refused
+    /// (`refuseOrderDependent`).
+    let internal certainOrRefuse
+        (found : FoundBody)
+        : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+        =
+        match found with
+        | FoundBody.Certain body -> body
+        | FoundBody.OrderDependent body -> refuseOrderDependent body
+
     /// A default body `FindDefaultInterfaceImplementation` considers, and the interface supplying it.
     type internal Candidate =
         {
             Interface : ConcreteTypeHandle
-            Body : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+            Body : FoundBody
         }
+
+    /// The body of a candidate the search for an instance method found. The instance arm of
+    /// `implementationOnType` gives only certain bodies, so an order-dependent one here is a PawPrint fault.
+    let internal instanceCandidateBody
+        (candidate : Candidate)
+        : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+        =
+        match candidate.Body with
+        | FoundBody.Certain body -> body
+        | FoundBody.OrderDependent body ->
+            failwith
+                $"BUG: %s{operation}: an instance method's candidate on %s{body.Level} is order-dependent, but only a static method's MethodImpl rows are read in an order that can change"
 
     let internal sameDefinition (state : TypeSystemState) (a : ConcreteTypeHandle) (b : ConcreteTypeHandle) : bool =
         match TypeSystemState.tryGetConcreteTypeInfo state a, TypeSystemState.tryGetConcreteTypeInfo state b with
@@ -42,8 +100,13 @@ module internal DefaultInterfaceImplementation =
     /// it is the one CoreCLR's search meets first: for an instance method the first body in
     /// `level`'s method table, in slot order (the MethodImpl search of
     /// `TryGetCandidateImplementation`), and for a static method the body of the first such
-    /// MethodImpl row (`MethodTable::TryResolveVirtualStaticMethodOnThisType`). A type the search
-    /// reaches that does not bind is the failure.
+    /// MethodImpl row (`MethodTable::TryResolveVirtualStaticMethodOnThisType`) in the order CoreCLR
+    /// finds `level`'s rows: for a type of a dynamic module, `ReadWriteMetadataLookup.rowsOfKeySinceCreation`
+    /// over its module's MethodImpl row counts. Where that gives two orders whose first rows have
+    /// different bodies, CoreCLR's answer depends on its own caches, and this gives
+    /// `FoundBody.OrderDependent`: whether that decides the call is the caller's question, since a more
+    /// specific interface's body can displace it. Otherwise the body is `FoundBody.Certain`. A type the
+    /// search reaches that does not bind is the failure.
     let internal implementationOnType
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
@@ -53,11 +116,7 @@ module internal DefaultInterfaceImplementation =
         (statics : bool)
         (accepts : TypeSystemState -> ConcreteTypeHandle -> TypeSystemState * Result<bool, TypeBindingFailure>)
         (state : TypeSystemState)
-        : TypeSystemState *
-          Result<
-              WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> option,
-              TypeBindingFailure
-           >
+        : TypeSystemState * Result<FoundBody option, TypeBindingFailure>
         =
         match TypeSystemState.tryGetConcreteTypeInfo state level with
         | None -> state, Ok None
@@ -130,7 +189,55 @@ module internal DefaultInterfaceImplementation =
                     | state, Ok None -> first state rows
                     | found -> found
 
-            first state rows
+            let certain (state : TypeSystemState, found) =
+                state, found |> Result.map (Option.map FoundBody.Certain)
+
+            // `rows` is in image order, which for a type of a dynamic module is the order its rows were added.
+            // CoreCLR reads a dynamic module's rows from its read-write metadata, counted in the module of the
+            // type whose rows these are.
+            match state._LoadedAssemblies.TryMethodImplRowCounts levelTy.Identity with
+            | None -> first state rows |> certain
+            | Some counts ->
+
+            match ReadWriteMetadataLookup.rowsOfKeySinceCreation counts.AtCreation counts.Now rows with
+            | RowsSinceCreation.OneOrder rows -> first state rows |> certain
+            | RowsSinceCreation.TwoOrders (inOrderAdded, reversed) ->
+                match first state inOrderAdded with
+                | state, Error failure -> state, Error failure
+                | state, Ok earlier ->
+
+                match first state reversed with
+                | state, Error failure -> state, Error failure
+                | state, Ok now ->
+
+                let identity
+                    (body : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>)
+                    =
+                    body.DeclaringAssemblyFullName, body.IdentityKey
+
+                match earlier, now with
+                | Some earlier, Some now when identity earlier <> identity now ->
+                    let methodName =
+                        match method with
+                        | assemblyName, (Some (handle, _), _) ->
+                            match state.LoadedAssembly assemblyName with
+                            | Some declaring -> declaring.Methods.[handle].Name
+                            | None -> $"a method of %s{assemblyName}"
+                        | _, _ -> "a synthesised method"
+
+                    let dependent : OrderDependentBody =
+                        {
+                            InOrderAdded = earlier
+                            Now = now
+                            Level = levelTy.Name
+                            Module = levelTy.Identity.AssemblyFullName
+                            Method = methodName
+                            RowsAtCreation = counts.AtCreation
+                            RowsNow = counts.Now
+                        }
+
+                    state, Ok (Some (FoundBody.OrderDependent dependent))
+                | _, _ -> state, Ok (Option.map FoundBody.Certain now)
         else
             let state, bodies =
                 (state, [], rows)
@@ -172,7 +279,7 @@ module internal DefaultInterfaceImplementation =
                         failwith
                             $"%s{operation}: the MethodImpl body %s{body.Name} holds no slot in the method table of %s{levelTy.Name}, which declares it"
 
-                state, Ok (Some (List.minBy slotOf bodies))
+                state, Ok (Some (FoundBody.Certain (List.minBy slotOf bodies)))
 
     /// Whether `from` casts to `target`, which for two interfaces is identity or variance.
     let internal castsTo
@@ -208,7 +315,7 @@ module internal DefaultInterfaceImplementation =
                 Some
                     {
                         Interface = candidate
-                        Body = definitionOf state method
+                        Body = FoundBody.Certain (definitionOf state method)
                     }
 
         if candidate = target then
@@ -325,7 +432,9 @@ module internal DefaultInterfaceImplementation =
     ///
     /// The survivors are distinct interfaces, none of which casts to another except as variance
     /// allows; what more than one of them means is the caller's question. A survivor's body may be
-    /// abstract, which is a reabstraction.
+    /// abstract, which is a reabstraction. For a static method it may be `FoundBody.OrderDependent`:
+    /// which interfaces survive does not depend on the bodies, so a caller refuses such a candidate only
+    /// if its body is the call's answer.
     ///
     /// A type the search reaches that does not bind is the failure.
     let internal search

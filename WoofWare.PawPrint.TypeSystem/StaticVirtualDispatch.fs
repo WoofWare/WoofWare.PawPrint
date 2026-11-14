@@ -105,6 +105,12 @@ module StaticVirtualDispatch =
     /// method, as where `constrained` does not implement the interface at all. Never
     /// `NotOverridden`. `constrained` must be a type with a TypeDef row.
     ///
+    /// Fails with a TODO where the body the call runs is order-dependent
+    /// (`DefaultInterfaceImplementation.FoundBody.OrderDependent`): a MethodImpl of the chain, or the one
+    /// surviving default body, whose rows were read in an order that changed after their type was created.
+    /// CoreCLR's answer there depends on whether it resolved the call before the change. An order-dependent
+    /// body that a more specific one displaces, or that only takes part in a conflict, decides nothing.
+    ///
     /// A type the search reaches that does not bind is the failure, returned with what loaded before
     /// it.
     let resolve
@@ -177,7 +183,9 @@ module StaticVirtualDispatch =
                     state
             with
             | state, Error failure -> state, Error failure
-            | state, Ok (Some body) -> state, Ok (Some (found state level body))
+            // A MethodImpl of the chain decides the call, so an order-dependent body is its answer.
+            | state, Ok (Some body) ->
+                state, Ok (Some (found state level (DefaultInterfaceImplementation.certainOrRefuse body)))
             | state, Ok None ->
 
             let state, variant =
@@ -237,7 +245,9 @@ module StaticVirtualDispatch =
                                     state
                             with
                             | state, Error failure -> state, Error failure
-                            | state, Ok (Some body) -> state, Ok (Some (found state level body))
+                            | state, Ok (Some body) ->
+                                state,
+                                Ok (Some (found state level (DefaultInterfaceImplementation.certainOrRefuse body)))
                             | state, Ok None -> entries state rest
 
                 entries state map
@@ -268,16 +278,28 @@ module StaticVirtualDispatch =
             match defaultBody loggerFactory dotnetRuntimeDirs baseClassTypes allowVariance constrained method state with
             | state, Error failure -> state, Error failure
             | state, Ok (DefaultBody.Unique candidate) ->
-                match candidate.Body.Body with
-                | MethodBody.Abstract -> state, Ok (Some (VirtualImplementation.Reabstracted candidate.Body))
+                // The surviving candidate's body is the call's answer, so an order-dependent one is refused.
+                let body = DefaultInterfaceImplementation.certainOrRefuse candidate.Body
+
+                match body.Body with
+                | MethodBody.Abstract -> state, Ok (Some (VirtualImplementation.Reabstracted body))
                 | MethodBody.Il _
                 | MethodBody.AsyncIl _
                 | MethodBody.MissingIl
                 | MethodBody.InternalCall
                 | MethodBody.PInvoke
-                | MethodBody.RuntimeProvided _ -> state, Ok (Some (found state candidate.Interface candidate.Body))
+                | MethodBody.RuntimeProvided _ -> state, Ok (Some (found state candidate.Interface body))
             | state, Ok (DefaultBody.Conflict candidates) ->
-                state, Ok (Some (VirtualImplementation.Ambiguous (candidates |> List.map _.Body)))
+                // Which candidates conflict depends on their interfaces, not their bodies, so the call is
+                // ambiguous whatever an order-dependent candidate's rows give (measured on .NET 10 and 11, one
+                // and two such candidates). The bodies only name the conflict; an order-dependent candidate is
+                // named by the body a read now finds.
+                let named (candidate : DefaultInterfaceImplementation.Candidate) =
+                    match candidate.Body with
+                    | DefaultInterfaceImplementation.FoundBody.Certain body -> body
+                    | DefaultInterfaceImplementation.FoundBody.OrderDependent body -> body.Now
+
+                state, Ok (Some (VirtualImplementation.Ambiguous (candidates |> List.map named)))
             | state, Ok DefaultBody.NotFound -> state, Ok None
 
         match fromDefault state false with

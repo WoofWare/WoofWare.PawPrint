@@ -864,6 +864,87 @@ module TestLoadedAssemblies =
         | Some message -> message |> shouldContainText "AddedToCreatedType"
 
     [<Test>]
+    let ``a created type's MethodImpl row counts are its module's, at its creation and now`` () : unit =
+        let _, loggerFactory = LoggerFactory.makeTest ()
+        let first, scope = dynamicScope "Counted" |> withType "First"
+        let second, scope = withType "Second" scope
+        let scope = scope |> withMethod first |> withMethod second
+
+        let impl (owner : TypeDefRid) (body : int) (scope : EmitScope) : EmitScope =
+            EmitScope.addMethodImpl
+                {
+                    Class = owner
+                    Body = MethodDefOrRef.MethodDef (MethodDefRid body)
+                    Declaration = MethodDefOrRef.MethodDef (MethodDefRid body)
+                }
+                scope
+
+        let counts (loaded : LoadedAssemblies) (name : string) (typeDef : TypeDefRid) =
+            loaded.TryMethodImplRowCounts (
+                ResolvedTypeIdentity.ofDefinitionInAssembly name (MetadataTokens.TypeDefinitionHandle typeDef.Rid)
+            )
+
+        let scope = scope |> impl first 1 |> impl first 1
+        let loaded, dynamic = registerDynamic scope LoadedAssemblies.empty
+        let name = dynamic.DefinitionFullName
+        let loaded = loaded.WithCreatedType name first
+
+        counts loaded name first
+        |> shouldEqual (
+            Some
+                {
+                    AtCreation = 2
+                    Now = 2
+                }
+        )
+
+        let scope = scope |> impl second 2 |> impl second 2 |> impl second 2
+        let loaded, _ = loaded.WithEmitScope loggerFactory name scope
+        let loaded = loaded.WithCreatedType name second
+
+        counts loaded name first
+        |> shouldEqual (
+            Some
+                {
+                    AtCreation = 2
+                    Now = 5
+                }
+        )
+
+        counts loaded name second
+        |> shouldEqual (
+            Some
+                {
+                    AtCreation = 5
+                    Now = 5
+                }
+        )
+
+        // Another assembly's counts are not the dynamic one's, and an image on disk has none.
+        let other, otherScope = dynamicScope "Other" |> withType "Third"
+        let loaded, otherDynamic = registerDynamic otherScope loaded
+        let loaded = loaded.WithCreatedType otherDynamic.DefinitionFullName other
+
+        counts loaded otherDynamic.DefinitionFullName other
+        |> shouldEqual (
+            Some
+                {
+                    AtCreation = 0
+                    Now = 0
+                }
+        )
+
+        counts loaded "Elsewhere, Version=1.0.0.0" first |> shouldEqual None
+
+        // A type not yet created has been read by nothing.
+        let uncreated, extended = withType "Fourth" scope
+        let loaded, _ = loaded.WithEmitScope loggerFactory name extended
+
+        match thrownBy (fun () -> counts loaded name uncreated) with
+        | None -> Assert.Fail "Expected the counts of a type that is not created to be refused"
+        | Some message -> message |> shouldContainText "is not a created type"
+
+    [<Test>]
     let ``a type is created once, and only a type the scope has`` () : unit =
         let first, scope = dynamicScope "CreatedOnce" |> withType "First"
         let loaded, dynamic = registerDynamic scope LoadedAssemblies.empty
