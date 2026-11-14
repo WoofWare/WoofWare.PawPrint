@@ -17462,6 +17462,78 @@ public static class Runners
     /// (`TestFabricatedNewobjRefusals`), so these are not run here.
     let private newobjOfNonConstructors : string list = [ "NewNotCtor" ; "NewFake" ]
 
+    /// A driver for `fabricateNewobjRefusals`' image, whose `Main` calls each runner of
+    /// `EscapeNewobj.Runners` that its first argument's file names, one to a line, with `false` and
+    /// then `true`, and writes to its second argument's file a line for each call: the runner's
+    /// name, a tab, and `-` where the call returns, or the full name of what escaped it. It finds
+    /// the image by name alone, which binds because it lies beside the driver.
+    let private newobjDriverSource : string =
+        """
+public static class Driver
+{
+    public static void Main(string[] args)
+    {
+        var runners = System.Reflection.Assembly.Load("EscapeNewobj").GetType("EscapeNewobj.Runners", true);
+        using var writer = new System.IO.StreamWriter(args[1]);
+        foreach (var name in System.IO.File.ReadAllLines(args[0]))
+        {
+            foreach (var argument in new[] { false, true })
+            {
+                string outcome;
+                try { runners.GetMethod(name).Invoke(null, new object[] { argument }); outcome = "-"; }
+                catch (System.Reflection.TargetInvocationException e) { outcome = e.InnerException.GetType().FullName; }
+                writer.WriteLine(name + "\t" + outcome);
+            }
+        }
+    }
+}
+"""
+
+    /// The full name of what escapes each of `runners` of `fabricateNewobjRefusals`' `image`, called
+    /// with `false` and then with `true`, on the framework under test's real runtime, as its own
+    /// process, with `dependencyImage` as `EscapeNewobjDep` beside it; a call that returns adds
+    /// nothing.
+    let private newobjOnRealRuntime
+        (image : byte[])
+        (dependencyImage : byte[])
+        (runners : string list)
+        : Map<string, string list>
+        =
+        let driver =
+            Roslyn.compileAssembly "EscapeNewobjDriver" OutputKind.ConsoleApplication [] [ newobjDriverSource ]
+
+        let directory =
+            Path.Combine (Path.GetTempPath (), "pawprint-escape-newobj-" + Path.GetRandomFileName ())
+
+        Directory.CreateDirectory directory |> ignore<DirectoryInfo>
+
+        try
+            File.WriteAllBytes (Path.Combine (directory, "EscapeNewobj.dll"), image)
+            File.WriteAllBytes (Path.Combine (directory, "EscapeNewobjDep.dll"), dependencyImage)
+            let driverPath = Path.Combine (directory, "EscapeNewobjDriver.dll")
+            File.WriteAllBytes (driverPath, driver)
+            let requested = Path.Combine (directory, "runners.txt")
+            File.WriteAllLines (requested, runners)
+            let outcomes = Path.Combine (directory, "outcomes.txt")
+
+            match RealRuntime.executeAssemblyInPlace [| requested ; outcomes |] driverPath with
+            | RealRuntimeResult.NormalExit 0 -> ()
+            | other -> failwith $"the driver ended %A{other}"
+
+            File.ReadAllLines outcomes
+            |> Array.toList
+            |> List.map (fun line ->
+                match line.Split '\t' with
+                | [| name ; "-" |] -> name, None
+                | [| name ; escaped |] -> name, Some escaped
+                | _ -> failwith $"the driver wrote %s{line}"
+            )
+            |> List.groupBy fst
+            |> List.map (fun (name, calls) -> name, List.choose snd calls)
+            |> Map.ofList
+        finally
+            RealRuntime.deleteScratchTree directory
+
     [<Test>]
     let ``the JIT refuses a method whose newobj names what it will not construct, wherever it is`` () : unit =
         let _, loggerFactory = LoggerFactory.makeTest ()
@@ -17474,49 +17546,28 @@ public static class Runners
         let dependency =
             Assembly.read loggerFactory (Some "EscapeNewobjDep.dll") (new MemoryStream (dependencyImage))
 
-        // The fixture exercises what it claims to: the real runtime raises exactly that exception,
-        // for either argument, or none.
-        let context =
-            System.Runtime.Loader.AssemblyLoadContext ("EscapeNewobj", isCollectible = true)
-
-        context.add_Resolving (
-            Func<_, _, _> (fun (context : Runtime.Loader.AssemblyLoadContext) (name : AssemblyName) ->
-                match name.Name with
-                | "EscapeNewobjDep" -> context.LoadFromStream (new MemoryStream (dependencyImage))
-                | _ -> null
-            )
-        )
+        // The fixture exercises what it claims to: the real runtime under test raises exactly that
+        // exception, for either argument, or none.
+        let raisedOnRealRuntime =
+            newobjOnRealRuntime image dependencyImage (newobjRefusals |> List.map fst)
 
         let runtimeFailures =
-            try
-                let ty =
-                    context.LoadFromStream(new MemoryStream (image)).GetType "EscapeNewobj.Runners"
+            [
+                for name, refused in newobjRefusals do
+                    let expected =
+                        match refused with
+                        | Refusal.Raises refusal -> List.replicate 2 refusal
+                        | Refusal.Compiles -> []
+                        | Refusal.UnlessInlined _
+                        | Refusal.RaisesBesideBinding _ ->
+                            failwith $"%s{name}: no runner of this fixture is expected %A{refused}"
 
-                [
-                    for name, refused in newobjRefusals do
-                        let raised =
-                            [ false ; true ]
-                            |> List.choose (fun argument ->
-                                try
-                                    ty.GetMethod(name).Invoke ((null : obj), [| box argument |]) |> ignore<obj>
-                                    None
-                                with :? TargetInvocationException as e ->
-                                    Some (e.InnerException.GetType().FullName)
-                            )
-
-                        let expected =
-                            match refused with
-                            | Refusal.Raises refusal -> List.replicate 2 refusal
-                            | Refusal.Compiles -> []
-                            | Refusal.UnlessInlined _
-                            | Refusal.RaisesBesideBinding _ ->
-                                failwith $"%s{name}: no runner of this fixture is expected %A{refused}"
-
-                        if raised <> expected then
-                            yield $"%s{name}: the real runtime raised %A{raised}, not %A{expected}"
-                ]
-            finally
-                context.Unload ()
+                    match Map.tryFind name raisedOnRealRuntime with
+                    | None -> yield $"%s{name}: the driver did not run it"
+                    | Some raised when raised <> expected ->
+                        yield $"%s{name}: the real runtime raised %A{raised}, not %A{expected}"
+                    | Some _ -> ()
+            ]
 
         let refusalTypes =
             Set.ofList [ invalidProgram ; typeLoad ; badImageFormat ; invalidOperation ]
