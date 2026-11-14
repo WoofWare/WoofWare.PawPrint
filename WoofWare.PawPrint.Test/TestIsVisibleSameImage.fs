@@ -24,6 +24,7 @@ open WoofWare.PawPrint
 /// types and CoreLib's (instantiations, arrays, pointers, byrefs, generic parameters, function
 /// pointers) are drawn by FsCheck, each built on both sides from one tree.
 [<TestFixture>]
+[<Parallelizable(ParallelScope.All)>]
 module TestIsVisibleSameImage =
 
     /// The six nested visibilities, as a C# keyword and a short code for the type's name.
