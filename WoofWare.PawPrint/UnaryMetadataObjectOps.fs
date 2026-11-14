@@ -390,8 +390,9 @@ module internal UnaryMetadataObjectOps =
         : IlMachineState * WhatWeDid
         =
         // Asked here and not in `constructObject`, whose other caller, `UnsafeAccessorDispatch`,
-        // only ever finds constructors and refuses an abstract type itself. That check refuses an
-        // abstract value type too, which real .NET's accessor stub (a `newobj`) constructs.
+        // asks only `NewobjTarget.refusesAsAbstractClass`: its lookup also binds a `.ctor` without
+        // `RTSpecialName`, which real .NET's accessor stub (a `newobj`) constructs and `classify`
+        // would stop at.
         let ctorType =
             let assembly =
                 state.LoadedAssembly concretizedCtor.DeclaringAssemblyFullName
