@@ -554,7 +554,7 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """`DispatchProxy.Create` over an interface with methods only, measured on .NET 10 to exit 0. It stops before the proxy type is emitted: "Unimplemented native method (PInvokeImpl QCall!RuntimeTypeHandle_IsVisible)" (measured, on both runtimes). With that answered by a throwaway edit, it stops at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002", the interface's events; with both answered, it exits 0 (measured). Un-parked by implementing `RuntimeTypeHandle_IsVisible` and `MetadataImport.Enum` of a type's events."""
+            """`DispatchProxy.Create` over an interface with methods only, measured on .NET 10 to exit 0. It stops before the proxy type is emitted, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002", the interface's events (measured by naming the case, after `RuntimeTypeHandle_IsVisible`). With that answered by a throwaway edit, it exits 0 (measured). Un-parked by implementing `MetadataImport.Enum` of a type's events."""
             {
                 FileName = "DispatchProxyPropertyInterface.cs"
                 ExpectedReturnCode = 0
@@ -570,7 +570,23 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, measured on .NET 10 to exit 0. It stops first where `DispatchProxyMethodInterface.cs` does: "Unimplemented native method (PInvokeImpl QCall!RuntimeTypeHandle_IsVisible)" (measured, on both runtimes). With that and `MetadataImport.Enum` of the interface's events answered by throwaway edits, it stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineProperty)" (measured), as the proxy type redeclares the interface's property. Un-parked by those two and `TypeBuilder_DefineProperty`, with whatever the property's accessors then reach."""
+            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, measured on .NET 10 to exit 0. It stops where `DispatchProxyMethodInterface.cs` does, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002" (measured by naming the case, after `RuntimeTypeHandle_IsVisible`). With that answered by a throwaway edit, it exited 0 once `TypeBuilder_DefineProperty` was implemented (measured with stage 5s). Un-parked by implementing `MetadataImport.Enum` of a type's events."""
+            {
+                FileName = "DispatchProxyInternalInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`DispatchProxy.Create` over an internal interface, measured on .NET 10 and 11 to exit 0, with `IgnoresAccessChecksToAttribute` naming the guest's assembly on the proxy's assembly (a control with the interface made public exits 4 on both). `IsVisible` of the interface is false, so `DispatchProxy` defines that attribute and applies it, and stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute)" (measured by naming the case). Un-parked by custom attributes, with whatever then follows; check 4 is what tells a right answer of false from a wrong true once it runs."""
             {
                 FileName = "TypeBuilderDuplicateStaticVirtualOverride.cs"
                 ExpectedReturnCode = 0
@@ -6350,6 +6366,42 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertFieldRows
+            }
+            {
+                // `RuntimeTypeHandle_IsVisible` of a dynamic module's created types, and the managed
+                // walk of their `TypeBuilder`s. Dynamic-code switch overridden to true like its siblings;
+                // measured to exit 0 on real .NET 10 and 11.
+                FileName = "TypeBuilderIsVisible.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `RuntimeTypeHandle_IsVisible` of the dynamic-methods class, reached through CoreLib's
+                // internals by name, and of its array type. Dynamic-code switch overridden to true like the
+                // other `DynamicMethod` guests; measured to exit 0 on real .NET 10 and 11.
+                FileName = "DynamicMethodsClassIsVisible.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
             }
             {
                 // `TypeBuilder_DefineProperty` and `TypeBuilder_DefineMethodSemantics`: properties of several

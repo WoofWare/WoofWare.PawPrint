@@ -60,6 +60,7 @@
         <Compile Include="FriendAssemblies.fs" />
         <Compile Include="SequencePoint.fs" />
         <Compile Include="Assembly.fs" />
+        <Compile Include="TypeVisibility.fs" />
         <Compile Include="EmulatedRuntime.fs" />
         <Compile Include="BaseClassTypes.fs" />
         <Compile Include="AccessCheck.fs" />

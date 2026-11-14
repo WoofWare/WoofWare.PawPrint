@@ -153,8 +153,8 @@ type RuntimeTypeHandleTarget =
     /// `DynamicMethodTable`'s MethodTable, built by `CreateMinimalMethodTable`
     /// (coreclr/vm/methodtable.cpp:663, via `DynamicMethodTable::MakeMethodTable`,
     /// dynamicmethod.cpp:113). Parentless, `ELEMENT_TYPE_CLASS`, `OBJECT_BASESIZE`, and carrying no
-    /// metadata at all — no token, no name outside a debug build, no fields, no methods, no
-    /// attributes.
+    /// metadata at all — no token, no name outside a debug build, no fields, no methods — though its
+    /// class attributes are set, to `tdPublic | tdSealed` (methodtable.cpp:694).
     ///
     /// This is the *only* case here that no `ResolvedTypeIdentity` backs, and that is the point: it
     /// is a type the guest can be handed but no assembly declares. Standing the scope module's
@@ -276,8 +276,9 @@ module RuntimeTypeHandleTarget =
     /// Refuse a query that only metadata can answer, asked of the dynamic-methods class.
     ///
     /// CoreCLR's `CreateMinimalMethodTable` builds a MethodTable with no metadata behind it at all:
-    /// no token, no name outside a debug build, no fields, no methods, no attributes, no parent. So
-    /// there is no honest answer to give, and inventing one — most temptingly, borrowing the scope
+    /// no token, no name outside a debug build, no fields, no methods, no parent. (It does set the
+    /// class attributes, to `tdPublic | tdSealed`, which is all `isExternallyVisible` reads of it.) So
+    /// for a query that needs metadata there is no honest answer to give, and inventing one — most temptingly, borrowing the scope
     /// module's `&lt;Module&gt;` row — would put a real type's metadata behind a type that is not it.
     ///
     /// A guest reaching one of these is doing reflection over a `DynamicMethod`'s declaring type,
@@ -323,6 +324,48 @@ module RuntimeTypeHandleTarget =
         | Some identity ->
             loadedAssemblies.ByDefinitionName(identity.AssemblyFullName).TypeDefs.[identity.TypeDefinition.Get]
             |> LoadedTypeInfo.isByRefLike baseClassTypes loadedAssemblies
+
+    /// CoreCLR's `TypeHandle::IsExternallyVisible` (typehandle.cpp:991), which `Type.IsVisible` of a
+    /// `RuntimeType` asks through the `RuntimeTypeHandle_IsVisible` QCall: whether the target is visible
+    /// outside its assembly.
+    ///
+    /// A closed target is `ConcreteTypeVisibility.isExternallyVisible`. A type variable of either kind is
+    /// visible whatever its owner. A generic type definition is its TypeDef's visibility alone; an open
+    /// construction is its definition's and then each argument's, so an argument canonicalisation has
+    /// collapsed to a bare definition is answered as a definition. A shape asks its element, and a function
+    /// pointer its parameter and return types. The dynamic-methods class is visible: its MethodTable has no
+    /// metadata, but `CreateMinimalMethodTable` (methodtable.cpp:663) sets its class attributes to
+    /// `tdPublic | tdSealed`, and `IsTypeDefExternallyVisible` returns at `tdPublic`.
+    let rec isExternallyVisible
+        (loadedAssemblies : LoadedAssemblies)
+        (concreteTypes : AllConcreteTypes)
+        (target : RuntimeTypeHandleTarget)
+        : bool
+        =
+        let recurse = isExternallyVisible loadedAssemblies concreteTypes
+
+        let definitionVisible (identity : ResolvedTypeIdentity) : bool =
+            let assembly = loadedAssemblies.ByDefinitionName identity.AssemblyFullName
+
+            TypeVisibility.isTypeDefExternallyVisible assembly assembly.TypeDefs.[identity.TypeDefinition.Get]
+
+        match target with
+        | RuntimeTypeHandleTarget.Closed handle ->
+            ConcreteTypeVisibility.isExternallyVisible loadedAssemblies concreteTypes handle
+        | RuntimeTypeHandleTarget.GenericParameter _
+        | RuntimeTypeHandleTarget.MethodGenericParameter _ -> true
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity -> definitionVisible identity
+        | RuntimeTypeHandleTarget.OpenConstructed (identity, arguments) ->
+            definitionVisible identity && List.forall recurse arguments
+        | RuntimeTypeHandleTarget.DynamicMethodsClass _ -> true
+        | RuntimeTypeHandleTarget.Composite (_, element) -> recurse element
+        | RuntimeTypeHandleTarget.FunctionPointer signature ->
+            List.forall recurse signature.ParameterTypes
+            && (
+                match signature.ReturnType with
+                | MethodReturnType.Void -> true
+                | MethodReturnType.Returns returnType -> recurse returnType
+            )
 
     /// Is this target the definition <paramref name="definition"/> applied to exactly its own
     /// formal parameters, in declaration order? CoreCLR calls that the *typical instantiation*,

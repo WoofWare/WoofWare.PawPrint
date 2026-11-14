@@ -278,6 +278,47 @@ module NativeRuntimeTypeQCall =
                     $"%s{operation}: the loader allocator reports collectible, so the assembly must now be checked and the dependency recorded (runtimehandles.cpp:1257-1266)"
 
             NativeHandlerResult.completed state |> Some
+        // The method name is deliberately not matched: CoreLib declares `_IsVisible` with
+        // `[LibraryImport(..., EntryPoint = "RuntimeTypeHandle_IsVisible")]`, so the method executing is
+        // the generated stub (`<_IsVisible>g____PInvoke|82_0`), whose counters drift between SDKs. The
+        // entry point, declaring type and signature disambiguate it. The stub returns the raw `Int32`
+        // and does the `!= 0` itself.
+        | "RuntimeTypeHandle_IsVisible",
+          "System.Private.CoreLib",
+          "System",
+          "RuntimeTypeHandle",
+          _,
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        qCallGenerics) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            qCallGenerics.IsEmpty
+            ->
+            let operation = "RuntimeTypeHandle_IsVisible"
+
+            if instruction.Arguments.Length <> 1 then
+                failwith $"%s{operation}: expected one native argument, got %d{instruction.Arguments.Length}"
+
+            // `RuntimeTypeHandle_IsVisible` (runtimehandles.cpp:709) is
+            // `TypeHandle::IsExternallyVisible()` and nothing else.
+            let target =
+                instruction.Arguments.[0]
+                |> EvalStackValue.ofCliType
+                |> NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state
+
+            let visible =
+                RuntimeTypeHandleTarget.isExternallyVisible
+                    state.TypeSystem._LoadedAssemblies
+                    state.TypeSystem.ConcreteTypes
+                    target
+
+            let state =
+                IlMachineState.pushToEvalStack
+                    (CliType.Numeric (CliNumericType.Int32 (if visible then 1 else 0)))
+                    ctx.Thread
+                    state
+
+            NativeHandlerResult.completed state |> Some
         | "RuntimeTypeHandle_IsCollectible",
           "System.Private.CoreLib",
           "System",
