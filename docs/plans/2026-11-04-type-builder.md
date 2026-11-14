@@ -5683,3 +5683,117 @@ Taken 2026-11-14.
     The scope admits it, as CoreCLR's table does; no managed caller writes one.
   * The four guards above are assertions about the managed callers. A test that drives a handler with arguments
     which no caller passes would be their check; no fixture does that for the emit QCalls today.
+
+### 5w: as built
+
+Built 2026-11-14 as decided above, in the decisions' order: the guests measured, then the tests that compile today
+(`b7816ee89`), then the smallest Domain surface with the Domain tests (`840f161ba`), then Domain (`600a2baeb`), then the
+handlers (`dd131b3dd`). Probes, logs and the mutation harness are in scratchpad `5w-impl`.
+
+Each guest was built against net10.0, run on 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148, and run under the
+Debug App at the handlers' commit (which runs on the host's .NET 10), each with a control inverting check 3:
+
+| Guest | .NET 10.0.14 | .NET 11.0.0-rc.3 | PawPrint | Control (check 3 inverted): .NET 10, .NET 11, PawPrint |
+|---|---|---|---|---|
+| `sourcesImpure/TypeBuilderDefineEvent.cs` (47 checks) | 0 | 0 | 0 | 3, 3, 3 |
+| `sourcesImpure/DispatchProxyEventInterface.cs` (8 checks) | 0 | 0 | 0 | 3, 3, 3 |
+
+Both pass as registered tests with `PAWPRINT_TEST_RUNTIME` unset and `Net11`, the terminal-state check included.
+
+* Domain (`WoofWare.PawPrint.Domain/EmitScope.fs`, `EmitScopeDefinitions.fs`, `EmitScopeImage.fs`): `EventRid` with an
+  `internal` constructor and `tryEventRid`; `EventRow` (owner, flags, name, and `EventType`, a `TypeDefOrRef`);
+  `HasSemantics.Event`, coded `rid <<< 1`; `addEvent`, which requires the owner, the name and the event type to exist and
+  the flags to fit two bytes; `events`; and `defineEvent`, which stores 0 for `-1` and otherwise the low sixteen bits
+  without `evReservedMask` (0x0400), with no search. The writer's map derivation is renamed `ownerMaps` and serves both
+  kinds; EventMap, EventPtr and Event are written between StandAloneSig and PropertyMap. The `Sorted` bit for
+  MethodSemantics stays clear.
+* Loader (`EmitScopeExtension.fs`): the earlier scope's Event rows are compared, an Event row of a created type is
+  refused, and an accessor row keys on its event's owner.
+* Interpreter (`Native/NativeRuntimeTypeBuilder.fs`, `Native/NativeQCall.fs`): `TypeBuilder_DefineEvent`, with the four
+  guards the decisions name as PawPrint faults; the Event arm of `TypeBuilder_DefineMethodSemantics`; the accessor
+  refusal's message says "association".
+* Tests: `TypeBuilderDefineEvent.cs` and its terminal-state check `assertEventRows` (`Ref`'s 16 Event rows, `Flags`' 41
+  flags, `Inter`'s EventMap `(3,1) (2,3) (4,7) (6,10)` and EventPtr `1 5 2 4 6 8 3 7 10 9 11`, `S11`'s eleven
+  MethodSemantics rows); `DispatchProxyEventInterface.cs` registered as passing; the `Wild2` refusal in
+  `TestTypeBuilderPropertyRefusals`; `TestEmitScopeEvents` (the Domain models, the probe's 41 measured flag values, and
+  `addEvent`'s refusals); events in `EmitScopeGen`, the image round trip, `Assembly.read`'s `TypeInfo.Events`, the
+  extension tests and the differential property.
+* Red at `b7816ee89`: both guests failed with "GuestFailureException : Unimplemented native method (PInvokeImpl
+  QCall!TypeBuilder_DefineEvent)", and the event refusal test with `Expected: String containing "TODO:
+  TypeBuilder_DefineMethodSemantics"` but that message. Red at `840f161ba`: of the 65 tests in `TestEmitScopeEvents`,
+  `TestEmitScopeProperties`, `TestEmitScopeImage`, `TestEmitScopeExtension` and `TestTypeBuilderPropertyRefusals`, 35
+  failed: 22 at "TODO: EmitScope.events: the scope holds no Event table yet", 8 at "TODO:
+  EmitScopeDefinitions.defineEvent", 4 at "TODO: EmitScope.addEvent of TypeDef ...", and the event refusal test at the
+  unimplemented QCall. The guests still stopped there; `TypeBuilderDefineProperty.cs` passed.
+* The differential property's fixed sample (150 cases) reached: a property with two rows of one semantics from 25 rows
+  70 times and below 25 rows 42 times; the same for an event 70 and 44 times; a PropertyPtr 42 times; an EventPtr 47
+  times; a property and an event of one RID each with a row 114 times; a repeated event name 79 times; flags of `-1` 75
+  times; an event with no accessor 81 times. Each is asserted above 20.
+* Mutants, each built fresh after the work was committed and run against the three `TypeBuilderDefine*`/`DispatchProxy`
+  guests (`TypeBuilderDefineEvent.cs`, `DispatchProxyEventInterface.cs`, `TypeBuilderDefineProperty.cs`) and the 65 tests
+  of the five fixtures above. A guest's number is the exit code of `TypeBuilderDefineEvent.cs`, its first failing check;
+  "round trip" is "every row reads back at the RID the scope gave it", "differential" the differential property, "Domain
+  model" `TestEmitScopeEvents`:
+
+  | Mutant | Killed by |
+  |---|---|
+  | The event's RID off by one in the handler | both guests (the accessor call names no Event row); the refusal test |
+  | The token's table byte `0x17` | both guests (the accessor call names no Property row); the refusal test |
+  | The property's mask `0xF400` applied to events | the guest (28, `Flags`); the Domain model and the 41 measured values; the differential |
+  | `RTSpecialName` kept | the same three |
+  | `-1` masked rather than zeroed | the same three |
+  | The high sixteen bits kept | the guest (`addEvent` refuses flags 0x10000); the same unit tests |
+  | A search for an existing event | the guest (18, the duplicate `E1`); the Domain model; the differential |
+  | The EventPtr omitted | the guest (20); the round trip; `Assembly.read`; the differential |
+  | The EventMap in TypeDef order | the terminal-state check (`Inter`'s map rows); the round trip's replay. The guest's checks, and the differential, survive it, as the stage expected |
+  | The EventPtr keyed on the owner's TypeDef RID | the guest (30, `Inter`); the round trip; `Assembly.read`; the differential; the generated extension property |
+  | `HasSemantics.Event` coded with tag 1 | both guests (21); the extension tests (the moved rows; the generated property); the differential; the Domain accessor model |
+  | The MethodSemantics sort on the RID, the tag dropped (5s's survivor) | the guest (SRM: "Metadata table MethodSemantics not sorted"); the round trip; the differential; the extension tests |
+  | The 25-row count taken over one kind's rows alone | the guest (33, `S25`) alone: the differential applies `rowsOfKey` to the whole table itself |
+  | An event's add and remove swapped | both guests (21, `Acc`); no unit test, since no unit test runs the handler |
+  | An event's raise written as Other | the guest (31, `S11`) alone |
+  | The EventType column written nil | the round trip and the index-width round trips alone: no reflection reads the column |
+  | The EventType column with a TypeSpec's tag written as a TypeRef's | the round trip alone |
+  | The Event arm checking the RID against the Property table but building an Event association | both guests, at `Ref`'s first accessor call, since `Ref` has no property; the refusal test |
+  | The Event arm building a Property association | the same, for the same reason: `Ref` fails before `S11` is reached |
+  | `associationOwner` reading an Event RID from the Property table | both guests (index out of range); the generated extension property; the history property |
+  | The extension check not refusing an Event row of a created type | `TestEmitScopeExtension` alone ("an event added to a created type is refused"; the generated property), since the managed caller refuses first |
+  | `DefineEvent`'s extended scope not kept | both guests (7); the refusal test |
+  | `-1` recognised on the low sixteen bits alone | the guest (28); the Domain model and the 41 measured values; the differential |
+  | The EventMap derived from the properties' owners | all three guests; the round trip; `Assembly.read`; the differential |
+  | The extension rule no longer comparing the earlier scope's Event rows | `TestEmitScopeExtension` alone ("a changed event is reported at its RID"; the history property) |
+  | The extension rule keyed on the accessor's owner for an event | the guest (`Foreign`: "AddedToCreatedType (MethodSemantics, 1, TypeDefRid 3)"); `TestEmitScopeExtension` |
+  | The handler reading a TypeSpec token as a TypeRef | the guest (the handler's refusal: "the event type 0x01000004 names no row") |
+  | The refusal of an empty name removed | survives: no managed caller passes one |
+  | The refusal of a null name pointer removed | survives, for the same reason |
+  | The refusal of a nil event type removed | survives: `GetTypeTokenInternal` hands out no nil token |
+  | The refusal of a parent that is not a TypeDef removed | survives: the managed caller passes only its TypeBuilder's |
+  | `addEvent` not checking the event type (beyond the decisions) | the Domain model's refusal test alone |
+  | `addEvent` not checking the flags' width (beyond the decisions) | the same |
+
+  No mutant with a named killer survived, so no test was strengthened after the battery.
+* Suites, built from the whole solution at `dd131b3dd` in a detached worktree while the mutants ran here (the later
+  commit changes only this plan), each run on its own: the default suite (5623 passed, 37 skipped), `Guest` (234),
+  `GuestSolo` (2), `GuestPure` (1185) and `GuestImpure` (283), all passing; both 5w guests under
+  `PAWPRINT_TEST_RUNTIME=Net11` (2), passing.
+* Deviations from the decisions, and findings:
+  * `assertEventRows` is in the second commit, not the first: it reads `EmitScope.events` and `HasSemantics.Event`,
+    which do not compile before the Domain surface exists. The guest itself, registered, is in the first.
+  * The Domain surface of the second commit also has `EmitScope.events` and `tryEventRid`, failing by name, beyond the
+    decisions' list, because the tests read them; and the Event arms of `addMethodSemantics` and of the extension rule's
+    `associationOwner`, failing by name, because a match without them does not compile.
+  * `EmitScopeGen` gained `MethodSemanticsRun`, several accessors of one association at once, in the Domain commit: with
+    single rows none of the 200 fixed-sample scopes reached 25 MethodSemantics rows with an event given two adds, which
+    the round trip's coverage asserts. The coverage assertion itself is as first committed.
+  * "A type with events created before a later type gets its first" is asserted in the round trip's fixed sample as a
+    type defined after the module's first event that then gets events of its own, since a scope has no notion of a
+    created type; the guest's `Inter` (events on `E`, defined after `B` is created) is the case with creation.
+  * The mutant "the name read past the first NUL" was not built. The handler gets no length, and the shared
+    `readNullTerminatedUtf16` stops at the first NUL by construction; a mutant reading past it would read past every
+    name's terminator, so it could not single out `a\0b`.
+  * The two `tryPropertyRid` mutants are both killed at `Ref`'s first accessor, not at `S11` as the decisions expected
+    for the second: `Ref` has no property, so the Property check fails before an association of either kind is built.
+  * `EmitScopeExtensionViolation`'s remarks needed no change: they already speak of an association, not a property. Only
+    one of the three accessor refusals said "reflection over the property"; it now says "association".
+  * `describeRows` (`EmitScopeGen`) reads Event rows, so the history property checks them; Property rows it does not
+    read, as before.
