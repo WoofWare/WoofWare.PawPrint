@@ -3962,3 +3962,97 @@ Taken 2026-11-14.
     join the two rules.
   * Whether the events stage is 5v here or a plan of its own.
   * The internal-interface guest's un-parking by custom attributes, with the check that separates the two answers.
+
+### 5u: as built
+
+Built 2026-11-14 as decided above, after the measurements the decisions asked for (throwaway probe `5u-probe3`, and
+`5u-probe2` rerun with no argument), each the same on .NET 10.0.14 and 11.0.0-rc.3:
+
+| Emitted or asked | Observed |
+|---|---|
+| `typeof(PubG<>).MakeGenericType(typeof(PubG<>))`; the same over `InternalG<>` | true; false |
+| `DispatchProxy.Create` over an internal interface: `GetCustomAttributesData` of the proxy's assembly | `IgnoresAccessChecksToAttribute` with the caller's assembly name; over a public interface, none (the guest's control exits 4) |
+| under PawPrint before the handler: `MakeArrayType` over the dynamic-methods class | runs, and its element is the class; `IsVisible` of either then reaches the unimplemented QCall |
+| the dynamic-methods class's `Name` | `(dynamicClass)` |
+
+* `TypeVisibility` (WoofWare.PawPrint.Domain/TypeVisibility.fs): `isChainExternallyVisible`, the rule over a chain of
+  visibilities, innermost first; `nestingChain`, which gathers it through `DeclaringType` and fails, naming the type, on
+  an absent encloser or a chain longer than the assembly has TypeDefs; and `isTypeDefExternallyVisible`, the two
+  composed.
+* `ConcreteTypeVisibility.isExternallyVisible` (WoofWare.PawPrint.TypeSystem/ConcreteTypeVisibility.fs, after
+  `ContinuationSlots.fs`), over a `ConcreteTypeHandle`, with a continuation failing through `ContinuationType.unasked`.
+* `RuntimeTypeHandleTarget.isExternallyVisible` (ManagedPointerSource.fs, beside `isByRefLike`), taking the loaded
+  assemblies and concrete types; `isByRefLike`'s `BaseClassTypes` parameter is not taken, since nothing here reads it.
+  The two docstrings that called the dynamic-methods class attribute-less now say its attributes are set.
+* The handler in `NativeRuntimeTypeQCall` matches the entry point, declaring type and signature, with the method name
+  unmatched (the generated stub's), and pushes the `Int32`; it is registered in `NativeQCall`.
+* Tests, committed first with the three functions as stubs that fail, so that the commit builds. Red: 11 of the 13 unit
+  tests failed (at the stubs, and the property at its first case), and `TypeIsVisible.cs`, `TypeBuilderIsVisible.cs` and
+  `DynamicMethodsClassIsVisible.cs` stopped at "Unimplemented native method (PInvokeImpl
+  QCall!RuntimeTypeHandle_IsVisible)". The two that passed are the fixture's census and the check that every
+  instantiated definition is unconstrained.
+  * `TypeIsVisible.cs` (68 checks) and the two impure guests exit 0 on .NET 10 and 11, and a control of `TypeIsVisible.cs`
+    with check 40 inverted exits 40 on both.
+  * `TestTypeVisibility`: the chain rule against its model over all 37,448 chains of one to five levels (five are
+    visible), with and without non-visibility bits set; a gathered chain; the two refusals.
+  * `TestIsVisibleSameImage`: the CoreLib sweep in its two parts, over all 2,647 TypeDefs of the host's .NET 10.0.14
+    CoreLib except `<Module>`, which the host's `Module.ResolveType` refuses to name (the count is asserted against the
+    image's TypeDef table). Concretisation refused none of the 2,646, so the refusal list asserted is empty and the
+    closed-handle sweep stays exhaustive; its peak memory is in the suite results below. The fixture's 518 chain types,
+    its generic forest and its construction pool, each through the rule and the walk. The FsCheck property over drawn
+    constructions, 300 fixed cases and 300 fresh, with every label reached at least 15 times in the fixed sample (the
+    least, 25). The dynamic-methods class and its array, built directly.
+  * After the first green run, the generator gained a fixed opening for the rarest label (4 hits in 300), and, after the
+    first mutant run, visible nominals drawn as often as the whole pool and closed void-returning function pointers,
+    with two more labels: `closed-args-alone` and `void-false` below had survived the property and died only to the
+    pure guest.
+* The parked cases, measured by naming them once the handler existed: `DispatchProxyMethodInterface.cs` and
+  `DispatchProxyPropertyInterface.cs` stop at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with
+  parent 0x02000002", and `DispatchProxyInternalInterface.cs` at "Unimplemented native method (PInvokeImpl
+  QCall!TypeBuilder_DefineCustomAttribute)". Their reasons say so.
+* The `FnHolder<>` finding is broader than function pointers: PawPrint refuses any field of an open generic type
+  definition whose type mentions the definition's parameters, a plain `public T Plain;` included, with the same
+  `Signature.Init` message, because `runtimeTypeForField` (`NativeSignature.fs`) reads such a field with no type
+  arguments in scope. #2243 parks it as `sourcesPure/FieldTypeOfGenericDefinition.cs` (a plain `T` field, a `List<T>`
+  field and the function pointer). The item in "left to later stages" means the general fix: reading a field of a
+  generic definition in the definition's own context.
+* Mutants, each built fresh and run against the three guests and every unit test above, after the generator's last
+  change. The pure guest's exit code is the number of its first failing check. "P" is the property, "CD" and "CW" the
+  CoreLib sweeps of the rule and the walk, "F" the fixture's, "M" the chain model, "K" the masked chains, "C" the gathered
+  chain, "D" the dynamic-methods class's unit test:
+
+  | Mutant | Killed by |
+  |---|---|
+  | `NestedPrivate` treated as `NestedPublic` | pure guest (24); P, CD, CW, F, M, K |
+  | `NestedFamily` treated as `NestedPublic` | pure guest (17); F, M, K, C. No CoreLib type's chain is visible but for a family level |
+  | `NestedAssembly` treated as `NestedPublic` | pure guest (20); P, CD, CW, F, M, K |
+  | `NestedFamANDAssem` treated as `NestedPublic` | pure guest (23); P, CD, CW, F, M, K |
+  | `NestedFamORAssem` treated as `NestedPublic` | pure guest (22); P, CD, CW, F, M, K |
+  | the walk stopping at the immediate encloser, asking whether it is `Public` | pure guest (16); P, CD, CW, F, M, K |
+  | `NestedPublic` accepted without the walk | pure guest (19); P, CD, CW, F, M, K |
+  | a top-level `NotPublic` type answered true | pure guest (2); `TypeBuilderIsVisible.cs` (4); P, CD, CW, F, M, K |
+  | a closed instantiation's arguments not checked | pure guest (28); `TypeBuilderIsVisible.cs` (8); P |
+  | the argument check one level deep only | pure guest (29); P |
+  | a closed instantiation answered by its arguments alone | pure guest (31); P |
+  | an array answered by `System.Array`'s TypeDef rather than its element | pure guest (30); P |
+  | a closed byref answered true without its element | pure guest (62); P |
+  | a closed pointer answered true without its element | pure guest (60); P |
+  | a closed function pointer's return type skipped | pure guest (65); P |
+  | a closed function pointer's parameters skipped | pure guest (64); P |
+  | a `void` return answered false | pure guest (63); P |
+  | a dynamic module's created type answered true | `TypeBuilderIsVisible.cs` (4) alone: nothing else reads a dynamic module |
+  | a generic parameter answered by its owner's visibility | pure guest (42); P |
+  | an open function pointer answered true without its types | pure guest (68); P |
+  | an open construction's arguments skipped | pure guest (40); P |
+  | an open construction answered by its arguments alone | pure guest (45); P |
+  | a `Composite` answered true without its element | pure guest (52); P |
+  | the dynamic-methods class answered false | `DynamicMethodsClassIsVisible.cs` (2); D |
+  | the handler pushing the inverted answer | pure guest (1); `TypeBuilderIsVisible.cs` (3); `DynamicMethodsClassIsVisible.cs` (2) |
+
+  In the first run, against the earlier generator, `NestedFamily` was killed by the property too, and the property did
+  not kill `closed-args-alone` or `void-false`; every other row was as above.
+* Suites at the tip, built from the whole solution, each run on its own: `Guest` (234), `GuestSolo` (2), `GuestPure`
+  (1180) and `GuestImpure` (278), all passing. The default suite first failed one test, "every fixture declares whether
+  it runs in parallel", which named `TestIsVisibleSameImage`; with that declared, it passed (5583 passed, 37 skipped).
+  `TestIsVisibleSameImage` alone peaks at 1.3 GB resident (`/usr/bin/time -l`), well under the 8 GiB cap, so the
+  closed-handle sweep of CoreLib stays exhaustive.
