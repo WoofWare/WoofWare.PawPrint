@@ -5593,3 +5593,121 @@ QCall!TypeBuilder_SetParamInfo)" before the handler exists:
 * 5w's list stands: `XmlSerializer` (which also calls `DefineParameter`, behind its `AssemblyNative_InternalLoad` stop),
   the dynamic-methods class's two queries, nested dynamic types, the `Signature.Init` fix, and whether reflection should
   read `TypeInfo.Events`.
+
+### 5x: the decisions
+
+Taken 2026-11-14.
+
+* **5x is the next stage, and custom attributes follow it.**
+  * `TypeBuilder_DefineCustomAttribute` has the stronger guest: `DispatchProxyInternalInterface.cs` is parked on it, and it is a BCL consumer. 5x has no parked guest, and its measured consumer, Castle, cannot be one.
+  * 5x still goes first, for three reasons.
+    * `ParameterBuilder.SetCustomAttribute` and `ParameterBuilder.SetConstant` each need a Param token. With 5x built, the custom-attribute stage can design every parent a `TypeBuilder` produces in one pass, the Param row's rewritten flags included.
+    * 5x is one handler and one Domain function over tables that stage 1 already writes and reads. The custom-attribute stage is large (5s's survey), and it wants a plan of its own.
+    * Castle DynamicProxy stands behind Moq and NSubstitute, so it is what a test binary under PawPrint reaches. For the measured shape, 5x and `GC._CollectionCount` are all that it lacks.
+  * The stage after 5x is custom attributes, planned from `DispatchProxyInternalInterface.cs` (an attribute on the assembly) outwards.
+* **A: a Domain `defineParam` over the existing Param table. The writer and the reader keep their shape.** Checked against the pinned source:
+  * `TypeBuilder_SetParamInfo` (vm/comdynamic.cpp:705), `RegMeta::DefineParam` (md/compiler/emit.cpp:2765), `_SetParamProps` (md/compiler/regmeta_emit.cpp:1727), `AddParamToMethod`, `AddChildRowDirectForParent`, `AddChildRowIndirectForParent`, `FixParamSequence`, `AddMethodRecord` and `PutStringW` (md/enc/metamodelrw.cpp), `DefineParameterCore` (RuntimeMethodBuilder.cs:641, RuntimeConstructorBuilder.cs:125), `RuntimeParameterBuilder`'s constructor and `RuntimeParameterInfo.GetParameters` are each as "5x: what it is" describes them.
+  * `FixParamSequence` compares with a strict `<`, so ties stay in RID order. A pointer table starts either when a later method already has parameters or when a row slides. Both together are "the rows sorted by (method, Sequence, RID) are not in RID order", which is the rule that `pointerTable` holds. `pointerTable` sorts (key, RID) pairs, so its ties are in RID order too.
+  * B is rejected. A Param RID is a token handed out across the whole module (`Order`'s tokens 5 to 9 alternate between types), so a column of each method needs a counter for the module beside it, and it contradicts stage 1's 1a for a table that already follows it.
+  * C is rejected. The scope would hold a second statement of an order that the writer derives, and a pointer list which disagrees with its rows could then be represented.
+  * Conditions on A.
+    * `defineParam (method : MethodDefRid) (sequence : int) (name : string) (flags : int)` adds a row at the next RID and searches for nothing.
+    * `EmitScope.addParam` gains the check that `addProperty` has: flags outside the column's two bytes are an `ArgumentException`. `EmitScopeImage` writes `uint16 row.Flags`, which today truncates such a row silently.
+    * `defineParam` and the new refusal in `addParam` are public changes to a published package. The PR body says so.
+* **Flags: Domain refuses the reserved bits, and stores the low sixteen bits otherwise. This amends the planner's (a).**
+  * `defineParam` throws `ArgumentException` when `flags &&& 0xF000 <> 0`. Otherwise the row holds `flags &&& 0xFFFF`. The handler passes the argument through with no check of its own.
+  * Both managed callers clear `ParameterAttributes.ReservedMask` before the QCall. `_SetParamProps` asserts `(dwParamFlags & pdReservedMask) == 0`, and `RuntimeConstructorBuilder` says "MD will assert if we try to set the reserved bits explicitly". Reserved bits at the QCall therefore mean that PawPrint misread an argument.
+  * `-1` has the reserved bits, so the refusal covers it. `defineParam` has no `-1` case and no mask.
+  * The planner's (a) is rejected in two parts.
+    * A fault in the handler has no killer, because no caller reaches it. 5w recorded four such guards as surviving. The same refusal in Domain is reached by a Domain test.
+    * The mask and the `-1` case in Domain would be two branches that no managed caller reaches and no measurement against .NET can check. Their only test would restate them.
+  * (b) is rejected: the handler would hold the truncation to sixteen bits, which is the emitter's rule, where no Domain test or differential property sees it.
+  * (c) is rejected: a misread argument would become a silent row.
+  * This follows 5w's rule: Domain holds what the emitter can be made to hold by its managed callers. `internString` already refuses a NUL on the same ground.
+  * `defineField` masks where its handler faults. That is not changed in 5x.
+* **Positions: Domain stores the low sixteen bits, and refuses a negative position.**
+  * `DefineParam` stores `static_cast<USHORT>(ulParamSeq)`. Position 65537 reads back as parameter 1 and 65536 as the return value, measured on both runtimes and under the throwaway arm.
+  * A refusal as a TODO is rejected: it would refuse what real .NET does without fault, to save one cast.
+  * `MethodBuilder.DefineParameter` refuses a negative position before the QCall, so `defineParam` throws `ArgumentException` for one, in Domain for the reason above.
+* **A null name: the handler maps a null pointer to `""`.**
+  * `_SetParamProps` leaves the Name column 0 for a null pointer, and `PutStringW` stores 0 for an empty string. The row is the same.
+  * A `string option` in Domain is rejected: it records a distinction which the row does not hold.
+  * The handler reads the name to its first NUL. It refuses nothing about the name.
+* **Conditions on the handler.**
+  * It reads the module, the method token, the position, the attributes and the name pointer. It returns `0x08000000 ||| rid`.
+  * A method token whose table is not MethodDef, or whose RID names no row of the scope, is a PawPrint fault which names the token. `RuntimeParameterBuilder` passes `_methodBuilder.MetadataToken`, and its constructor is internal.
+  * It does not consult whether a type is created. `EmitScopeExtension` already refuses a Param row of a created type's method.
+* **Scope: `SetParamInfo` alone.**
+  * `TypeBuilder_SetConstantValue` and `TypeBuilder_DefineCustomAttribute` stay refused by their existing stops. Each spans other parents, and each rewrites a Param row's flags afterwards (measured: `HasDefault`, `Out`).
+  * The Constant table for parameters alone is rejected: it is half of a feature whose other half would need a second design of the same table.
+* **One PR.** The handler and `defineParam` are one feature: a parameter that can be read back.
+  * The split by layer stays the cut to make if review finds the PR too large.
+  * 5x branches from `main`. It needs nothing from 5w. Whichever of the two lands second is rebased, and the whole solution is rebuilt before the push.
+* **The generator changes (7a).**
+  * `EmitScopeGen` draws two rows of one (method, sequence), and flags from the whole two-byte column.
+  * The round trip replaces `paramsInRidOrder` with a replay of `AddChildRowDirectForParent`, `AddChildRowIndirectForParent` and `FixParamSequence`, one parameter at a time. The replay gives each method's run, whether a pointer table started, and the table's contents.
+  * The replay may take the final MethodDef count. Checked: the direct path fails only when a later method already has parameters, and a method added afterwards has none at that time.
+  * This commit tests the writer as `main` has it, and it is expected to pass with no change to the writer. If it fails, stop and report: that is a defect of stage 1, and it gets its own PR.
+  * Leaving the generator is rejected. Duplicates are what the tie order is about, and the existing check of the pointer table's presence is the writer's own sentence.
+* **The guest pins the malformed shapes (8).** `TwoSame`, `Slide`, `TwoReturns`, `ThreeRows` and `RetAndOne` are what CoreLib's own code makes of rows that PawPrint writes. They are the only checks by a guest that the handler searches for nothing and that ties stay in RID order.
+* **The guest holds a Castle-shaped copy (9).**
+  * The source is an interface of the guest's own assembly: `int Add(int left, int right)` and `void Named(string first, out int second, int third = 7)`. The copy calls `DefineParameter(p.Position + 1, p.Attributes, p.Name)` for each parameter, and nothing else.
+  * `third` arrives with `Optional ||| HasDefault` (0x1010). The row must read 0x0010, `DefaultValue` must be `Missing`, and `HasDefaultValue` must be false. This is the one check in which a compiler's reserved bit goes through the managed mask.
+* **`GC._CollectionCount` is its own PR against `main`, outside this plan (10).** 5x neither waits for it nor includes it.
+* **Corrections to the other 5x sections.**
+  * "What 5x must change" says that 5x does not touch `EmitScope.fs`. It does: `addParam` gains the check of the flags' width.
+  * The mutant "the flags stored whole" is described as killed by the Domain model alone, "since the column is two bytes". The writer truncates such a row silently, which is why only a read of the scope sees it. With `addParam`'s check, the guest's `0x7FFF0013` kills it too.
+  * The oracle says that the differential property kills the mutant with no slide, through "the differential's run order". It cannot. `GetParameters` stores each row at its position, so a run in RID order and a run in CoreCLR's order give the same answer for every schedule. The terminal-state check and the round trip's replay are the only killers.
+  * The differential property is described as passing flags from the whole `int` range to both sides. The host's managed caller clears 0xF000 first. The test must clear it too before it calls `defineParam`, and it says that this states `DefineParameterCore`.
+  * The differential property compares host tokens with RIDs, and does not say how MethodDef RIDs agree. It forces every `MethodBuilder`'s `MetadataToken`, in order, before the first `DefineParameter`, as 5s's does.
+  * `DefineConstructor` leaves the differential property. A constructor needs a body, the difference is in managed code alone, and the guest's `Ctor` covers it.
+  * `Edge` cannot tell truncation to sixteen bits from truncation to eight: 65537 and 65536 are 1 and 0 under both. `Wide` gains positions 256 and 65535.
+  * Question 2 says that the handler's fault follows `TypeBuilder_DefineField`. It does, and that fault has no killer either; see the flag decision.
+  * The Castle rows stand, checked against the logs. `GC._CollectionCount` is reached eight frames below `new ProxyGenerator()`, after `System.Diagnostics.TraceSource` loads, so it is not Castle's own call.
+* **The oracle, as the implementer builds it.** In this order:
+  * Before any commit, the guest is built against net10.0 and run on .NET 10.0.14 and 11.0.0-rc.3, with a control that inverts `Slide`'s winner. The control must exit with that check's number on both.
+  * Commit 1 holds what compiles today, and its run is recorded.
+    * `sourcesImpure/TypeBuilderDefineParameter.cs`, registered, with its terminal-state check. It stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetParamInfo)".
+    * The generator and the round trip of 7a. Expected green.
+    * A Domain test that `addParam` refuses flags of 0x10000 and of `-1`. Red.
+  * Commit 2 holds `defineParam` with a body that fails by name, the Domain model and the differential property. Their failing run is recorded.
+  * Then `addParam`'s check and `defineParam`, then the handler.
+  * The guest is the stage's list, with these changes.
+    * `Wide` gains positions 256 and 65535. Its time under the test build is recorded. If it is most of the guest's time, `Edge` becomes a guest of its own.
+    * The Castle-shaped copy is as decided above.
+    * A parameter of a global method (`ModuleBuilder.DefineGlobalMethod`, then `CreateGlobalFunctions`) is measured on .NET first. It joins the guest if PawPrint agrees. If PawPrint stops outside the handler, the stop is recorded under "left to later stages" and the scenario is left out.
+    * The terminal-state check reads three scopes. `Order`: every Param row in RID order (method, Sequence, Flags, name), and the ParamPtr's contents from the image that SRM reads back. `Dup`: the same, so that `Slide`'s pointer table is seen. `Edge`: the Sequence column of `Wide`'s four rows (1, 0, 256, 65535).
+  * The Domain model goes in a new `TestEmitScopeParams`.
+    * Over generated calls: each call gets the next RID; the Sequence is the low sixteen bits; the Flags are the low sixteen bits; the name reads back; two calls with one (method, sequence) give two rows.
+    * Sequences are drawn from 0 upwards, with 0, 255, 256, 65535, 65536 and 65537 over-represented. Flags are drawn from every `int` without a reserved bit, with the high sixteen bits over-represented.
+    * Refusals: any flags with a bit of 0xF000, `-1` among them; a negative sequence; a method that the scope lacks; a name with a NUL.
+    * The probe's forty measured flag values are a fixed table: each value, after the managed mask, gives the measured row.
+  * The round trip is as 7a has it. Its fixed sample asserts, each above a stated count: a duplicate pair; a slide past a duplicate; a method whose run needs the pointer table because of a slide alone; one that needs it because a later method's rows came first; a return row added after a parameter row; flags above 0x0FFF.
+  * `TestEmitScopeExtension` needs no new case. Its generated property now runs over duplicates, and it must stay green.
+  * The differential property is the stage's, with the corrections above.
+    * It draws positions from 0 to the arity, duplicates included, and names from a small pool with null, `""` and an embedded NUL. The test cuts a name at its first NUL before it calls `defineParam`, as the handler does.
+    * It uses abstract methods of abstract types, and `RunAndCollect` assemblies.
+    * It compares each position's name, `Attributes` and token, or the exception's type, or the null element, with the model of `RuntimeParameterInfo.GetParameters` over the image's run.
+    * Its fixed sample asserts, each above a stated count: a duplicate position; two return rows; more rows than the signature's parameters plus one; a pointer table; flags with a bit above 0x0FFF before the mask; a null name.
+    * It covers Domain, the writer and the model. It does not cover the handler's reading of its arguments, the lazy MethodDef tokens or the truncation, which the guest covers.
+  * Mutants: the stage's list, with these changes. Each is built fresh, after the work is committed.
+    * "The reserved-bits fault inverted" becomes "Domain's refusal of the reserved bits removed" (`TestEmitScopeParams` alone, since no caller passes them).
+    * "Domain's `0xF000` mask dropped" and "`-1` stored as `0xFFFF`" leave the list: neither exists.
+    * "The flags stored whole" must die to the guest's sweep through `addParam`, and to the Domain model.
+    * `addParam`'s check of the width removed (the Domain test alone).
+    * Domain's refusal of a negative sequence removed (`TestEmitScopeParams` alone).
+    * The sequence truncated to eight bits (`Wide`'s 256; the Domain model).
+    * The position and the attributes read from each other's argument (the guest's first named parameter).
+    * A null name giving no row (`Ref`'s tokens).
+    * The name column written as 0 for every row (the guest's names; the Domain model).
+    * The writer with no slide: the terminal-state check and the replay must each kill it. Its surviving the guest's reflection and the differential property is accepted, for the reason in the corrections.
+    * The handler's check of the token's table removed: recorded as surviving, since no caller passes another table.
+    * "As built" records, for each mutant, which test killed it. A mutant that survives where a killer is named means a test is strengthened and the run repeated.
+  * At the tip, the default suite and the four Guest suites run, each as its own invocation, built from the whole solution. The guest also runs under PawPrint with `PAWPRINT_TEST_RUNTIME=Net11`, which is its first run under .NET 11's CoreLib.
+* **PR title:** "A MethodBuilder's parameters (type-builder stage 5x)".
+* **Additions to "left to later stages".**
+  * RegMeta's `-1` flags and its mask of the reserved bits, which no managed caller reaches. A caller that needs either adds it with its own measurement.
+  * `defineField`'s mask of flags that its handler already refuses: the same pair of an unkillable fault and an unreachable branch.
+  * Castle over an interface whose parameter has a default value, an attribute, or a reference type under a nullable context. `MethodEmitter` is expected to call `SetConstant` or `SetCustomAttribute` for each; this is read from memory of Castle's source and is not measured. The custom-attribute stage measures all three.
+  * A global method's parameter, if the guest leaves it out.
+  * The slide's order is invisible to every reader PawPrint has. If a later stage reads a method's run by rank, the terminal-state check is its only existing oracle.
