@@ -508,6 +508,22 @@ module TestImpureCases =
             },
             """`MethodBuilder.SetImplementationFlags` with `Native` and then `Unmanaged` on a method with no body, measured on .NET 10 to exit 0. `TypeBuilder_SetMethodImpl` refuses each with a TODO, because `MethodInfo.read` refuses a bodiless method that is not managed IL, abstract, an InternalCall or runtime-provided. Un-parked by letting the dynamic image hold such a row until `CreateType`."""
             {
+                FileName = "TypeBuilderDefineParameterStrandedRows.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """What real .NET does once a `DefineParameter` has stranded MethodDef rows (#2253): CoreCLR's `FixParamSequence` starts `ParamPtr` when a parameter slides ahead of an earlier one of its method, and leaves the `ParamList` of every later MethodDef row as `END_OF_TABLE`, after which real .NET refuses or misreports those methods' parameters. Measured on .NET 10 and 11 to exit 0, and a control inverting the third module's name exits 22 on both. It stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetParamInfo)". Un-parked by a model of the stranded rows, or by an upstream fix in every supported runtime."""
+            {
                 FileName = "DynamicMethodEmitCallReflected.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -1854,6 +1870,85 @@ module TestImpureCases =
 
         EmitScopeGen.propertyPtrRows pe reader
         |> shouldEqual (Some [ 1 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 2 ; 9 ; 10 ; 11 ; 12 ; 13 ; 14 ])
+
+    /// A dynamic assembly's scope, which the guest named `name`.
+    let private dynamicScopeNamed (state : IlMachineState) (name : string) : EmitScope =
+        state.TypeSystem._LoadedAssemblies.TryDynamicScope
+            $"%s{name}, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+        |> Option.defaultWith (fun () -> failwith $"the guest's dynamic assembly %s{name} is not loaded")
+
+    /// A scope's Param rows in RID order, each its method's RID, its Sequence, its Flags and its name; and, from
+    /// the image, the `ParamPtr` table, if it has one.
+    let private paramRowsOf (scope : EmitScope) : (int * int * int * string) list * int list option =
+        let rows =
+            EmitScope.parameters scope
+            |> Seq.map (fun row -> row.Owner.Rid, int row.Sequence, int row.Flags, EmitScope.stringAt row.Name scope)
+            |> List.ofSeq
+
+        let pe, reader = EmitScopeGen.readImage (EmitScopeImage.write scope)
+        use _ = pe
+        rows, EmitScopeGen.paramPtrRows pe reader
+
+    /// `TypeBuilderDefineParameter.cs` has defined parameters in modules `Order`, `Dup`, `Edge` and
+    /// `DirectTableThenSlide`. This checks each module's Param rows, which are CoreCLR's in CoreCLR's RID order,
+    /// duplicates included; and, from the image, each `ParamPtr` table, which lists every method's rows by
+    /// Sequence with ties in RID order, as CoreCLR's read-write metadata holds it (read from its source: no API
+    /// shows it). Reflection cannot see a slide, so this is what checks one.
+    let private assertParamRows (state : IlMachineState) : unit =
+        paramRowsOf (dynamicScopeNamed state "Order")
+        |> shouldEqual (
+            [
+                1, 3, 0, "c"
+                1, 1, 0, "a"
+                1, 0, 0, "ret"
+                1, 2, 0, "b"
+                3, 1, 0, "w"
+                2, 1, 0, "x"
+                4, 1, 0, "z"
+                2, 2, 0, "y"
+                4, 0, 0, "qret"
+            ],
+            Some [ 3 ; 2 ; 4 ; 1 ; 6 ; 8 ; 5 ; 9 ; 7 ]
+        )
+
+        paramRowsOf (dynamicScopeNamed state "Dup")
+        |> shouldEqual (
+            [
+                1, 1, 0x0002, "first"
+                1, 1, 0x0001, "second"
+                2, 0, 0, "r1"
+                2, 0, 0, "r2"
+                3, 1, 0, "x"
+                3, 1, 0, "y"
+                3, 1, 0, "z"
+                4, 2, 0, "b1"
+                4, 1, 0, "a"
+                4, 2, 0, "b2"
+                5, 1, 0, "a"
+                5, 0, 0, "r"
+                5, 1, 0, "b"
+            ],
+            Some [ 1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 9 ; 8 ; 10 ; 12 ; 11 ; 13 ]
+        )
+
+        EmitScope.parameters (dynamicScopeNamed state "Edge")
+        |> Seq.map (fun row -> int row.Sequence)
+        |> List.ofSeq
+        |> shouldEqual [ 1 ; 0 ; 256 ; 65535 ]
+
+        paramRowsOf (dynamicScopeNamed state "DirectTableThenSlide")
+        |> shouldEqual (
+            [
+                3, 1, 0, "z"
+                1, 2, 0, "b"
+                1, 1, 0, "a"
+                2, 2, 0, "d"
+                2, 1, 0, "c"
+                2, 0, 0, "r"
+                3, 0, 0, "zr"
+            ],
+            Some [ 3 ; 2 ; 6 ; 5 ; 4 ; 7 ; 1 ]
+        )
 
     /// `ModuleBuilderStringConstant.cs` has asked for six strings, `"hello"` twice. This checks the
     /// module's `#US` entries, each as its UTF-16 code units and its final byte: the space the heap
@@ -6512,6 +6607,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
+            }
+            {
+                // `MethodBuilder.DefineParameter` and `ConstructorBuilder.DefineParameter`, read back through
+                // reflection; `assertParamRows` reads the Param rows of four of its modules. Dynamic-code switch
+                // overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0, and a control
+                // naming `Slide`'s first row the winner exits 80 on both.
+                FileName = "TypeBuilderDefineParameter.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertParamRows
             }
             {
                 // A static virtual call over a type with several matching MethodImpl rows, in modules either

@@ -85,50 +85,10 @@ module TestEmitScopeImage =
         |> Seq.map (fun (i, _) -> i + 1)
         |> List.ofSeq
 
-    /// Each method's parameter RIDs in the order CoreCLR lists them, keyed by method RID:
-    /// `CMiniMdRW::FixParamSequence` (md/enc/metamodelrw.cpp) slides each new parameter ahead of every
-    /// earlier one of the same method with a greater sequence number.
-    let private paramsInCoreClrOrder (parameters : ParamRow seq) : Map<int, int list> =
-        let listed = Collections.Generic.Dictionary<int, ResizeArray<int * uint16>> ()
-
-        parameters
-        |> Seq.iteri (fun i p ->
-            let list =
-                match listed.TryGetValue p.Owner.Rid with
-                | true, list -> list
-                | false, _ ->
-                    let list = ResizeArray ()
-                    listed.[p.Owner.Rid] <- list
-                    list
-
-            let mutable at = list.Count
-
-            while at > 0 && p.Sequence < snd list.[at - 1] do
-                at <- at - 1
-
-            list.Insert (at, (i + 1, p.Sequence))
-        )
-
-        listed
-        |> Seq.map (fun kv -> kv.Key, kv.Value |> Seq.map fst |> List.ofSeq)
-        |> Map.ofSeq
-
-    let private paramsOf (method : int) (order : Map<int, int list>) : int list =
-        order.TryFind method |> Option.defaultValue []
-
-    /// Whether every method's parameters, in CoreCLR's order, are already the `Param` table's RID order,
-    /// so that no `ParamPtr` is needed.
-    let private paramsInRidOrder (methodCount : int) (parameters : ParamRow seq) : bool =
-        let order = paramsInCoreClrOrder parameters
-
-        [
-            for m in 1..methodCount do
-                yield! paramsOf m order
-        ] = [ 1 .. Seq.length parameters ]
-
     /// Every row of the scope reads back from the image with the same columns at the RID the scope gave
-    /// it, and every heap reference at the offset the scope gave it.
-    let private checkRoundTrip (scope : EmitScope) (image : byte[]) : unit =
+    /// it, and every heap reference at the offset the scope gave it; and the `ParamPtr` table and every
+    /// method's run of parameters are those of `replay`, CoreCLR's tables after the same definitions.
+    let private checkRoundTrip (replay : ParamTableReplay.State) (scope : EmitScope) (image : byte[]) : unit =
         let pe, reader = readImage image
         use _ = pe
 
@@ -206,15 +166,12 @@ module TestEmitScopeImage =
         reader.GetTableRowCount TableIndex.MethodPtr
         |> shouldEqual (if grouped methodOwners then 0 else methods.Count)
 
-        let paramOrder = paramsInCoreClrOrder parameters
+        ParamTableReplay.methodCount replay |> shouldEqual methods.Count
 
-        reader.GetTableRowCount TableIndex.ParamPtr
-        |> shouldEqual (
-            if paramsInRidOrder methods.Count parameters then
-                0
-            else
-                parameters.Count
-        )
+        ParamTableReplay.paramRows replay
+        |> shouldEqual (parameters |> Seq.map (fun p -> p.Owner.Rid, p.Sequence) |> List.ofSeq)
+
+        paramPtrRows pe reader |> shouldEqual (ParamTableReplay.pointers replay)
 
         let typeDefs = EmitScope.typeDefs scope
         let interfaceImpls = EmitScope.interfaceImpls scope
@@ -316,7 +273,7 @@ module TestEmitScopeImage =
             actual.GetParameters ()
             |> Seq.map MetadataTokens.GetRowNumber
             |> List.ofSeq
-            |> shouldEqual (paramsOf i paramOrder)
+            |> shouldEqual (ParamTableReplay.runOf i replay)
 
             genericParamOwners
             |> GenericParamOwnerIndex.parametersOf
@@ -490,7 +447,11 @@ module TestEmitScopeImage =
     let ``every row reads back at the RID the scope gave it`` () : unit =
         Check.One (
             Config.QuickThrowOnFailure.WithMaxTest 300,
-            Prop.forAll (Arb.fromGen genScope) (fun scope -> checkRoundTrip scope (EmitScopeImage.write scope))
+            Prop.forAll
+                (Arb.fromGen genGenerated)
+                (fun generated ->
+                    checkRoundTrip generated.Replay generated.Scope (EmitScopeImage.write generated.Scope)
+                )
         )
 
     [<Test>]
@@ -545,6 +506,106 @@ module TestEmitScopeImage =
 
         Check.One (Config.QuickThrowOnFailure.WithMaxTest 200, Prop.forAll (Arb.fromGen genScope) property)
 
+    /// What one generated `Op.Param` reached, as the round trip's fixed sample counts it.
+    [<RequireQualifiedAccess>]
+    type private ParamShape =
+        | Skipped
+        | DuplicatePair
+        | SlidePastDuplicate
+        | TableBySlideAlone
+        | TableByLaterMethod
+        | ReturnAfterParameter
+        | FlagsAboveTwelveBits
+        | SlideNotLastWithTable
+        | SlideOnLastThenLaterMethod
+
+    /// The shapes of CoreCLR's Param table that one generated scope's operations reached.
+    let private paramShapes (generated : Generated) : ParamShape list =
+        let events = Array.ofList generated.ParamEvents
+
+        [
+            for i in 0 .. events.Length - 1 do
+                let e = events.[i]
+
+                match e.Step with
+                | ParamTableReplay.Step.Stranded _ -> yield ParamShape.Skipped
+                | ParamTableReplay.Step.Added (_, _, started, slots) ->
+                    if e.EarlierSequences |> List.contains e.Sequence then
+                        yield ParamShape.DuplicatePair
+
+                    if slots > 0 then
+                        let passed = e.EarlierSequences |> List.filter (fun s -> s > e.Sequence)
+
+                        if List.length passed <> List.length (List.distinct passed) then
+                            yield ParamShape.SlidePastDuplicate
+
+                        if e.Sequence = 0us && not passed.IsEmpty then
+                            yield ParamShape.ReturnAfterParameter
+
+                        if e.TableBefore && e.Method < e.MethodCount then
+                            yield ParamShape.SlideNotLastWithTable
+
+                    match started with
+                    | Some ParamTableReplay.TableStart.Slide ->
+                        yield ParamShape.TableBySlideAlone
+
+                        if e.Method = e.MethodCount then
+                            let laterMethodGetsParameters =
+                                events.[i + 1 ..]
+                                |> Array.exists (fun later ->
+                                    later.Method > e.Method
+                                    && (
+                                        match later.Step with
+                                        | ParamTableReplay.Step.Added _ -> true
+                                        | ParamTableReplay.Step.Stranded _ -> false
+                                    )
+                                )
+
+                            if laterMethodGetsParameters then
+                                yield ParamShape.SlideOnLastThenLaterMethod
+                    | Some ParamTableReplay.TableStart.Direct -> yield ParamShape.TableByLaterMethod
+                    | None -> ()
+
+            if
+                EmitScope.parameters generated.Scope
+                |> Seq.exists (fun p -> int p.Flags > 0x0FFF)
+            then
+                yield ParamShape.FlagsAboveTwelveBits
+        ]
+
+    [<Test>]
+    let ``the generator's parameters reach every shape of CoreCLR's Param table`` () : unit =
+        let sample = Gen.sampleWithSeed (Rnd 20261105UL) 30 200 genGenerated
+
+        let count (shape : ParamShape) : int =
+            sample
+            |> Seq.filter (fun g -> paramShapes g |> List.contains shape)
+            |> Seq.length
+
+        for shape in
+            [
+                ParamShape.Skipped
+                ParamShape.DuplicatePair
+                ParamShape.SlidePastDuplicate
+                ParamShape.TableBySlideAlone
+                ParamShape.TableByLaterMethod
+                ParamShape.ReturnAfterParameter
+                ParamShape.FlagsAboveTwelveBits
+                ParamShape.SlideNotLastWithTable
+                ParamShape.SlideOnLastThenLaterMethod
+            ] do
+            System.Console.WriteLine $"%A{shape}: %d{count shape} of %d{sample.Length} scopes"
+
+        count ParamShape.Skipped |> shouldBeGreaterThan 10
+        count ParamShape.DuplicatePair |> shouldBeGreaterThan 50
+        count ParamShape.SlidePastDuplicate |> shouldBeGreaterThan 10
+        count ParamShape.TableBySlideAlone |> shouldBeGreaterThan 10
+        count ParamShape.TableByLaterMethod |> shouldBeGreaterThan 50
+        count ParamShape.ReturnAfterParameter |> shouldBeGreaterThan 30
+        count ParamShape.FlagsAboveTwelveBits |> shouldBeGreaterThan 100
+        count ParamShape.SlideNotLastWithTable |> shouldBeGreaterThan 20
+        count ParamShape.SlideOnLastThenLaterMethod |> shouldBeGreaterThan 5
+
     [<Test>]
     let ``the generator makes scopes with and without pointer tables`` () : unit =
         let scopes = Gen.sampleWithSeed (Rnd 20261105UL) 30 200 genScope
@@ -564,15 +625,6 @@ module TestEmitScopeImage =
         for owners in [ methodOwners ; fieldOwners ; paramOwners ] do
             ungrouped owners |> shouldBeGreaterThan 20
             (scopes.Length - ungrouped owners) |> shouldBeGreaterThan 20
-
-        // And parameters grouped by method that still need a pointer table, being out of sequence.
-        scopes
-        |> Seq.filter (fun s ->
-            grouped (paramOwners s)
-            && not (paramsInRidOrder (EmitScope.methodDefs s).Count (EmitScope.parameters s))
-        )
-        |> Seq.length
-        |> shouldBeGreaterThan 5
 
         // And sorted tables that must be re-sorted.
         scopes
@@ -931,7 +983,10 @@ module TestEmitScopeImage =
     [<TestCaseSource(nameof indexWidthBoundaries)>]
     let ``rows read back on both sides of an index width boundary`` (bulk : Bulk) : unit =
         // A few generated rows of every kind first, so that every coded index has something to name.
-        let scope = Gen.sampleWithSeed (Rnd 1234UL) 20 1 genScope |> Array.exactlyOne
+        let generated =
+            Gen.sampleWithSeed (Rnd 1234UL) 20 1 genGenerated |> Array.exactlyOne
+
+        let scope = generated.Scope
         let lastType = TypeDefRid (EmitScope.typeDefs scope).Count
         let emptyName = StringOffset 0
 
@@ -1092,7 +1147,34 @@ module TestEmitScopeImage =
                     scope
                 |> snd
 
-        checkRoundTrip scope (EmitScopeImage.write scope)
+        // CoreCLR's tables after the same definitions: the bulk methods and parameters, each parameter of
+        // the last method with sequence 1, follow the generated ones.
+        let replay =
+            let methodsAdded =
+                (EmitScope.methodDefs scope).Count
+                - (EmitScope.methodDefs generated.Scope).Count
+
+            let replay =
+                Seq.fold
+                    (fun replay _ -> ParamTableReplay.addMethod replay)
+                    generated.Replay
+                    (Seq.replicate methodsAdded ())
+
+            let paramsAdded =
+                (EmitScope.parameters scope).Count
+                - (EmitScope.parameters generated.Scope).Count
+
+            Seq.fold
+                (fun replay _ ->
+                    match ParamTableReplay.addParam (ParamTableReplay.methodCount replay) 1us replay with
+                    | ParamTableReplay.Step.Added (_, replay, _, _) -> replay
+                    | ParamTableReplay.Step.Stranded rid ->
+                        failwith $"the bulk parameter %d{rid} strands MethodDef rows"
+                )
+                replay
+                (Seq.replicate paramsAdded ())
+
+        checkRoundTrip replay scope (EmitScopeImage.write scope)
 
     [<Test>]
     let ``a list column that would name one past a full two-byte table is refused`` () : unit =

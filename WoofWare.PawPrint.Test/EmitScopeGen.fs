@@ -67,15 +67,40 @@ module EmitScopeGen =
         /// both; in the order added, with no search, as `_DefineMethodSemantics` adds them.
         | MethodSemantics of property : int * semantics : int * method : int
 
+    /// What happened to one `Op.Param`, in the replay of CoreCLR's tables beside the scope.
+    type ParamEvent =
+        {
+            Method : int
+            Sequence : uint16
+            /// The scope's MethodDef row count when the operation applied.
+            MethodCount : int
+            /// The sequences of the method's rows before the operation, in RID order.
+            EarlierSequences : uint16 list
+            /// Whether a `ParamPtr` existed before the operation.
+            TableBefore : bool
+            /// What the replay did. A `Stranded` operation added no row to the scope.
+            Step : ParamTableReplay.Step
+        }
+
+    /// A generated scope, the replay of CoreCLR's Param table that its operations gave, in order, and what
+    /// happened to each `Op.Param` that named a method.
+    type Generated =
+        {
+            Scope : EmitScope
+            Replay : ParamTableReplay.State
+            ParamEvents : ParamEvent list
+        }
+
     type private Applied =
         {
             Scope : EmitScope
             /// The parameter count of each method's signature, by RID - 1.
             ParamCounts : int list
-            /// Which `(method, sequence)` pairs already have a `Param` row.
-            ParamSequences : Set<int * int>
             /// The `MemberRef`s with a method signature.
             MethodRefs : MemberRefRid list
+            Replay : ParamTableReplay.State
+            /// Newest first.
+            ParamEvents : ParamEvent list
         }
 
     // Unpaired surrogates too, built at run time because the F# compiler replaces one in a literal.
@@ -138,14 +163,6 @@ module EmitScopeGen =
             MethodImplAttributes.NoInlining
             MethodImplAttributes.AggressiveInlining ||| MethodImplAttributes.NoOptimization
             MethodImplAttributes.Synchronized
-        ]
-
-    let paramFlagChoices : ParameterAttributes list =
-        [
-            ParameterAttributes.None
-            ParameterAttributes.In
-            ParameterAttributes.Out
-            ParameterAttributes.Optional
         ]
 
     let genericParamFlagChoices : GenericParameterAttributes list =
@@ -238,7 +255,10 @@ module EmitScopeGen =
                     let! methodChoice = choice
                     let! sequence = Gen.choose (0, 3)
                     let! name = genName
-                    let! flags = choice
+                    // The whole two-byte column, with the named flags common.
+                    let! flags =
+                        Gen.oneof [ Gen.elements [ 0x0000 ; 0x0001 ; 0x0002 ; 0x0010 ] ; Gen.choose (0, 0xFFFF) ]
+
                     return Op.Param (methodChoice, sequence, name, flags)
                 }
                 2, Gen.map2 (fun c i -> Op.InterfaceImpl (c, i)) choice choice
@@ -525,29 +545,49 @@ module EmitScopeGen =
 
             { withScope (EmitScope.addMethodDef row applied.Scope |> snd) applied with
                 ParamCounts = applied.ParamCounts @ [ parameters.Length ]
+                Replay = ParamTableReplay.addMethod applied.Replay
             }
         | Op.Param (methodChoice, sequence, name, flags) ->
             if methodCount = 0 then
                 applied
             else
                 let methodIndex = methodChoice % methodCount
-                let sequence = sequence % (List.item methodIndex applied.ParamCounts + 1)
+                let sequence = uint16 (sequence % (List.item methodIndex applied.ParamCounts + 1))
+                let step = ParamTableReplay.addParam (methodIndex + 1) sequence applied.Replay
 
-                if applied.ParamSequences.Contains (methodIndex, sequence) then
-                    applied
-                else
+                let event : ParamEvent =
+                    {
+                        Method = methodIndex + 1
+                        Sequence = sequence
+                        MethodCount = methodCount
+                        EarlierSequences =
+                            ParamTableReplay.paramRows applied.Replay
+                            |> List.filter (fun (owner, _) -> owner = methodIndex + 1)
+                            |> List.map snd
+                        TableBefore = (ParamTableReplay.pointers applied.Replay).IsSome
+                        Step = step
+                    }
+
+                let applied =
+                    { applied with
+                        ParamEvents = event :: applied.ParamEvents
+                    }
+
+                match step with
+                | ParamTableReplay.Step.Stranded _ -> applied
+                | ParamTableReplay.Step.Added (_, replay, _, _) ->
                     let name, applied = intern name applied
 
                     let row : ParamRow =
                         {
                             Owner = MethodDefRid (methodIndex + 1)
-                            Flags = (pick flags paramFlagChoices).Value
-                            Sequence = uint16 sequence
+                            Flags = enum<ParameterAttributes> flags
+                            Sequence = sequence
                             Name = name
                         }
 
                     { withScope (EmitScope.addParam row applied.Scope |> snd) applied with
-                        ParamSequences = applied.ParamSequences.Add (methodIndex, sequence)
+                        Replay = replay
                     }
         | Op.InterfaceImpl (cls, iface) ->
             let row : InterfaceImplRow =
@@ -775,16 +815,30 @@ module EmitScopeGen =
             }
             scope
 
-    let apply (mvid : Guid) (ops : Op list) : EmitScope =
+    /// The scope the operations make, applied in order, with the replay of CoreCLR's Param table beside it.
+    /// An `Op.Param` that the replay finds would strand MethodDef rows is skipped.
+    let applyGenerated (mvid : Guid) (ops : Op list) : Generated =
         let start : Applied =
             {
                 Scope = emptyScope mvid
                 ParamCounts = []
-                ParamSequences = Set.empty
                 MethodRefs = []
+                Replay = ParamTableReplay.empty
+                ParamEvents = []
             }
 
-        (List.fold applyOp start ops).Scope
+        let applied = List.fold applyOp start ops
+
+        let generated : Generated =
+            {
+                Scope = applied.Scope
+                Replay = applied.Replay
+                ParamEvents = List.rev applied.ParamEvents
+            }
+
+        generated
+
+    let apply (mvid : Guid) (ops : Op list) : EmitScope = (applyGenerated mvid ops).Scope
 
     let genGuid : Gen<Guid> =
         Gen.arrayOfLength 16 (Gen.choose (0, 255) |> Gen.map byte) |> Gen.map Guid
@@ -793,7 +847,9 @@ module EmitScopeGen =
         Gen.sized (fun size -> Gen.choose (0, 4 * size) |> Gen.bind (fun n -> Gen.listOfLength n genOp))
         |> Gen.map List.ofSeq
 
-    let genScope : Gen<EmitScope> = Gen.map2 apply genGuid genOps
+    let genGenerated : Gen<Generated> = Gen.map2 applyGenerated genGuid genOps
+
+    let genScope : Gen<EmitScope> = genGenerated |> Gen.map _.Scope
 
     // `MetadataReader` over the image's metadata, kept alive by the `PEReader` that owns it.
     let readImage (image : byte[]) : PEReader * MetadataReader =
@@ -969,6 +1025,12 @@ module EmitScopeGen =
     /// The image's `PropertyPtr` contents, or `None` when it has none.
     let propertyPtrRows (pe : PEReader) (reader : MetadataReader) : int list option =
         match rawRows pe reader TableIndex.PropertyPtr [ 2 ] with
+        | [] -> None
+        | rows -> Some (rows |> List.map List.head)
+
+    /// The image's `ParamPtr` contents, or `None` when it has none.
+    let paramPtrRows (pe : PEReader) (reader : MetadataReader) : int list option =
+        match rawRows pe reader TableIndex.ParamPtr [ reader.GetTableRowSize TableIndex.ParamPtr ] with
         | [] -> None
         | rows -> Some (rows |> List.map List.head)
 
