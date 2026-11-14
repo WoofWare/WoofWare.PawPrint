@@ -1381,15 +1381,23 @@ module internal UnaryMetadataCallOps =
                     state
 
         match awaitSite with
-        | AwaitSiteOutcome.Binds _ when pendingConstrained.IsSome ->
-            failwith
-                $"BUG: a constrained. callvirt of %O{concretizedMethod} bound its async variant, which decision 13 leaves unbound (AwaitNotYetBound.ConstrainedCallvirt)"
-        | AwaitSiteOutcome.Binds bound ->
+        | AwaitSiteOutcome.Binds bound when pendingConstrained.IsNone ->
             // Dispatch on the receiver finds the implementation of the variant, if the named method
             // dispatches.
             enterVirtualCallee ctx bound.Variant true (Some bound.Site) state
+        | AwaitSiteOutcome.Binds _
         | AwaitSiteOutcome.NotAnAwaitSite
         | AwaitSiteOutcome.DoesNotBind _ ->
+
+        // The async variant a matched await site binds, if any. A `constrained.` prefix transforms
+        // the receiver of the variant as it would the named method's: the variant's implementation
+        // on a value type is the variant of the value type's own implementation (decision 19), or
+        // what the variant dispatches to on the box.
+        let boundAwait =
+            match awaitSite with
+            | AwaitSiteOutcome.Binds bound -> Some bound
+            | AwaitSiteOutcome.NotAnAwaitSite
+            | AwaitSiteOutcome.DoesNotBind _ -> None
 
         // No class-initialisation check here. It could not be right at this point even in
         // principle: it would have to name the type at the call site, and the callee is not
@@ -1525,13 +1533,20 @@ module internal UnaryMetadataCallOps =
                         // has one; otherwise the box's, which is a method T inherits from
                         // Object/ValueType/Enum, or a default interface body (case 3); or T does not
                         // implement the method's interface, and the box's dispatch raises.
+                        // At a bound await site, T's own implementation of the variant, which
+                        // the probe finds through the ordinary sibling's.
+                        let probed =
+                            match boundAwait with
+                            | Some bound -> bound.Variant
+                            | None -> concretizedMethod
+
                         let state, directImplementation =
                             IlMachineStateExecution.tryResolveVirtualImplementation
                                 loggerFactory
                                 baseClassTypes
                                 thread
-                                concretizedMethod.Generics
-                                concretizedMethod
+                                probed.Generics
+                                probed
                                 tHandle
                                 false
                                 state
@@ -1555,6 +1570,15 @@ module internal UnaryMetadataCallOps =
                     // declares it.
                     let describe () : string =
                         $"constrained. %s{tConcrete.Namespace}.%s{tConcrete.Name} callvirt %s{MethodOwner.describe called.Owner}::%s{called.Name}"
+
+                    // A value type's classes are its own, `ValueType`, `Enum` and `Object`, and
+                    // only the first can declare a method returning a promise; a call of a value
+                    // type's own method through `constrained.` is IL no C# compiler emits.
+                    match boundAwait with
+                    | Some _ ->
+                        failwith
+                            $"TODO: %s{describe ()} is a matched await site, of a class's method on a value type; CoreCLR binds its async variant there, and PawPrint does not yet resolve a variant through a class method's slot on a value type"
+                    | None -> ()
 
                     // CoreCLR runs the method named on a box of T, or on T's address, though T is
                     // no instance of the method's class. That body then reads `this` as an instance
@@ -1768,7 +1792,18 @@ module internal UnaryMetadataCallOps =
                 state
         | ConstrainedReceiver.Ready (state, concretizedMethod, dispatchesOnReceiver) ->
 
-        enterVirtualCallee ctx concretizedMethod dispatchesOnReceiver None state
+        match boundAwait with
+        | None -> enterVirtualCallee ctx concretizedMethod dispatchesOnReceiver None state
+        | Some bound when dispatchesOnReceiver ->
+            // The receiver is now an object: a reference, or a box of a value type that implements
+            // the method not itself. Dispatch of the variant on it finds the variant of what the
+            // named method's dispatch finds. (The enum retarget to `Object.GetHashCode` leaves a
+            // method of its own here, but returns no promise, so begins no await site.)
+            enterVirtualCallee ctx bound.Variant true (Some bound.Site) state
+        | Some bound ->
+            // The prefix probed T with the variant, so this is the variant of T's own
+            // implementation.
+            enterVirtualCallee ctx concretizedMethod false (Some bound.Site) state
 
     /// The first instruction at or after `offset` that is not itself a prefix — PawPrint's
     /// counterpart to CoreCLR's `impGetNonPrefixOpcode` (`importer.cpp`), which skips exactly

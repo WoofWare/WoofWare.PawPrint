@@ -93,10 +93,10 @@ type internal AwaitSiteOutcome =
     | NotAnAwaitSite
     /// A matched await site that binds the named method's async variant.
     | Binds of BoundAwait
-    /// A matched await site that binds no variant, as decision 13's classification says (never
-    /// `AwaitSiteBinding.BindsVariant`). The call calls the named method, and the instructions of
-    /// the pattern run after it.
-    | DoesNotBind of AwaitSiteBinding
+    /// A matched await site where CoreCLR's VM supplies no async variant of the named method, for
+    /// this reason. The call calls the named method, and the instructions of the pattern run after
+    /// it.
+    | DoesNotBind of AsyncVariantRefusal
 
 /// What a `call` or `ldftn` does, decided by binding its token, with the type its `constrained.`
 /// prefix names, as CoreCLR's JIT binds them when it compiles the method holding the instruction.
@@ -356,9 +356,9 @@ module internal CallSiteBinding =
 
                 state, variant
 
-    /// Decision 13's classification of a matched await site whose pattern is `pattern`, and, where
-    /// it binds, the variant concretised as `named` is, with the continuation handling the
-    /// classification gives.
+    /// Decision 13's classification of a matched await site whose pattern is `pattern`: where it
+    /// binds, the variant concretised as `named` is, with the continuation handling the
+    /// classification gives; otherwise why CoreCLR's VM supplies no variant there.
     let private classifySite
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -372,7 +372,7 @@ module internal CallSiteBinding =
           Result<
               WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> *
               ContinuationContextHandling,
-              AwaitSiteBinding
+              AsyncVariantRefusal
            >
         =
         let state, variant = variantOfNamed loggerFactory named baseClassTypes state
@@ -420,8 +420,7 @@ module internal CallSiteBinding =
         | AwaitSiteBinding.Unmodelled body, _ ->
             failwith
                 $"TODO: %s{site} of %O{named} binds its async variant, whose body is %A{body}; CoreCLR runs that variant, which PawPrint does not model (decision 16 of docs/plans/2026-11-11-runtime-async.md)"
-        | AwaitSiteBinding.NoVariant _, _
-        | AwaitSiteBinding.NotYetBound _, _ -> state, Error classified
+        | AwaitSiteBinding.NoVariant refusal, _ -> state, Error refusal
 
     /// The tail shape the `call` or `callvirt` at the active frame of `thread`, an async version,
     /// begins (`impMatchAsyncVersionTailCall`, importer.cpp), and what decision 13 binds there; where
@@ -500,7 +499,7 @@ module internal CallSiteBinding =
         match
             classifySite loggerFactory baseClassTypes MatchedPattern.TailShape opcode constrained named site state
         with
-        | state, Error classified -> state, AwaitSiteOutcome.DoesNotBind classified
+        | state, Error refusal -> state, AwaitSiteOutcome.DoesNotBind refusal
         | state, Ok (variant, handling) ->
 
         let returnTypesAgree =
@@ -649,7 +648,7 @@ module internal CallSiteBinding =
         let site = $"awaiting at IL_%04X{follower.AwaitOffset} of %O{frame.ExecutingMethod}"
 
         match classifySite loggerFactory baseClassTypes pattern opcode constrained named site state with
-        | state, Error classified -> state, AwaitSiteOutcome.DoesNotBind classified
+        | state, Error refusal -> state, AwaitSiteOutcome.DoesNotBind refusal
         | state, Ok (variant, handling) ->
             state,
             AwaitSiteOutcome.Binds

@@ -1206,6 +1206,40 @@ Each stage is one pull request, with its tests first.
     `TestRuntimeAsyncSuspension` that a continuation has a continuation-context slot exactly where
     its await continues on the captured context.
 
+    As built, the second change:
+    * Decision 13's classification binds every matched site at which CoreCLR's VM supplies a
+      variant PawPrint models. `AwaitNotYetBound` and `AwaitSiteBinding.NotYetBound` are gone, and
+      a site that binds nothing carries only why the VM supplies no variant
+      (`AwaitSiteOutcome.DoesNotBind of AsyncVariantRefusal`).
+    * A `constrained.` `callvirt` at a bound site transforms its receiver as it would for the named
+      method. On a value type, the exact probe for T's own implementation is made with the variant,
+      and so finds the variant of T's implementation through decision 19's step. Where the prefix
+      leaves an object, a reference or a box, the call dispatches the variant on it. A class's
+      method on a value type through the prefix is refused by name at a bound site: the only
+      classes a value type has that could declare a promise-returning method are the value type
+      itself, and no C# compiler calls a value type's own method through `constrained.`.
+
+    The guest, `RuntimeAsyncConstrainedCallvirtAwait.cs`, does not use ASP.NET Core's
+    `AsyncServiceScope` sites, which run only in an ASP.NET Core request pipeline's exception and
+    status-code handling. It uses a shape only a
+    guest's own assembly gives (see "Test guests"): `Wrapper<T>.MoveNextAsync =>
+    Inner.MoveNextAsync()`, compiled without optimisation, is `ldflda; constrained. !T; callvirt
+    IAsyncEnumerator<int>::MoveNextAsync; ret`, a tail shape that `Parallel.ForEachAsync`'s worker
+    reaches through the async version of the wrapper's method. It covers each of the prefix's
+    cases, run on real .NET 10 and 11 RC3 first (100 runs without a failure):
+    * a value type implementing the method itself, whose method must run on the field and not on
+      a copy;
+    * a reference type;
+    * a value type whose implementation is a default interface body, which runs on a box.
+
+    For each case it faults the move. Real .NET 11 resumes the wrapper's frame at its `callvirt`,
+    IL_000C, between an awaiter's `GetResult` and the worker: the wrapper's await of the variant
+    is no tail await, and the implementation's async version passes its own suspension on.
+    Unbound, the wrapper's `ret` passes the ordinary method's task on and the wrapper has no
+    resumed frame; before the change PawPrint exits 16 on .NET 11. Two mutants are caught by
+    PawPrint's own check that a bound await calls a method with the async calling convention:
+    dispatching the named method on the object, and probing T with it.
+
 14. **(4g) Whole traces.** The guests that compare traces (`RuntimeAsyncTraceCrossesSuspension.cs`,
     `StreamWriter.DisposeAsync`'s in `RuntimeAsyncFinallyAfterSuspension.cs`, and the guests of
     stages 4b to 4f) compare whole traces with real .NET 11's, less the awaiter frames decision 20
