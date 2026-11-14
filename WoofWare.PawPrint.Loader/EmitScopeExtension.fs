@@ -26,10 +26,10 @@ type EmitScopeExtensionViolation =
     /// string or blob, and the space every user string heap starts with, not counted.
     | HeapEntryChanged of heap : HeapIndex * entry : int
 
-    /// A row the later scope adds is a member of a type already created: a field, method or property
-    /// it declares, a parameter of one of its methods, one of its interface implementations or method
+    /// A row the later scope adds is a member of a type already created: a field, method, property or
+    /// event it declares, a parameter of one of its methods, one of its interface implementations or method
     /// impls, a generic parameter of it or of one of its methods, or a constraint of one, or an accessor
-    /// of one of its properties, whatever type the accessor's method belongs to.
+    /// of one of its properties or events, whatever type the accessor's method belongs to.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
     /// A row of the earlier scope differs in the later one only in a column the emitter fills in after
@@ -160,12 +160,11 @@ module EmitScopeExtension =
         let methodOwner (method : MethodDefRid) : TypeDefRid =
             (EmitScope.methodDefs after).[method.Rid - 1].Owner
 
-        // The type an accessor row belongs to: its property's. CoreCLR checks only the property's type
-        // before adding one, and nothing reads the table by method.
+        // The type an accessor row belongs to: its property's or its event's. CoreCLR checks only that
+        // type before adding one, and nothing reads the table by method.
         let associationOwner (row : MethodSemanticsRow) : TypeDefRid =
             match row.Association with
-            | HasSemantics.Event ev ->
-                failwith $"TODO: EmitScopeExtension: the owner of an accessor of Event %d{ev.Rid}"
+            | HasSemantics.Event ev -> (EmitScope.events after).[ev.Rid - 1].Owner
             | HasSemantics.Property property -> (EmitScope.properties after).[property.Rid - 1].Owner
 
         // The type a generic parameter belongs to: its owner, or its owner's declaring type.
@@ -220,6 +219,15 @@ module EmitScopeExtension =
 
             yield! rewritten TableIndex.MemberRef (EmitScope.memberRefs before) (EmitScope.memberRefs after)
             yield! rewritten TableIndex.StandAloneSig (EmitScope.standAloneSigs before) (EmitScope.standAloneSigs after)
+
+            yield! rewritten TableIndex.Event (EmitScope.events before) (EmitScope.events after)
+
+            yield!
+                addedToCreated
+                    TableIndex.Event
+                    (EmitScope.events before).Count
+                    (EmitScope.events after)
+                    (fun row -> row.Owner)
 
             yield! rewritten TableIndex.Property (EmitScope.properties before) (EmitScope.properties after)
 

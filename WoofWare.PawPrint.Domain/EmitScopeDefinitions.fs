@@ -515,6 +515,9 @@ module EmitScopeDefinitions =
             }
             scope
 
+    /// `evReservedMask`: `evRTSpecialName`, which only the emitter sets.
+    let private reservedEventFlags : int = 0x0400
+
     /// <summary>
     /// Define an event of <paramref name="owner"/>, as <c>RegMeta::_DefineEvent</c> does in a dynamic
     /// module, whose emitter does not check for a duplicate (<c>MDDupEvent</c> is not set): a new row, at
@@ -534,4 +537,19 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : EventRid * EmitScope
         =
-        failwith $"TODO: EmitScopeDefinitions.defineEvent %A{name} of TypeDef %d{owner.Rid}: not yet implemented"
+        let flags =
+            if flags = -1 then
+                0
+            else
+                flags &&& ~~~reservedEventFlags &&& 0xFFFF
+
+        let name, scope = EmitScope.internString name scope
+
+        EmitScope.addEvent
+            {
+                Owner = owner
+                Flags = enum<EventAttributes> flags
+                Name = name
+                EventType = eventType
+            }
+            scope

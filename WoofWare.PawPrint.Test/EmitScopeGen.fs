@@ -71,6 +71,10 @@ module EmitScopeGen =
         /// if it has both; with any of the six semantics, whichever kind the association is, and in the
         /// order added, with no search, as `_DefineMethodSemantics` adds them.
         | MethodSemantics of association : int * semantics : int * method : int
+        /// `count` accessors of one property or event, all of one semantics, the methods consecutive from
+        /// the one `method` chooses: enough rows, sometimes, for a module to reach the 25 from which CoreCLR
+        /// finds an association's rows in reverse.
+        | MethodSemanticsRun of association : int * semantics : int * method : int * count : int
 
     type private Applied =
         {
@@ -304,6 +308,14 @@ module EmitScopeGen =
                     return Op.Event (owner, name, flags, eventType)
                 }
                 3, Gen.map3 (fun p s m -> Op.MethodSemantics (p, s, m)) choice choice choice
+                1,
+                gen {
+                    let! association = choice
+                    let! semantics = choice
+                    let! method = choice
+                    let! count = Gen.choose (2, 30)
+                    return Op.MethodSemanticsRun (association, semantics, method, count)
+                }
             ]
 
     let pick (choice : int) (items : 'a list) : 'a option =
@@ -439,7 +451,7 @@ module EmitScopeGen =
             Scope = scope
         }
 
-    let private applyOp (applied : Applied) (op : Op) : Applied =
+    let rec private applyOp (applied : Applied) (op : Op) : Applied =
         let scope = applied.Scope
         let typeDefCount = (EmitScope.typeDefs scope).Count
         let methodCount = (EmitScope.methodDefs scope).Count
@@ -774,6 +786,8 @@ module EmitScopeGen =
 
             withScope (EmitScope.addEvent row applied.Scope |> snd) applied
         | Op.MethodSemantics (associationChoice, semantics, methodChoice) ->
+            applyOp applied (Op.MethodSemanticsRun (associationChoice, semantics, methodChoice, 1))
+        | Op.MethodSemanticsRun (associationChoice, semantics, methodChoice, count) ->
             let propertyCount = (EmitScope.properties scope).Count
             let eventCount = (EmitScope.events scope).Count
 
@@ -785,14 +799,19 @@ module EmitScopeGen =
                     | i when i < propertyCount -> HasSemantics.Property (EmitScope.tryPropertyRid (i + 1) scope).Value
                     | i -> HasSemantics.Event (EmitScope.tryEventRid (i - propertyCount + 1) scope).Value
 
-                let row : MethodSemanticsRow =
-                    {
-                        Semantics = (pick semantics semanticsChoices).Value
-                        Method = MethodDefRid (methodChoice % methodCount + 1)
-                        Association = association
-                    }
+                let scope =
+                    (applied.Scope, [ 0 .. count - 1 ])
+                    ||> List.fold (fun scope i ->
+                        EmitScope.addMethodSemantics
+                            {
+                                Semantics = (pick semantics semanticsChoices).Value
+                                Method = MethodDefRid ((methodChoice + i) % methodCount + 1)
+                                Association = association
+                            }
+                            scope
+                    )
 
-                withScope (EmitScope.addMethodSemantics row applied.Scope) applied
+                withScope scope applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid

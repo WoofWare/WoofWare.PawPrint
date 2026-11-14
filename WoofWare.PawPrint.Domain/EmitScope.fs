@@ -232,7 +232,7 @@ type HasSemantics =
     /// ECMA-335 II.22.28 sorts the `MethodSemantics` table by it.
     member this.CodedIndex : int =
         match this with
-        | HasSemantics.Event _ -> failwith "TODO: HasSemantics.CodedIndex of an Event association"
+        | HasSemantics.Event rid -> (rid.Rid <<< 1) ||| 0
         | HasSemantics.Property rid -> (rid.Rid <<< 1) ||| 1
 
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
@@ -468,6 +468,7 @@ type EmitScope =
             GenericParamConstraints : ImmutableList<GenericParamConstraintRow>
             Properties : ImmutableList<PropertyRow>
             MethodSemantics : ImmutableList<MethodSemanticsRow>
+            Events : ImmutableList<EventRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -625,7 +626,10 @@ module EmitScope =
 
     /// The `Event` row with this RID, if the scope has one.
     let tryEventRid (rid : int) (scope : EmitScope) : EventRid option =
-        failwith $"TODO: EmitScope.tryEventRid %d{rid}: the scope holds no Event table yet"
+        if rid >= 1 && rid <= scope.Events.Count then
+            Some (EventRid rid)
+        else
+            None
 
     /// The offset `internString` would return for `value` if the heap already holds what CoreCLR's
     /// emitter stores for it, without adding it.
@@ -727,6 +731,7 @@ module EmitScope =
                 GenericParamConstraints = ImmutableList.Empty
                 Properties = ImmutableList.Empty
                 MethodSemantics = ImmutableList.Empty
+                Events = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -1058,15 +1063,14 @@ module EmitScope =
     /// association.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The scope lacks the method or the property, or the semantics do not fit the column's two bytes.
+    /// The scope lacks the method or the association, or the semantics do not fit the column's two bytes.
     /// </exception>
     let addMethodSemantics (row : MethodSemanticsRow) (scope : EmitScope) : EmitScope =
         let operation = "EmitScope.addMethodSemantics"
         requireRid operation "MethodDef" scope.MethodDefs.Count row.Method.Rid
 
         match row.Association with
-        | HasSemantics.Event rid ->
-            failwith $"TODO: %s{operation}: an accessor of Event %d{rid.Rid}, but the scope holds no Event table yet"
+        | HasSemantics.Event rid -> requireRid operation "Event" scope.Events.Count rid.Rid
         | HasSemantics.Property rid -> requireRid operation "Property" scope.Properties.Count rid.Rid
 
         if int row.Semantics < 0 || int row.Semantics > 0xFFFF then
@@ -1086,7 +1090,18 @@ module EmitScope =
     /// The scope lacks the owner, the name or the event type, or the flags do not fit the column's two bytes.
     /// </exception>
     let addEvent (row : EventRow) (scope : EmitScope) : EventRid * EmitScope =
-        failwith $"TODO: EmitScope.addEvent of TypeDef %d{row.Owner.Rid}: the scope holds no Event table yet"
+        let operation = "EmitScope.addEvent"
+        requireRid operation "TypeDef" scope.TypeDefs.Count row.Owner.Rid
+        requireString operation scope row.Name
+        requireTypeDefOrRef operation scope row.EventType
+
+        if int row.Flags < 0 || int row.Flags > 0xFFFF then
+            invalidArg (nameof row) $"%s{operation}: the flags 0x%x{int row.Flags} do not fit the column's two bytes"
+
+        EventRid (scope.Events.Count + 1),
+        { scope with
+            Events = scope.Events.Add row
+        }
 
     let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
         let operation = "EmitScope.addMethodSpec"
@@ -1149,5 +1164,4 @@ module EmitScope =
 
     /// In RID order, which is definition order across the module; the image lists each type's events
     /// through an `EventPtr` when they are not already grouped.
-    let events (scope : EmitScope) : ImmutableList<EventRow> =
-        failwith "TODO: EmitScope.events: the scope holds no Event table yet"
+    let events (scope : EmitScope) : ImmutableList<EventRow> = scope.Events
