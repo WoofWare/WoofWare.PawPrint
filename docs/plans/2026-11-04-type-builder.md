@@ -5214,3 +5214,382 @@ seconds and each process 9 to 11 seconds of wall time.
   type's non-constructors also skipped five static methods, which compile (measured above).
 * The fabricated abstract struct's method returns the field its constructor stored, boxed, rather than the struct: C#
   reads an abstract sealed type as a static class, so the driver cannot name it.
+
+### 5x: what it is
+
+**Which stage.** The `newobj` stage's list and 5w's put `TypeBuilder_SetParamInfo` after 5w. 5x is that QCall, which
+`MethodBuilder.DefineParameter` and `ConstructorBuilder.DefineParameter` reach through `RuntimeParameterBuilder`'s
+constructor, and what reflection then reads back on the created type: each parameter's `Name`, `Attributes`, `Position`,
+`MetadataToken` and the flags' readers (`IsIn`, `IsOut`, `IsOptional`, `IsRetval`, `IsLcid`), `DefaultValue` and
+`HasDefaultValue` when no constant is set, and the return parameter. Every program that names a parameter stops at
+"Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetParamInfo)" today (measured on this branch, `main` at
+90b691e38: scratchpad `5x/pawprint-main/refusals.log`, and again after the throwaway below was reverted,
+`5x/pawprint-reverted-order.log`). No parked guest stops there: nothing in `WoofWare.PawPrint.Test` calls
+`DefineParameter` except `TestEscapeAnalysis.fs:7842`, which emits on the host. 5x's code depends on nothing in 5w's
+PR (#2252); "Conflicts with 5w" below lists the files both touch.
+
+Scratchpad paths below are under this session's scratchpad,
+`/private/tmp/claude-501/-Users-patrick-Documents-GitHub-WoofWare-PawPrint--claude-worktrees-test-pipeline-performance-724897/ba89fbb1-81d8-460f-a9be-c4df3a5bd899/scratchpad/`.
+
+**`DispatchProxy` does not reach it.** `System.Reflection.DispatchProxy.dll` (10.0.14) does not contain the string
+`DefineParameter`; in the shared framework only `System.Private.CoreLib`, `System.Reflection.Emit`, `System.Private.Xml`
+(`XmlSerializer`'s and XSLT's IL generators), `System.Runtime.InteropServices` and `System.Diagnostics.StackTrace` (as
+the `ISymbolWriter` member name) do, and the ASP.NET Core framework none. The probe's `proxy` scenario,
+`DispatchProxy.Create` over an interface with `Add(int left, int right)` and `Named(string first, out int second, int
+third = 7)`, runs under PawPrint on `main` and prints exactly what .NET 10.0.14 prints (`5x/proxy-diff.txt` empty): the
+proxy's methods have no Param rows at all, so every `ParameterInfo.Name` is null. 5s's survey said the same.
+
+**What a real guest needs: one more feature, not emit.** Castle DynamicProxy copies each interface parameter's name and
+attributes onto the proxy's method. A throwaway program (scratchpad `5x/castle`, `Castle.Core` 5.1.1 from the local
+NuGet cache, so not a candidate guest) calls `ProxyGenerator.CreateInterfaceProxyWithoutTarget<ICalc>` over `int
+Add(int left, int right)` with an interceptor, calls the proxy, and lists the proxy method's parameters. On .NET 10.0.14
+and 11.0.0-rc.3 it prints `Add: 5` and `param 0 left`, `param 1 right` (`5x/castle/net10.out`, `net11.out`, identical).
+Under the Release App:
+
+| PawPrint | Outcome |
+|---|---|
+| `main` | stops at "Unimplemented native method (InternalCall): System.GC::_CollectionCount", before any emit QCall (`5x/castle/pawprint-main.log`) |
+| `main` with a throwaway `GC._CollectionCount` answering 0 and the throwaway `SetParamInfo` arm below | exits 0, output identical to .NET's (`5x/castle/pawprint-throwaway1.log`) |
+| the same with only the `SetParamInfo` registration removed | stops at `TypeBuilder_SetParamInfo` (`5x/castle/pawprint-control-no-setparaminfo.log`) |
+
+So for this shape two features stand between Castle and a passing run: a GC InternalCall outside this plan, and 5x. No
+custom attribute, constant or other emit QCall is reached. (5u's sketch expected Castle to need custom attributes too;
+for an interface whose members carry none, it does not.)
+
+**The read side needs nothing.** A throwaway arm (scratchpad `5x/throwaway.diff`, 95 lines with the GC stub; the
+`SetParamInfo` handler is 55 of them) read the five arguments, interned the name (a null pointer as `""`), stored the
+flags as `attributes &&& 0x0FFF` and the sequence as `uint16`, called the existing `EmitScope.addParam`, and returned
+`0x08000000 ||| rid`. Nothing else changed: not the scope, the writer, `EmitScopeExtension`, or the reflection arms.
+Under the Release App, every probe scenario below except `constant` and `pseudo` printed output byte-identical to .NET
+10.0.14's (`5x/pawprint-throwaway/diff-*.txt`; `refusals` compared NUL-safely, since two of its names hold a NUL, and
+`edge` in `diff-edge.txt`). `constant` stops at `TypeBuilder_SetConstantValue` and `pseudo` at
+`TypeBuilder_DefineCustomAttribute`, both outside 5x. With the arm reverted and the App rebuilt, the probe stops at the
+`SetParamInfo` refusal again. So the Param table, its `ParamPtr` and the reflection arms (stage 1's writer, SRM's
+`MethodDefinition.GetParameters` behind `MetadataImport.Enum`, `GetParamDefProps`, `GetName`, the Constant and
+FieldMarshal lookups) already serve a dynamic module's parameters, and 5x is the write side alone.
+
+**What CoreCLR does.** Read from the pinned source (`$DOTNET_RUNTIME_SRC_NET10`). `RuntimeParameterBuilder.cs`,
+`MethodBuilder.cs`, `RegMeta::DefineParam` (md/compiler/emit.cpp) and `CMiniMdRW::FixParamSequence`,
+`AddParamToMethod`, `AddChildRowDirectForParent` and `AddChildRowIndirectForParent` (md/enc/metamodelrw.cpp) are
+identical in `_NET11`, as are `_SetParamProps`' lines; `RuntimeParameterInfo.cs` differs only in spelling (`[]` for
+`Array.Empty`, `Missing.Value` for `Type.Missing`, the same object) and in an early empty return from
+`GetCustomAttributesData` for a parameter with no row.
+
+* `MethodBuilder.DefineParameter` (libraries MethodBuilder.cs:34) refuses a negative position
+  (`ArgumentOutOfRangeException.ThrowIfNegative`, parameter `position`). `RuntimeMethodBuilder.DefineParameterCore`
+  (RuntimeMethodBuilder.cs:641) then calls `ThrowIfGeneric` (which no `MethodBuilder` the public API hands out can
+  fail: it throws only for an instantiation), `m_containingType.ThrowIfCreated()`, and refuses a position above
+  `m_parameterTypes.Length`, or any positive position when there are no parameter types, with
+  `ArgumentOutOfRangeException(SR.ArgumentOutOfRange_ParamSequence)`, which passes the message as the parameter's name.
+  Position 0, the return value, is always accepted. It clears `ParameterAttributes.ReservedMask` (0xF000: `HasDefault`,
+  `HasFieldMarshal`, `Reserved3`, `Reserved4`) and constructs the builder. The name is not checked: null, empty and
+  NUL-bearing names all go through.
+* `ConstructorBuilder.DefineParameter` (libraries ConstructorBuilder.cs:20) has no check of its own;
+  `RuntimeConstructorBuilder.DefineParameterCore` (:125) clears the reserved mask and calls the inner
+  `MethodBuilder.DefineParameter`, so a constructor has the same checks in the same order, position 0 included.
+* `RuntimeParameterBuilder`'s constructor (RuntimeParameterBuilder.cs:29) asks for `_methodBuilder.MetadataToken`,
+  which gives the method, and every earlier method of its type, a MethodDef row (5o), then calls `SetParamInfo` with
+  `StringMarshalling.Utf16`: a null name is a null pointer, and the native side reads to the first NUL. The builder keeps
+  the position, name and attributes as the caller gave them (after the mask), not as the row holds them.
+* `TypeBuilder_SetParamInfo` (vm/comdynamic.cpp:705) calls `RegMeta::DefineParam` with `ELEMENT_TYPE_VOID`, no value
+  and length `-1`, so no constant is written. `DefineParam` (emit.cpp:2765) searches only under `MDDupParamDef` (0x40),
+  which neither `MDDupDefault` (corhdr.h:1323) nor vm/assembly.cpp:88 sets. It adds the Param row, stores
+  `(USHORT)ulParamSeq` as its Sequence, and calls `AddParamToMethod`.
+* `_SetParamProps` (regmeta_emit.cpp:1727) writes the name with `PutStringW` when the pointer is not null, and
+  `PutStringW` (metamodelrw.cpp:4239) stores index 0 for an empty string, so a null and an empty name both leave the
+  Name column 0. Unless the flags are `UINT32_MAX` it clears `pdReservedMask` (0xF000, corhdr.h:503), ORs back the
+  reserved bits the row holds (none, on a fresh row) and stores the low sixteen bits. The managed caller has already
+  cleared 0xF000, so `UINT32_MAX` cannot arrive (`-1` arrives as 0xFFFF0FFF), and the row holds
+  `attributes & 0x0FFF`. This is neither 5s's rule nor 5w's: no flag is the emitter's own beyond the four reserved ones,
+  and `-1` is not special.
+* `AddParamToMethod` (metamodelrw.cpp:4864) appends the row to its method's run with `AddChildRowDirectForParent`, else
+  through a `ParamPtr` (`AddChildRowIndirectForParent`), exactly as fields and methods are added, keyed by the
+  MethodDef's RID. A new MethodDef's `ParamList` is `END_OF_TABLE` until the pointer table exists
+  (`AddMethodRecord`, :3915; `NewRecordPointerEndValue`), so a method added later never forces the pointer table.
+  Then `FixParamSequence` (:4700) walks back from the end of the method's run while the new row's Sequence is strictly
+  less than the one before it, and moves it there, creating the `ParamPtr` if it slides at all. Each insertion is one
+  step of a stable insertion sort, so a method's run is its rows ordered by Sequence, ties in RID order, and a
+  `ParamPtr` exists exactly when the rows sorted by (method RID, Sequence, RID) are not in RID order. Stage 1's writer
+  already derives it so (`EmitScopeImage.fs:270-278`), and its round trip already models `FixParamSequence`
+  (`TestEmitScopeImage.fs:88-127`). As for properties, no API shows a dynamic module's pointer table; the tie order is
+  visible through reflection (below), the slide is not.
+* `RuntimeParameterInfo.GetParameters` (RuntimeParameterInfo.cs:29) enumerates the method's Param rows in run order,
+  throws `BadImageFormatException` when there are more than the signature's parameters plus one, or when a row's
+  position is past the signature, and stores each row at its position, so a later row of the same position replaces an
+  earlier one. Rows of position 0 are skipped, and the gaps are filled with row-less parameters only when there are
+  fewer rows than parameters plus one: two return rows on a one-parameter method leave the array's element null.
+  `GetReturnParameter` throws `BadImageFormatException` at a second return row. A parameter with a row reads its name
+  through `MetadataImport.GetName`, which gives `""` for column 0; one without a row has name null and token
+  `0x08000000`. `DefaultValue` with no Constant row and no constant attribute is `DBNull`, or `Missing` when the
+  parameter is `Optional`, and `HasDefaultValue` is false.
+
+**Measured on .NET 10.0.14 and 11.0.0-rc.3** with a throwaway probe (scratchpad `5x/probe`, `Program.cs`), built against
+net10.0 and run on 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148 (`DOTNET_ROLL_FORWARD=LatestMajor`,
+`DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`). The outputs are identical but for the version line (`5x/probe/net10-all.out`,
+`net11-all.out`; `net10-edge.out`, `net11-edge.out`). Tokens are read from each builder's private `_token`. Each
+scenario is its own module.
+
+| Emitted | Observed |
+|---|---|
+| `Ref`: `M(int ×6)`; `DefineParameter(1, "first")` | `0x08000001`; `M` is `0x06000001` |
+| position `-1`; `int.MinValue` | `ArgumentOutOfRangeException` (`position`), no token |
+| position 7; `int.MaxValue` | `ArgumentOutOfRangeException` whose `ParamName` is "The specified parameter index is not in range.", no token |
+| position 0, `"ret"` | `0x08000002`; the created method's `ReturnParameter` is named `ret` with that token |
+| names null, `""`, `"\0x"`, `"a\0b"`, `"é中😀"` at positions 2 to 6 | tokens `0x08000003` to `0x08000007`; the builders keep the names as given (null, `""`, `"\0x"`, `"a\0b"`); reflection names them `""`, `""`, `""`, `a`, `é中😀` |
+| `GetParameters` and `ReturnParameter` of the `MethodBuilder` before `CreateType` | `NotSupportedException`; `InvalidOperationException` ("Type has not been created.") |
+| a method with no parameters: position 1; position 0 with `Retval` | `ArgumentOutOfRangeException`; `0x08000008`, and the return parameter is `IsRetval` |
+| `DefineMethod(name, attrs)` with no signature: position 1; then `SetParameters(long)` and position 1 | `ArgumentOutOfRangeException`; `0x08000009` |
+| after `CreateType`: position `-1`; 7; 1 | `ArgumentOutOfRangeException` (`position`); `InvalidOperationException` twice: the negative check precedes `ThrowIfCreated`, which precedes the range check |
+| the next parameter, on a new type `B` | `0x0800000A`: no refusal consumed a token |
+| `Flags`: a 40-parameter method, parameter `i` given each of the 32 single bits, then `0`, `0xFFFF`, `-1`, `0x1000`, `0x2000`, `0xF000`, `0x7FFF0013`, `0x0FFF`; the return value `-1` | the row (`ParameterInfo.Attributes`) keeps bits 0 to 11, the unnamed bits 5 to 11 included, and drops 12 to 31: `0xFFFF`, `-1` and `0x0FFF` give `0x0FFF`, `0x7FFF0013` gives `0x0013`, `0x1000` to `0xF000` give 0. The builder's `Attributes` is the managed value after the mask, high bits included (`-1` gives `0xFFFF0FFF`). `Optional` makes `DefaultValue` and `RawDefaultValue` `Missing`; otherwise `DBNull`; `HasDefaultValue` is always false |
+| `Order`: `A.M(int, string, long)` given positions 3, 1, 0, 2 | tokens 1 to 4 in that order; reflection gives `a` (2), `b` (4), `c` (1), and return `ret` (3) |
+| `P.p1(int, int)`, `P.p2(int)`, `Q.q1(int)`: `p2.1 w`, `p1.1 x`, `q1.1 z`, `p1.2 y`; `P` created; `q1.0 qret` | tokens 5 to 9 in that order; methods `p1` `0x06000002`, `p2` `0x06000003`, `q1` `0x06000004`; each method lists only its own, by position. (`p2`'s parameter precedes `p1`'s, so a `ParamPtr` is needed, read, not measured) |
+| `Dup`: `TwoSame(int, int)`: `1 first (Out)`, `1 second (In)` | two rows; reflection's first parameter is `second`, `In`, token 2; the second has no row |
+| `TwoReturns(int)`: `0 r1`, `0 r2` | `GetParameters` returns one element, null (`5x/probe/net10-edge.out`, `TwoRet`); `ReturnParameter` throws `BadImageFormatException` |
+| `ThreeRows(int)`: position 1 three times; `RetAndOne(int)`: `1 a`, `0 r`, `1 b` | both throw `BadImageFormatException` from `GetParameters` and `ReturnParameter`; invoking `ThreeRows` works |
+| `Slide(int, int)`: `2 b1`, `1 a`, `2 b2` | `a`, `b2`: the later of two rows of one position wins |
+| `Ctor`: `C(int, string)`: positions 0, 2 (`Optional`), 1; 3; `-1`; the default constructor's 1; the type initializer's 0 | tokens 1, 2, 3; `ArgumentOutOfRangeException` three times (the message one, then `position`, then the message one); `0x08000004`. Reflection names `i`, `s` (`Missing`); the constructor's return row is invisible; after `CreateType`, `InvalidOperationException` |
+| `Tok`: `A.a1`, `A.a2`, `B.b1` defined, then `b1.DefineParameter`, then `a2.DefineParameter` | `b1` `0x06000001`, then `a1` `0x06000002` and `a2` `0x06000003`: the call tokenises the method and the earlier methods of its type |
+| `Gen`: `G<T>.M(T x, int n)`; `H.Id<U>(U u)` with return `r` | names read through `G<>` and `G<int>` (one token each), and through `Id<>` and `Id<string>`; `Id<string>("hi")` runs |
+| `Iface`: interface `I.M(int value, out int result)`, then `C : I` naming only its second parameter | `I.M`'s two names and `Out`; `C.M`'s first parameter has no row (name null); invoking through `I` sets the `out` |
+| `Const`: `Optional` parameter, then `SetConstant(5)` | the builder still says `0x0010`; the row says `0x1010` (`HasDefault` set by `TypeBuilder_SetConstantValue`), `DefaultValue` 5 |
+| `Pseudo`: `SetCustomAttribute([Out])` on a parameter defined with `None` | the builder says 0; the row says `0x0002`: `TypeBuilder_DefineCustomAttribute` rewrites the Param row's flags |
+| `Edge`: a 65537-parameter method: position 65537 `last`, then 65536 `nextToLast` | tokens 1 and 2; reflection names parameter 0 `last` and the return parameter `nextToLast`: the position is truncated to sixteen bits |
+
+Every row but `Const` and `Pseudo` was reproduced byte for byte under PawPrint by the throwaway arm, which stores the
+sequence as `uint16` and the flags as `& 0x0FFF`.
+
+**What 5x must change in PawPrint.** Cited at `main` 90b691e38.
+
+* `WoofWare.PawPrint/Native/NativeRuntimeTypeBuilder.fs`: no `TypeBuilder_SetParamInfo` arm. `TypeBuilder_SetMethodImpl`
+  (`:491-543`) is the template for reading the module and a MethodDef token against the scope (`tryMethodDefRid`), and
+  `TypeBuilder_DefineProperty` (`:348-416`) for reading a name with `readNullTerminatedUtf16` and returning a token.
+  `methodDefTable` (`:16`) gains a `paramTable` (0x08) sibling. The arguments are the module, the method token, the
+  sequence and the attributes as `int`s (the attributes typed `ParameterAttributes`), and the name as `ushort*`, which
+  may be null.
+* `WoofWare.PawPrint/Native/NativeQCall.fs:221-234` registers the TypeBuilder QCalls; `TypeBuilder_SetParamInfo` joins
+  them.
+* `WoofWare.PawPrint.Domain/EmitScopeDefinitions.fs`: no `defineParam`. `defineProperty` (`:459-499`) and `defineField`
+  (`:216-270`) are where the siblings' flag rules live. `EmitScope.addParam` (`EmitScope.fs:884-892`) already adds a
+  row at the next RID, checks the owner's RID and the name's offset, and searches for nothing; `ParamRid`
+  (`:99-107`), `ParamRow` (`:306-313`, Sequence a `uint16`, Flags a `ParameterAttributes`) and `parameters`
+  (`:1084`) stand. Nothing outside the test generator calls `addParam` today.
+* `WoofWare.PawPrint.Domain/EmitScopeImage.fs`: nothing. The `ParamPtr` derivation (`:270-278`), the `ParamList`
+  column (`:458-466`), the pointer table (`:469-470`) and the Param rows (`:472-476`) are stage 1's, and the module
+  docstring (`:67-68`) already names `ParamPtr` and the sequence order.
+* `WoofWare.PawPrint.Loader/EmitScopeExtension.fs:200-206` already refuses a Param row added to a created type's
+  method, and its generated test (`TestEmitScopeExtension.fs`, `typeView` at `:62-80`) covers parameters.
+* `WoofWare.PawPrint/Native/NativeMetadataImport.fs`: nothing, as the throwaway showed. `Enum` of `mdtParamDef`
+  (`:1248-1249`) lists the run through SRM's `MethodDefinition.GetParameters` (`:496-521`), which follows a
+  `ParamPtr`; `GetParamDefProps` (`:2332-2378`) reports Sequence and Flags raw; `GetName` (`:1521-1525`) gives `""`
+  for column 0; the Constant (`:802`) and FieldMarshal (`:849`) lookups and `GetParentToken` of a Param
+  (`methodOwningParameter`, `:932`, used at `:2291`) scan rather than hash, so none needs `isDynamic`.
+  `Parameter.readAll` (`Domain/MethodInfo.fs:35-52`) and `parameterMarshalling` (`:1630-1655`) read the same run when
+  the created type is loaded.
+* Tests: `EmitScopeGen.fs` draws Param rows (`Op.Param`, `:41`, `:236-242`) with four flag choices
+  (`paramFlagChoices`, `:143-148`) and never two rows of one (method, sequence) (`ParamSequences`, `:75-76`,
+  `:536`), which CoreCLR writes routinely. `TestEmitScopeImage.fs`' round trip checks the `ParamPtr`'s presence
+  against `paramsInRidOrder` (`:198-216`), the same rule the writer uses, and each method's run against
+  `paramsInCoreClrOrder` (`:88-117`, read at `:316`), with coverage asserted at `:555-575`. `TestImpureCases.fs`'
+  `assertPropertyRows` (`:1790`) is the precedent for a terminal-state check. 5o's oracle above says `DefineParameter`
+  reaches an unimplemented QCall; no test carries that note any more.
+
+**Conflicts with 5w.** 5w's PR (#2252, `origin/plan-5w-define-event`) changes `NativeRuntimeTypeBuilder.fs`
+(`TypeBuilder_DefineMethodSemantics` and a new `TypeBuilder_DefineEvent` arm), `NativeQCall.fs` (one registration
+beside the property QCalls), `EmitScopeDefinitions.fs` (`defineEvent` after `defineProperty`), `EmitScopeGen.fs`,
+`TestEmitScopeImage.fs`, `TestImpureCases.fs`, `WoofWare.PawPrint.Test.fsproj` and this file, whose sections both
+branches append at its end. 5x touches each of those, and not `EmitScope.fs`, `EmitScopeImage.fs` or
+`EmitScopeExtension.fs`, under the recommended option. The overlaps are textual (neighbouring lines and list entries);
+no 5x code reads anything 5w adds. 5x branches from `main` and rebases once 5w lands; whichever lands second rebuilds the
+whole solution before pushing.
+
+### 5x: the options
+
+Every option adds a `TypeBuilder_SetParamInfo` handler in `NativeRuntimeTypeBuilder`, checking the module and that the
+method token names a MethodDef row of the scope, reading the name to its first NUL, and returning the Param token. None
+changes the reader. They differ in where the parameters live in the scope and who applies `RegMeta`'s rules.
+
+**A. A Domain `defineParam` over the existing Param table; the writer and reader unchanged.**
+`EmitScopeDefinitions.defineParam (method : MethodDefRid) (sequence : int) (name : string) (flags : int)` models
+`RegMeta::DefineParam` with `_SetParamProps`: a new row at the next RID whatever the method's rows already hold, the
+sequence stored as its low sixteen bits, the flags as `_SetParamProps` stores them, the name interned. The handler reads
+its arguments, states the managed caller's guarantees (below), calls `defineParam` and keeps the extended scope. Stage 1's
+writer derives `ParamPtr` and every method's run from the rows.
+
+* Correctness: every row of the probe above, measured with exactly this structure by the throwaway arm (which inlined
+  the rule in the handler; A moves it to Domain).
+* Blast radius if wrong: parameters of dynamic methods, which are refused today. A wrong tie order or a missing pointer
+  table shows at once in reflection's names (the `Dup` and `Order` rows); a wrong slide does not, and only the image
+  checks see it.
+* Reversibility: one function and one handler; no type changes shape.
+* Information: CoreCLR's rows in CoreCLR's RID order, duplicates included.
+* Size: about the throwaway's 55 lines in the handler, 20 in Domain, plus docstrings and tests.
+
+**B. Each method holds its parameters as a column.** `MethodDefRow` gains a list of (sequence, flags, name), appended to
+as `SetMethodIL` fills in a body; the writer numbers Param rows and derives the pointer table.
+
+* But a Param RID is a token handed out in definition order across every method of the module (`Order`'s tokens 5 to 9
+  alternate between `P` and `Q`), so the column needs a module-wide counter beside it, and a row's RID becomes a
+  computed property rather than a list position. Every child table in the scope names its owner (stage 1's decision
+  1a); this would be the only exception. 5s rejected the same shape for property accessors.
+* The extension rule gains an append-only column on MethodDef, a third kind beside "added" and "filled in".
+* Rejected unless the decider reopens stage 1's 1a.
+
+**C. The scope holds CoreCLR's physical order: the Param rows plus an explicit `ParamPtr` list, maintained by
+`defineParam` as `AddChildRowIndirectForParent` and `FixParamSequence` maintain them.**
+
+* It states CoreCLR's algorithm in the data rather than as a sort in the writer, so the pointer table is checkable at
+  each insertion, and a later stage that needs a row's run position would have it.
+* But the writer already derives the same table from the rows, and stage 1 proved the derivation against a model; C
+  holds a second representation that must agree with it. `EmitScopeExtension` would compare a list whose entries
+  move (a slide rewrites earlier pointer entries), which none of its rules does today. No consumer needs a run position.
+
+**Recommended: A.** It is the structure stage 1 chose and 5s and 5w followed; the throwaway measured it end to end; and the
+only new rule (the flags and the sequence's width) is a pure function that Domain can test against a model. B
+contradicts 1a for a table that already follows it. C keeps twice what A derives.
+
+Open questions:
+
+1. A, B or C.
+2. Where the flag rule lives, and what the handler asserts. (a) The handler refuses, as a PawPrint fault, attributes
+   with any bit of `ParameterAttributes.ReservedMask` (0xF000) set, since both managed callers clear it, as
+   `TypeBuilder_DefineField` does for `FieldAttributes.ReservedMask` (`NativeRuntimeTypeBuilder.fs:333`); Domain's
+   `defineParam` models `_SetParamProps` in full: `-1` leaves the column 0, any other value loses 0xF000 and keeps
+   its low sixteen bits (recommended: Domain stays a model of the emitter, as `defineProperty` and `defineEvent` are,
+   and the fault states the managed guarantee that makes the row `& 0x0FFF`). (b) Domain takes the flags already
+   reduced (`& 0x0FFF`) and the handler reduces them: smallest, but Domain no longer says what `RegMeta` does, and its
+   model test could not tell the mask from the managed caller's. (c) Neither refuses: the handler passes the value
+   through. Under (a) and (c) Domain's 0xF000 mask is invisible to every guest (the managed caller has cleared those
+   bits), so only the Domain model kills its mutant.
+3. A position wider than sixteen bits. CoreCLR truncates (measured: 65537 becomes parameter 1, 65536 the return
+   value), and the throwaway's `uint16` cast reproduced it. (a) Model it: Domain takes the sequence as an `int`, the
+   managed caller's range, and stores its low sixteen bits (recommended: deterministic metadata behaviour, measured on
+   both runtimes, one cast to model). (b) Refuse it by name as a TODO naming CoreCLR's truncation: smaller still, but
+   it refuses what real .NET does without fault, for no saving.
+4. A null name. (a) The handler maps a null pointer to `""`, which `internString` gives offset 0, the column CoreCLR
+   leaves when it writes no name and the one `PutStringW` writes for an empty one (recommended: the row is the same
+   either way, and reflection measured `""` for both). (b) Domain takes `string option` to mirror `szName != NULL`:
+   it records a distinction that the row does not hold.
+5. The scope of the stage. (a) `SetParamInfo` alone; `ParameterBuilder.SetConstant` (`TypeBuilder_SetConstantValue`)
+   and `ParameterBuilder.SetCustomAttribute` (`TypeBuilder_DefineCustomAttribute`) stay refused by their existing
+   unimplemented-QCall stops (recommended: each is its own feature spanning other parents, and each rewrites the Param
+   row's flags afterwards, measured as `HasDefault` from the constant and `Out` from the pseudo-attribute, which is a
+   filled-in column for the extension rule to admit). (b) Add the Constant table for parameters only: half a feature,
+   whose other half (fields, properties, enum literals) would follow with a second design pass over the same table.
+6. One PR (recommended: the throwaway shows the feature is one handler and one Domain function), or split with the
+   Domain function and its tests first.
+7. The generator. (a) Lift `EmitScopeGen`'s refusal to draw two rows of one (method, sequence), widen the flags to
+   the whole sixteen-bit column, and replace the round trip's `paramsInRidOrder` with a replay of
+   `AddChildRowDirectForParent`, `AddChildRowIndirectForParent` and `FixParamSequence` one parameter at a time, giving
+   both the pointer table's presence and its contents (recommended: the writer's rule and the test's are the same
+   sentence today, and duplicates are what the tie order is about). The replay can take the final MethodDef count,
+   because a method added later starts at `END_OF_TABLE` and so never makes an earlier insertion indirect. (b) Leave
+   the generator as stage 1 wrote it, and rely on the guests and the differential property for duplicates.
+8. Whether the guest pins the shapes whose reflection is malformed (`TwoReturns`' null element and
+   `BadImageFormatException`, `ThreeRows` and `RetAndOne`'s `BadImageFormatException`). Recommended: yes. They are what
+   CoreLib's managed code makes of rows PawPrint writes, measured identical under the throwaway, and with `TwoSame` and
+   `Slide` they are the only guest-visible check that the handler searches for nothing and keeps ties in RID order.
+9. Whether the main guest includes a Castle-shaped generator: copy each parameter's position, attributes and name from
+   an interface method onto a proxy's method with `DefineParameter`, as Castle does, then read them back through the
+   proxy type. Recommended: yes; Castle is the one consumer measured to run to completion with 5x, and it cannot be a
+   guest itself (a NuGet package).
+10. Whether `GC._CollectionCount`, Castle's first stop, gets its own small PR outside this plan, and when. It is not
+    emit and needs a decision of its own (how many collections a deterministic run reports), so it is recorded under
+    "left to later stages" rather than planned here.
+
+### 5x: the oracle
+
+Written first, and seen to fail on this branch at "Unimplemented native method (PInvokeImpl
+QCall!TypeBuilder_SetParamInfo)" before the handler exists:
+
+* `sourcesImpure/TypeBuilderDefineParameter.cs` (`IsDynamicCodeSupported` on, registered in `TestImpureCases.fs`), the
+  probe's scenarios without the console, returning the number of the first failing check:
+  * the refusals and their order: positions `-1`, `int.MinValue`, one past the count and `int.MaxValue` before
+    creation; a positive position on a method with no parameters and on one with no signature yet, then after
+    `SetParameters`; `-1`, one past the count and a valid position after `CreateType` (the negative check first, then
+    `ThrowIfCreated`); the same on a constructor, the default constructor and the type initializer; each refusal's
+    exception type and `ParamName`, and a token read afterwards showing none was consumed;
+  * the names: null, `""`, `"\0x"`, `"a\0b"`, and one with a surrogate pair, each read back from the created method and
+    from the builder;
+  * the flag sweep: the 32 single bits and the eight specials on one method, the return value with `-1`, each
+    parameter's `Attributes`, `IsIn`, `IsOut`, `IsOptional`, `IsRetval`, `IsLcid`, `DefaultValue`, `RawDefaultValue`
+    (`Missing` or `DBNull`) and `HasDefaultValue`, and each builder's `Attributes`;
+  * the order: positions out of order on one method; parameters interleaved across two methods of one type and a method
+    of another, the earlier-defined method's parameter after the later's, and one added after its neighbour's type is
+    created; each token, and each method's parameters by position;
+  * the duplicates and malformed shapes: `TwoSame`, `TwoReturns`, `ThreeRows`, `Slide`, `RetAndOne` (question 8);
+  * the lazy MethodDef tokens: `A.a1`, `A.a2`, `B.b1`, then `b1`'s parameter and `a2`'s;
+  * the generic type and generic method, read through the definition and an instantiation, and invoked;
+  * the interface method with an `out` parameter and an implementation naming only its second, invoked through the
+    interface;
+  * the 65537-parameter method (question 3);
+  * the Castle-shaped copy (question 9).
+
+  Tokens are checked as literals within each module of their own, as the probe does. Its terminal-state check, beside
+  `assertPropertyRows`, reads the scope's Param rows in RID order (method, Sequence, Flags, name) for the order and
+  duplicate modules, and, from the image SRM reads back, the `ParamPtr`'s presence and contents for each. That check is
+  the only guest-level oracle of the slide, which reflection cannot see.
+* The guest is built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 before it is committed,
+  with a control inverting one check (the `Slide` winner's name, so that the control exercises the tie order) that must
+  exit with that check's number on both runtimes, and run under PawPrint with `PAWPRINT_TEST_RUNTIME` unset and `Net11`.
+  The throwaway arm was measured only on the host's .NET 10 CoreLib, so the `Net11` run is the first under .NET 11's
+  CoreLib, whose `RuntimeParameterInfo` differs only in spelling and in `GetCustomAttributesData` for a parameter
+  without a row.
+* Domain model (in `TestEmitScopeMethods` or a sibling `TestEmitScopeParams`): `defineParam` against a model over
+  generated calls: methods drawn from the scope, sequences from the whole `int` range with 0, the parameter count and
+  values above 65535 over-represented, flags from the whole `int` range with `-1`, the reserved bits and the high
+  sixteen bits over-represented, names including `""`. Each call gets the next RID, the Sequence is the low sixteen
+  bits, the Flags follow `_SetParamProps` (`-1` gives 0, otherwise `& ~0xF000 & 0xFFFF`), the name reads back, and two
+  calls with one (method, sequence) give two rows.
+* The image round trip (`TestEmitScopeImage`), under question 7(a): the generator draws duplicate (method, sequence)
+  pairs and flags over sixteen bits; for every method, SRM's `GetParameters` equals the replay's run, ties in RID order,
+  and the image has a `ParamPtr` exactly when the replay created one, with its contents. The fixed sample asserts its
+  coverage: a duplicate pair, a slide past a duplicate, a method whose run needs the pointer table only because of a
+  slide, one that needs it only because a later method's rows came first, and a return row added after a parameter row.
+* A differential property against real .NET, in-process (as `TestEmitScopeProperties`' at `:335`, `RunAndCollect`): a
+  generated schedule over a few types of `DefineMethod` with zero to four parameters (some with a return value),
+  `DefineConstructor`, and `DefineParameter` at positions 0 to the arity, duplicates included, with flags from the whole
+  `int` range and names from a small alphabet including null, `""` and an embedded NUL. It runs on the host's
+  `TypeBuilder` and through `defineParam`. Every host `_token` equals the RID `defineParam` returned. For every created
+  method, the host's `GetParameters` and `ReturnParameter` (each position's name, `Attributes` and token, or the
+  exception type, or the null element) equal a model of `RuntimeParameterInfo.GetParameters` applied to the image's run,
+  read through SRM. The model is test code, about thirty lines over (token, Sequence, Flags, name) in run order; the
+  property is what pins it, and the guests pin PawPrint running CoreLib's own copy. Coverage is asserted for a
+  duplicate, a slide, a pointer table, two return rows and too many rows.
+* Mutants, each run against the guest, the Domain model, the round trip and the differential property:
+  * the Param RID off by one in the handler; the token's table byte `0x06` (`Ref`'s tokens; the differential's tokens);
+  * the method token read from the sequence argument (every token);
+  * the flags stored whole, the high sixteen bits kept (the column is two bytes, so this is a Domain mutant: the model
+    test);
+  * the flags masked with `0x0F00`, or `0x00FF` (the sweep's bits 0 to 11);
+  * Domain's `0xF000` mask dropped (expected to survive the guest, whose caller clears the bits; killed by the model
+    test);
+  * `-1` stored as `0xFFFF` rather than leaving 0 (the model test alone, since `-1` cannot arrive from the managed
+    caller);
+  * the sequence refused, or saturated, above 65535 rather than truncated (`Edge`);
+  * the name read past the first NUL (`a\0b`; `internString` refuses the NUL, so the run crashes);
+  * a null name refused (`Ref`'s position 2);
+  * a search for an existing (method, sequence) row (`TwoSame`, `Slide`, `ThreeRows`);
+  * the writer's ties broken by descending RID (`TwoSame` names `first`; `Slide` names `b1`);
+  * the writer's `ParamPtr` keyed on the method alone, with no slide (expected to survive every guest check by
+    reflection; killed by the terminal-state check, the round trip's replay and the differential's run order);
+  * the `ParamPtr` omitted (`Order`: `P.p1`'s run takes `w`);
+  * `defineParam`'s extended scope not kept by the handler (every check after the first `DefineParameter`);
+  * the reserved-bits fault of question 2(a) inverted, refusing attributes without them (the first `DefineParameter`).
+
+### 5x: left to later stages
+
+* `ParameterBuilder.SetConstant`, through `TypeBuilder_SetConstantValue`, with the Constant table that enums, literal
+  fields and properties want too. It sets `HasDefault` in an existing Param row (measured), and
+  `RuntimeParameterBuilder.SetConstant` does not check that the type is not yet created, so that stage must say whether
+  the extension rule admits a Param row of a created type whose flags change.
+* `ParameterBuilder.SetCustomAttribute`, through `TypeBuilder_DefineCustomAttribute`, refused for every parent today;
+  its pseudo-attributes (`In`, `Out`, `Optional`, `MarshalAs`) rewrite the Param row's flags and add FieldMarshal rows
+  (measured for `Out`).
+* `GC._CollectionCount`, Castle DynamicProxy's first stop on `main`, outside this plan (question 10).
+* `MethodBuilder.SetParameters` after `DefineParameter`: the MethodDef's signature is written when `DefineParameter`
+  tokenises the method, so the later `SetParameters` does not reach the row (measured: `Shrink` keeps two
+  parameters). That is 5o's lazy-tokenisation behaviour, not 5x's, and the probe found PawPrint identical.
+* 5w's list stands: `XmlSerializer` (which also calls `DefineParameter`, behind its `AssemblyNative_InternalLoad` stop),
+  the dynamic-methods class's two queries, nested dynamic types, the `Signature.Init` fix, and whether reflection should
+  read `TypeInfo.Events`.
