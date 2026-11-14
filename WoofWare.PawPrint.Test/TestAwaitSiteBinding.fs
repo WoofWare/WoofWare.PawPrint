@@ -7,12 +7,12 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// `AwaitSiteBinding.classify`, decision 13's classification of a matched await site, against the
-/// rule of stage 4e of `docs/plans/2026-11-11-runtime-async.md`: a site binds the callee's async
-/// variant exactly when it is a tail shape or an await with `ConfigureAwait(false)`, is no
-/// `callvirt` with a `constrained.` prefix, and names a method with a variant PawPrint models: one
-/// that runs IL, an `Async` method's or an async version's, or an abstract one, which only a call
-/// that dispatches or has a `constrained.` prefix names. An await continues on the thread pool, and
-/// a tail shape with no preference.
+/// rule of stage 4f of `docs/plans/2026-11-11-runtime-async.md`: a site binds the callee's async
+/// variant exactly when it is no `callvirt` with a `constrained.` prefix, and names a method with a
+/// variant PawPrint models: one that runs IL, an `Async` method's or an async version's, or an
+/// abstract one, which only a call that dispatches or has a `constrained.` prefix names. An await
+/// with `ConfigureAwait(false)` continues on the thread pool, any other await on the captured
+/// context, and a tail shape with no preference.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestAwaitSiteBinding =
@@ -82,11 +82,10 @@ module TestAwaitSiteBinding =
     /// Whether `reason` holds of `facts`.
     let private holds (facts : AwaitSiteFacts) (reason : AwaitNotYetBound) : bool =
         match reason with
-        | AwaitNotYetBound.ContinuesOnCapturedContext -> facts.Pattern = MatchedPattern.Await true
         | AwaitNotYetBound.ConstrainedCallvirt -> facts.Constrained && facts.Opcode = AwaitedCall.Callvirt
 
     [<Test>]
-    let ``A site binds exactly when stage 4e's three conditions hold, and continues as its pattern says`` () : unit =
+    let ``A site binds exactly when stage 4f's two conditions hold, and continues as its pattern says`` () : unit =
         let property (facts : AwaitSiteFacts) : unit =
             let hasVariant =
                 match facts.NamedVariant with
@@ -94,16 +93,16 @@ module TestAwaitSiteBinding =
                 | Error _ -> false
 
             let binds =
-                hasVariant
-                && facts.Pattern <> MatchedPattern.Await true
-                && not (facts.Constrained && facts.Opcode = AwaitedCall.Callvirt)
+                hasVariant && not (facts.Constrained && facts.Opcode = AwaitedCall.Callvirt)
 
             match AwaitSiteBinding.classify facts with
             | AwaitSiteBinding.BindsVariant handling ->
                 binds |> shouldEqual true
 
                 match facts.Pattern with
-                | MatchedPattern.Await _ -> handling |> shouldEqual ContinuationContextHandling.ContinueOnThreadPool
+                | MatchedPattern.Await true ->
+                    handling |> shouldEqual ContinuationContextHandling.ContinueOnCapturedContext
+                | MatchedPattern.Await false -> handling |> shouldEqual ContinuationContextHandling.ContinueOnThreadPool
                 | MatchedPattern.TailShape -> handling |> shouldEqual ContinuationContextHandling.NoPreference
             | AwaitSiteBinding.NoVariant _
             | AwaitSiteBinding.NotYetBound _
@@ -172,8 +171,7 @@ module TestAwaitSiteBinding =
             )
             |> Set.ofSeq
 
-        reasons
-        |> shouldEqual (Set.ofList [ "ContinuesOnCapturedContext" ; "ConstrainedCallvirt" ])
+        reasons |> shouldEqual (Set.ofList [ "ConstrainedCallvirt" ])
 
     /// A `callvirt` that dispatches binds the named method's variant, abstract or not: dispatch
     /// finds the receiver's implementation through the ordinary sibling (decision 19).
@@ -185,7 +183,12 @@ module TestAwaitSiteBinding =
                 AsyncVariantBody.AsyncVersion
                 AsyncVariantBody.Abstract
             ] do
-            for pattern in [ MatchedPattern.Await false ; MatchedPattern.TailShape ] do
+            for pattern in
+                [
+                    MatchedPattern.Await true
+                    MatchedPattern.Await false
+                    MatchedPattern.TailShape
+                ] do
                 let facts : AwaitSiteFacts =
                     {
                         Pattern = pattern
@@ -210,7 +213,12 @@ module TestAwaitSiteBinding =
                 AsyncVariantBody.AsyncVersion
                 AsyncVariantBody.Abstract
             ] do
-            for pattern in [ MatchedPattern.Await false ; MatchedPattern.TailShape ] do
+            for pattern in
+                [
+                    MatchedPattern.Await true
+                    MatchedPattern.Await false
+                    MatchedPattern.TailShape
+                ] do
                 for dispatches in [ true ; false ] do
                     let facts : AwaitSiteFacts =
                         {

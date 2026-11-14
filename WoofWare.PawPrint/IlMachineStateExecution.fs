@@ -1961,7 +1961,10 @@ module IlMachineStateExecution =
                 $"BUG: %O{method} is suspending at IL_%04X{callSite}, its continuation flagged %O{flags}, but its frame is %A{other}"
 
         let layout =
-            AsyncSuspension.layoutAwaiting (not (AsyncSuspension.tryRegionsAround method callSite).IsEmpty) awaited
+            AsyncSuspension.layoutAwaiting
+                (not (AsyncSuspension.tryRegionsAround method callSite).IsEmpty)
+                flags
+                awaited
 
         let continuation, state =
             AsyncSuspension.allocateContinuation loggerFactory baseClassTypes layout state
@@ -1983,24 +1986,47 @@ module IlMachineStateExecution =
 
         match frame.AsyncFrame with
         | Some (AsyncFrame.SavesContexts (AsyncContextHandling.Captured contexts)) ->
-            // `FinishSuspensionNoContinuationContext(ref execCtx, resumed, previousExecCtx,
-            // previousSyncCtx)`, the helper for an await of no continuation context
-            // (`GetSuspensionContextHelper`), which captures the thread's `ExecutionContext` into the
-            // continuation and puts back the contexts the frame found on entry.
-            callAsyncHelper
-                loggerFactory
-                baseClassTypes
-                "FinishSuspensionNoContinuationContext"
+            let pointer (pointer : ManagedPointerSource) : CliType =
+                CliType.RuntimePointer (CliRuntimePointer.Managed pointer)
+
+            // Each helper captures the thread's `ExecutionContext` into the continuation and puts
+            // back the contexts the frame found on entry (`GetSuspensionContextHelper`).
+            let finishContextHandling =
                 [
-                    CliType.RuntimePointer (
-                        CliRuntimePointer.Managed (
-                            AsyncSuspension.slotPointer continuation ContinuationSlot.ExecutionContext
-                        )
-                    )
+                    pointer (AsyncSuspension.slotPointer continuation ContinuationSlot.ExecutionContext)
                     CliType.ofBool contexts.Resumed
                     CliType.ObjectRef contexts.ExecutionContext
                     CliType.ObjectRef contexts.SynchronizationContext
                 ]
+
+            let helper, args, state =
+                match flags with
+                | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnCapturedContext ->
+                    // `FinishSuspensionWithContinuationContext(ref continuationContext, ref flags,
+                    // ref execCtx, resumed, previousExecCtx, previousSyncCtx)` also records where the
+                    // continuation continues: the thread's `SynchronizationContext` or
+                    // `TaskScheduler`, in the slot, with the flag that says which.
+                    let flagsPointer, state =
+                        AsyncSuspension.flagsPointer loggerFactory baseClassTypes continuation state
+
+                    let args =
+                        pointer (AsyncSuspension.slotPointer continuation ContinuationSlot.ContinuationContext)
+                        :: pointer flagsPointer
+                        :: finishContextHandling
+
+                    "FinishSuspensionWithContinuationContext", args, state
+                | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+                | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool
+                | SuspendedCallFlags.ValueTaskAdaptedToTask ->
+                    // `FinishSuspensionNoContinuationContext(ref execCtx, resumed, previousExecCtx,
+                    // previousSyncCtx)`.
+                    "FinishSuspensionNoContinuationContext", finishContextHandling, state
+
+            callAsyncHelper
+                loggerFactory
+                baseClassTypes
+                helper
+                args
                 (AsyncContextStep.AfterFinishSuspension suspension)
                 thread
                 state
