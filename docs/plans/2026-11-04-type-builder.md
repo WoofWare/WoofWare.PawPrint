@@ -5836,3 +5836,134 @@ Scratchpad paths below are under the scratchpad named in "5x: what it is". The f
   * The exact model of stranded rows (option (b)), with the parked guest as its oracle.
   * Whether `PersistedAssemblyBuilder` or a saved image shares the defect. `PreSave` converts markers only from the last row down to the first real value. Not measured, and outside a `Run` assembly.
   * How often real emitters reach the trigger: not measured. The shape needs a later method tokenised early (for instance by `ILGenerator.Emit(OpCodes.Call, laterMethod)`) and then parameters defined out of position order, or the return value after a parameter. Castle's measured run does not reach it.
+
+### 5x: as built
+
+Built 2026-11-14 as the amended decisions say, in six commits after the plan: the two records of the decisions; the
+tests that compile today (`666532150`); `defineParam` failing by name with its tests (`c18f3e372`); the Domain
+(`6a337f7e6`); and the handler (`d42283b7d`). Scratchpad paths are under `5x-impl/` in the scratchpad named in "5x:
+what it is". The emitter's defect is PawPrint issue #2253.
+
+**Measured on real .NET before any commit.** Each guest was built against net10.0 and run on 10.0.14, and rolled forward
+to 11.0.0-rc.3, with a control (`5x-impl/guest`):
+
+| Guest | .NET 10.0.14 | .NET 11.0.0-rc.3 | Control | PawPrint, host's CoreLib | PawPrint, `Net11` |
+|---|---|---|---|---|---|
+| `TypeBuilderDefineParameter.cs` | 0 | 0 | `Slide`'s winner `b1`: 80 on both | 0, 12 s | 0, 12 s |
+| `TypeBuilderDefineParameterStrandedRows.cs` (parked) | 0 | 0 | the third module's name `a`: 22 on both | the handler's TODO at the first module's `X.0` | the same |
+| `TypeBuilderDefineParameterWide.cs` (parked) | 0 | 0 | no row at position 256: 2 on both | out of the harness's 20,000,000 steps; 0 in 5 m 29 s with 4,000,000,000 | not run |
+
+The `Net11` runs were the guests' first under .NET 11's CoreLib (`dotnet-linux-x64-framework-11.0.0-rc.3.26522.148`).
+
+**Red, as recorded.**
+* At `666532150`: both guests stopped at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetParamInfo)".
+  `addParam refuses flags wider than the column's two bytes` failed for 0x10000 and for `-1`; the other 78 tests of the
+  emit-scope, replay and parking fixtures passed, the round trip against `main`'s writer among them, so stage 1's writer
+  had no defect to report.
+* At `c18f3e372`: all six tests of `TestEmitScopeParams` failed, the four that call `defineParam` at "TODO:
+  EmitScopeDefinitions.defineParam is not implemented yet".
+
+**What was built.**
+* Domain. `ParamDefinition` (`Defined` or `StrandsLaterMethods of slid * last`) and
+  `EmitScopeDefinitions.defineParam`, which refuses reserved bits, a negative sequence, a method the scope lacks and a
+  NUL in the name with `ArgumentException`, computes the stranding trigger from the scope before the call, and otherwise
+  adds the row with the low sixteen bits of the sequence and of the flags. `EmitScope.addParam` gains its docstring and
+  the refusal of flags wider than two bytes. `EmitScopeImage`'s docstring says for which scopes its `ParamPtr` is
+  CoreCLR's.
+* The handler: `TypeBuilder_SetParamInfo` in `NativeRuntimeTypeBuilder`, registered in `NativeQCall`. Its TODO for
+  `StrandsLaterMethods` names the token, the sequence, the stranded range and #2253.
+* Tests. `ParamTableReplay` with `TestParamTableReplay` (the eighteen scenarios; for the seven that strand nothing it
+  also pins each method's run). `EmitScopeGen` carries the replay and records what each `Op.Param` did; the round trip
+  compares the `ParamPtr`'s contents and every run with the replay, the index-width test included, and a fixed sample of
+  200 generated scopes counts the shapes (each floor is about half the count measured: skipped strands 16, duplicate
+  pairs 90, a slide past a duplicate 16, a table started by a slide 20, by a later method 93, a return row after a
+  parameter 50, flags above 0x0FFF 143, a slide on a method that is not the last with a table 39, a slide on the last
+  MethodDef row followed by a later method's parameter 12). `TestEmitScopeParams` holds the equivalence property, the
+  forty measured flags, the refusals and the differential property. `TestImpureCases` registers the main guest with
+  `assertParamRows` (`Order`, `Dup`, `DirectTableThenSlide`) and parks the other two, `Wide` with `assertWideParamRows`.
+
+**The global method** (`5x-impl/globalprobe`). On .NET 10 and 11, a global method's parameters defined at positions 2
+then 1 get tokens `0x08000001` and `0x08000002`, the method `0x06000001`, and read back as `n` and `s` (`Optional`)
+after `CreateGlobalFunctions`. Under PawPrint the two `DefineParameter`s return the same tokens, and
+`CreateGlobalFunctions` stops outside the handler: "TODO: TypeBuilder_TermCreateClass: the nil token 0x02000000 is the
+global type of Glob, ..., which ModuleBuilder.CreateGlobalFunctions creates; creating <Module> is not implemented". The
+scenario is left out of the guest, and is added to "left to later stages" below.
+
+**`Wide`.** With `Edge` in the main guest, the guest ran out of 20,000,000 steps after 4 m 55 s, in
+`SignatureHelper.AddOneArgTypeHelperWorker` while building the 65537-parameter signature; without it the guest takes
+12 s. So `Edge` became `TypeBuilderDefineParameterWide.cs`, as decided. That guest cannot finish within the impure
+fixture's budget either: with the budget raised to 4,000,000,000 (a probe edit to `TestHarness.fs`, not committed) it
+passes in 5 m 29 s on the test build, terminal-state check included. It is parked on the budget, and `TestEmitScopeParams`
+covers the truncation in the meantime.
+
+**Mutants.** Each was built fresh in a detached worktree at `d42283b7d` and run against the emit-scope, replay and
+parameter fixtures, the main guest and the parked guest (`5x-impl/mutate.py`, `5x-impl/mut`). "Eq" is the equivalence
+property, "Diff" the differential property, "Flags" the forty measured flags, "Refusals" the refusal property,
+"RoundTrip" the round trip, "IndexWidth" the index-width round trips, "Replay" `TestParamTableReplay`. A guest's number
+is its exit code. The three sequence mutants were also run against `Wide` with the raised budget (`5x-impl/wide-mut`; the
+unmutated tip passed there first, in 305 s).
+
+| Mutant | Killed by |
+|---|---|
+| the Param RID off by one in the handler | guest (1); parked guest (2) |
+| the token's table byte `0x06` | guest (1); parked guest (2) |
+| the method token read from the sequence argument | guest and parked guest, at the handler's fault on the table byte |
+| the position and the attributes read from each other's argument | guest (13); parked guest (3) |
+| a null name refused | guest, at the refusal |
+| a null name giving no row | guest (4) |
+| `defineParam`'s extended scope not kept | guest (4); parked guest (2) |
+| the handler's check of the token's table removed | survives, as decided: no caller passes another table |
+| `StrandsLaterMethods` as a fault with no TODO text | the parked guest's ending, which loses "TODO: TypeBuilder_SetParamInfo" |
+| the flags stored whole | Eq, Diff, Flags; guest, at `addParam`'s refusal of 0x10000 |
+| the flags masked with `0x0F00` | Eq, Diff, Flags; guest (15) |
+| the flags masked with `0x00FF` | Eq, Diff, Flags; guest (33) |
+| Domain's refusal of the reserved bits removed | Refusals alone |
+| the sequence saturated above 65535 | Eq; `Wide` (2) |
+| the sequence refused above 65535 | Eq; `Wide`, at the refusal |
+| the sequence truncated to eight bits | Eq; `Wide` (2) |
+| a search for an existing (method, sequence) row | Eq, Diff; guest (70) |
+| Domain's refusal of a negative sequence removed | Refusals alone |
+| the name column written as 0 | Eq, Diff; guest (13) |
+| the refusal removed, so that `defineParam` always defines | Eq, Diff (the extra call); parked guest (3) |
+| condition 1 dropped | Eq, Diff; guest, at the TODO in `DirectTableThenSlide` |
+| condition 2's owner test as "any row of `m` has a greater Sequence" | Eq, Diff; guest, at the TODO in `DirectAndSlideOneCall` |
+| condition 2's `>` as `>=` | Eq, Diff; guest, at the TODO in `TieIsNoSlide` |
+| condition 3 dropped | Eq, Diff; guest, at the TODO in `Ref` (`M.0` after `M.1`, which strands nothing on real .NET) |
+| condition 3 as "a later method of the same type" | Eq, Diff |
+| `addParam`'s check of the width removed | the `addParam` test alone |
+| the writer's ties broken by descending RID | RoundTrip, IndexWidth, Diff; guest (75) |
+| the writer's `ParamPtr` keyed on the method alone, with no slide | RoundTrip, IndexWidth; the terminal-state check (`Order`'s pointer table); survives the guest's reflection and Diff, as decided |
+| the `ParamPtr` omitted | RoundTrip, IndexWidth, Diff; guest (55) |
+| the replay's `CreateIndirectTable(false)` path converting the markers | Replay (all eleven stranding scenarios), Eq, RoundTrip, and the other generated emit-scope properties |
+
+The original list's "the name read past the first NUL" was not built: the handler receives a pointer and no length, so
+`readNullTerminatedUtf16` has nothing past the NUL to read.
+
+**Suites**, at `d42283b7d`, after the reference assemblies were deleted and the whole solution built (0 warnings), each
+its own invocation (`5x-impl/suite-*.log`):
+
+| Suite | Passed | Skipped | Total | Duration |
+|---|---|---|---|---|
+| default | 5640 | 37 | 5677 | 21 m 24 s |
+| `Guest` | 234 | 0 | 234 | 19 m 29 s |
+| `GuestSolo` | 2 | 0 | 2 | 9 m 48 s |
+| `GuestPure` | 1185 | 0 | 1185 | 8 m 47 s |
+| `GuestImpure` | 282 | 0 | 282 | 4 m 5 s |
+
+**Deviations.**
+* `Wide` is a parked guest, not a registered one. The decisions moved `Edge` out if it was most of the guest's time; it
+  was, and it also cannot run within the harness's step budget. Giving one case a larger budget is a harness change that
+  this stage does not decide.
+* A third of the differential property's schedules open with the first tokenised method's position 1 and then its
+  return value. Without that opening the fixed sample reached 9 refusals, below the floor of 20; with it, 45.
+* The round trip's coverage is counted with `Gen.sampleWithSeed`, as the neighbouring generator test counts its own,
+  rather than through `CoverageSample`; the sample is fixed either way.
+* `ParamTableReplay` keeps its tables in immutable lists and changes the pointer list through a builder, so that the
+  index-width round trip's 65536 parameters replay in linear time.
+* "A null name giving no row" was built as the handler keeping the scope from before the call when the name pointer is
+  null, so that the next call gets the same token.
+
+**Additions to "left to later stages".**
+* A global method's parameters: `DefineParameter` works on one, and `CreateGlobalFunctions` stops at
+  `TypeBuilder_TermCreateClass`'s refusal to create `<Module>`. That stage adds the scenario to the guest.
+* A step budget for one guest case, which would un-park `TypeBuilderDefineParameterWide.cs`.
