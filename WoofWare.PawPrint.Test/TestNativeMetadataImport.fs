@@ -4487,6 +4487,565 @@ public interface IEventInterface
             ] do
             coverage.Count label |> shouldBeGreaterThan 15
 
+    /// The shapes `MetadataImport.GetClassLayout` tells apart. Each type has a distinct Pack and
+    /// Size; C# writes a ClassLayout row only for a type naming `Pack` or `Size`, or for an empty
+    /// struct (Size 1), whatever its `LayoutKind`.
+    let private classLayoutSource =
+        """
+using System.Runtime.InteropServices;
+
+[StructLayout(LayoutKind.Sequential)]
+public struct SequentialStruct { public int A; public long B; }
+
+[StructLayout(LayoutKind.Sequential, Pack = 2)]
+public struct SequentialPacked { public byte A; public int B; }
+
+[StructLayout(LayoutKind.Sequential, Size = 24, CharSet = CharSet.Unicode)]
+public struct SequentialSized { public int A; }
+
+[StructLayout(LayoutKind.Explicit, Pack = 1, Size = 13)]
+public struct ExplicitStruct { [FieldOffset(0)] public int A; [FieldOffset(5)] public long B; }
+
+[StructLayout(LayoutKind.Explicit)]
+public struct ExplicitUnsized { [FieldOffset(0)] public int A; }
+
+[StructLayout(LayoutKind.Auto, Pack = 8, Size = 32)]
+public struct AutoStruct { public int A; public string B; }
+
+public struct EmptyStruct { }
+
+public class PlainClass { public int P; }
+
+[StructLayout(LayoutKind.Sequential, Pack = 4, Size = 40)]
+public class SequentialClass { public int A; }
+
+[StructLayout(LayoutKind.Explicit, Size = 48)]
+public class ExplicitClass { [FieldOffset(8)] public object O; [FieldOffset(0)] public int I; }
+
+[StructLayout(LayoutKind.Sequential, Pack = 16, Size = 56)]
+public struct Generic<T> { public T Value; }
+
+public class Outer
+{
+    [StructLayout(LayoutKind.Sequential, Pack = 1, Size = 7)]
+    public struct Nested { public byte A; }
+}
+
+public interface IThing { }
+
+public enum Colour { Red, Green }
+
+public delegate void Callback();
+"""
+
+    /// What `MetadataImport.GetClassLayout` wrote: its HRESULT and its two out-parameters.
+    type private ClassLayoutAnswer =
+        {
+            ReturnValue : EvalStackValue
+            PackSize : int32
+            ClassSize : int32
+        }
+
+    /// What each out-parameter holds before the call, so that a handler which leaves one unwritten
+    /// is seen to: CoreCLR writes both, 0 when the type has no ClassLayout row.
+    let private classLayoutSentinel : int32 = 0x5EED5EED
+
+    let private invokeGetClassLayoutIn
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (typeToken : int32)
+        (state : IlMachineState)
+        : ClassLayoutAnswer * IlMachineState
+        =
+        let state, metadataImportType, method =
+            metadataImportMethod fixture state "GetClassLayout" 4
+
+        let packOut, state = allocateInt32Out fixture classLayoutSentinel state
+        let sizeOut, state = allocateInt32Out fixture classLayoutSentinel state
+
+        let state =
+            invokeMetadataImportNative
+                fixture
+                metadataImportType
+                method
+                [
+                    metadataImportHandleOf assemblyFullName
+                    CliType.Numeric (CliNumericType.Int32 typeToken)
+                    CliType.RuntimePointer (CliRuntimePointer.Managed packOut)
+                    CliType.RuntimePointer (CliRuntimePointer.Managed sizeOut)
+                ]
+                state
+
+        let returnValue, state = IlMachineState.popEvalStack (ThreadId 0) state
+
+        {
+            ReturnValue = returnValue
+            PackSize = readInt32Out fixture.BaseClassTypes state packOut
+            ClassSize = readInt32Out fixture.BaseClassTypes state sizeOut
+        },
+        state
+
+    let private expectedClassLayoutAnswer (packSize : int32) (classSize : int32) : ClassLayoutAnswer =
+        {
+            ReturnValue = EvalStackValue.Int32 (Int32Source.Verbatim 0)
+            PackSize = packSize
+            ClassSize = classSize
+        }
+
+    /// For every type of `hostAssembly` whose `StructLayoutAttribute` host reflection builds (its
+    /// only reader of this InternalCall), checks PawPrint's `GetClassLayout` against that
+    /// attribute's `Pack` and `Size`. Returns how many types were compared, and how many of those
+    /// had a non-zero Pack or Size.
+    let private assertClassLayoutsAgreeWithHost
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (hostTypes : System.Type seq)
+        (state : IlMachineState)
+        : int * int * IlMachineState
+        =
+        let mutable state = state
+        let mutable compared = 0
+        let mutable nonZero = 0
+
+        for hostType in hostTypes do
+            match hostType.StructLayoutAttribute with
+            | null -> ()
+            | layout ->
+                let answer, nextState =
+                    invokeGetClassLayoutIn fixture assemblyFullName hostType.MetadataToken state
+
+                state <- nextState
+
+                if answer <> expectedClassLayoutAnswer layout.Pack layout.Size then
+                    failwith
+                        $"GetClassLayout(%s{hostType.FullName}): expected Pack %d{layout.Pack} and Size %d{layout.Size}, got %O{answer}"
+
+                compared <- compared + 1
+
+                if layout.Pack <> 0 || layout.Size <> 0 then
+                    nonZero <- nonZero + 1
+
+        compared, nonZero, state
+
+    [<Test>]
+    let ``MetadataImport GetClassLayout reports each type's ClassLayout row, or zeros without one`` () : unit =
+        let fixture = makeFixture ()
+
+        let image =
+            Roslyn.compileAssembly
+                "ClassLayoutTestAssembly"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ classLayoutSource ]
+
+        let assembly, state = withImage fixture image
+        let name = assembly.Name.FullName
+
+        let ask (namespaceName : string) (typeName : string) : ClassLayoutAnswer =
+            let typeInfo = requiredTopLevelType assembly namespaceName typeName
+
+            invokeGetClassLayoutIn fixture name (typeDefToken typeInfo.TypeDefHandle) state
+            |> fst
+
+        ask "" "SequentialStruct" |> shouldEqual (expectedClassLayoutAnswer 0 0)
+        ask "" "SequentialPacked" |> shouldEqual (expectedClassLayoutAnswer 2 0)
+        ask "" "SequentialSized" |> shouldEqual (expectedClassLayoutAnswer 0 24)
+        ask "" "ExplicitStruct" |> shouldEqual (expectedClassLayoutAnswer 1 13)
+        ask "" "ExplicitUnsized" |> shouldEqual (expectedClassLayoutAnswer 0 0)
+        ask "" "AutoStruct" |> shouldEqual (expectedClassLayoutAnswer 8 32)
+        ask "" "EmptyStruct" |> shouldEqual (expectedClassLayoutAnswer 0 1)
+        ask "" "PlainClass" |> shouldEqual (expectedClassLayoutAnswer 0 0)
+        ask "" "SequentialClass" |> shouldEqual (expectedClassLayoutAnswer 4 40)
+        ask "" "ExplicitClass" |> shouldEqual (expectedClassLayoutAnswer 0 48)
+        ask "" "Generic`1" |> shouldEqual (expectedClassLayoutAnswer 16 56)
+
+        // `<Module>`, which reflection never asks about, has no row.
+        invokeGetClassLayoutIn fixture name 0x02000001 state
+        |> fst
+        |> shouldEqual (expectedClassLayoutAnswer 0 0)
+
+    [<Test>]
+    let ``MetadataImport GetClassLayout agrees with the host runtime for every type of an image`` () : unit =
+        let fixture = makeFixture ()
+
+        let image =
+            Roslyn.compileAssembly
+                "ClassLayoutTestAssembly"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [ classLayoutSource ]
+
+        let assembly, state = withImage fixture image
+
+        let context =
+            System.Runtime.Loader.AssemblyLoadContext ("ClassLayouts", isCollectible = true)
+
+        try
+            let hostAssembly = context.LoadFromStream (new MemoryStream (image))
+
+            let compared, nonZero, _ =
+                assertClassLayoutsAgreeWithHost fixture assembly.Name.FullName (hostAssembly.GetTypes ()) state
+
+            // Every type but `IThing`, whose attribute CoreLib never builds.
+            compared |> shouldEqual (hostAssembly.GetTypes().Length - 1)
+            // SequentialPacked, SequentialSized, ExplicitStruct, AutoStruct, EmptyStruct,
+            // SequentialClass, ExplicitClass, Generic`1 and Outer+Nested.
+            nonZero |> shouldEqual 9
+        finally
+            context.Unload ()
+
+    [<Test>]
+    let ``MetadataImport GetClassLayout agrees with the host runtime for every CoreLib type`` () : unit =
+        let fixture = makeFixture ()
+        let corelib = fixture.BaseClassTypes.Corelib
+        let hostTypes = typeof<obj>.Assembly.GetTypes ()
+
+        let typeDefRows =
+            MetadataReaderExtensions.GetTableRowCount (corelib.PeReader.GetMetadataReader (), TableIndex.TypeDef)
+
+        // Every TypeDef but `<Module>`.
+        hostTypes.Length |> shouldEqual (typeDefRows - 1)
+
+        let compared, nonZero, _ =
+            assertClassLayoutsAgreeWithHost fixture corelib.Name.FullName hostTypes fixture.State
+
+        // The sweep reaches most types, and both answers occur often.
+        compared |> shouldBeGreaterThan 2000
+        nonZero |> shouldBeGreaterThan 50
+        compared - nonZero |> shouldBeGreaterThan 1000
+
+    [<Test>]
+    let ``MetadataImport GetClassLayout rejects a type token that is not a TypeDef of the assembly`` () : unit =
+        // CoreCLR searches the ClassLayout table for the token's row number alone, so another
+        // table's token, or a row past the TypeDef table's end, would be answered from whichever
+        // row (or none) the number matches. The only managed caller passes a `RuntimeType`'s own
+        // `MetadataToken`, so either is a token PawPrint should never have minted.
+        let fixture = makeFixture ()
+        let corelib = fixture.BaseClassTypes.Corelib
+        let name = corelib.Name.FullName
+
+        let typeDefRows =
+            MetadataReaderExtensions.GetTableRowCount (corelib.PeReader.GetMetadataReader (), TableIndex.TypeDef)
+
+        for token in [ 0x06000001 ; 0x04000001 ; 0x02000000 ; 0x02000000 ||| (typeDefRows + 1) ] do
+            let ex =
+                Assert.Catch (fun () -> invokeGetClassLayoutIn fixture name token fixture.State |> ignore)
+
+            ex.Message |> shouldContainText "MetadataImport.GetClassLayout"
+
+    /// The layout and kind of a drawn type.
+    [<RequireQualifiedAccess>]
+    type private DrawnClassLayoutKind =
+        | AutoClass
+        | SequentialClass
+        | ExplicitClass
+        | AutoStruct
+        | SequentialStruct
+        | ExplicitStruct
+
+    /// A drawn type, with its ClassLayout row's PackingSize and ClassSize if it has one.
+    type private DrawnClassLayoutType =
+        {
+            Kind : DrawnClassLayoutKind
+            Row : (uint16 * uint32) option
+        }
+
+    [<RequireQualifiedAccess>]
+    type private DrawnClassLayoutCoverage =
+        | NoRow
+        | ZeroRow
+        | PackOnly
+        | SizeOnly
+        | PackAndSize
+        | PackNotAPowerOfTwo
+        | PackAboveAByte
+        | SizeAboveAPage
+        | ValueType
+        | ReferenceType
+        | ExplicitLayout
+        | AutoLayout
+
+    let private drawnClassLayoutTypeGen : Gen<DrawnClassLayoutType> =
+        gen {
+            let! kind =
+                Gen.elements
+                    [
+                        DrawnClassLayoutKind.AutoClass
+                        DrawnClassLayoutKind.SequentialClass
+                        DrawnClassLayoutKind.ExplicitClass
+                        DrawnClassLayoutKind.AutoStruct
+                        DrawnClassLayoutKind.SequentialStruct
+                        DrawnClassLayoutKind.ExplicitStruct
+                    ]
+
+            // The host oracle must load each type. CoreCLR refuses a sequential or explicit type
+            // whose Pack is neither 0 nor a power of two up to 128 (`BFA_BAD_PACKING_SIZE`,
+            // methodtablebuilder.cpp:12880), but reads no Pack for an auto-layout type, which loads
+            // with any. Only a value type's instance size is ClassSize, so an auto class takes any
+            // ClassSize that `System.Reflection.Metadata` reads (it refuses one above
+            // `Int32.MaxValue`, and so does PawPrint's reader).
+            let isAuto, isValueType =
+                match kind with
+                | DrawnClassLayoutKind.AutoClass -> true, false
+                | DrawnClassLayoutKind.AutoStruct -> true, true
+                | DrawnClassLayoutKind.SequentialClass
+                | DrawnClassLayoutKind.ExplicitClass -> false, false
+                | DrawnClassLayoutKind.SequentialStruct
+                | DrawnClassLayoutKind.ExplicitStruct -> false, true
+
+            let packGen =
+                Gen.frequency
+                    [
+                        yield 1, Gen.constant 0us
+                        yield 2, Gen.elements [ 1us ; 2us ; 4us ; 8us ; 16us ; 32us ; 64us ; 128us ]
+                        if isAuto then
+                            yield 2, Gen.choose (0, int System.UInt16.MaxValue) |> Gen.map uint16
+                    ]
+
+            let sizeGen =
+                Gen.frequency
+                    [
+                        yield 1, Gen.constant 0u
+                        yield 3, Gen.choose (1, 4096) |> Gen.map uint32
+                        if not isValueType then
+                            yield 2, Gen.choose (4097, System.Int32.MaxValue) |> Gen.map uint32
+                    ]
+
+            let rowGen =
+                Gen.frequency
+                    [
+                        1, Gen.constant None
+                        3, Gen.map2 (fun pack size -> Some (pack, size)) packGen sizeGen
+                    ]
+
+            let! row = rowGen
+
+            return
+                {
+                    Kind = kind
+                    Row = row
+                }
+        }
+
+    /// An image declaring `N.T<i>` for each drawn type, each with one `int32` field (at offset 0 in
+    /// an explicit type), and the drawn ClassLayout rows. Hand-written, because a C# compiler writes
+    /// only a power-of-two Pack.
+    let private writeDrawnClassLayoutImage (types : DrawnClassLayoutType list) : byte array =
+        let builder = MetadataBuilder ()
+
+        let signature =
+            let blob = BlobBuilder ()
+            BlobEncoder(blob).Field().Type().Int32 ()
+            builder.GetOrAddBlob blob
+
+        builder.AddModule (
+            0,
+            builder.GetOrAddString "DrawnClassLayouts.dll",
+            builder.GetOrAddGuid (System.Guid "5eed5eed-0000-0000-0000-000000000001"),
+            GuidHandle (),
+            GuidHandle ()
+        )
+        |> ignore<ModuleDefinitionHandle>
+
+        builder.AddAssembly (
+            builder.GetOrAddString "DrawnClassLayouts",
+            System.Version (1, 0, 0, 0),
+            StringHandle (),
+            BlobHandle (),
+            enum<System.Reflection.AssemblyFlags> 0,
+            System.Reflection.AssemblyHashAlgorithm.None
+        )
+        |> ignore<AssemblyDefinitionHandle>
+
+        let systemRuntime : EntityHandle =
+            builder.AddAssemblyReference (
+                builder.GetOrAddString "System.Runtime",
+                System.Version (8, 0, 0, 0),
+                StringHandle (),
+                builder.GetOrAddBlob [| 0xb0uy ; 0x3fuy ; 0x5fuy ; 0x7fuy ; 0x11uy ; 0xd5uy ; 0x0auy ; 0x3auy |],
+                enum<System.Reflection.AssemblyFlags> 0,
+                BlobHandle ()
+            )
+            |> AssemblyReferenceHandle.op_Implicit
+
+        let objectRef : EntityHandle =
+            builder.AddTypeReference (systemRuntime, builder.GetOrAddString "System", builder.GetOrAddString "Object")
+            |> TypeReferenceHandle.op_Implicit
+
+        let valueTypeRef : EntityHandle =
+            builder.AddTypeReference (
+                systemRuntime,
+                builder.GetOrAddString "System",
+                builder.GetOrAddString "ValueType"
+            )
+            |> TypeReferenceHandle.op_Implicit
+
+        builder.AddTypeDefinition (
+            enum<System.Reflection.TypeAttributes> 0,
+            StringHandle (),
+            builder.GetOrAddString "<Module>",
+            EntityHandle (),
+            MetadataTokens.FieldDefinitionHandle 1,
+            MetadataTokens.MethodDefinitionHandle 1
+        )
+        |> ignore<TypeDefinitionHandle>
+
+        types
+        |> List.iteri (fun typeIndex drawn ->
+            let layout, isValueType =
+                match drawn.Kind with
+                | DrawnClassLayoutKind.AutoClass -> System.Reflection.TypeAttributes.AutoLayout, false
+                | DrawnClassLayoutKind.SequentialClass -> System.Reflection.TypeAttributes.SequentialLayout, false
+                | DrawnClassLayoutKind.ExplicitClass -> System.Reflection.TypeAttributes.ExplicitLayout, false
+                | DrawnClassLayoutKind.AutoStruct -> System.Reflection.TypeAttributes.AutoLayout, true
+                | DrawnClassLayoutKind.SequentialStruct -> System.Reflection.TypeAttributes.SequentialLayout, true
+                | DrawnClassLayoutKind.ExplicitStruct -> System.Reflection.TypeAttributes.ExplicitLayout, true
+
+            let attributes, baseType =
+                if isValueType then
+                    System.Reflection.TypeAttributes.Public
+                    ||| System.Reflection.TypeAttributes.Sealed
+                    ||| layout,
+                    valueTypeRef
+                else
+                    System.Reflection.TypeAttributes.Public ||| layout, objectRef
+
+            let typeDef =
+                builder.AddTypeDefinition (
+                    attributes,
+                    builder.GetOrAddString "N",
+                    builder.GetOrAddString $"T%d{typeIndex}",
+                    baseType,
+                    MetadataTokens.FieldDefinitionHandle (typeIndex + 1),
+                    MetadataTokens.MethodDefinitionHandle 1
+                )
+
+            let field =
+                builder.AddFieldDefinition (
+                    System.Reflection.FieldAttributes.Public,
+                    builder.GetOrAddString "F",
+                    signature
+                )
+
+            if layout = System.Reflection.TypeAttributes.ExplicitLayout then
+                builder.AddFieldLayout (field, 0)
+
+            match drawn.Row with
+            | Some (pack, size) -> builder.AddTypeLayout (typeDef, pack, size)
+            | None -> ()
+        )
+
+        let peBuilder =
+            System.Reflection.PortableExecutable.ManagedPEBuilder (
+                System.Reflection.PortableExecutable.PEHeaderBuilder (
+                    imageCharacteristics = System.Reflection.PortableExecutable.Characteristics.Dll
+                ),
+                MetadataRootBuilder builder,
+                BlobBuilder ()
+            )
+
+        let blob = BlobBuilder ()
+        peBuilder.Serialize blob |> ignore<BlobContentId>
+        blob.ToArray ()
+
+    [<Test>]
+    let ``MetadataImport GetClassLayout agrees with the host runtime over drawn images`` () : unit =
+        let fixture = makeFixture ()
+
+        let property (cover : DrawnClassLayoutCoverage -> unit) (types : DrawnClassLayoutType list) : unit =
+            for drawn in types do
+                match drawn.Row with
+                | None -> cover DrawnClassLayoutCoverage.NoRow
+                | Some (0us, 0u) -> cover DrawnClassLayoutCoverage.ZeroRow
+                | Some (_, 0u) -> cover DrawnClassLayoutCoverage.PackOnly
+                | Some (0us, _) -> cover DrawnClassLayoutCoverage.SizeOnly
+                | Some _ -> cover DrawnClassLayoutCoverage.PackAndSize
+
+                match drawn.Row with
+                | Some (pack, _) when pack <> 0us && (pack &&& (pack - 1us)) <> 0us ->
+                    cover DrawnClassLayoutCoverage.PackNotAPowerOfTwo
+                | _ -> ()
+
+                match drawn.Row with
+                | Some (pack, _) when pack > 255us -> cover DrawnClassLayoutCoverage.PackAboveAByte
+                | _ -> ()
+
+                match drawn.Row with
+                | Some (_, size) when size > 4096u -> cover DrawnClassLayoutCoverage.SizeAboveAPage
+                | _ -> ()
+
+                match drawn.Kind with
+                | DrawnClassLayoutKind.AutoStruct
+                | DrawnClassLayoutKind.SequentialStruct
+                | DrawnClassLayoutKind.ExplicitStruct -> cover DrawnClassLayoutCoverage.ValueType
+                | DrawnClassLayoutKind.AutoClass
+                | DrawnClassLayoutKind.SequentialClass
+                | DrawnClassLayoutKind.ExplicitClass -> cover DrawnClassLayoutCoverage.ReferenceType
+
+                match drawn.Kind with
+                | DrawnClassLayoutKind.ExplicitClass
+                | DrawnClassLayoutKind.ExplicitStruct -> cover DrawnClassLayoutCoverage.ExplicitLayout
+                | DrawnClassLayoutKind.AutoClass
+                | DrawnClassLayoutKind.AutoStruct -> cover DrawnClassLayoutCoverage.AutoLayout
+                | DrawnClassLayoutKind.SequentialClass
+                | DrawnClassLayoutKind.SequentialStruct -> ()
+
+            let image = writeDrawnClassLayoutImage types
+            let assembly, state = withImage fixture image
+
+            let context =
+                System.Runtime.Loader.AssemblyLoadContext ("DrawnClassLayouts", isCollectible = true)
+
+            try
+                let hostAssembly = context.LoadFromStream (new MemoryStream (image))
+
+                let hostTypes =
+                    types
+                    |> List.mapi (fun typeIndex _ -> hostAssembly.GetType ($"N.T%d{typeIndex}", true))
+
+                // The host reads each drawn row back, so the oracle below is not vacuous.
+                List.zip types hostTypes
+                |> List.iter (fun (drawn, hostType) ->
+                    let layout = hostType.StructLayoutAttribute
+
+                    match drawn.Row with
+                    | None -> (layout.Pack, layout.Size) |> shouldEqual (0, 0)
+                    | Some (pack, size) -> (layout.Pack, layout.Size) |> shouldEqual (int pack, int size)
+                )
+
+                let compared, _, _ =
+                    assertClassLayoutsAgreeWithHost fixture assembly.Name.FullName hostTypes state
+
+                compared |> shouldEqual types.Length
+            finally
+                context.Unload ()
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 200)
+                (Arb.fromGen (
+                    Gen.choose (1, 5)
+                    |> Gen.bind (fun n -> Gen.listOfLength n drawnClassLayoutTypeGen)
+                ))
+                property
+
+        for label in
+            [
+                DrawnClassLayoutCoverage.NoRow
+                DrawnClassLayoutCoverage.ZeroRow
+                DrawnClassLayoutCoverage.PackOnly
+                DrawnClassLayoutCoverage.SizeOnly
+                DrawnClassLayoutCoverage.PackAndSize
+                DrawnClassLayoutCoverage.PackNotAPowerOfTwo
+                DrawnClassLayoutCoverage.PackAboveAByte
+                DrawnClassLayoutCoverage.SizeAboveAPage
+                DrawnClassLayoutCoverage.ValueType
+                DrawnClassLayoutCoverage.ReferenceType
+                DrawnClassLayoutCoverage.ExplicitLayout
+                DrawnClassLayoutCoverage.AutoLayout
+            ] do
+            coverage.Count label |> shouldBeGreaterThan 15
+
     /// `MetadataTokenType.ParamDef`, as `MetadataImport.EnumParams` passes it.
     let private invokeEnumParams
         (fixture : MetadataImportFixture)
