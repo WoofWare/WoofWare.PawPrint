@@ -443,13 +443,37 @@ module TestEmitScopeImage =
             |> List.ofSeq
             |> shouldEqual (ridsOwnedBy i (properties |> Seq.map _.Owner.Rid))
 
-        let mapRows, ptrRows =
-            properties |> Seq.map _.Owner.Rid |> List.ofSeq |> propertyMapReplay
+        let propertyMaps, propertyPtr =
+            properties |> Seq.map _.Owner.Rid |> List.ofSeq |> ownerMapReplay
 
-        propertyMapRows pe reader |> shouldEqual mapRows
-        propertyPtrRows pe reader |> shouldEqual ptrRows
+        mapRows pe reader TableIndex.PropertyMap |> shouldEqual propertyMaps
+        pointerRows pe reader TableIndex.PropertyPtr |> shouldEqual propertyPtr
 
-        // Each property's accessors in the order added, the table sorted by association.
+        // Every event likewise, with its event type.
+        let events = EmitScope.events scope
+        reader.GetTableRowCount TableIndex.Event |> shouldEqual events.Count
+
+        for i in 1 .. events.Count do
+            let expected = events.[i - 1]
+            let actual = reader.GetEventDefinition (MetadataTokens.EventDefinitionHandle i)
+            actual.Attributes |> shouldEqual expected.Flags
+            checkString scope reader expected.Name actual.Name
+            token actual.Type |> shouldEqual (typeDefOrRefToken expected.EventType)
+
+        for i in 1 .. typeDefs.Count do
+            (reader.GetTypeDefinition (MetadataTokens.TypeDefinitionHandle i)).GetEvents ()
+            |> Seq.map (fun h -> MetadataTokens.GetRowNumber (EventDefinitionHandle.op_Implicit h : EntityHandle))
+            |> List.ofSeq
+            |> shouldEqual (ridsOwnedBy i (events |> Seq.map _.Owner.Rid))
+
+        let eventMaps, eventPtr =
+            events |> Seq.map _.Owner.Rid |> List.ofSeq |> ownerMapReplay
+
+        mapRows pe reader TableIndex.EventMap |> shouldEqual eventMaps
+        pointerRows pe reader TableIndex.EventPtr |> shouldEqual eventPtr
+
+        // Each property's and each event's accessors in the order added, the table sorted by association
+        // across both kinds.
         let semantics = EmitScope.methodSemantics scope
         let imageSemantics = methodSemanticsRows pe reader
         imageSemantics.Length |> shouldEqual semantics.Count
@@ -460,9 +484,15 @@ module TestEmitScopeImage =
         |> List.forall (fun (a, b) -> a <= b)
         |> shouldEqual true
 
-        for i in 1 .. properties.Count do
-            let association = (i <<< 1) ||| 1
+        let associations =
+            [
+                for i in 1 .. properties.Count do
+                    yield (i <<< 1) ||| 1
+                for i in 1 .. events.Count do
+                    yield i <<< 1
+            ]
 
+        for association in associations do
             imageSemantics
             |> List.filter (fun (_, _, a) -> a = association)
             |> List.map (fun (semantics, method, _) -> semantics, method)
@@ -480,7 +510,6 @@ module TestEmitScopeImage =
                 TableIndex.CustomAttribute
                 TableIndex.ModuleRef
                 TableIndex.NestedClass
-                TableIndex.Event
             ] do
             reader.GetTableRowCount table |> shouldEqual 0
 
@@ -585,24 +614,122 @@ module TestEmitScopeImage =
         |> Seq.length
         |> shouldBeGreaterThan 20
 
-        // And properties whose owners need a pointer table; properties that need none although a later
-        // map's parent has a lower TypeDef RID, which tells first-property order from TypeDef order; and
-        // properties with two accessors of one semantics.
+        // And properties, and events, whose owners need a pointer table; and ones that need none although a
+        // later map's parent has a lower TypeDef RID, which tells first-member order from TypeDef order.
         let propertyOwners (s : EmitScope) =
             EmitScope.properties s |> Seq.map _.Owner.Rid |> List.ofSeq
 
+        let eventOwners (s : EmitScope) =
+            EmitScope.events s |> Seq.map _.Owner.Rid |> List.ofSeq
+
+        for owners in [ propertyOwners ; eventOwners ] do
+            scopes
+            |> Seq.filter (fun s -> (ownerMapReplay (owners s) |> snd).IsSome)
+            |> Seq.length
+            |> shouldBeGreaterThan 20
+
+            scopes
+            |> Seq.filter (fun s ->
+                let maps, ptr = ownerMapReplay (owners s)
+                ptr.IsNone && not (grouped (maps |> List.map fst))
+            )
+            |> Seq.length
+            |> shouldBeGreaterThan 5
+
+        // And an event map order unlike TypeDef order, whether or not a pointer table is needed.
         scopes
-        |> Seq.filter (fun s -> (propertyMapReplay (propertyOwners s) |> snd).IsSome)
+        |> Seq.filter (fun s -> not (grouped (ownerMapReplay (eventOwners s) |> fst |> List.map fst)))
         |> Seq.length
         |> shouldBeGreaterThan 20
 
+        // And a property and an event of one RID, the property's accessor added first, which sorts after
+        // the event's.
         scopes
         |> Seq.filter (fun s ->
-            let maps, ptr = propertyMapReplay (propertyOwners s)
-            ptr.IsNone && not (grouped (maps |> List.map fst))
+            let rows = EmitScope.methodSemantics s |> List.ofSeq
+
+            rows
+            |> List.indexed
+            |> List.exists (fun (i, row) ->
+                match row.Association with
+                | HasSemantics.Property property ->
+                    rows
+                    |> List.skip (i + 1)
+                    |> List.exists (fun later ->
+                        match later.Association with
+                        | HasSemantics.Event ev -> ev.Rid = property.Rid
+                        | HasSemantics.Property _ -> false
+                    )
+                | HasSemantics.Event _ -> false
+            )
         )
         |> Seq.length
-        |> shouldBeGreaterThan 5
+        |> shouldBeGreaterThan 10
+
+        // And events of each kind of event type.
+        let typedBy (kind : TypeDefOrRef -> bool) (s : EmitScope) =
+            EmitScope.events s |> Seq.exists (fun row -> kind row.EventType)
+
+        for kind in
+            [
+                (fun target ->
+                    match target with
+                    | TypeDefOrRef.TypeDef _ -> true
+                    | TypeDefOrRef.TypeRef _
+                    | TypeDefOrRef.TypeSpec _ -> false
+                )
+                (fun target ->
+                    match target with
+                    | TypeDefOrRef.TypeRef _ -> true
+                    | TypeDefOrRef.TypeDef _
+                    | TypeDefOrRef.TypeSpec _ -> false
+                )
+                (fun target ->
+                    match target with
+                    | TypeDefOrRef.TypeSpec _ -> true
+                    | TypeDefOrRef.TypeDef _
+                    | TypeDefOrRef.TypeRef _ -> false
+                )
+            ] do
+            scopes |> Seq.filter (typedBy kind) |> Seq.length |> shouldBeGreaterThan 20
+
+        // And a type defined after the module's first event, which then gets events of its own.
+        Gen.sampleWithSeed (Rnd 20261114UL) 30 200 (Gen.zip genGuid genOps)
+        |> Seq.filter (fun (mvid, ops) ->
+            let steps = applySteps mvid ops
+
+            match steps |> List.tryFind (fun s -> (EmitScope.events s).Count > 0) with
+            | None -> false
+            | Some first ->
+                let typesThen = (EmitScope.typeDefs first).Count
+
+                EmitScope.events (List.last steps)
+                |> Seq.exists (fun row -> row.Owner.Rid > typesThen)
+        )
+        |> Seq.length
+        |> shouldBeGreaterThan 10
+
+        // And 25 or more MethodSemantics rows with an event given two adds, and one given two raises.
+        for semantics in [ MethodSemanticsAttributes.Adder ; MethodSemanticsAttributes.Raiser ] do
+            scopes
+            |> Seq.filter (fun s ->
+                let rows = EmitScope.methodSemantics s
+
+                rows.Count >= 25
+                && rows
+                   |> Seq.filter (fun row -> row.Semantics = semantics)
+                   |> Seq.countBy (fun row -> row.Association)
+                   |> Seq.exists (fun (association, n) ->
+                       n > 1
+                       && (
+                           match association with
+                           | HasSemantics.Event _ -> true
+                           | HasSemantics.Property _ -> false
+                       )
+                   )
+            )
+            |> Seq.length
+            |> shouldBeGreaterThan 5
 
         scopes
         |> Seq.filter (fun s ->
@@ -699,7 +826,7 @@ module TestEmitScopeImage =
         | MissingIl
 
     [<Test>]
-    let ``Assembly.read lists each type's methods and fields as the scope defines them`` () : unit =
+    let ``Assembly.read lists each type's methods, fields and events as the scope defines them`` () : unit =
         let property (cover : BodilessMethod -> unit) (scope : EmitScope) : unit =
             use stream = new MemoryStream (EmitScopeImage.write scope)
             use assy = Assembly.read NullLoggerFactory.Instance None stream
@@ -739,6 +866,14 @@ module TestEmitScopeImage =
                     MetadataTokens.GetRowNumber (FieldDefinitionHandle.op_Implicit f.Handle : EntityHandle)
                 )
                 |> shouldEqual (ridsOwnedBy i (EmitScope.fields scope |> Seq.map _.Owner.Rid))
+
+                // `TypeInfo.Events` reads the type's events as SRM lists them, through an `EventPtr` too.
+                ty.Events
+                |> Seq.map (fun e ->
+                    MetadataTokens.GetRowNumber (EventDefinitionHandle.op_Implicit e.Handle : EntityHandle)
+                )
+                |> List.ofSeq
+                |> shouldEqual (ridsOwnedBy i (EmitScope.events scope |> Seq.map _.Owner.Rid))
 
         let coverage =
             CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 100) (Arb.fromGen genScope) property

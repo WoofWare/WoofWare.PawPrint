@@ -55,10 +55,10 @@ module TestEmitScopeExtension =
     /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its
     /// generic parameters, its methods with their implementation flags, parameters, generic parameters
     /// and bodies, and its fields, as handles into the image, and its interface
-    /// implementations and method impls in table order; and its properties, each with its accessors in
-    /// table order. The interface, method impl and accessor tables are sorted, so their RIDs move as rows
-    /// of lower classes or properties are added; the runtime keeps no handle into them, only what each
-    /// row names.
+    /// implementations and method impls in table order; and its properties and events, each with its
+    /// accessors in table order. The interface, method impl and accessor tables are sorted, so their RIDs
+    /// move as rows of lower classes, properties or events are added; the runtime keeps no handle into
+    /// them, only what each row names.
     let private typeView (pe : PEReader) (reader : MetadataReader) (typeDef : TypeDefRid) =
         let handle = MetadataTokens.TypeDefinitionHandle typeDef.Rid
         let definition = reader.GetTypeDefinition handle
@@ -133,13 +133,27 @@ module TestEmitScopeExtension =
                         |> List.map (fun (s, m, _) -> s, m)
             ]
 
+        let events =
+            [
+                for e in definition.GetEvents () do
+                    let rid = rowNumber (EventDefinitionHandle.op_Implicit e)
+                    let association = rid <<< 1
+
+                    yield
+                        rid,
+                        semantics
+                        |> List.filter (fun (_, _, a) -> a = association)
+                        |> List.map (fun (s, m, _) -> s, m)
+            ]
+
         token definition.BaseType,
         genericParamsView reader genericParamOwners (GenericParamOwner.TypeDef handle),
         methods,
         fields,
         interfaces,
         impls,
-        properties
+        properties,
+        events
 
     let private createdTypeNamed (violation : EmitScopeExtensionViolation) : TypeDefRid option =
         match violation with
@@ -1092,3 +1106,132 @@ module TestEmitScopeExtension =
         EmitScopeExtension.violations ImmutableHashSet.Empty scope oneProperty
         |> List.contains (EmitScopeExtensionViolation.RowChanged (TableIndex.Property, 1))
         |> shouldEqual true
+
+    /// `<Module>`, then `First` (TypeDef 2) and `Second` (TypeDef 3), each with one method (MethodDefs 1 and
+    /// 2) and one event (Events 1 and 2), and `First` a property (Property 1).
+    let private withEvents () : EmitScope * EventRid * EventRid =
+        let define (name : string) (scope : EmitScope) : TypeDefRid * EmitScope =
+            match EmitScopeDefinitions.defineTopLevelTypeDef name Reflection.TypeAttributes.Public None [] scope with
+            | TypeDefDefinition.Defined (rid, scope) -> rid, scope
+            | TypeDefDefinition.Duplicate _ -> failwith $"%s{name} is defined twice"
+
+        let signature = ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x01uy |]
+        let scope = EmitScope.create "Events" Guid.Empty
+        let first, scope = define "First" scope
+        let second, scope = define "Second" scope
+
+        let _, scope =
+            EmitScopeDefinitions.defineMethod first "add_A" signature Reflection.MethodAttributes.Public scope
+
+        let _, scope =
+            EmitScopeDefinitions.defineMethod second "add_B" signature Reflection.MethodAttributes.Public scope
+
+        let _, scope =
+            EmitScopeDefinitions.defineProperty
+                first
+                "P"
+                (ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |])
+                0
+                scope
+
+        let a, scope =
+            EmitScopeDefinitions.defineEvent first "A" (TypeDefOrRef.TypeDef second) 0 scope
+
+        let b, scope =
+            EmitScopeDefinitions.defineEvent second "B" (TypeDefOrRef.TypeDef first) 0 scope
+
+        scope, a, b
+
+    [<Test>]
+    let ``an event added to a created type is refused`` () : unit =
+        let before, _, _ = withEvents ()
+
+        let after =
+            EmitScopeDefinitions.defineEvent (TypeDefRid 2) "Late" (TypeDefOrRef.TypeDef (TypeDefRid 3)) 0 before
+            |> snd
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 3)) before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 2)) before after
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.Event, 3, TypeDefRid 2)
+            ]
+
+    [<Test>]
+    let ``an event's accessor is refused exactly when its event's type is created`` () : unit =
+        let before, a, _ = withEvents ()
+
+        // `Second`'s method as an accessor of `First`'s event: CoreCLR checks only the event's type.
+        let after =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Event a)
+                Reflection.MethodSemanticsAttributes.Adder
+                (MethodDefRid 2)
+                before
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 3)) before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 2)) before after
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.MethodSemantics, 1, TypeDefRid 2)
+            ]
+
+    [<Test>]
+    let ``a created type's event accessor rows may move`` () : unit =
+        let scope, a, b = withEvents ()
+
+        // `First`'s property and `Second`'s event have accessors; `Second` is created.
+        let before =
+            scope
+            |> EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Property (EmitScope.tryPropertyRid 1 scope).Value)
+                Reflection.MethodSemanticsAttributes.Getter
+                (MethodDefRid 1)
+            |> EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Event b)
+                Reflection.MethodSemanticsAttributes.Adder
+                (MethodDefRid 2)
+
+        // `First`'s event (coded 2) sorts before both the property (coded 3) and `Second`'s event (coded
+        // 4), so the property's row moves from image RID 1 to 2 and `Second`'s from 2 to 3.
+        let after =
+            EmitScopeDefinitions.defineMethodSemantics
+                (HasSemantics.Event a)
+                Reflection.MethodSemanticsAttributes.Adder
+                (MethodDefRid 1)
+                before
+
+        let afterPe, afterReader = readImage (EmitScopeImage.write after)
+        use _ = afterPe
+
+        methodSemanticsRows afterPe afterReader
+        |> shouldEqual [ 8, 1, 1 <<< 1 ; 2, 1, (1 <<< 1) ||| 1 ; 8, 2, 2 <<< 1 ]
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 3)) before after
+        |> shouldEqual []
+
+    [<Test>]
+    let ``a changed event is reported at its RID`` () : unit =
+        let scope, _, _ = withEvents ()
+
+        let changed (eventType : TypeDefOrRef) (flags : int) =
+            let before =
+                EmitScopeDefinitions.defineEvent (TypeDefRid 3) "C" (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0 scope
+                |> snd
+
+            let rewritten =
+                EmitScopeDefinitions.defineEvent (TypeDefRid 3) "C" eventType flags scope |> snd
+
+            EmitScopeExtension.violations ImmutableHashSet.Empty before rewritten
+
+        changed (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0 |> shouldEqual []
+
+        changed (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0x0200
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Event, 3) ]
+
+        changed (TypeDefOrRef.TypeDef (TypeDefRid 3)) 0
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Event, 3) ]

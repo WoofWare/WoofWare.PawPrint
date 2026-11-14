@@ -164,6 +164,8 @@ module EmitScopeExtension =
         // before adding one, and nothing reads the table by method.
         let associationOwner (row : MethodSemanticsRow) : TypeDefRid =
             match row.Association with
+            | HasSemantics.Event ev ->
+                failwith $"TODO: EmitScopeExtension: the owner of an accessor of Event %d{ev.Rid}"
             | HasSemantics.Property property -> (EmitScope.properties after).[property.Rid - 1].Owner
 
         // The type a generic parameter belongs to: its owner, or its owner's declaring type.

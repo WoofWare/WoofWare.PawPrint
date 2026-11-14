@@ -166,6 +166,16 @@ type PropertyRid =
         match this with
         | PropertyRid rid -> rid
 
+/// The RID of an emit scope's `Event` row: its token, in definition order across the module.
+[<Struct>]
+type EventRid =
+    internal
+    | EventRid of int
+
+    member this.Rid : int =
+        match this with
+        | EventRid rid -> rid
+
 /// ECMA-335 II.24.2.6's `ResolutionScope` coded index, for the targets an emit scope can hold.
 [<RequireQualifiedAccess>]
 type ResolutionScope =
@@ -211,16 +221,18 @@ type TypeOrMethodDef =
         | TypeOrMethodDef.TypeDef rid -> (rid.Rid <<< 1) ||| 0
         | TypeOrMethodDef.MethodDef rid -> (rid.Rid <<< 1) ||| 1
 
-/// ECMA-335 II.24.2.6's `HasSemantics` coded index, for the targets an emit scope can hold: what a
-/// `MethodSemantics` row's method is an accessor of.
+/// ECMA-335 II.24.2.6's `HasSemantics` coded index: the property or event of which a `MethodSemantics`
+/// row's method is an accessor.
 [<RequireQualifiedAccess>]
 type HasSemantics =
+    | Event of EventRid
     | Property of PropertyRid
 
     /// The coded index: the RID shifted left one bit, tagged 0 for an Event and 1 for a Property.
     /// ECMA-335 II.22.28 sorts the `MethodSemantics` table by it.
     member this.CodedIndex : int =
         match this with
+        | HasSemantics.Event _ -> failwith "TODO: HasSemantics.CodedIndex of an Event association"
         | HasSemantics.Property rid -> (rid.Rid <<< 1) ||| 1
 
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
@@ -384,7 +396,19 @@ type PropertyRow =
         Signature : BlobOffset
     }
 
-/// A `MethodSemantics` row (ECMA-335 II.22.28): a method that is an accessor of a property.
+/// An `Event` row (ECMA-335 II.22.13), with the type that owns it. A scope holds no `EventMap` or
+/// `EventPtr` rows: the writer derives both from the owners.
+type EventRow =
+    {
+        Owner : TypeDefRid
+        /// Stored in a two-byte column.
+        Flags : EventAttributes
+        Name : StringOffset
+        /// The delegate type the event was defined with, which no reflection API reads.
+        EventType : TypeDefOrRef
+    }
+
+/// A `MethodSemantics` row (ECMA-335 II.22.28): a method that is an accessor of a property or an event.
 type MethodSemanticsRow =
     {
         /// Stored in a two-byte column.
@@ -598,6 +622,10 @@ module EmitScope =
             Some (PropertyRid rid)
         else
             None
+
+    /// The `Event` row with this RID, if the scope has one.
+    let tryEventRid (rid : int) (scope : EmitScope) : EventRid option =
+        failwith $"TODO: EmitScope.tryEventRid %d{rid}: the scope holds no Event table yet"
 
     /// The offset `internString` would return for `value` if the heap already holds what CoreCLR's
     /// emitter stores for it, without adding it.
@@ -1037,6 +1065,8 @@ module EmitScope =
         requireRid operation "MethodDef" scope.MethodDefs.Count row.Method.Rid
 
         match row.Association with
+        | HasSemantics.Event rid ->
+            failwith $"TODO: %s{operation}: an accessor of Event %d{rid.Rid}, but the scope holds no Event table yet"
         | HasSemantics.Property rid -> requireRid operation "Property" scope.Properties.Count rid.Rid
 
         if int row.Semantics < 0 || int row.Semantics > 0xFFFF then
@@ -1047,6 +1077,16 @@ module EmitScope =
         { scope with
             MethodSemantics = scope.MethodSemantics.Add row
         }
+
+    /// <summary>
+    /// Add an <c>Event</c> row, at the next RID, which is the token CoreCLR hands out for it, whatever
+    /// owns the rows before it.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope lacks the owner, the name or the event type, or the flags do not fit the column's two bytes.
+    /// </exception>
+    let addEvent (row : EventRow) (scope : EmitScope) : EventRid * EmitScope =
+        failwith $"TODO: EmitScope.addEvent of TypeDef %d{row.Owner.Rid}: the scope holds no Event table yet"
 
     let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
         let operation = "EmitScope.addMethodSpec"
@@ -1106,3 +1146,8 @@ module EmitScope =
 
     /// In the order they were added, which is not the image's: the image sorts them by association.
     let methodSemantics (scope : EmitScope) : ImmutableList<MethodSemanticsRow> = scope.MethodSemantics
+
+    /// In RID order, which is definition order across the module; the image lists each type's events
+    /// through an `EventPtr` when they are not already grouped.
+    let events (scope : EmitScope) : ImmutableList<EventRow> =
+        failwith "TODO: EmitScope.events: the scope holds no Event table yet"
