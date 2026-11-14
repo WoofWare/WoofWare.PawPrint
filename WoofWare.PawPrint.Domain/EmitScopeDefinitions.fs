@@ -20,6 +20,22 @@ type TypeDefDefinition =
     | Duplicate of TypeDefRid
 
 /// <summary>
+/// The outcome of asking CoreCLR's emitter to define a parameter in a dynamic module's scope
+/// (<c>RegMeta::DefineParam</c>).
+/// </summary>
+[<RequireQualifiedAccess>]
+type ParamDefinition =
+    /// A new <c>Param</c> row, and the scope that holds it.
+    | Defined of ParamRid * EmitScope
+    /// <summary>
+    /// CoreCLR would add the row and, sliding it ahead of an earlier row of <c>slid</c>, start
+    /// the <c>ParamPtr</c> table while every MethodDef row after it up to <c>last</c> still
+    /// holds <c>END_OF_TABLE</c> as its <c>ParamList</c>. Real .NET then refuses or misreports those
+    /// methods' parameters, which a scope does not model, so nothing is added (issue #2253).
+    /// </summary>
+    | StrandsLaterMethods of slid : MethodDefRid * last : MethodDefRid
+
+/// <summary>
 /// A generic parameter whose variance PawPrint does not model when its type is created.
 /// </summary>
 [<RequireQualifiedAccess>]
@@ -514,3 +530,28 @@ module EmitScopeDefinitions =
                 Association = association
             }
             scope
+
+    /// <summary>
+    /// Define a parameter of <paramref name="method"/>, as <c>RegMeta::DefineParam</c> does for
+    /// <c>TypeBuilder_SetParamInfo</c>, whose emitter does not check for a duplicate (<c>MDDupParamDef</c> is
+    /// not set): a new row at the next RID, whatever rows the method already has, unless CoreCLR would strand
+    /// later MethodDef rows (<see cref="ParamDefinition.StrandsLaterMethods"/>).
+    /// </summary>
+    /// <remarks>
+    /// The row holds the low 16 bits of <paramref name="sequence"/> and of <paramref name="flags"/>, the
+    /// columns' widths. An empty name leaves the name column 0, as a null name does in CoreCLR.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="flags"/> has a bit of <c>ParameterAttributes.ReservedMask</c> (0xF000), which every
+    /// managed caller clears; <paramref name="sequence"/> is negative, which every managed caller refuses;
+    /// the scope lacks <paramref name="method"/>; or <paramref name="name"/> holds a NUL.
+    /// </exception>
+    let defineParam
+        (method : MethodDefRid)
+        (sequence : int)
+        (name : string)
+        (flags : int)
+        (scope : EmitScope)
+        : ParamDefinition
+        =
+        failwith "TODO: EmitScopeDefinitions.defineParam is not implemented yet"
