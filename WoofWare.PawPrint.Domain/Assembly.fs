@@ -1353,7 +1353,12 @@ module Assembly =
 
             let groupedByParent = Dictionary<int, ImmutableArray<int>.Builder> ()
 
-            for handle in metadataReader.CustomAttributes do
+            // By RID, not through SRM's enumeration: over a table that is not sorted by owner, as a dynamic module's
+            // is, SRM groups the rows by owner, each owner's rows in no defined order. For a sorted table the two
+            // agree.
+            for rid in 1 .. metadataReader.GetTableRowCount TableIndex.CustomAttribute do
+                let handle = MetadataTokens.CustomAttributeHandle rid
+
                 let typed =
                     metadataReader.GetCustomAttribute handle
                     |> CustomAttribute.make metadataReader handle

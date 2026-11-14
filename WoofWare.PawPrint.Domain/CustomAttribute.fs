@@ -428,7 +428,13 @@ module CustomAttribute =
     /// but, over a table that is not sorted by owner, not in a defined order.
     /// </summary>
     let ofOwnerInRidOrder (metadataReader : MetadataReader) (owner : EntityHandle) : CustomAttributeHandle list =
-        failwith "TODO: CustomAttribute.ofOwnerInRidOrder is not implemented yet"
+        metadataReader.GetCustomAttributes owner
+        |> Seq.sortBy (fun handle ->
+            System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
+                CustomAttributeHandle.op_Implicit handle : EntityHandle
+            )
+        )
+        |> List.ofSeq
 
     let make
         (metadataReader : MetadataReader)

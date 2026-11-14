@@ -334,15 +334,6 @@ module EmitScopeGen =
                     return Op.Event (owner, name, flags, eventType)
                 }
                 3, Gen.map3 (fun p s m -> Op.MethodSemantics (p, s, m)) choice choice choice
-                4,
-                gen {
-                    let! owner = choice
-                    let! constructor = choice
-                    let! blob = choice
-                    // Mostly one at a time, interleaved with the rows that own them; sometimes a run.
-                    let! count = Gen.frequency [ 6, Gen.constant 1 ; 1, Gen.choose (2, 30) ]
-                    return Op.CustomAttributeRun (owner, constructor, blob, count)
-                }
                 1,
                 gen {
                     let! association = choice
@@ -987,9 +978,60 @@ module EmitScopeGen =
     let genGuid : Gen<Guid> =
         Gen.arrayOfLength 16 (Gen.choose (0, 255) |> Gen.map byte) |> Gen.map Guid
 
+    /// Custom attribute operations adding `total` rows: mostly one at a time, sometimes a run.
+    let rec private genCustomAttributeOps (total : int) : Gen<Op list> =
+        if total <= 0 then
+            Gen.constant []
+        else
+            gen {
+                let! owner = choice
+                let! constructor = choice
+                let! blob = choice
+                let! count = Gen.frequency [ 6, Gen.constant 1 ; 1, Gen.choose (2, 30) ]
+                let count = min count total
+                let! rest = genCustomAttributeOps (total - count)
+                return Op.CustomAttributeRun (owner, constructor, blob, count) :: rest
+            }
+
+    // Custom attributes are drawn apart from the other operations and inserted among them, so that the other
+    // operations are drawn as they would be with no attributes: no other table's row has an attribute as its owner.
+    // The table's size is drawn first, so that sizes below 17, from 17 to 24 and from 25 are each common.
     let genOps : Gen<Op list> =
-        Gen.sized (fun size -> Gen.choose (0, 4 * size) |> Gen.bind (fun n -> Gen.listOfLength n genOp))
-        |> Gen.map List.ofSeq
+        gen {
+            let! ops =
+                Gen.sized (fun size -> Gen.choose (0, 4 * size) |> Gen.bind (fun n -> Gen.listOfLength n genOp))
+                |> Gen.map List.ofSeq
+
+            let! total =
+                Gen.frequency
+                    [
+                        1, Gen.constant 0
+                        2, Gen.choose (1, 16)
+                        2, Gen.choose (17, 24)
+                        2, Gen.choose (25, 60)
+                    ]
+
+            let! attributeOps = genCustomAttributeOps total
+            let! positions = Gen.listOfLength attributeOps.Length (Gen.choose (0, List.length ops))
+            let attributes = List.zip (List.ofSeq positions) attributeOps
+
+            let attributes =
+                attributes
+                |> List.ofSeq
+                |> List.indexed
+                |> List.sortBy (fun (i, (position, _)) -> position, i)
+
+            return
+                [
+                    for position in 0 .. List.length ops do
+                        for _, (at, op) in attributes do
+                            if at = position then
+                                yield op
+
+                        if position < List.length ops then
+                            yield ops.[position]
+                ]
+        }
 
     let genGenerated : Gen<Generated> = Gen.map2 applyGenerated genGuid genOps
 

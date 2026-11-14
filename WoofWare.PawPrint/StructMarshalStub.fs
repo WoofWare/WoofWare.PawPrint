@@ -104,7 +104,7 @@ module StructMarshalStub =
         let describe () = $"type %O{typeHandle}"
 
         let readFrom
-            (attributes : System.Reflection.Metadata.CustomAttributeHandleCollection)
+            (attributes : System.Reflection.Metadata.CustomAttributeHandle list)
             (flags : bool * bool)
             : bool * bool
             =
@@ -131,8 +131,17 @@ module StructMarshalStub =
             | _ -> flags
 
         (true, false)
-        |> readFrom (mr.GetAssemblyDefinition().GetCustomAttributes ())
-        |> readFrom (mr.GetTypeDefinition(concreteType.Definition.Get).GetCustomAttributes ())
+        |> readFrom (
+            CustomAttribute.ofOwnerInRidOrder
+                mr
+                (System.Reflection.Metadata.AssemblyDefinitionHandle.op_Implicit
+                    System.Reflection.Metadata.EntityHandle.AssemblyDefinition)
+        )
+        |> readFrom (
+            CustomAttribute.ofOwnerInRidOrder
+                mr
+                (System.Reflection.Metadata.TypeDefinitionHandle.op_Implicit concreteType.Definition.Get)
+        )
 
     /// Derive the write plan for `value`'s unmanaged image, or say why we can't.
     ///

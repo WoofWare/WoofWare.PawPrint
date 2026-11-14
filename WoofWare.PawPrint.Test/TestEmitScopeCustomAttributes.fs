@@ -1454,7 +1454,7 @@ module TestEmitScopeCustomAttributes =
             gen {
                 let! types = Gen.choose (1, 3)
                 let! favourite = choice
-                let! count = Gen.choose (0, 60)
+                let! count = Gen.choose (0, 80)
                 let! calls = Gen.listOfLength count (genCall favourite)
                 let! createAt = Gen.choose (0, count + 5)
 

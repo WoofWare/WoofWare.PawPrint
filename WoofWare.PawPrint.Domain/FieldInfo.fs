@@ -213,12 +213,12 @@ module FieldInfo =
     let private hasThreadStaticAttribute
         (mr : MetadataReader)
         (describeField : unit -> string)
-        (def : FieldDefinition)
+        (handle : FieldDefinitionHandle)
         : bool
         =
         let describeTarget () = $"field %s{describeField ()}"
 
-        def.GetCustomAttributes ()
+        CustomAttribute.ofOwnerInRidOrder mr (FieldDefinitionHandle.op_Implicit handle)
         |> Seq.exists (fun handle ->
             let attr = mr.GetCustomAttribute handle
 
@@ -283,7 +283,7 @@ module FieldInfo =
             && hasThreadStaticAttribute
                 mr
                 (fun () -> $"%s{assembly.Name}!%s{declaringTypeNamespace}.%s{declaringTypeName}::%s{name}")
-                def
+                handle
 
         {
             Name = name

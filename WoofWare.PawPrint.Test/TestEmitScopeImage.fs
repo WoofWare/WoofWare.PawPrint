@@ -706,90 +706,91 @@ module TestEmitScopeImage =
         let ownersOf (scope : EmitScope) : HasCustomAttribute list =
             EmitScope.customAttributes scope |> Seq.map _.Parent |> List.ofSeq
 
-        let count (predicate : EmitScope -> bool) : int =
-            scopes |> Seq.filter predicate |> Seq.length
+        let rowCount (scope : EmitScope) : int =
+            (EmitScope.customAttributes scope).Count
+
+        // Each floor is about half the count measured over this fixed sample.
+        let atLeast (label : string) (floor : int) (predicate : EmitScope -> bool) : unit =
+            let n = scopes |> Seq.filter predicate |> Seq.length
+            System.Console.WriteLine $"%s{label}: %d{n} of %d{scopes.Length} scopes"
+            n |> shouldBeGreaterThan floor
 
         // An owner with more rows than the 16 below which SRM's sort of the table is an insertion sort.
-        count (fun s -> ownersOf s |> List.countBy id |> List.exists (fun (_, n) -> n >= 17))
-        |> shouldBeGreaterThan 10
+        atLeast
+            "an owner with 17 rows"
+            20
+            (fun s -> ownersOf s |> List.countBy id |> List.exists (fun (_, n) -> n >= 17))
 
         // Owners interleaved: some owner's rows are in two runs, so that the table is not in owner order.
-        count (fun s ->
-            let owners = ownersOf s
+        atLeast
+            "interleaved owners"
+            35
+            (fun s ->
+                let owners = ownersOf s
 
-            let runs =
-                owners |> List.pairwise |> List.filter (fun (a, b) -> a <> b) |> List.length
+                let runs =
+                    owners |> List.pairwise |> List.filter (fun (a, b) -> a <> b) |> List.length
 
-            not owners.IsEmpty && runs + 1 > List.length (List.distinct owners)
-        )
-        |> shouldBeGreaterThan 20
+                not owners.IsEmpty && runs + 1 > List.length (List.distinct owners)
+            )
 
         // Table sizes on each side of 17 and 25.
-        count (fun s ->
-            (EmitScope.customAttributes s).Count > 0
-            && (EmitScope.customAttributes s).Count < 17
-        )
-        |> shouldBeGreaterThan 20
+        atLeast "1 to 16 rows" 30 (fun s -> rowCount s > 0 && rowCount s < 17)
+        atLeast "17 to 24 rows" 25 (fun s -> rowCount s >= 17 && rowCount s < 25)
+        atLeast "25 rows or more" 20 (fun s -> rowCount s >= 25)
 
-        count (fun s ->
-            (EmitScope.customAttributes s).Count >= 17
-            && (EmitScope.customAttributes s).Count < 25
-        )
-        |> shouldBeGreaterThan 10
-
-        count (fun s -> (EmitScope.customAttributes s).Count >= 25)
-        |> shouldBeGreaterThan 20
-
-        // Each owner kind.
         let kinds : (string * (HasCustomAttribute -> bool)) list =
             [
-                "assembly", (fun o -> o = HasCustomAttribute.Assembly)
-                "module", (fun o -> o = HasCustomAttribute.Module)
-                "type", (fun o -> o.IsTypeDef)
-                "method", (fun o -> o.IsMethodDef)
-                "field", (fun o -> o.IsField)
-                "parameter", (fun o -> o.IsParam)
-                "property", (fun o -> o.IsProperty)
-                "event", (fun o -> o.IsEvent)
-                "generic parameter", (fun o -> o.IsGenericParam)
+                "the assembly", (fun o -> o = HasCustomAttribute.Assembly)
+                "the module", (fun o -> o = HasCustomAttribute.Module)
+                "a type", (fun o -> o.IsTypeDef)
+                "a method", (fun o -> o.IsMethodDef)
+                "a field", (fun o -> o.IsField)
+                "a parameter", (fun o -> o.IsParam)
+                "a property", (fun o -> o.IsProperty)
+                "an event", (fun o -> o.IsEvent)
+                "a generic parameter", (fun o -> o.IsGenericParam)
             ]
 
-        for _, kind in kinds do
-            count (fun s -> ownersOf s |> List.exists kind) |> shouldBeGreaterThan 10
+        for label, kind in kinds do
+            atLeast $"an attribute of %s{label}" 20 (fun s -> ownersOf s |> List.exists kind)
 
-        // An empty blob, and two equal rows.
-        count (fun s -> EmitScope.customAttributes s |> Seq.exists (fun row -> row.Value.Offset = 0))
-        |> shouldBeGreaterThan 20
+        atLeast
+            "an empty blob"
+            70
+            (fun s -> EmitScope.customAttributes s |> Seq.exists (fun row -> row.Value.Offset = 0))
 
-        count (fun s ->
-            EmitScope.customAttributes s
-            |> Seq.countBy id
-            |> Seq.exists (fun (_, n) -> n >= 2)
-        )
-        |> shouldBeGreaterThan 20
+        atLeast
+            "two equal rows"
+            60
+            (fun s ->
+                EmitScope.customAttributes s
+                |> Seq.countBy id
+                |> Seq.exists (fun (_, n) -> n >= 2)
+            )
 
         // SRM's own per-owner order differs from RID order, which is why `CustomAttribute.ofOwnerInRidOrder` sorts.
         // If SRM's sort becomes stable this fails, and the sweep no longer shows why the function sorts.
-        count (fun s ->
-            let pe, reader = readImage (EmitScopeImage.write s)
-            use _ = pe
+        atLeast
+            "SRM's own order of an owner's rows not RID order"
+            40
+            (fun s ->
+                let pe, reader = readImage (EmitScopeImage.write s)
+                use _ = pe
 
-            ownersOf s
-            |> List.distinct
-            |> List.exists (fun owner ->
-                let handle = MetadataTokens.EntityHandle (ownerToken owner)
+                ownersOf s
+                |> List.distinct
+                |> List.exists (fun owner ->
+                    let srm =
+                        reader.GetCustomAttributes (MetadataTokens.EntityHandle (ownerToken owner))
+                        |> Seq.map (fun h ->
+                            MetadataTokens.GetRowNumber (CustomAttributeHandle.op_Implicit h : EntityHandle)
+                        )
+                        |> List.ofSeq
 
-                let srm =
-                    reader.GetCustomAttributes handle
-                    |> Seq.map (fun h ->
-                        MetadataTokens.GetRowNumber (CustomAttributeHandle.op_Implicit h : EntityHandle)
-                    )
-                    |> List.ofSeq
-
-                srm <> List.sort srm
+                    srm <> List.sort srm
+                )
             )
-        )
-        |> shouldBeGreaterThan 5
 
     /// A scope of `memberRefs` MemberRef rows, with one custom attribute on a type whose constructor is the last.
     let private withMemberRefs (memberRefs : int) : EmitScope * CustomAttributeRow =
