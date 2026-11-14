@@ -382,9 +382,6 @@ module internal UnaryMetadataObjectOps =
     /// Ask `NewobjTarget` what CoreCLR's JIT makes of a `newobj` of `concretizedCtor`, the
     /// executing instruction's bound method, and raise the refusal it gives, if any; otherwise
     /// construct, as `constructObject` describes.
-    ///
-    /// Asked here and not in `constructObject`, which `[UnsafeAccessor]` stubs also reach: each
-    /// other route to a construction makes checks of its own.
     let private constructOrRefuse
         (ctx : UnaryMetadataIlOpContext)
         (concretizedCtor : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
@@ -392,6 +389,9 @@ module internal UnaryMetadataObjectOps =
         (state : IlMachineState)
         : IlMachineState * WhatWeDid
         =
+        // Asked here and not in `constructObject`, whose other caller, `UnsafeAccessorDispatch`,
+        // only ever finds constructors and refuses an abstract type itself. That check refuses an
+        // abstract value type too, which real .NET's accessor stub (a `newobj`) constructs.
         let ctorType =
             let assembly =
                 state.LoadedAssembly concretizedCtor.DeclaringAssemblyFullName
