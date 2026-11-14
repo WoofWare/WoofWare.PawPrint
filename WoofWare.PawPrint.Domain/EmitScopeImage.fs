@@ -53,6 +53,11 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 /// stably by its association's coded index. A row of those three tables therefore moves when a row added
 /// later sorts before it; nothing hands out their RIDs.
 ///
+/// `CustomAttribute`, which ECMA-335 also requires to be sorted, is in the scope's order, as CoreCLR's read-write
+/// metadata keeps it in a live dynamic module, so that each RID is the token CoreCLR gave the row. The header does not
+/// declare it sorted, and SRM reads it through a pointer table of its own, which groups each owner's rows but not in
+/// RID order: `CustomAttribute.ofOwnerInRidOrder` reads one owner's rows in RID order.
+///
 /// `GenericParam` is in the scope's order, which is the order the parameters were created and need not
 /// be ECMA-335's order by owner, so that each RID is the token CoreCLR gave the parameter. The header
 /// declares the table sorted all the same, whatever its order, because SRM's reader refuses an unsorted
@@ -332,6 +337,7 @@ module EmitScopeImage =
         rowCounts.[int TableIndex.ParamPtr] <- paramPtr.Length
         rowCounts.[int TableIndex.Param] <- parameters.Count
         rowCounts.[int TableIndex.InterfaceImpl] <- interfaceImpls.Length
+        rowCounts.[int TableIndex.CustomAttribute] <- (EmitScope.customAttributes scope).Count
         rowCounts.[int TableIndex.MemberRef] <- (EmitScope.memberRefs scope).Count
         rowCounts.[int TableIndex.StandAloneSig] <- (EmitScope.standAloneSigs scope).Count
         rowCounts.[int TableIndex.EventMap] <- eventMapParents.Length
@@ -387,6 +393,39 @@ module EmitScopeImage =
 
         let hasSemanticsSize =
             codedIndexSize rowCounts [ TableIndex.Event ; TableIndex.Property ] 1
+
+        // Every table the coded index can name sizes it, not only the nine an emit scope's attributes are owned by.
+        let hasCustomAttributeSize =
+            codedIndexSize
+                rowCounts
+                [
+                    TableIndex.MethodDef
+                    TableIndex.Field
+                    TableIndex.TypeRef
+                    TableIndex.TypeDef
+                    TableIndex.Param
+                    TableIndex.InterfaceImpl
+                    TableIndex.MemberRef
+                    TableIndex.Module
+                    TableIndex.DeclSecurity
+                    TableIndex.Property
+                    TableIndex.Event
+                    TableIndex.StandAloneSig
+                    TableIndex.ModuleRef
+                    TableIndex.TypeSpec
+                    TableIndex.Assembly
+                    TableIndex.AssemblyRef
+                    TableIndex.File
+                    TableIndex.ExportedType
+                    TableIndex.ManifestResource
+                    TableIndex.GenericParam
+                    TableIndex.GenericParamConstraint
+                    TableIndex.MethodSpec
+                ]
+                5
+
+        let customAttributeTypeSize =
+            codedIndexSize rowCounts [ TableIndex.MethodDef ; TableIndex.MemberRef ] 3
 
         let tables = BlobBuilder ()
 
@@ -508,6 +547,18 @@ module EmitScopeImage =
             writeIndex tables memberRefParentSize "MemberRef.Class" coded
             str "MemberRef.Name" row.Name
             blob "MemberRef.Signature" row.Signature
+
+        // CustomAttribute (II.22.10), in RID order, which is not owner order: the header does not declare it sorted.
+        for row in EmitScope.customAttributes scope do
+            writeIndex tables hasCustomAttributeSize "CustomAttribute.Parent" row.Parent.CodedIndex
+
+            let constructor =
+                match row.Constructor with
+                | MethodDefOrRef.MethodDef rid -> (rid.Rid <<< 3) ||| 2
+                | MethodDefOrRef.MemberRef rid -> (rid.Rid <<< 3) ||| 3
+
+            writeIndex tables customAttributeTypeSize "CustomAttribute.Type" constructor
+            blob "CustomAttribute.Value" row.Value
 
         // StandAloneSig (II.22.36)
         for row in EmitScope.standAloneSigs scope do

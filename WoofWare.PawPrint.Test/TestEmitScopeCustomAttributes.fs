@@ -623,12 +623,83 @@ module TestEmitScopeCustomAttributes =
 
         found
 
+    /// Calls CoreLib's internal `MetadataImport.EnumCustomAttributes` on a `RuntimeModule` and returns the tokens.
+    let private enumerateCustomAttributes : Lazy<Func<Module, int, int[]>> =
+        lazy
+            let runtimeModule = requireType "System.Reflection.RuntimeModule"
+            let metadataImport = requireType "System.Reflection.MetadataImport"
+            let enumResult = requireType "System.Reflection.MetadataEnumResult"
+
+            let getImport =
+                (requireMember (runtimeModule.GetProperty ("MetadataImport", instance)) "RuntimeModule.MetadataImport")
+                    .GetMethod
+
+            let enumerate =
+                requireMember (metadataImport.GetMethod ("EnumCustomAttributes", instance)) "EnumCustomAttributes"
+
+            let getLength =
+                (requireMember (enumResult.GetProperty ("Length", instance)) "MetadataEnumResult.Length").GetMethod
+
+            let getItem =
+                (requireMember (enumResult.GetProperty ("Item", instance)) "MetadataEnumResult.Item").GetMethod
+
+            let dm =
+                DynamicMethod (
+                    "EnumCustomAttributes",
+                    typeof<int[]>,
+                    [| typeof<Module> ; typeof<int> |],
+                    typeof<obj>.Module,
+                    true
+                )
+
+            let il = dm.GetILGenerator ()
+            let import = il.DeclareLocal metadataImport
+            let result = il.DeclareLocal enumResult
+            let array = il.DeclareLocal typeof<int[]>
+            let index = il.DeclareLocal typeof<int>
+            il.Emit (OpCodes.Ldarg_0)
+            il.Emit (OpCodes.Castclass, runtimeModule)
+            il.Emit (OpCodes.Call, getImport)
+            il.Emit (OpCodes.Stloc, import)
+            il.Emit (OpCodes.Ldloca, import)
+            il.Emit (OpCodes.Ldarg_1)
+            il.Emit (OpCodes.Ldloca, result)
+            il.Emit (OpCodes.Call, enumerate)
+            il.Emit (OpCodes.Ldloca, result)
+            il.Emit (OpCodes.Call, getLength)
+            il.Emit (OpCodes.Newarr, typeof<int>)
+            il.Emit (OpCodes.Stloc, array)
+            il.Emit (OpCodes.Ldc_I4_0)
+            il.Emit (OpCodes.Stloc, index)
+            let top = il.DefineLabel ()
+            let test = il.DefineLabel ()
+            il.Emit (OpCodes.Br, test)
+            il.MarkLabel top
+            il.Emit (OpCodes.Ldloc, array)
+            il.Emit (OpCodes.Ldloc, index)
+            il.Emit (OpCodes.Ldloca, result)
+            il.Emit (OpCodes.Ldloc, index)
+            il.Emit (OpCodes.Call, getItem)
+            il.Emit (OpCodes.Stelem_I4)
+            il.Emit (OpCodes.Ldloc, index)
+            il.Emit (OpCodes.Ldc_I4_1)
+            il.Emit (OpCodes.Add)
+            il.Emit (OpCodes.Stloc, index)
+            il.MarkLabel test
+            il.Emit (OpCodes.Ldloc, index)
+            il.Emit (OpCodes.Ldloc, array)
+            il.Emit (OpCodes.Ldlen)
+            il.Emit (OpCodes.Conv_I4)
+            il.Emit (OpCodes.Blt, top)
+            il.Emit (OpCodes.Ldloc, array)
+            il.Emit (OpCodes.Ret)
+            dm.CreateDelegate typeof<Func<Module, int, int[]>> :?> Func<Module, int, int[]>
+
     /// The rows the host's emitter holds for `owner` in `moduleBuilder`, in its enumeration order: each row's token,
     /// its constructor's token and its blob.
     let private hostRows (moduleBuilder : ModuleBuilder) (owner : int) : (int * int * byte list) list =
         let runtimeModule = requireType "System.Reflection.RuntimeModule"
         let metadataImport = requireType "System.Reflection.MetadataImport"
-        let enumResult = requireType "System.Reflection.MetadataEnumResult"
         let constArray = requireType "System.Reflection.ConstArray"
         let runtimeModuleBuilder = requireType "System.Reflection.Emit.RuntimeModuleBuilder"
 
@@ -641,26 +712,16 @@ module TestEmitScopeCustomAttributes =
                 .GetValue
                 internalModule
 
-        let enumArgs = [| box owner ; null |]
-
-        (requireMember (metadataImport.GetMethod ("EnumCustomAttributes", instance)) "EnumCustomAttributes")
-            .Invoke (import, enumArgs)
-        |> ignore<obj>
-
-        let result = enumArgs.[1]
-
-        let length =
-            enumResult.GetProperty("Length", instance).GetValue result |> unbox<int>
-
-        let item =
-            requireMember (enumResult.GetProperty ("Item", instance)) "MetadataEnumResult.Item"
+        // `MetadataEnumResult` is a ref struct, which reflection cannot box, so a skip-visibility `DynamicMethod`
+        // calls `EnumCustomAttributes` and copies the result into an array.
+        let rows : int[] =
+            enumerateCustomAttributes.Value.Invoke (internalModule :?> Module, owner)
 
         let props =
             requireMember (metadataImport.GetMethod ("GetCustomAttributeProps", instance)) "GetCustomAttributeProps"
 
         [
-            for i in 0 .. length - 1 do
-                let row = item.GetValue (result, [| box i |]) |> unbox<int>
+            for row in rows do
                 let propsArgs = [| box row ; null ; null |]
                 props.Invoke (import, propsArgs) |> ignore<obj>
                 let blob = propsArgs.[2]
@@ -752,19 +813,20 @@ module TestEmitScopeCustomAttributes =
         let ownDefinitions =
             names |> List.map (fun name -> name, attributeType moduleBuilder (full name))
 
-        let outer = moduleBuilder.DefineType ("Outer", TypeAttributes.Public)
-
+        // Each nested type has an encloser of its own: reflection keys a nested type by its encloser and the part of
+        // its name after the last dot, which two of the names share.
         let ownNested =
             names
-            |> List.map (fun name ->
+            |> List.mapi (fun i name ->
+                let outer = moduleBuilder.DefineType ($"Outer%d{i}", TypeAttributes.Public)
+
                 let t =
                     outer.DefineNestedType (full name, TypeAttributes.NestedPublic, typeof<Attribute>)
 
-                name, t, t.DefineDefaultConstructor MethodAttributes.Public
+                name, outer, t, t.DefineDefaultConstructor MethodAttributes.Public
             )
 
         let _, other = newModule "ClassifierOther"
-        let otherOuter = other.DefineType ("Outer", TypeAttributes.Public)
 
         let otherTop =
             names
@@ -775,19 +837,16 @@ module TestEmitScopeCustomAttributes =
 
         let otherNested =
             names
-            |> List.map (fun name ->
+            |> List.mapi (fun i name ->
+                let outer = other.DefineType ($"Outer%d{i}", TypeAttributes.Public)
+
                 let t =
-                    otherOuter.DefineNestedType (full name, TypeAttributes.NestedPublic, typeof<Attribute>)
+                    outer.DefineNestedType (full name, TypeAttributes.NestedPublic, typeof<Attribute>)
 
                 t.DefineDefaultConstructor MethodAttributes.Public |> ignore<ConstructorBuilder>
-                name, t
+                outer.CreateType () |> ignore<Type>
+                name, t.CreateType().GetConstructor Type.EmptyTypes
             )
-
-        otherOuter.CreateType () |> ignore<Type>
-
-        let otherNested =
-            otherNested
-            |> List.map (fun (name, t) -> name, t.CreateType().GetConstructor Type.EmptyTypes)
 
         let generic =
             let _, third = newModule "ClassifierGeneric"
@@ -803,11 +862,13 @@ module TestEmitScopeCustomAttributes =
             ownDefinitions
             |> List.map (fun (name, (t, _)) -> name, t.CreateType().GetConstructor Type.EmptyTypes)
 
-        outer.CreateType () |> ignore<Type>
-
         let ownNestedCreated =
             ownNested
-            |> List.map (fun (name, t, c) -> name, (t.CreateType () |> ignore<Type>), c)
+            |> List.map (fun (name, outer, t, c) ->
+                outer.CreateType () |> ignore<Type>
+                t.CreateType () |> ignore<Type>
+                name, (), c
+            )
 
         [
             for t in coreLibTypes do
@@ -943,8 +1004,25 @@ module TestEmitScopeCustomAttributes =
                 let describe = $"%s{entry.Label} on a %s{ownerKind}: classified %A{kind}"
 
                 match kind with
-                | CustomAttributeEmitKind.Known _ ->
-                    if not threw && rows <> 0 then
+                | CustomAttributeEmitKind.Known known ->
+                    // The six attributes `KnownCaList` marks `bKEEPCA` are validated and then stored as rows, which a
+                    // well-formed blob on a right target makes indistinguishable from an ordinary row here; the
+                    // fixed table pins their names. Every other known attribute writes no row.
+                    let kept =
+                        [
+                            KnownCustomAttribute.Guid
+                            KnownCustomAttribute.InterfaceType
+                            KnownCustomAttribute.ClassInterface
+                            KnownCustomAttribute.TypeLibVersion
+                            KnownCustomAttribute.ComCompatibleVersion
+                            KnownCustomAttribute.AllowPartiallyTrustedCallers
+                        ]
+
+                    if threw then
+                        reached <- reached.Add "Known, refused"
+                    elif rows = 0 then
+                        reached <- reached.Add "Known, no row"
+                    elif not (List.contains known kept) || rows <> 1 then
                         failwith $"%s{describe}, but the host wrote %d{rows} row(s) and threw nothing"
                 | CustomAttributeEmitKind.Ordinary ->
                     let outcome = flags ()
@@ -992,6 +1070,8 @@ module TestEmitScopeCustomAttributes =
                 [
                     "Ordinary"
                     "Known"
+                    "Known, refused"
+                    "Known, no row"
                     "SuppressUnmanagedCodeSecurity"
                     "DynamicSecurityMethod"
                 ]
@@ -1119,7 +1199,12 @@ module TestEmitScopeCustomAttributes =
                 typeRids
                 |> Array.map (fun t ->
                     let rid, s =
-                        EmitScopeDefinitions.defineMethod t "M" methodSignature MethodAttributes.Public scope
+                        EmitScopeDefinitions.defineMethod
+                            t
+                            "M"
+                            methodSignature
+                            (MethodAttributes.Public ||| MethodAttributes.Static)
+                            scope
 
                     scope <- s
                     rid

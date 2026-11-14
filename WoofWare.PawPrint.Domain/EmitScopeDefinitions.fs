@@ -68,11 +68,57 @@ type KnownCustomAttribute =
 module KnownCustomAttribute =
     /// Every case, once each.
     let all : KnownCustomAttribute list =
-        failwith "TODO: KnownCustomAttribute.all is not implemented yet"
+        [
+            KnownCustomAttribute.DllImport
+            KnownCustomAttribute.Guid
+            KnownCustomAttribute.ComImport
+            KnownCustomAttribute.InterfaceType
+            KnownCustomAttribute.ClassInterface
+            KnownCustomAttribute.Serializable
+            KnownCustomAttribute.NonSerialized
+            KnownCustomAttribute.MethodImpl
+            KnownCustomAttribute.MarshalAs
+            KnownCustomAttribute.PreserveSig
+            KnownCustomAttribute.In
+            KnownCustomAttribute.Out
+            KnownCustomAttribute.Optional
+            KnownCustomAttribute.StructLayout
+            KnownCustomAttribute.FieldOffset
+            KnownCustomAttribute.TypeLibVersion
+            KnownCustomAttribute.ComCompatibleVersion
+            KnownCustomAttribute.SpecialName
+            KnownCustomAttribute.AllowPartiallyTrustedCallers
+            KnownCustomAttribute.WindowsRuntimeImport
+        ]
 
     /// The namespace and the name of the attribute type, as <c>KnownCaList</c>'s entries spell them.
     let name (known : KnownCustomAttribute) : string * string =
-        failwith "TODO: KnownCustomAttribute.name is not implemented yet"
+        let interop = "System.Runtime.InteropServices"
+        let compilerServices = "System.Runtime.CompilerServices"
+
+        match known with
+        | KnownCustomAttribute.DllImport -> interop, "DllImportAttribute"
+        | KnownCustomAttribute.Guid -> interop, "GuidAttribute"
+        | KnownCustomAttribute.ComImport -> interop, "ComImportAttribute"
+        | KnownCustomAttribute.InterfaceType -> interop, "InterfaceTypeAttribute"
+        | KnownCustomAttribute.ClassInterface -> interop, "ClassInterfaceAttribute"
+        | KnownCustomAttribute.Serializable -> "System", "SerializableAttribute"
+        | KnownCustomAttribute.NonSerialized -> "System", "NonSerializedAttribute"
+        | KnownCustomAttribute.MethodImpl -> compilerServices, "MethodImplAttribute"
+        | KnownCustomAttribute.MarshalAs -> interop, "MarshalAsAttribute"
+        | KnownCustomAttribute.PreserveSig -> interop, "PreserveSigAttribute"
+        | KnownCustomAttribute.In -> interop, "InAttribute"
+        | KnownCustomAttribute.Out -> interop, "OutAttribute"
+        | KnownCustomAttribute.Optional -> interop, "OptionalAttribute"
+        | KnownCustomAttribute.StructLayout -> interop, "StructLayoutAttribute"
+        | KnownCustomAttribute.FieldOffset -> interop, "FieldOffsetAttribute"
+        | KnownCustomAttribute.TypeLibVersion -> interop, "TypeLibVersionAttribute"
+        | KnownCustomAttribute.ComCompatibleVersion -> interop, "ComCompatibleVersionAttribute"
+        | KnownCustomAttribute.SpecialName -> compilerServices, "SpecialNameAttribute"
+        | KnownCustomAttribute.AllowPartiallyTrustedCallers ->
+            "System.Security", "AllowPartiallyTrustedCallersAttribute"
+        | KnownCustomAttribute.WindowsRuntimeImport ->
+            "System.Runtime.InteropServices.WindowsRuntime", "WindowsRuntimeImportAttribute"
 
 /// <summary>
 /// What CoreCLR's emitter does with an attribute, by its constructor's declaring type and the owner
@@ -729,7 +775,52 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : CustomAttributeEmitKind
         =
-        failwith "TODO: EmitScopeDefinitions.classifyCustomAttribute is not implemented yet"
+        let operation = "EmitScopeDefinitions.classifyCustomAttribute"
+        // Refuses an owner the scope lacks.
+        EmitScope.typeOfCustomAttributeOwner owner scope |> ignore<TypeDefRid option>
+
+        let typeDefName (typeDef : TypeDefRid) : string * string =
+            let row = (EmitScope.typeDefs scope).[typeDef.Rid - 1]
+            EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+
+        let name : (string * string) option =
+            match constructor with
+            | MethodDefOrRef.MemberRef rid ->
+                if (EmitScope.tryMemberRefRid rid.Rid scope).IsNone then
+                    invalidArg (nameof constructor) $"%s{operation}: the scope has no MemberRef row %d{rid.Rid}"
+
+                match (EmitScope.memberRefs scope).[rid.Rid - 1].Parent with
+                | MemberRefParent.TypeRef typeRef ->
+                    let row = (EmitScope.typeRefs scope).[typeRef.Rid - 1]
+                    Some (EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope)
+                | MemberRefParent.TypeDef typeDef -> Some (typeDefName typeDef)
+                | MemberRefParent.TypeSpec _
+                | MemberRefParent.MethodDef _ -> None
+            | MethodDefOrRef.MethodDef rid ->
+                if (EmitScope.tryMethodDefRid rid.Rid scope).IsNone then
+                    invalidArg (nameof constructor) $"%s{operation}: the scope has no MethodDef row %d{rid.Rid}"
+
+                Some (typeDefName (EmitScope.methodDefs scope).[rid.Rid - 1].Owner)
+
+        match name with
+        | None -> CustomAttributeEmitKind.Ordinary
+        | Some name ->
+
+        match
+            KnownCustomAttribute.all
+            |> List.tryFind (fun known -> KnownCustomAttribute.name known = name)
+        with
+        | Some known -> CustomAttributeEmitKind.Known known
+        | None ->
+            // `RegMeta::DefineCustomAttribute` compares the joined path; every name a managed caller can write is a
+            // full name divided at its last dot, so comparing the two parts agrees with it.
+            match owner, name with
+            | HasCustomAttribute.MethodDef _, ("System.Security", "DynamicSecurityMethodAttribute") ->
+                CustomAttributeEmitKind.DynamicSecurityMethod
+            | (HasCustomAttribute.TypeDef _ | HasCustomAttribute.MethodDef _),
+              ("System.Security", "SuppressUnmanagedCodeSecurityAttribute") ->
+                CustomAttributeEmitKind.SuppressUnmanagedCodeSecurity
+            | _ -> CustomAttributeEmitKind.Ordinary
 
     /// <summary>
     /// Define a custom attribute of <paramref name="owner"/>, as <c>RegMeta::DefineCustomAttribute</c> does for
@@ -744,4 +835,18 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : CustomAttributeDefinition
         =
-        failwith "TODO: EmitScopeDefinitions.defineCustomAttribute is not implemented yet"
+        match classifyCustomAttribute owner constructor scope with
+        | CustomAttributeEmitKind.Ordinary ->
+            let blob, scope = EmitScope.internBlob value scope
+
+            let rid, scope =
+                EmitScope.addCustomAttribute
+                    {
+                        Parent = owner
+                        Constructor = constructor
+                        Value = blob
+                    }
+                    scope
+
+            CustomAttributeDefinition.Defined (rid, scope)
+        | kind -> CustomAttributeDefinition.NotStoredAsGiven kind
