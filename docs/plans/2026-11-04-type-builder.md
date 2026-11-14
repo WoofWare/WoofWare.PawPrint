@@ -5094,3 +5094,123 @@ Taken 2026-11-14.
     caller only.
   * A non-constructor target, if a guest ever stops at it. The starting point is the measurement that `NotCtor`
     runs, and the reading that CoreCLR allocates the token's class.
+
+### The `newobj` stage, PR 1: as built
+
+Built 2026-11-14 as decided above, from `main` at `101ebd665`.
+
+**Measured first**, each built against net10.0 and run on 10.0.14 and rolled forward to 11.0.0-rc.3:
+
+* The abstract struct (scratchpad `newobj/absstruct`). An image from `PersistedAssemblyBuilder` holds three value
+  types, each with a public constructor from `int` that stores it: `AbsSealed` (`Abstract | Sealed`), `AbsOpen`
+  (`Abstract`) and `Plain` (`Sealed`). A static method per type puts `newobj` of its constructor first, and the image is
+  loaded from disk, so the token is metadata. On both runtimes all three types load, reflection reports `IsAbstract`
+  for the first two, and all three `newobj`s construct (the field reads back 42), boxed or not. So the rule takes "is a
+  value type" as an input and `TestFabricatedNewobjRefusals` has the row. `Activator.CreateInstance` of `AbsSealed`
+  is refused by its own check (`MemberAccessException`, "Cannot create an instance of AbsSealed because it is an
+  abstract class."), on both.
+* `[UnsafeAccessor(UnsafeAccessorKind.Constructor)]` of `AbsOpen` (scratchpad `newobj/absua`, compiled against
+  CoreLib's implementation assembly so that it can name the fabricated type): it constructs on both runtimes. See the
+  deviations.
+* The probe's full output on both runtimes (scratchpad `newobj/probe/net10-full.out` and `net11-full.out`): identical
+  but for the version line, and holding the `tb-*`, `dyn-dm-empty`, `dyn-dm-mints` and `byref-method` rows, each as the
+  stage's table and the decisions give it.
+* `sourcesImpure/TypeBuilderNewobjRefusals.cs` (scratchpad `newobj/tbguest`): 0 on both; with the abstract method's
+  message altered in the check, 6 on both.
+* The sweep without its skip of a delegate type's non-constructors (scratchpad `newobj/sweep2`): the five static
+  methods that skip also left out (`MulticastDelegate::TrySetSlot` and others) compile to `InvalidProgramException` on
+  both runtimes, and nothing crashes; 24,011 methods on 10, 26,117 on 11.
+* `[SuppressGCTransition]` in the test host's CoreLib (scratchpad `newobj/sgt`): 36 methods, P/Invokes into `QCall`
+  (23) and `libSystem.Native` (13), all static, so the sweep compiles a `newobj` of each. The CoreCLR 10.0.12 JIT-lock
+  leak needs a `DllNotFoundException` during compilation; both libraries are present, and the sweep asserts that every
+  compilation raises the rule's exception, so none raised that.
+
+**Files.**
+
+* `WoofWare.PawPrint.Semantics/NewobjTarget.fs` (new, after `StringConstructor.fs`): `NewobjTarget`, five cases in
+  the decisions' order; `NewobjTarget.isInstanceConstructor`, CoreCLR's `IsMdInstanceInitializer`; and
+  `NewobjTarget.classify` over the method's attributes and name and the declaring type's attributes and
+  value-typeness. Public, so the sweep calls it directly.
+* `OpcodeFaults.fs`: `ResolutionFault.TokenBinding`'s documentation names `newobj`'s three refusals, and
+  `typeNames TokenBinding` gains `System.InvalidOperationException`.
+* `CallSiteBinding.fs`: `CompilationFailure.NewobjOfStaticMethod` and `InstantiatesAbstractClass`;
+  `NamesAbstractMethod`'s documentation names `newobj`. `UnaryMetadataCallOps.raiseCompilationFailure` raises both as
+  `TokenBinding` (`InvalidProgramException` with its default message; `InvalidOperationException` with the CLR's), and
+  `raiseNamedAbstractMethod`'s docstring names `newobj`.
+* `Exceptions.fs`: `InvalidOperationMessages.cantInstantiateAbstractClass`, which `UnsafeAccessorDispatch`'s existing
+  refusal now reads instead of its own copy of the text.
+* `UnaryMetadataObjectOps.fs`: `executeNewobj` splits on every `ResolvedMetadataOperand` case with no wildcard.
+  `FromMetadata` is `executeMetadataNewobj`, the old body; `ScopeMethod` fails by name (the decoder refuses such a body
+  at mint, so it is unreachable until PR 2); the other four fail as bugs. After the array shortcut and the binding,
+  `constructOrRefuse` asks `NewobjTarget.classify`, matches all five outcomes, raises the three refusals through
+  `raiseCompilationFailure`, stops by name at `NotInstanceConstructor`, and otherwise calls `constructObject`, which is
+  unchanged.
+* `docs/divergences.md`: "A `newobj` that the JIT refuses fails when it is reached, and one of a non-constructor
+  stops", after the section on an abstract method's `call`.
+* Tests, committed first (`bcbb0f2bd`):
+  * `TestNewobjTarget`: all 192 combinations of abstract, static, `RTSpecialName`, six names, abstract type and value
+    type, against the order written as a list of conditions, with each outcome's count asserted (96, 48, 44, 1, 3); the
+    constructor predicate's cases; and an FsCheck property over uniformly drawn 16-bit method and 32-bit type attribute
+    words (10,000 cases), whose outcome counts are each asserted at least seven standard deviations below expectation.
+  * `TestNewobjTargetOnHost`: the sweep, in the test host. It enumerates 35,478 methods, compiles 24,011 (686
+    `AbstractMethod`, 21,257 `StaticMethod`, 94 `AbstractClass`, 1,974 `Constructs`) and skips 11,467, for each of
+    which the rule says `NotInstanceConstructor`. It reads each method and type from PawPrint's image of the host's
+    CoreLib by metadata token, takes value-typeness from `LoadedTypeInfo.isValueType` (checked against reflection for
+    every type), asserts the exception type and message, that each exception is one `TokenBinding` names, the counts,
+    and the coverage the decisions list. It takes 3 to 4 seconds.
+  * `TestFabricatedNewobjRefusals`: the decisions' eight rows through `FabricatedGuest.run`, and the stop by name at a
+    `newobj` of `Inst.NotCtor` and of a `.ctor` without `RTSpecialName` (a second image, run on PawPrint alone).
+  * `sourcesImpure/TypeBuilderNewobjRefusals.cs`, registered in `TestImpureCases` beside its `TypeBuilder` siblings.
+
+**Red**, at `bcbb0f2bd`: the four rule tests at the stubs' "TODO: NewobjTarget... is not implemented yet"; the
+fabricated refusals test with the real runtime exiting 0 and PawPrint stopped at "stack shape: NewStatic ... at
+offset 5 has 2 value(s) on its evaluation stack, but the analysis expects 1" (the static method called as a
+constructor); both stop-by-name cases at "PawPrint ran the guest, which exited 0"; and the `TypeBuilder` guest at the
+same stack-shape failure in `Dyn.T.Static`.
+
+**Mutants**, each built fresh and run against the seven default-suite tests and the `TypeBuilder` guest (scratchpad
+`newobj-mut`). "C" is the combinations test, "K" the constructor predicate test, "P" the property, "S" the sweep, "F"
+the fabricated refusals (with the driver's exit code, where it exited), "N" the two stop-by-name cases, "G" the guest:
+
+| Mutant | Killed by |
+|---|---|
+| static checked before abstract | C, P, S, F (9: the static abstract interface member) |
+| not-a-constructor checked before static | C, P, S, F and G (stopped by name at the static method) |
+| abstract class checked before not-a-constructor | C, P, S (the instance methods of abstract classes) |
+| the abstract-class refusal dropped (abstract class and "otherwise" swapped) | C, P, S, F (10), G (7) |
+| the value-type exemption dropped | C, P, F (the abstract struct's `InvalidOperationException` unhandled) |
+| the metadata arm skipping the rule | F and G (the stack-shape failure), N |
+| the non-constructor stop dropped | N alone |
+| the constructor predicate reading the name alone | C, K, P, N (`NewFake`) |
+| the rule moved into `constructObject` | survived; see the deviations |
+
+No test was strengthened after the first run.
+
+**The in-process sweep**, run ten times alone and ten times beside the other fixtures that compile in the test host's
+JIT (`TestBoxPattern`, `TestArrayConstructor`, `TestOpcodeFaultsOnHost*`, `TestResolutionFaultsOnHost`,
+`TestFabricatedAbstractMethodCall`), each a `dotnet test` process of its own: 20 of 20 passed, the sweep taking 3 to 4
+seconds and each process 9 to 11 seconds of wall time.
+
+**Suites**, built from the whole solution at `b9ddf3457`, each run on its own: `Guest` (234), `GuestSolo` (2), `GuestPure` (1185) and
+`GuestImpure` (281), all passing, and the default suite (5613 passed, 37 skipped).
+
+**Deviations.**
+
+* The `StackShapeOfMethod` `newobj` arm is not in PR 1. The decoder still refuses a dynamic method's `newobj` at
+  mint, so the arm is unreachable, and its tests (the decisions' PR 2 unit tests) need the scope arm.
+* The rule moved into `constructObject` survives every test, the guests that reach the other routes included (47
+  `UnsafeAccessor` and `Activator` default-suite tests, and 118 `UnsafeAccessor`, `Activator` and `Reflection` guests in
+  `GuestPure` and `GuestImpure`, all passing as at the tip). It is equivalent, so no row was added. `constructObject`
+  has one caller besides `executeNewobj`: `UnsafeAccessorDispatch`. The runtime's reflection invoker and `Activator` do
+  not reach it, contrary to the decisions' list. `UnsafeAccessorDispatch` finds only constructors for its `Constructor`
+  kind, and refuses an abstract type before it calls `constructObject`, so the rule there never answers anything but
+  `Constructs`.
+* A finding that bears on the decisions' reason for keeping the rule out of `constructObject`: CoreCLR's
+  `[UnsafeAccessor]` constructor stub is IL whose body is a `newobj` (`vm/unsafeaccessors.cpp:908`), so its
+  abstract-class refusal is the JIT's rule, value-type exemption included: real .NET constructs an abstract struct
+  through one (measured above). PawPrint's `UnsafeAccessorDispatch` refuses every type flagged abstract, so it diverges
+  for an abstract struct. Not changed here; asking `NewobjTarget` there is a candidate follow-up.
+* The sweep compiles every static method, so 24,011 rather than the planner's 24,006: the planner's skip of a delegate
+  type's non-constructors also skipped five static methods, which compile (measured above).
+* The fabricated abstract struct's method returns the field its constructor stored, boxed, rather than the struct: C#
+  reads an abstract sealed type as a static class, so the driver cannot name it.
