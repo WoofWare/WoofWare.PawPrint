@@ -757,17 +757,18 @@ module NativeMetadataImport =
                     $"%s{operation}: FieldDef token 0x%08x{mdToken} was not present in %s{assembly.DefinitionFullName}"
         | token -> failwith $"%s{operation}: expected FieldDef token, got %O{token} from 0x%08x{mdToken}"
 
-    /// The Offset column, raw, of the FieldLayout row (ECMA-335 II.22.16) whose Field is
-    /// <paramref name="field"/>, or <c>None</c> when that field has no row. Fails if it has more
-    /// than one, which II.22.16 forbids.
+    /// The Offset column, raw, of the FieldLayout row (ECMA-335 II.22.16) of each of
+    /// <paramref name="fields"/> that has one, keyed by the field's row number. A field with no row
+    /// is absent. Fails if one of <paramref name="fields"/> has more than one row, which II.22.16
+    /// forbids.
     ///
     /// The offset is unsigned, and every value is reported: CoreCLR's loader accepts a row of any
     /// offset on a field of an auto- or sequential-layout type, and reflection reports it.
-    let private fieldLayoutOffset
+    let private fieldLayoutOffsets
         (operation : string)
         (assembly : DumpedAssembly)
-        (field : System.Reflection.Metadata.FieldDefinitionHandle)
-        : uint32 option
+        (fields : System.Reflection.Metadata.FieldDefinitionHandle list)
+        : Map<int, uint32>
         =
         // Read straight from the metadata bytes, because `FieldDefinition.GetOffset` reports an
         // offset above `Int32.MaxValue` as -1, the same answer it gives for no row at all.
@@ -792,10 +793,14 @@ module NativeMetadataImport =
             failwith
                 $"%s{operation}: FieldLayout row size %d{rowSize} in %s{assembly.DefinitionFullName} disagrees with the ECMA-335 II.24.2.6 widths derived from the table row counts (4 + %d{fieldIndexSize})"
 
-        let target =
-            System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
-                System.Reflection.Metadata.FieldDefinitionHandle.op_Implicit field
+        let wanted =
+            fields
+            |> List.map (fun field ->
+                System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
+                    System.Reflection.Metadata.FieldDefinitionHandle.op_Implicit field
+                )
             )
+            |> Set.ofList
 
         let rows =
             tableRowCount assembly System.Reflection.Metadata.Ecma335.TableIndex.FieldLayout
@@ -814,7 +819,7 @@ module NativeMetadataImport =
         // A scan of the whole table rather than a binary search. II.24.2.6 requires the table
         // sorted by Field, and CoreCLR's read-only reader relies on that, so on a conforming image
         // the two agree; a dynamic module's read-write reader does not rely on it.
-        let offsets = ResizeArray<uint32> ()
+        let mutable offsets : Map<int, uint32> = Map.empty
 
         for _ = 1 to rows do
             let offset = reader.ReadUInt32 ()
@@ -825,19 +830,30 @@ module NativeMetadataImport =
                 else
                     reader.ReadInt32 ()
 
-            if rowField = target then
-                offsets.Add offset
+            if wanted.Contains rowField then
+                if offsets.ContainsKey rowField then
+                    failwith
+                        $"%s{operation}: field row %d{rowField} of %s{assembly.DefinitionFullName} has more than one FieldLayout row, which ECMA-335 II.22.16 forbids; which one CoreCLR reports depends on how it searches the table"
 
-        match List.ofSeq offsets with
-        | [] -> None
-        | [ offset ] -> Some offset
-        | offsets ->
-            failwith
-                $"%s{operation}: field 0x%08x{metadataTokenOfFieldDefinitionHandle field} of %s{assembly.DefinitionFullName} has %d{offsets.Length} FieldLayout rows, which ECMA-335 II.22.16 forbids; which one CoreCLR reports depends on how it searches the table"
+                offsets <- offsets.Add (rowField, offset)
 
-    /// The answer of CoreCLR's <c>MetaDataImport::GetFieldOffset</c>: the offset of the FieldLayout
-    /// row of <paramref name="target"/>, if <paramref name="target"/> is a field of the TypeDef
-    /// <paramref name="typeDef"/> and has a row, and otherwise <c>None</c>. Any token may be the
+        offsets
+
+    /// The answer of CoreCLR's <c>MetaDataImport::GetFieldOffset</c> (vm/managedmdimport.cpp:176).
+    [<RequireQualifiedAccess>]
+    type private FieldOffsetSearch =
+        /// The target is a field of the type, and its FieldLayout row has this offset. CoreCLR
+        /// answers S_OK.
+        | Found of offset : uint32
+        /// The target is not a field of the type with a row, and some field of the type has no row.
+        /// CoreCLR answers S_FALSE.
+        | NotFoundSomeFieldWithoutRow
+        /// The target is not a field of the type, and every field of the type has a row, which a
+        /// type with no fields satisfies. CoreCLR answers S_OK.
+        | NotFoundEveryFieldHasRow
+
+    /// What CoreCLR's <c>MetaDataImport::GetFieldOffset</c> answers for the field
+    /// <paramref name="target"/> of the TypeDef <paramref name="typeDef"/>. Any token may be the
     /// target, a token that is not a FieldDef simply being no field of the type.
     ///
     /// Fails for a <paramref name="typeDef"/> that is not a TypeDef of <paramref name="assembly"/>.
@@ -846,7 +862,7 @@ module NativeMetadataImport =
         (assembly : DumpedAssembly)
         (typeDef : int32)
         (target : int32)
-        : uint32 option
+        : FieldOffsetSearch
         =
         match MetadataToken.ofInt typeDef with
         | MetadataToken.TypeDefinition typeDefHandle ->
@@ -858,12 +874,36 @@ module NativeMetadataImport =
                 failwith
                     $"%s{operation}: TypeDef token 0x%08x{typeDef} was not present in %s{assembly.DefinitionFullName}"
 
-            // CoreCLR walks the type's run of fields (`GetClassLayoutInit`/`GetClassLayoutNext`,
-            // md/runtime/mdinternalro.cpp:2133 and :2192), stepping over each field without a row,
-            // and compares each field token with the target.
-            ((metadataReaderOf assembly).GetTypeDefinition typeDefHandle).GetFields ()
-            |> Seq.tryFind (fun field -> metadataTokenOfFieldDefinitionHandle field = target)
-            |> Option.bind (fieldLayoutOffset operation assembly)
+            let fields =
+                ((metadataReaderOf assembly).GetTypeDefinition typeDefHandle).GetFields ()
+                |> List.ofSeq
+
+            let offsets = fieldLayoutOffsets operation assembly fields
+
+            let offsetOf (field : System.Reflection.Metadata.FieldDefinitionHandle) : uint32 option =
+                offsets.TryFind (
+                    System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
+                        System.Reflection.Metadata.FieldDefinitionHandle.op_Implicit field
+                    )
+                )
+
+            // CoreCLR calls `GetClassLayoutNext` (md/runtime/mdinternalro.cpp:2192) once per field
+            // of the type, stopping early at the target. Each call steps over fields without a row
+            // and answers S_OK at the next field with one, or S_FALSE when none is left, and
+            // `IfFailGo` keeps every answer in the HRESULT. So a found target leaves S_OK; otherwise
+            // all of the calls are made, and the last is S_FALSE exactly when the fields with rows
+            // run out before the calls do, which is when some field has no row.
+            match
+                fields
+                |> List.tryFind (fun field -> metadataTokenOfFieldDefinitionHandle field = target)
+                |> Option.bind offsetOf
+            with
+            | Some offset -> FieldOffsetSearch.Found offset
+            | None ->
+                if fields |> List.forall (fun field -> (offsetOf field).IsSome) then
+                    FieldOffsetSearch.NotFoundEveryFieldHasRow
+                else
+                    FieldOffsetSearch.NotFoundSomeFieldWithoutRow
         | token ->
             failwith
                 $"%s{operation}: expected TypeDef token for the type whose fields to search, got %O{token} from 0x%08x{typeDef}"
@@ -1685,9 +1725,10 @@ module NativeMetadataImport =
             ConcreteByref (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Boolean) ],
           MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
             // CoreCLR's FCall (managedmdimport.cpp:176) writes `found`, and writes the offset only
-            // when it finds a row, answering S_OK either way. Its only managed caller is
-            // `RuntimeCustomAttributeData.GetFieldOffsetCustomAttribute`, which turns a found offset
-            // into a `FieldOffsetAttribute` for every field's custom attributes.
+            // when it finds a row; `FieldOffsetSearch` says which HRESULT it answers. Its only
+            // managed caller is `RuntimeCustomAttributeData.GetFieldOffsetCustomAttribute`, which
+            // turns a found offset into a `FieldOffsetAttribute` for every field's custom attributes,
+            // and ignores the HRESULT unless it is a failure.
             let operation = "MetadataImport.GetFieldOffset"
             let assemblyFullName = metadataImportHandleOfArg operation instruction.Arguments.[0]
             let assembly = metadataImportAssembly operation state assemblyFullName
@@ -1708,25 +1749,27 @@ module NativeMetadataImport =
             let foundOut =
                 NativeCall.managedPointerOfPointerArgument operation "found out pointer" instruction.Arguments.[4]
 
-            let state =
+            let writeFound (found : bool) (state : IlMachineState) : IlMachineState =
+                IlMachineState.writeManagedByrefWithBase
+                    ctx.BaseClassTypes
+                    state
+                    (ManagedPointerSource.requireAddressed foundOut)
+                    (CliType.ofBool found)
+
+            let sOk : int32 = 0
+            let sFalse : int32 = 1
+
+            let state, hresult =
                 match fieldOffsetInTypeDefinition operation assembly typeDef target with
-                | Some offset ->
-                    let state = writeInt32AtPointer ctx.BaseClassTypes state offsetOut (int32 offset)
-
-                    IlMachineState.writeManagedByrefWithBase
-                        ctx.BaseClassTypes
-                        state
-                        (ManagedPointerSource.requireAddressed foundOut)
-                        (CliType.ofBool true)
-                | None ->
-                    IlMachineState.writeManagedByrefWithBase
-                        ctx.BaseClassTypes
-                        state
-                        (ManagedPointerSource.requireAddressed foundOut)
-                        (CliType.ofBool false)
+                | FieldOffsetSearch.Found offset ->
+                    writeInt32AtPointer ctx.BaseClassTypes state offsetOut (int32 offset)
+                    |> writeFound true,
+                    sOk
+                | FieldOffsetSearch.NotFoundSomeFieldWithoutRow -> writeFound false state, sFalse
+                | FieldOffsetSearch.NotFoundEveryFieldHasRow -> writeFound false state, sOk
 
             let state =
-                IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim 0)) ctx.Thread state
+                IlMachineState.pushToEvalStack' (EvalStackValue.Int32 (Int32Source.Verbatim hresult)) ctx.Thread state
 
             NativeHandlerResult.completed state |> Some
         | "System.Private.CoreLib",
