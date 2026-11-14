@@ -9,10 +9,10 @@ using System.Reflection.Emit;
 // `Order`, positions out of order, and parameters interleaved across methods and types; `Dup`, two rows of one
 // position and the malformed shapes `GetParameters` refuses; `Ctor`, a constructor's parameters and refusals; `Tok`,
 // the MethodDef tokens a parameter forces; `Gen`, a generic type's and a generic method's; `Iface`, an interface's
-// `out` parameter; `Edge`, positions that do not fit sixteen bits; `Copy`, a copy of an interface's parameters as
-// Castle DynamicProxy makes one; and four modules in which the `ParamPtr` table starts in each way CoreCLR starts it
-// without stranding a MethodDef row. The test's terminal-state check reads the Param rows of `Order`, `Dup`, `Edge`
-// and `DirectTableThenSlide`. Measured on .NET 10 and 11 to exit 0.
+// `out` parameter; `Copy`, a copy of an interface's parameters as Castle DynamicProxy makes one; and four modules in
+// which the `ParamPtr` table starts in each way CoreCLR starts it without stranding a MethodDef row. Positions that do
+// not fit sixteen bits are `TypeBuilderDefineParameterWide.cs`'s. The test's terminal-state check reads the Param rows
+// of `Order`, `Dup` and `DirectTableThenSlide`. Measured on .NET 10 and 11 to exit 0.
 //
 // Returns 0 on success, or the number of the first check that failed.
 
@@ -638,42 +638,6 @@ public static class Program
         return 0;
     }
 
-    static int Edge ()
-    {
-        ModuleBuilder module = NewModule ("Edge");
-        TypeBuilder e = module.DefineType ("E", TypeAttributes.Public);
-        Type[] types = new Type[65537];
-        for (int k = 0; k < types.Length; k++)
-        {
-            types[k] = typeof (byte);
-        }
-
-        MethodBuilder wide = e.DefineMethod ("Wide", MethodAttributes.Public | MethodAttributes.Static, typeof (void), types);
-        wide.GetILGenerator ().Emit (OpCodes.Ret);
-        if (!Define (wide, 65537, "last", 1)
-            || !Define (wide, 65536, "nextToLast", 2)
-            || !Define (wide, 256, "p256", 3)
-            || !Define (wide, 65535, "p65535", 4))
-        {
-            return 150;
-        }
-
-        MethodInfo created = e.CreateType ().GetMethod ("Wide");
-        ParameterInfo[] ps = created.GetParameters ();
-        if (ps.Length != 65537
-            || !Is (ps[0], 0, "last", 0, 0x08000001)
-            || !Is (ps[255], 255, "p256", 0, 0x08000003)
-            || !Is (ps[65534], 65534, "p65535", 0, 0x08000004)
-            || !Is (ps[65535], 65535, null, 0, 0x08000000)
-            || !Is (ps[65536], 65536, null, 0, 0x08000000)
-            || !Is (created.ReturnParameter, -1, "nextToLast", 0, 0x08000002))
-        {
-            return 151;
-        }
-
-        return 0;
-    }
-
     static int Copy ()
     {
         ModuleBuilder module = NewModule ("Copy");
@@ -913,7 +877,6 @@ public static class Program
             Tok,
             Gen,
             Iface,
-            Edge,
             Copy,
             DirectTableThenSlide,
             DirectAndSlideOneCall,

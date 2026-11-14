@@ -442,6 +442,20 @@ module TestImpureCases =
         // count, or it is not testing anything the ASCII case doesn't.
         multiByteCurrentDirectory.Length |> shouldBeSmallerThan stackallocBytes
 
+    /// A dynamic assembly's scope, which the guest named `name`.
+    let private dynamicScopeNamed (state : IlMachineState) (name : string) : EmitScope =
+        state.TypeSystem._LoadedAssemblies.TryDynamicScope
+            $"%s{name}, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
+        |> Option.defaultWith (fun () -> failwith $"the guest's dynamic assembly %s{name} is not loaded")
+
+    /// `TypeBuilderDefineParameterWide.cs` has defined four parameters of `Wide`, at positions 65537, 65536, 256
+    /// and 65535. This checks the Sequence column, which holds each position's low sixteen bits.
+    let private assertWideParamRows (state : IlMachineState) : unit =
+        EmitScope.parameters (dynamicScopeNamed state "Edge")
+        |> Seq.map (fun row -> int row.Sequence)
+        |> List.ofSeq
+        |> shouldEqual [ 1 ; 0 ; 256 ; 65535 ]
+
     /// The cases parked on every runtime, each with why it is parked, what would un-park it, and
     /// how it was verified to behave on real .NET. `onRuntime` folds these into every runtime's
     /// parks.
@@ -522,7 +536,23 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """What real .NET does once a `DefineParameter` has stranded MethodDef rows (#2253): CoreCLR's `FixParamSequence` starts `ParamPtr` when a parameter slides ahead of an earlier one of its method, and leaves the `ParamList` of every later MethodDef row as `END_OF_TABLE`, after which real .NET refuses or misreports those methods' parameters. Measured on .NET 10 and 11 to exit 0, and a control inverting the third module's name exits 22 on both. It stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetParamInfo)". Un-parked by a model of the stranded rows, or by an upstream fix in every supported runtime."""
+            """What real .NET does once a `DefineParameter` has stranded MethodDef rows (#2253): CoreCLR's `FixParamSequence` starts `ParamPtr` when a parameter slides ahead of an earlier one of its method, and leaves the `ParamList` of every later MethodDef row as `END_OF_TABLE`, after which real .NET refuses or misreports those methods' parameters. Measured on .NET 10 and 11 to exit 0, and a control inverting the third module's name exits 22 on both. It stops at the first module's `X.0`, the call that strands, at the handler's TODO (measured): "TODO: TypeBuilder_SetParamInfo: the parameter at sequence 0 of MethodDef 0x06000001 would slide ahead of an earlier one while no ParamPtr exists and MethodDef 0x06000002 to 0x06000002 have no parameters". Un-parked by a model of the stranded rows, or by an upstream fix in every supported runtime."""
+            {
+                FileName = "TypeBuilderDefineParameterWide.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertWideParamRows
+            },
+            """Positions that do not fit the Param row's two-byte Sequence column, on a method of 65537 parameters; `assertWideParamRows` reads the column. Measured on .NET 10 and 11 to exit 0, and a control expecting no row at position 256 exits 2 on both. It passes under PawPrint, terminal-state check included, but only with a larger step budget: it ran out of the harness's 20,000,000 steps in `SignatureHelper.AddOneArgTypeHelperWorker` while building the signature, and passed in 5 m 29 s with the budget raised to 4,000,000,000 (measured on the test build). Un-parked when one case can be given a larger budget, or when the interpreter builds such a signature within the default one. `TestEmitScopeParams` covers the truncation to sixteen bits in the meantime."""
             {
                 FileName = "DynamicMethodEmitCallReflected.cs"
                 ExpectedReturnCode = 0
@@ -1871,12 +1901,6 @@ module TestImpureCases =
         EmitScopeGen.propertyPtrRows pe reader
         |> shouldEqual (Some [ 1 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 2 ; 9 ; 10 ; 11 ; 12 ; 13 ; 14 ])
 
-    /// A dynamic assembly's scope, which the guest named `name`.
-    let private dynamicScopeNamed (state : IlMachineState) (name : string) : EmitScope =
-        state.TypeSystem._LoadedAssemblies.TryDynamicScope
-            $"%s{name}, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
-        |> Option.defaultWith (fun () -> failwith $"the guest's dynamic assembly %s{name} is not loaded")
-
     /// A scope's Param rows in RID order, each its method's RID, its Sequence, its Flags and its name; and, from
     /// the image, the `ParamPtr` table, if it has one.
     let private paramRowsOf (scope : EmitScope) : (int * int * int * string) list * int list option =
@@ -1889,7 +1913,7 @@ module TestImpureCases =
         use _ = pe
         rows, EmitScopeGen.paramPtrRows pe reader
 
-    /// `TypeBuilderDefineParameter.cs` has defined parameters in modules `Order`, `Dup`, `Edge` and
+    /// `TypeBuilderDefineParameter.cs` has defined parameters in modules `Order`, `Dup` and
     /// `DirectTableThenSlide`. This checks each module's Param rows, which are CoreCLR's in CoreCLR's RID order,
     /// duplicates included; and, from the image, each `ParamPtr` table, which lists every method's rows by
     /// Sequence with ties in RID order, as CoreCLR's read-write metadata holds it (read from its source: no API
@@ -1930,11 +1954,6 @@ module TestImpureCases =
             ],
             Some [ 1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 9 ; 8 ; 10 ; 12 ; 11 ; 13 ]
         )
-
-        EmitScope.parameters (dynamicScopeNamed state "Edge")
-        |> Seq.map (fun row -> int row.Sequence)
-        |> List.ofSeq
-        |> shouldEqual [ 1 ; 0 ; 256 ; 65535 ]
 
         paramRowsOf (dynamicScopeNamed state "DirectTableThenSlide")
         |> shouldEqual (
@@ -6610,7 +6629,7 @@ module TestImpureCases =
             }
             {
                 // `MethodBuilder.DefineParameter` and `ConstructorBuilder.DefineParameter`, read back through
-                // reflection; `assertParamRows` reads the Param rows of four of its modules. Dynamic-code switch
+                // reflection; `assertParamRows` reads the Param rows of three of its modules. Dynamic-code switch
                 // overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0, and a control
                 // naming `Slide`'s first row the winner exits 80 on both.
                 FileName = "TypeBuilderDefineParameter.cs"

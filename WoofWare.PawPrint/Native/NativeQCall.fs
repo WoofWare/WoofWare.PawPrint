@@ -221,6 +221,7 @@ module NativeQCall =
             "TypeBuilder_DefineType", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineType"
             "TypeBuilder_DefineMethod", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethod"
             "TypeBuilder_SetMethodImpl", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetMethodImpl"
+            "TypeBuilder_SetParamInfo", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetParamInfo"
             "TypeBuilder_DefineMethodImpl", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethodImpl"
             "TypeBuilder_DefineMethodSpec", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethodSpec"
             "TypeBuilder_DefineGenericParam", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineGenericParam"

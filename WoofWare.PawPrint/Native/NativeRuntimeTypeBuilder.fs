@@ -15,6 +15,9 @@ module NativeRuntimeTypeBuilder =
     /// `mdtMethodDef`, the table byte of a `MethodDef` token.
     let private methodDefTable : int = 0x06
 
+    /// `mdtParamDef`, the table byte of a `Param` token.
+    let private paramTable : int = 0x08
+
     /// `mdtProperty`, the table byte of a `Property` token.
     let private propertyTable : int = 0x17
 
@@ -542,6 +545,65 @@ module NativeRuntimeTypeBuilder =
             let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
 
             NativeHandlerResult.completed state |> Some
+        | "TypeBuilder_SetParamInfo",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Reflection", "ParameterAttributes", attributesGenerics)
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.UInt16) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            moduleGenerics.IsEmpty && attributesGenerics.IsEmpty
+            ->
+            let operation = "TypeBuilder_SetParamInfo"
+
+            if instruction.Arguments.Length <> 5 then
+                failwith $"%s{operation}: expected five native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+            let token = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+            // `RuntimeParameterBuilder` passes its `MethodBuilder`'s token, which names a row of the scope.
+            let method =
+                if token >>> 24 &&& 0xFF <> methodDefTable then
+                    failwith
+                        $"%s{operation}: 0x%08x{token} is not a MethodDef token, and the managed caller passes only its MethodBuilder's"
+
+                match EmitScope.tryMethodDefRid (token &&& 0x00FFFFFF) held with
+                | Some method -> method
+                | None -> failwith $"%s{operation}: 0x%08x{token} names no MethodDef row of the module's scope"
+
+            let sequence = NativeCall.int32Argument operation instruction.Arguments.[2]
+            let attributes = NativeCall.int32Argument operation instruction.Arguments.[3]
+
+            // The QCall reads the name to its first NUL; a null name leaves the Name column 0, as an empty
+            // one does.
+            let name =
+                match NativeCall.managedPointerOfPointerArgument operation "wszParamName" instruction.Arguments.[4] with
+                | ManagedPointerSource.Null -> ""
+                | namePtr -> NativeCall.readNullTerminatedUtf16 operation ctx.BaseClassTypes state namePtr
+
+            match EmitScopeDefinitions.defineParam method sequence name attributes held with
+            | ParamDefinition.StrandsLaterMethods (slid, last) ->
+                failwith
+                    $"TODO: %s{operation}: the parameter at sequence %d{sequence} of MethodDef 0x%08x{token} would slide ahead of an earlier one while no ParamPtr exists and MethodDef 0x%08x{(methodDefTable <<< 24) ||| (slid.Rid + 1)} to 0x%08x{(methodDefTable <<< 24) ||| last.Rid} have no parameters. CoreCLR's FixParamSequence starts ParamPtr here and leaves those methods' ParamList as END_OF_TABLE; real .NET returns a token and then misreports or refuses those methods' parameters, which PawPrint does not model (see #2253)"
+            | ParamDefinition.Defined (param, extended) ->
+                let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+                state
+                |> IlMachineState.pushToEvalStack
+                    (CliType.Numeric (CliNumericType.Int32 ((paramTable <<< 24) ||| param.Rid)))
+                    ctx.Thread
+                |> NativeHandlerResult.completed
+                |> Some
         | "TypeBuilder_DefineMethodImpl",
           "System.Private.CoreLib",
           "System.Reflection.Emit",
