@@ -335,6 +335,8 @@ module TestCustomAttribValueLowering =
         | CustomAttribFixedArg.Type _ -> 8
         | CustomAttribFixedArg.Array _ ->
             failwith "expectedSize: Array is outside genPrimitiveArg's range and has no defined slot size here"
+        | CustomAttribFixedArg.Tagged _ ->
+            failwith "expectedSize: Tagged is outside genPrimitiveArg's range and has no defined slot size here"
 
     [<Test>]
     let ``tryToPureCliType: every non-allocating arg yields the expected slot size`` () : unit =
@@ -347,15 +349,22 @@ module TestCustomAttribValueLowering =
 
     // --- TYPE ---------------------------------------------------------------
 
-    /// A heap object to stand in for a resolved `RuntimeType`. The lowering passes the address
-    /// through without inspecting the object, so any allocation will do; a string is the cheapest.
+    /// A heap object to stand in for a resolved `RuntimeType` that is not an enum. The lowering
+    /// passes the address through without inspecting the object, so any allocation will do; a
+    /// string is the cheapest.
     let private standIn
         (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
         (label : string)
         (state : IlMachineState)
-        : ManagedHeapAddress * IlMachineState
+        : CustomAttribResolvedType * IlMachineState
         =
-        IlMachineState.allocateManagedString loggerFactory bct label state
+        let addr, state = IlMachineState.allocateManagedString loggerFactory bct label state
+
+        {
+            RuntimeType = addr
+            Enum = None
+        },
+        state
 
     let private typeHandle : ConcreteTypeHandle = handleFor bct.RuntimeType
 
@@ -396,7 +405,7 @@ module TestCustomAttribValueLowering =
                 [ first ; second ]
                 state
 
-        result |> shouldEqual (CliType.ObjectRef (Some first))
+        result |> shouldEqual (CliType.ObjectRef (Some first.RuntimeType))
         unconsumed |> shouldEqual [ second ]
 
     [<Test>]
@@ -447,9 +456,9 @@ module TestCustomAttribValueLowering =
         cells (arrayAddress result) state
         |> shouldEqual
             [
-                CliType.ObjectRef (Some a)
+                CliType.ObjectRef (Some a.RuntimeType)
                 CliType.ObjectRef None
-                CliType.ObjectRef (Some b)
+                CliType.ObjectRef (Some b.RuntimeType)
             ]
 
         (ManagedHeap.getArrayShape (arrayAddress result) state.ManagedHeap).ConcreteType
@@ -488,7 +497,7 @@ module TestCustomAttribValueLowering =
             // One stand-in per name, labelled with the name, so a cell can be read back as the
             // name it was supposed to hold.
             let resolved, state =
-                ((([] : ManagedHeapAddress list), state), names)
+                ((([] : CustomAttribResolvedType list), state), names)
                 ||> List.fold (fun (acc, state) name ->
                     let addr, state = standIn loggerFactory name state
                     acc @ [ addr ], state
@@ -743,3 +752,381 @@ module TestCustomAttribValueLowering =
             cells (arrayAddress result) state = expected
 
         Check.One (propertyConfig, Prop.forAll (ArbMap.defaults |> ArbMap.arbitrary<int list>) property)
+
+    // --- TAGGED_OBJECT ------------------------------------------------------
+
+    /// The box `result` refers to: its type, and the value its sole field holds.
+    let private boxed (fieldName : string) (result : CliType) (state : IlMachineState) : ConcreteTypeHandle * CliType =
+        match result with
+        | CliType.ObjectRef (Some addr) ->
+            let obj = ManagedHeap.get addr state.ManagedHeap
+            obj.ConcreteType, AllocatedNonArrayObject.DereferenceField fieldName obj
+        | other -> failwithf "expected a reference to a box, got %A" other
+
+    /// A resolved type that is the given enum.
+    let private enumStandIn
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (label : string)
+        (handle : ConcreteTypeHandle)
+        (underlying : EnumUnderlyingType)
+        (state : IlMachineState)
+        : CustomAttribResolvedType * IlMachineState
+        =
+        let resolved, state = standIn loggerFactory label state
+
+        { resolved with
+            Enum = Some (handle, underlying)
+        },
+        state
+
+    [<Test>]
+    let ``toCliType: a tagged primitive boxes as the primitive its tag names`` () : unit =
+        // The box's type comes from the tag, not from the value's eval-stack form: `U4` and `I4`
+        // both lower to an Int32 slot, but box as UInt32 and Int32 respectively.
+        let cases : (PrimitiveType * CustomAttribFixedArg * TypeInfo<GenericParamFromMetadata, TypeDefn>) list =
+            [
+                PrimitiveType.Boolean, CustomAttribFixedArg.Bool true, bct.Boolean
+                PrimitiveType.Char, CustomAttribFixedArg.Char 'Z', bct.Char
+                PrimitiveType.SByte, CustomAttribFixedArg.I1 -5y, bct.SByte
+                PrimitiveType.Byte, CustomAttribFixedArg.U1 250uy, bct.Byte
+                PrimitiveType.Int16, CustomAttribFixedArg.I2 -1234s, bct.Int16
+                PrimitiveType.UInt16, CustomAttribFixedArg.U2 60000us, bct.UInt16
+                PrimitiveType.Int32, CustomAttribFixedArg.I4 -123456, bct.Int32
+                PrimitiveType.UInt32, CustomAttribFixedArg.U4 4000000000u, bct.UInt32
+                PrimitiveType.Int64, CustomAttribFixedArg.I8 -1099511627776L, bct.Int64
+                PrimitiveType.UInt64, CustomAttribFixedArg.U8 0xFEDCBA9876543210UL, bct.UInt64
+                PrimitiveType.Single, CustomAttribFixedArg.R4 1.5f, bct.Single
+                PrimitiveType.Double, CustomAttribFixedArg.R8 -2.25, bct.Double
+            ]
+
+        for pt, value, expected in cases do
+            let loggerFactory, state = freshState ()
+            use _loggerFactory = loggerFactory
+
+            let result, state =
+                lower
+                    loggerFactory
+                    bct
+                    CustomAttribArgPlan.TaggedObject
+                    (CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Primitive pt, value))
+                    state
+
+            let boxType, contents = boxed "m_value" result state
+            boxType |> shouldEqual (handleFor expected)
+
+            // The payload is what the value lowers to as an argument, rewrapped into the box's
+            // field exactly as `box` would rewrap it.
+            let payload =
+                match CustomAttribValueLowering.tryToPureCliType value with
+                | Ok cli -> cli
+                | Error msg -> failwithf "expected a pure lowering, got Error %s" msg
+
+            EvalStackValue.toCliTypeCoerced contents (EvalStackValue.ofCliType payload)
+            |> shouldEqual contents
+
+            (EvalStackValue.ofCliType contents)
+            |> shouldEqual (EvalStackValue.ofCliType payload)
+
+    [<Test>]
+    let ``toCliType: a tagged string is the string itself, unboxed`` () : unit =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+
+        let tag = CustomAttribTaggedType.Primitive PrimitiveType.String
+
+        let result, state =
+            lower
+                loggerFactory
+                bct
+                CustomAttribArgPlan.TaggedObject
+                (CustomAttribFixedArg.Tagged (tag, CustomAttribFixedArg.String (Some "hello")))
+                state
+
+        match result with
+        | CliType.ObjectRef (Some addr) ->
+            ManagedHeap.getStringContents addr state.ManagedHeap
+            |> shouldEqual (Some "hello")
+        | other -> failwithf "expected a string reference, got %A" other
+
+        lower
+            loggerFactory
+            bct
+            CustomAttribArgPlan.TaggedObject
+            (CustomAttribFixedArg.Tagged (tag, CustomAttribFixedArg.String None))
+            state
+        |> fst
+        |> shouldEqual (CliType.ObjectRef None)
+
+    [<Test>]
+    let ``toCliType: a tagged enum consumes one resolution and boxes as that enum`` () : unit =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+        let enumHandle, _, state = securityRuleSetPlan loggerFactory state
+
+        let resolved, state =
+            enumStandIn loggerFactory "E" enumHandle EnumUnderlyingType.Byte state
+
+        let spare, state = standIn loggerFactory "spare" state
+
+        let result, unconsumed, state =
+            CustomAttribValueLowering.toCliType
+                loggerFactory
+                bct
+                CustomAttribArgPlan.TaggedObject
+                (CustomAttribFixedArg.Tagged (
+                    CustomAttribTaggedType.Enum "System.Security.SecurityRuleSet",
+                    CustomAttribFixedArg.Enum (CustomAttribFixedArg.U1 2uy)
+                ))
+                [ resolved ; spare ]
+                state
+
+        unconsumed |> shouldEqual [ spare ]
+        let boxType, contents = boxed "value__" result state
+        boxType |> shouldEqual enumHandle
+
+        contents
+        |> shouldEqual (CliType.Numeric (CliNumericType.UInt8 (UInt8Source.Verbatim 2uy)))
+
+    [<Test>]
+    let ``toCliType: a tagged enum whose resolution is not an enum fails loudly`` () : unit =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+        let resolved, state = standIn loggerFactory "NotAnEnum" state
+
+        let exn =
+            Assert.Throws<System.Exception> (fun () ->
+                CustomAttribValueLowering.toCliType
+                    loggerFactory
+                    bct
+                    CustomAttribArgPlan.TaggedObject
+                    (CustomAttribFixedArg.Tagged (
+                        CustomAttribTaggedType.Enum "NotAnEnum",
+                        CustomAttribFixedArg.Enum (CustomAttribFixedArg.U1 2uy)
+                    ))
+                    [ resolved ]
+                    state
+                |> ignore
+            )
+
+        exn.Message |> shouldContainText "NotAnEnum"
+
+    [<Test>]
+    let ``toCliType: a null tagged enum array still consumes its element type's resolution`` () : unit =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+        let enumHandle, _, state = securityRuleSetPlan loggerFactory state
+
+        let resolved, state =
+            enumStandIn loggerFactory "E" enumHandle EnumUnderlyingType.Byte state
+
+        let spare, state = standIn loggerFactory "spare" state
+
+        let tag =
+            CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum "System.Security.SecurityRuleSet")
+
+        let result, unconsumed, _ =
+            CustomAttribValueLowering.toCliType
+                loggerFactory
+                bct
+                CustomAttribArgPlan.TaggedObject
+                (CustomAttribFixedArg.Tagged (tag, CustomAttribFixedArg.Array None))
+                [ resolved ; spare ]
+                state
+
+        result |> shouldEqual (CliType.ObjectRef None)
+        unconsumed |> shouldEqual [ spare ]
+
+    [<Test>]
+    let ``toCliType: a tagged array's element type is the one its tag names, even when empty`` () : unit =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+        let enumHandle, _, state = securityRuleSetPlan loggerFactory state
+
+        let resolved, state =
+            enumStandIn loggerFactory "E" enumHandle EnumUnderlyingType.Byte state
+
+        let state, systemType =
+            let typeInfo =
+                corelib.TryGetTopLevelTypeDef "System" "Type"
+                |> Option.defaultWith (fun () -> failwith "System.Type not found in corelib")
+
+            IlMachineTypeResolution.concretizeType
+                loggerFactory
+                bct
+                state
+                corelib.DefinitionFullName
+                ImmutableArray.Empty
+                ImmutableArray.Empty
+                (TypeDefn.FromDefinition (typeInfo.Identity, System.Reflection.Metadata.SignatureTypeKind.Class))
+
+        let cases : (CustomAttribTaggedElementType * CustomAttribResolvedType list * ConcreteTypeHandle) list =
+            [
+                CustomAttribTaggedElementType.Primitive PrimitiveType.Int32, [], int32Handle
+                CustomAttribTaggedElementType.Primitive PrimitiveType.String, [], stringHandle
+                CustomAttribTaggedElementType.Type, [], systemType
+                CustomAttribTaggedElementType.Object, [], handleFor bct.Object
+                CustomAttribTaggedElementType.Enum "E", [ resolved ], enumHandle
+            ]
+
+        for element, resolvedTypes, expected in cases do
+            let result, unconsumed, state =
+                CustomAttribValueLowering.toCliType
+                    loggerFactory
+                    bct
+                    CustomAttribArgPlan.TaggedObject
+                    (CustomAttribFixedArg.Tagged (
+                        CustomAttribTaggedType.SzArray element,
+                        CustomAttribFixedArg.Array (Some [])
+                    ))
+                    resolvedTypes
+                    state
+
+            unconsumed |> shouldEqual []
+
+            (ManagedHeap.getArrayShape (arrayAddress result) state.ManagedHeap).ConcreteType
+            |> shouldEqual (ConcreteTypeHandle.OneDimArrayZero expected)
+
+    [<Test>]
+    let ``toCliType: a tagged object[] boxes each element as its own tag says`` () : unit =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+
+        let arg =
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Object,
+                CustomAttribFixedArg.Array (
+                    Some
+                        [
+                            CustomAttribFixedArg.Tagged (
+                                CustomAttribTaggedType.Primitive PrimitiveType.UInt16,
+                                CustomAttribFixedArg.U2 7us
+                            )
+                            CustomAttribFixedArg.Tagged (
+                                CustomAttribTaggedType.Primitive PrimitiveType.String,
+                                CustomAttribFixedArg.String None
+                            )
+                        ]
+                )
+            )
+
+        let result, state =
+            lower loggerFactory bct CustomAttribArgPlan.TaggedObject arg state
+
+        let addr = arrayAddress result
+
+        (ManagedHeap.getArrayShape addr state.ManagedHeap).ConcreteType
+        |> shouldEqual (ConcreteTypeHandle.OneDimArrayZero (handleFor bct.Object))
+
+        match cells addr state with
+        | [ first ; CliType.ObjectRef None ] -> boxed "m_value" first state |> fst |> shouldEqual (handleFor bct.UInt16)
+        | other -> failwithf "expected [box; null], got %A" other
+
+    [<Test>]
+    let ``toCliType: tagged values consume resolutions in the order typeNamesToResolve lists them`` () : unit =
+        // Names: E1 (a tagged enum), T1 (a Type argument), E2 (a null enum array's element type),
+        // T2 (a Type inside an object[]), E3 (an enum inside the same object[]). Each resolution
+        // is distinct, so a lowering that skipped or reordered one puts the wrong one somewhere.
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+        let enumHandle, _, state = securityRuleSetPlan loggerFactory state
+
+        let e1, state =
+            enumStandIn loggerFactory "E1" enumHandle EnumUnderlyingType.Byte state
+
+        let t1, state = standIn loggerFactory "T1" state
+
+        let e2, state =
+            enumStandIn loggerFactory "E2" enumHandle EnumUnderlyingType.Byte state
+
+        let t2, state = standIn loggerFactory "T2" state
+
+        let e3, state =
+            enumStandIn loggerFactory "E3" enumHandle EnumUnderlyingType.Byte state
+
+        let byteEnum (v : byte) =
+            CustomAttribFixedArg.Enum (CustomAttribFixedArg.U1 v)
+
+        let args =
+            [
+                CustomAttribArgPlan.TaggedObject,
+                CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Enum "E1", byteEnum 1uy)
+                CustomAttribArgPlan.Type, CustomAttribFixedArg.Type (Some "T1")
+                CustomAttribArgPlan.TaggedObject,
+                CustomAttribFixedArg.Tagged (
+                    CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum "E2"),
+                    CustomAttribFixedArg.Array None
+                )
+                CustomAttribArgPlan.TaggedObject,
+                CustomAttribFixedArg.Tagged (
+                    CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Object,
+                    CustomAttribFixedArg.Array (
+                        Some
+                            [
+                                CustomAttribFixedArg.Tagged (
+                                    CustomAttribTaggedType.Type,
+                                    CustomAttribFixedArg.Type (Some "T2")
+                                )
+                                CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Enum "E3", byteEnum 3uy)
+                            ]
+                    )
+                )
+            ]
+
+        CustomAttribute.typeNamesToResolve (List.map snd args)
+        |> shouldEqual [ "E1" ; "T1" ; "E2" ; "T2" ; "E3" ]
+
+        let lowered, unconsumed, state =
+            (([], [ e1 ; t1 ; e2 ; t2 ; e3 ], state), args)
+            ||> List.fold (fun (acc, resolved, state) (plan, arg) ->
+                let cli, resolved, state =
+                    CustomAttribValueLowering.toCliType loggerFactory bct plan arg resolved state
+
+                acc @ [ cli ], resolved, state
+            )
+
+        unconsumed |> shouldEqual []
+
+        match lowered with
+        | [ first ; second ; third ; fourth ] ->
+            boxed "value__" first state
+            |> shouldEqual (enumHandle, CliType.Numeric (CliNumericType.UInt8 (UInt8Source.Verbatim 1uy)))
+
+            second |> shouldEqual (CliType.ObjectRef (Some t1.RuntimeType))
+            third |> shouldEqual (CliType.ObjectRef None)
+
+            match cells (arrayAddress fourth) state with
+            | [ typeCell ; enumCell ] ->
+                typeCell |> shouldEqual (CliType.ObjectRef (Some t2.RuntimeType))
+
+                boxed "value__" enumCell state
+                |> shouldEqual (enumHandle, CliType.Numeric (CliNumericType.UInt8 (UInt8Source.Verbatim 3uy)))
+            | other -> failwithf "expected two cells, got %A" other
+        | other -> failwithf "expected four lowered args, got %A" other
+
+    [<Test>]
+    let ``toCliType: a tagged value under another plan, and an untagged one under TaggedObject, fail loudly``
+        ()
+        : unit
+        =
+        let loggerFactory, state = freshState ()
+        use _loggerFactory = loggerFactory
+
+        let tagged =
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.Primitive PrimitiveType.Int32,
+                CustomAttribFixedArg.I4 1
+            )
+
+        for plan, arg in
+            [
+                CustomAttribArgPlan.Primitive PrimitiveType.Int32, tagged
+                CustomAttribArgPlan.Enum EnumUnderlyingType.Int32, tagged
+                CustomAttribArgPlan.Type, tagged
+                int32ArrayPlan, tagged
+                CustomAttribArgPlan.TaggedObject, CustomAttribFixedArg.I4 1
+                CustomAttribArgPlan.TaggedObject, CustomAttribFixedArg.String None
+            ] do
+            let exn =
+                Assert.Throws<System.Exception> (fun () -> lower loggerFactory bct plan arg state |> ignore)
+
+            exn.Message |> shouldContainText "bug"
