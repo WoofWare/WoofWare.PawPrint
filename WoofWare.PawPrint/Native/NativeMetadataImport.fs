@@ -18,6 +18,10 @@ module NativeMetadataImport =
     /// <c>RuntimeType.PopulateProperties</c>.
     let private metadataTokenTypeProperty : int32 = 0x17000000
 
+    /// <c>mdtEvent</c>. Passed by <c>MetadataImport.EnumEvents</c>, whose only caller is
+    /// <c>RuntimeType.PopulateEvents</c>.
+    let private metadataTokenTypeEvent : int32 = 0x14000000
+
     /// <c>mdtMethodDef</c>. As an <c>Enum</c> token type this does *not* mean "enumerate MethodDefs":
     /// CoreCLR pairs it with a Property or Event parent to mean that member's MethodSemantics
     /// associates (see <c>methodSemanticsForAssociation</c>).
@@ -143,6 +147,15 @@ module NativeMetadataImport =
             System.Reflection.Metadata.PropertyDefinitionHandle.op_Implicit propertyHandle
 
         System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken propertyHandle
+
+    let private metadataTokenOfEventDefinitionHandle
+        (eventHandle : System.Reflection.Metadata.EventDefinitionHandle)
+        : int32
+        =
+        let eventHandle : System.Reflection.Metadata.EntityHandle =
+            System.Reflection.Metadata.EventDefinitionHandle.op_Implicit eventHandle
+
+        System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken eventHandle
 
     let private metadataTokenOfParameterHandle (parameterHandle : System.Reflection.Metadata.ParameterHandle) : int32 =
         let parameterHandle : System.Reflection.Metadata.EntityHandle =
@@ -399,6 +412,78 @@ module NativeMetadataImport =
         : string
         =
         (metadataReaderOf assembly).GetString ((propertyDefinition operation assembly propertyHandle).Name)
+
+    /// The events declared by the TypeDef named by <paramref name="parent"/>, as raw metadata tokens,
+    /// in the order the real runtime returns them: the type's EventMap run (ECMA-335 II.22.12).
+    ///
+    /// Unfiltered and non-transitive, as CoreCLR's <c>EnumInit</c>/<c>EnumNext</c> over that run is:
+    /// private and static events are returned, inherited ones are not, and two events of one name are
+    /// both returned. <c>RuntimeType.PopulateEvents</c> applies binding flags, drops a repeated name and
+    /// walks the base chain itself, calling this once per type.
+    let private eventDefinitionsForTypeDefinition
+        (operation : string)
+        (assembly : DumpedAssembly)
+        (parent : int32)
+        : int32 list
+        =
+        match MetadataToken.ofInt parent with
+        | MetadataToken.TypeDefinition typeDefHandle ->
+            // An out-of-range handle would otherwise reach the reader as `BadImageFormatException:
+            // Read out of bounds`, which reads as a corrupt image when the real problem is a token
+            // PawPrint should never have minted.
+            if not (assembly.TypeDefs.ContainsKey typeDefHandle) then
+                failwith
+                    $"%s{operation}: TypeDef token 0x%08x{parent} was not present in %s{assembly.DefinitionFullName}"
+
+            // SRM follows the EventMap run, through EventPtr when the image has one. EventMap has no
+            // lookup hash in read-write metadata either, so a dynamic module is read the same way.
+            ((metadataReaderOf assembly).GetTypeDefinition typeDefHandle).GetEvents ()
+            |> Seq.map metadataTokenOfEventDefinitionHandle
+            |> List.ofSeq
+        | token ->
+            failwith
+                $"%s{operation}: expected TypeDef parent token for event enumeration, got %O{token} from 0x%08x{parent}"
+
+    /// The two columns of an Event row that reflection reads.
+    type private EventRow =
+        {
+            /// The <c>#Strings</c> entry itself.
+            Name : string
+            /// The raw sixteen-bit <c>EventFlags</c> column, unmasked.
+            Flags : int32
+        }
+
+    /// The Event row named by the raw token <paramref name="mdToken"/>. Fails for a token that is
+    /// not an Event, and for a row below 1 or past the table's end.
+    let private eventRow (operation : string) (assembly : DumpedAssembly) (mdToken : int32) : EventRow =
+        match MetadataToken.ofInt mdToken with
+        | MetadataToken.EventDefinition eventHandle ->
+            let metadataReader = metadataReaderOf assembly
+
+            let rowNumber =
+                System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
+                    System.Reflection.Metadata.EventDefinitionHandle.op_Implicit eventHandle
+                )
+
+            // `MetadataReader` has no total lookup, so the row is bounds-checked here; an absent one
+            // would otherwise surface from the reader as `BadImageFormatException`.
+            if
+                rowNumber < 1
+                || rowNumber > tableRowCount assembly System.Reflection.Metadata.Ecma335.TableIndex.Event
+            then
+                failwith
+                    $"%s{operation}: Event token 0x%08x{mdToken} was not present in %s{assembly.DefinitionFullName}"
+
+            let event = metadataReader.GetEventDefinition eventHandle
+
+            // SRM reads the column as a `ushort`, so the conversion neither sign-extends nor masks:
+            // the flags are what the image holds, `RTSpecialName` included (an image on disk keeps
+            // the bit that a dynamic module's `DefineEvent` clears).
+            {
+                Name = metadataReader.GetString event.Name
+                Flags = int32 event.Attributes
+            }
+        | token -> failwith $"%s{operation}: expected Event token, got %O{token} from 0x%08x{mdToken}"
 
     /// The Param rows (ECMA-335 II.22.33) owned by the MethodDef named by <paramref name="parent"/>,
     /// as raw metadata tokens, in the order the real runtime returns them.
@@ -1158,6 +1243,8 @@ module NativeMetadataImport =
                     nestedTypeDefinitionsForTypeDefinition operation assembly parent
                 elif tokenType = metadataTokenTypeProperty then
                     propertyDefinitionsForTypeDefinition operation assembly parent
+                elif tokenType = metadataTokenTypeEvent then
+                    eventDefinitionsForTypeDefinition operation assembly parent
                 elif tokenType = metadataTokenTypeParamDef then
                     parameterDefinitionsForMethodDefinition operation assembly parent
                 elif tokenType = metadataTokenTypeMethodDef then
@@ -1400,16 +1487,12 @@ module NativeMetadataImport =
             ConcreteByref (ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Byte)) ],
           MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
             // CoreCLR's FCall (`managedmdimport.cpp:216`) answers seven token kinds, forwarding each
-            // to a different `IMDInternalImport` accessor. This answers three.
+            // to a different `IMDInternalImport` accessor. This answers four; the Event arm's caller
+            // is the name filter in `RuntimeType.PopulateEvents`.
             //
             // MethodDef, `mdtModule` and TypeDef have no managed caller at all: `RuntimeType.Name`
             // goes through `Cache.GetName()`/`ConstructName`, and methods and non-literal fields
             // have their own `RuntimeMethodHandle.GetName` / `RuntimeFieldHandle.GetName` QCalls.
-            //
-            // Event *does* have a caller — the name filter in `RuntimeType.PopulateEvents` — but its
-            // tokens are minted only by `MetadataImport.Enum`, which PawPrint refuses for
-            // `mdtEvent`. Adding that enumeration means adding the matching arm here in the same
-            // change.
             //
             // Any other kind reaching here is therefore a PawPrint gap rather than a bad image.
             // CoreCLR would instead return `E_FAIL` and the guest would see a
@@ -1426,9 +1509,9 @@ module NativeMetadataImport =
             let nameOut =
                 NativeCall.managedPointerOfPointerArgument operation "name out pointer" instruction.Arguments.[2]
 
-            // All three are `mr.GetString def.Name`, i.e. the `#Strings` entry itself, so these are
-            // the same strings CoreCLR's `GetNameOfFieldDef`/`GetNameOfProperty`/`GetParamDefProps`
-            // return rather than reconstructions. That matters for an indexer, whose metadata name
+            // All four are `mr.GetString def.Name`, i.e. the `#Strings` entry itself, so these are
+            // the same strings CoreCLR's `GetNameOfFieldDef`/`GetNameOfProperty`/`GetParamDefProps`/
+            // `GetEventProps` return rather than reconstructions. That matters for an indexer, whose metadata name
             // (`Item`, or whatever `[IndexerName]` says) is not its C# spelling.
             let name =
                 match MetadataToken.ofInt mdToken with
@@ -1441,9 +1524,11 @@ module NativeMetadataImport =
                     // absent: CoreCLR hands back a pointer to offset 0 of `#Strings`, and
                     // `MetadataReader.GetString` of a nil handle is `""`.
                     (metadataReaderOf assembly).GetString (parameterDefinition operation assembly parameterHandle).Name
+                // The same row read as `GetEventProps`, so that the two cannot disagree about a name.
+                | MetadataToken.EventDefinition _ -> (eventRow operation assembly mdToken).Name
                 | token ->
                     failwith
-                        $"%s{operation}: expected FieldDef, PropertyDef or ParamDef token, got %O{token} from 0x%08x{mdToken}"
+                        $"%s{operation}: expected FieldDef, PropertyDef, ParamDef or Event token, got %O{token} from 0x%08x{mdToken}"
 
             completeWithUtf8String ctx nameOut name state
         | "System.Private.CoreLib",
@@ -1977,6 +2062,46 @@ module NativeMetadataImport =
             // the runtime itself minted, so a rejected token is a PawPrint bug rather than a
             // malformed image.
             completeWithUtf8String ctx nameOut ((metadataReaderOf assembly).GetString property.Name) state
+        | "System.Private.CoreLib",
+          "System.Reflection",
+          "MetadataImport",
+          "GetEventProps",
+          [ ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.IntPtr
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcreteByref (ConcretePointer (ConcreteVoid state.TypeSystem.ConcreteTypes))
+            ConcreteByref (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) ->
+            // CoreCLR's FCall (managedmdimport.cpp:279) forwards to `IMDInternalImport::GetEventProps`,
+            // asking for the Event row's `#Strings` name and its raw `EventFlags`, and not its
+            // `EventType` column, which no reflection API reads: `EventInfo.EventHandlerType` is the
+            // add method's delegate parameter. `RuntimeEventInfo`'s constructor reads the accessors
+            // separately, through `Associates.AssignAssociates`.
+            let operation = "MetadataImport.GetEventProps"
+            let assemblyFullName = metadataImportHandleOfArg operation instruction.Arguments.[0]
+            let assembly = metadataImportAssembly operation state assemblyFullName
+
+            let mdToken =
+                match CliType.unwrapPrimitiveLikeDeep instruction.Arguments.[1] with
+                | CliType.Numeric (CliNumericType.Int32 mdToken) -> mdToken
+                | other -> failwith $"%s{operation}: expected Int32 mdToken argument, got %O{other}"
+
+            let nameOut =
+                NativeCall.managedPointerOfPointerArgument operation "name out pointer" instruction.Arguments.[2]
+
+            let attributesOut =
+                NativeCall.managedPointerOfPointerArgument
+                    operation
+                    "eventAttributes out pointer"
+                    instruction.Arguments.[3]
+
+            // A host-level crash for a token that is not an Event row of this image, rather than the
+            // failing HRESULT CoreCLR would return: the only guest caller passes tokens `Enum` minted
+            // from this image, so a rejected token is a PawPrint bug rather than a malformed image.
+            let row = eventRow operation assembly mdToken
+
+            let state = writeInt32AtPointer ctx.BaseClassTypes state attributesOut row.Flags
+
+            completeWithUtf8String ctx nameOut row.Name state
         | "System.Private.CoreLib",
           "System.Reflection",
           "MetadataImport",
