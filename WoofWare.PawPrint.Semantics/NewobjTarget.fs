@@ -38,15 +38,26 @@ module NewobjTarget =
     let isInstanceConstructor (attributes : MethodAttributes) (name : string) : bool =
         attributes.HasFlag MethodAttributes.RTSpecialName && name = ".ctor"
 
+    /// Whether the JIT refuses to allocate, for a `newobj` of one of its instance methods, a type
+    /// with attributes `declaringType`, which is a value type if `isValueType`: whether it is an
+    /// abstract class, which `CEEInfo::getNewHelper` refuses with `InvalidOperationException`.
+    /// The JIT allocates a value type without asking `getNewHelper`, so a value type flagged
+    /// abstract is allocated (measured on .NET 10 and 11).
+    ///
+    /// This holds whatever the instance method is, constructor or not: measured on .NET 10 and 11,
+    /// a `newobj` of a `void` instance method named `.ctor` without `RTSpecialName` refuses an
+    /// abstract class and allocates anything else, as for a constructor.
+    let refusesAsAbstractClass (declaringType : TypeAttributes) (isValueType : bool) : bool =
+        declaringType.HasFlag TypeAttributes.Abstract && not isValueType
+
     /// What the JIT makes of a `newobj` naming a method with attributes `method` and name
     /// `methodName`, declared on a type with attributes `declaringType`, which is a value type if
     /// `declaringTypeIsValueType`. The outcomes are tried in the order `NewobjTarget` lists them,
     /// and the first that holds is the answer.
     ///
     /// The declaring type is the type the token names wherever the answer depends on it: that is
-    /// only for an instance constructor, which a token never finds through a derived type. An
-    /// abstract value type constructs, because the JIT allocates a value type without asking
-    /// `getNewHelper` (measured on .NET 10 and 11).
+    /// only for an instance constructor, which a token never finds through a derived type. Whether
+    /// an instance constructor's type is refused is `refusesAsAbstractClass`.
     ///
     /// An array type's constructor, which the runtime synthesises, is not a method this answers
     /// for: the JIT allocates the array before it reaches this question.
@@ -63,7 +74,7 @@ module NewobjTarget =
             NewobjTarget.StaticMethod
         elif not (isInstanceConstructor method methodName) then
             NewobjTarget.NotInstanceConstructor
-        elif declaringType.HasFlag TypeAttributes.Abstract && not declaringTypeIsValueType then
+        elif refusesAsAbstractClass declaringType declaringTypeIsValueType then
             NewobjTarget.AbstractClass
         else
             NewobjTarget.Constructs

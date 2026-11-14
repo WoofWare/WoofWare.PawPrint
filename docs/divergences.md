@@ -875,11 +875,20 @@ that would never execute, and no handler inside that method can catch it.
 A `newobj` naming an instance method that is not a constructor has no single answer: the JIT
 compiles one of a `void` method of a class, which allocates the class and calls the method (measured
 on .NET 10 and 11), and crashes the process (SIGSEGV) compiling one of a delegate's `Invoke`, of a
-struct's method returning a `ReadOnlySpan<char>`, or of a class's returning a `ValueTask<int>`.
+struct's method returning a `ReadOnlySpan<char>`, or of a class's returning a `ValueTask<int>`. A
+`void` instance method named `.ctor` without `RTSpecialName` is treated as a constructor: measured on
+.NET 10 and 11, a `newobj` of one allocates a class, a struct or a struct flagged abstract and calls
+the method, and raises the abstract-class `InvalidOperationException` for an abstract class.
+
+An `[UnsafeAccessor(UnsafeAccessorKind.Constructor)]`'s stub is a `newobj` of the constructor it
+binds, and its lookup asks only for a method named `.ctor` that is not static, so it binds such a
+method too. Measured on .NET 10 and 11, it then behaves exactly as the `newobj` of it does.
 
 **PawPrint**: raises each of the three exceptions, with the same message, when the instruction
 *executes*. It stops the run, naming the method, at a `newobj` of any instance method that is not an
-instance constructor (`RTSpecialName` and the name `.ctor`), including one real .NET runs.
+instance constructor (`RTSpecialName` and the name `.ctor`), including one real .NET runs. An
+`[UnsafeAccessor(Constructor)]` does not stop at a `.ctor` without `RTSpecialName`: it refuses an
+abstract class and constructs anything else, as real .NET does.
 
 **Spec status**: ECMA-335 III.4.21 requires `newobj`'s token to be "a methodref or methoddef that
 shall be marked as a constructor", without saying what an implementation does with one that is not,
@@ -900,6 +909,9 @@ CoreLib, `TestFabricatedNewobjRefusals` each refusal from metadata with the inst
 method and no handler of its own, where the two runtimes agree, and the stop,
 `TypeBuilderNewobjRefusals.cs` the refusals from a `TypeBuilder`'s emit scope, and
 `DynamicMethodNewobj.cs` those from a `DynamicMethod`'s scope.
+`UnsafeAccessorDispatch` asks `NewobjTarget.refusesAsAbstractClass`, the part of the rule that reads
+the declaring type, and `TestFabricatedUnsafeAccessorAbstractConstructor` checks it against the real
+runtime over each type's shape, with and without `RTSpecialName`.
 
 ## A `box` or `newarr` of a byref-like type fails when it is reached
 
