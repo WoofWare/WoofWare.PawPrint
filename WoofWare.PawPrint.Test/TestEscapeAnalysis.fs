@@ -17183,7 +17183,7 @@ public static class Runners
     ///   - `Plain`, with a constructor from `int`, a static `Stat()` returning `object`, and a
     ///     static `StatGone()` returning `EscapeNewobjDep.Gone`;
     ///   - the abstract class `Abs`, with a constructor from `int`, and abstract methods `A()`
-    ///     returning `int` and `AGone()` returning `Gone`;
+    ///     returning `int`, `AGone()` returning `Gone`, and `AVarargs(__arglist)`;
     ///   - the interface `I`, with a static abstract `SA()`;
     ///   - `AbsS`, a struct flagged abstract and sealed, with a constructor from `int`;
     ///   - `Inst`, with a constructor and an instance method `NotCtor()`;
@@ -17260,6 +17260,10 @@ public static class Runners
         let absCtor = intConstructor abs
         let absA = abs.DefineMethod ("A", abstractAttributes, typeof<int>, [||])
         let absAGone = abs.DefineMethod ("AGone", abstractAttributes, gone, [||])
+
+        let absAVarargs =
+            abs.DefineMethod ("AVarargs", abstractAttributes, CallingConventions.VarArgs, typeof<int>, [||])
+
         abs.CreateType () |> ignore<Type>
 
         let i =
@@ -17404,6 +17408,7 @@ public static class Runners
         define "NewStaticDead" (dead newStatic)
         define "NewStaticGone" (plainly (constructs (ofMethod statGone) false))
         define "NewAbstractGone" (plainly (constructs (ofMethod absAGone) false))
+        define "NewAbstractVarargs" (plainly (constructs (ofMethod absAVarargs) false))
         define "NewNotCtor" (plainly (constructs (ofMethod notCtor) false))
         define "NewFake" (plainly (constructs (ofMethod fakeCtor) false))
 
@@ -17446,6 +17451,9 @@ public static class Runners
             "NewStaticGone", Refusal.Raises typeLoad
             // ...but refuses an abstract method before it loads the return type.
             "NewAbstractGone", Refusal.Raises badImageFormat
+            // ...and before it converts the signature, which CoreCLR on Unix refuses for a variable
+            // argument list (`InvalidProgramException`).
+            "NewAbstractVarargs", Refusal.Raises badImageFormat
         ]
 
     /// The runners of `fabricateNewobjRefusals` whose `newobj` names an instance method that is not
