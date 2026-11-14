@@ -881,10 +881,20 @@ module EmitScope =
                 )
         }
 
+    /// <summary>
+    /// Add a <c>Param</c> row, at the next RID, whatever rows its method already has. This does not model
+    /// <c>RegMeta::DefineParam</c>; <c>EmitScopeDefinitions.defineParam</c> does.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope lacks the owner or the name, or the flags do not fit the column's two bytes.
+    /// </exception>
     let addParam (row : ParamRow) (scope : EmitScope) : ParamRid * EmitScope =
         let operation = "EmitScope.addParam"
         requireRid operation "MethodDef" scope.MethodDefs.Count row.Owner.Rid
         requireString operation scope row.Name
+
+        if int row.Flags < 0 || int row.Flags > 0xFFFF then
+            invalidArg (nameof row) $"%s{operation}: the flags 0x%x{int row.Flags} do not fit the column's two bytes"
 
         ParamRid (scope.Params.Count + 1),
         { scope with

@@ -644,7 +644,28 @@ module TestEmitScopeParams =
                     }
 
                 let! defines = Gen.listOfLength length genDefine
-                let! restAt = Gen.choose (0, length)
+
+                // A third of the schedules open with the first tokenised method's position 1 and then its
+                // return value, a slide that strands rows when a later method has a token.
+                let! opening =
+                    Gen.frequency
+                        [
+                            2, Gen.constant []
+                            1,
+                            Gen.constant
+                                [
+                                    for position in [ 1 ; 0 ] ->
+                                        {
+                                            Method = 0
+                                            Position = position
+                                            Flags = 0
+                                            Name = "o"
+                                        }
+                                ]
+                        ]
+
+                let defines = opening @ List.ofSeq defines
+                let! restAt = Gen.choose (0, defines.Length)
 
                 return
                     {
@@ -652,7 +673,7 @@ module TestEmitScopeParams =
                         Types = types
                         Prefix = prefix
                         RestAt = restAt
-                        Defines = List.ofSeq defines
+                        Defines = defines
                     }
             }
 

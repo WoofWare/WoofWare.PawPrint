@@ -554,4 +554,51 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : ParamDefinition
         =
-        failwith "TODO: EmitScopeDefinitions.defineParam is not implemented yet"
+        if flags &&& 0xF000 <> 0 then
+            invalidArg
+                (nameof flags)
+                $"EmitScopeDefinitions.defineParam: the flags 0x%08x{flags} have a reserved bit (0xF000), which every managed caller clears"
+
+        if sequence < 0 then
+            invalidArg
+                (nameof sequence)
+                $"EmitScopeDefinitions.defineParam: the sequence %d{sequence} is negative, which every managed caller refuses"
+
+        if (EmitScope.tryMethodDefRid method.Rid scope).IsNone then
+            invalidArg
+                (nameof method)
+                $"EmitScopeDefinitions.defineParam: the scope has no MethodDef row %d{method.Rid}"
+
+        let stored = uint16 (sequence &&& 0xFFFF)
+        let nameOffset, named = EmitScope.internString name scope
+        let parameters = EmitScope.parameters scope
+        let methodCount = (EmitScope.methodDefs scope).Count
+
+        // `CMiniMdRW::FixParamSequence` starts `ParamPtr` without converting the `END_OF_TABLE` markers when
+        // the new row slides and no table exists. With no table, the rows with a real `ParamList` end at the
+        // method of the last row, so the row slides past one of its own method only if that method owns the
+        // last row; and the methods after it hold the marker.
+        let noTable =
+            parameters
+            |> Seq.pairwise
+            |> Seq.forall (fun (a, b) -> (a.Owner.Rid, a.Sequence) <= (b.Owner.Rid, b.Sequence))
+
+        let slidesPastLast =
+            parameters.Count > 0
+            && parameters.[parameters.Count - 1].Owner = method
+            && parameters.[parameters.Count - 1].Sequence > stored
+
+        if noTable && slidesPastLast && methodCount > method.Rid then
+            ParamDefinition.StrandsLaterMethods (method, MethodDefRid methodCount)
+        else
+            let rid, scope =
+                EmitScope.addParam
+                    {
+                        Owner = method
+                        Flags = enum<ParameterAttributes> (flags &&& 0xFFFF)
+                        Sequence = stored
+                        Name = nameOffset
+                    }
+                    named
+
+            ParamDefinition.Defined (rid, scope)
