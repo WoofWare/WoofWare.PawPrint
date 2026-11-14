@@ -441,8 +441,19 @@ module NativeCustomAttribute =
                 match identity.GetDeclaringType () with
                 | RuntimeTypeHandleTarget.Closed declaring when declaring = instantiatedHandle -> ()
                 | other ->
+                    let describe (handle : ConcreteTypeHandle) : string =
+                        AllConcreteTypes.describe
+                            state.TypeSystem._LoadedAssemblies
+                            state.TypeSystem.ConcreteTypes
+                            handle
+
+                    let declaring =
+                        match other with
+                        | RuntimeTypeHandleTarget.Closed handle -> describe handle
+                        | other -> $"%O{other}"
+
                     failwith
-                        $"%s{operation}: the constructor at %O{ctorAddr} is declared by %O{other}, not by the attribute type %O{instantiatedHandle}"
+                        $"%s{operation}: the constructor at %O{ctorAddr} is declared by %s{declaring}, not by the attribute type %s{describe instantiatedHandle}"
 
                 let ctorAssemblyName = identity.GetAssemblyFullName ()
 
