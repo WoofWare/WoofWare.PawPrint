@@ -236,6 +236,7 @@
     <Compile Include="TestBindToMethodDetailsLayout.fs" />
     <Compile Include="TestDelegateBindFormalSignature.fs" />
     <Compile Include="TestNativeTypeParamInfo.fs" />
+    <Compile Include="TestFabricatedEventAccessors.fs" />
     <Compile Include="TestNativeMetadataImport.fs" />
     <Compile Include="TestDynamicSignatureDecoding.fs" />
     <Compile Include="TestInternalSignatureTypeResolution.fs" />

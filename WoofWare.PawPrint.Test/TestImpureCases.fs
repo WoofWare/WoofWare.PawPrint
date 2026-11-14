@@ -572,6 +572,22 @@ module TestImpureCases =
             },
             """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, measured on .NET 10 to exit 0. It stops where `DispatchProxyMethodInterface.cs` does, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002" (measured by naming the case, after `RuntimeTypeHandle_IsVisible`). With that answered by a throwaway edit, it exited 0 once `TypeBuilder_DefineProperty` was implemented (measured with stage 5s). Un-parked by implementing `MetadataImport.Enum` of a type's events."""
             {
+                FileName = "DispatchProxyEventInterface.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`DispatchProxy.Create` over an interface with an event of its own, extending an interface with a second, measured on .NET 10 and 11 to exit 0 (a control with check 3 inverted exits 3 on both). One proxy, so that a second `Create`'s reflected constructor cannot stand in front of the events. It stops before the proxy type is emitted, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002", the interface's events (measured by naming the case). Un-parked by reflection over events and then `TypeBuilder_DefineEvent`."""
+            {
                 FileName = "DispatchProxyInternalInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -6406,6 +6422,25 @@ module TestImpureCases =
                 // internals by name, and of its array type. Dynamic-code switch overridden to true like the
                 // other `DynamicMethod` guests; measured to exit 0 on real .NET 10 and 11.
                 FileName = "DynamicMethodsClassIsVisible.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `MetadataImport.Enum` of a dynamic module's TypeDef, which has no Event rows, then of
+                // its compiled base's, through `GetEvents` of a dynamic type deriving from a class with
+                // events. Dynamic-code switch overridden to true like its siblings; measured to exit 0
+                // on real .NET 10 and 11.
+                FileName = "TypeBuilderInheritedEvents.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =
