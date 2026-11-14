@@ -41,20 +41,22 @@ module TestIsVisibleSameImage =
         let builder = Text.StringBuilder ()
 
         let rec emit (indent : string) (keyword : string) (name : string) (depth : int) : unit =
-            builder.Append($"%s{indent}%s{keyword} class %s{name}\n%s{indent}{{\n") |> ignore
+            builder.Append ($"%s{indent}%s{keyword} class %s{name}\n%s{indent}{{\n")
+            |> ignore
 
             if depth < 3 then
                 for nestedKeyword, code in nestedVisibilities do
                     emit (indent + "    ") nestedKeyword $"%s{name}_%s{code}" (depth + 1)
 
-            builder.Append($"%s{indent}}}\n") |> ignore
+            builder.Append ($"%s{indent}}}\n") |> ignore
 
         emit "" "public" "C_P" 0
         emit "" "internal" "C_N" 0
         builder.ToString ()
 
     /// Every signature of at most two parameters over the types the holder can name, each a field.
-    let private fnParameterTypes : string list = [ "Pub" ; "Internal" ; "PubG<Internal>" ; "T" ]
+    let private fnParameterTypes : string list =
+        [ "Pub" ; "Internal" ; "PubG<Internal>" ; "T" ]
 
     let private fnReturnTypes : string list = "void" :: fnParameterTypes
 
@@ -165,9 +167,12 @@ public unsafe class FnFields<T>
     /// PawPrint's reading of the TypeDef the host's `t` is, by metadata token.
     let private typeInfoOf (t : Type) : DumpedAssembly * TypeInfo<GenericParamFromMetadata, TypeDefn> =
         let assembly =
-            if Object.ReferenceEquals (t.Assembly, hostAssembly) then guest
-            elif Object.ReferenceEquals (t.Assembly, hostCoreLib) then corelib
-            else failwith $"%O{t} is in neither the fixture nor CoreLib"
+            if Object.ReferenceEquals (t.Assembly, hostAssembly) then
+                guest
+            elif Object.ReferenceEquals (t.Assembly, hostCoreLib) then
+                corelib
+            else
+                failwith $"%O{t} is in neither the fixture nor CoreLib"
 
         assembly, assembly.TypeDefs.[MetadataTokens.TypeDefinitionHandle (t.MetadataToken &&& 0x00FFFFFF)]
 
@@ -188,7 +193,10 @@ public unsafe class FnFields<T>
             defn
 
     let private pawPrintAnswer (state : IlMachineState) (target : RuntimeTypeHandleTarget) : bool =
-        RuntimeTypeHandleTarget.isExternallyVisible state.TypeSystem._LoadedAssemblies state.TypeSystem.ConcreteTypes target
+        RuntimeTypeHandleTarget.isExternallyVisible
+            state.TypeSystem._LoadedAssemblies
+            state.TypeSystem.ConcreteTypes
+            target
 
     /// A TypeDef as the handle a `RuntimeType` of it would carry: the definition for a generic type,
     /// else the closed type, concretised.
@@ -258,7 +266,9 @@ public unsafe class FnFields<T>
 
         List.ofSeq disagreements |> shouldEqual []
         List.ofSeq refusals |> shouldEqual expectedCoreLibRefusals
-        compared |> shouldEqual (corelib.TypeDefs.Count - 1 - expectedCoreLibRefusals.Length)
+
+        compared
+        |> shouldEqual (corelib.TypeDefs.Count - 1 - expectedCoreLibRefusals.Length)
 
     // ----- The enumerated nesting fixture -----
 
@@ -270,7 +280,9 @@ public unsafe class FnFields<T>
     [<Test>]
     let ``The fixture holds every chain of up to three nested levels`` () : unit =
         let chainTypes =
-            guest.TypeDefs.Values |> Seq.filter (fun ty -> ty.Name.StartsWith "C_") |> List.ofSeq
+            guest.TypeDefs.Values
+            |> Seq.filter (fun ty -> ty.Name.StartsWith "C_")
+            |> List.ofSeq
 
         chainTypes.Length |> shouldEqual 518
 
@@ -396,7 +408,8 @@ public unsafe class FnFields<T>
             for parameter in definition.GetGenericArguments () do
                 parameter.GetGenericParameterConstraints () |> shouldEqual [||]
 
-                parameter.GenericParameterAttributes &&& GenericParameterAttributes.SpecialConstraintMask
+                parameter.GenericParameterAttributes
+                &&& GenericParameterAttributes.SpecialConstraintMask
                 |> shouldEqual GenericParameterAttributes.None
 
     let private parameterPool : Leaf list =
@@ -434,7 +447,8 @@ public unsafe class FnFields<T>
 
     /// Most of `nominalPool` is the fixture's invisible chains, so the visible ones are drawn on their own
     /// as often, or an instantiation would rarely have every argument visible.
-    let private visibleNominals : Type list = nominalPool |> List.filter (fun t -> t.IsVisible)
+    let private visibleNominals : Type list =
+        nominalPool |> List.filter (fun t -> t.IsVisible)
 
     let private genLeaf (argument : bool) : Gen<Tree> =
         Gen.frequency
@@ -509,10 +523,14 @@ public unsafe class FnFields<T>
             state, RuntimeTypeHandleTarget.Closed handle
 
     let private nominalDefn (t : Type) : TypeDefn =
-        if t = typeof<int> then TypeDefn.PrimitiveType PrimitiveType.Int32
-        elif t = typeof<string> then TypeDefn.PrimitiveType PrimitiveType.String
-        elif t = typeof<obj> then TypeDefn.PrimitiveType PrimitiveType.Object
-        else definitionDefn (snd (typeInfoOf t))
+        if t = typeof<int> then
+            TypeDefn.PrimitiveType PrimitiveType.Int32
+        elif t = typeof<string> then
+            TypeDefn.PrimitiveType PrimitiveType.String
+        elif t = typeof<obj> then
+            TypeDefn.PrimitiveType PrimitiveType.Object
+        else
+            definitionDefn (snd (typeInfoOf t))
 
     let private applyShape (shape : CompositeShape) (built : Built) : Built =
         match built with
@@ -542,8 +560,7 @@ public unsafe class FnFields<T>
                     ImmutableArray.Create (nominalDefn (fixtureType "Internal"))
                 )
             )
-        | "T" ->
-            Built.OpenTarget (RuntimeTypeHandleTarget.GenericParameter ((snd (typeInfoOf fnFields)).Identity, 0))
+        | "T" -> Built.OpenTarget (RuntimeTypeHandleTarget.GenericParameter ((snd (typeInfoOf fnFields)).Identity, 0))
         | other -> failwith $"no function-pointer part %s{other}"
 
     let rec private build (state : IlMachineState) (tree : Tree) : IlMachineState * Built =
@@ -553,7 +570,9 @@ public unsafe class FnFields<T>
             state, Built.OpenTarget (RuntimeTypeHandleTarget.OpenGenericTypeDefinition (snd (typeInfoOf t)).Identity)
         | Tree.Leaf (Leaf.TypeParam (definition, position)) ->
             state,
-            Built.OpenTarget (RuntimeTypeHandleTarget.GenericParameter ((snd (typeInfoOf definition)).Identity, position))
+            Built.OpenTarget (
+                RuntimeTypeHandleTarget.GenericParameter ((snd (typeInfoOf definition)).Identity, position)
+            )
         | Tree.Leaf (Leaf.MethodParam (declaring, name, position)) ->
             let method = declaring.GetMethod (name, allBindings)
 
@@ -588,7 +607,10 @@ public unsafe class FnFields<T>
             if closedArguments.Length = builtArguments.Length then
                 state,
                 Built.ClosedDefn (
-                    TypeDefn.GenericInstantiation (definitionDefn definitionInfo, ImmutableArray.CreateRange closedArguments)
+                    TypeDefn.GenericInstantiation (
+                        definitionDefn definitionInfo,
+                        ImmutableArray.CreateRange closedArguments
+                    )
                 )
             else
                 let state, targets =
@@ -692,9 +714,11 @@ public unsafe class FnFields<T>
                 if arguments |> List.exists (fun a -> not (isLeaf a) && invisible a) then
                     cover Reach.VisibleDefinitionInvisibleDeeperArgument
 
-            if (hostType tree).ContainsGenericParameters
-               && arguments
-                  |> List.exists (fun a -> not (hostType a).ContainsGenericParameters && invisible a) then
+            if
+                (hostType tree).ContainsGenericParameters
+                && arguments
+                   |> List.exists (fun a -> not (hostType a).ContainsGenericParameters && invisible a)
+            then
                 cover Reach.OpenWithInvisibleClosedArgument
 
             if
@@ -770,11 +794,13 @@ public unsafe class FnFields<T>
 
     [<Test>]
     let ``The dynamic-methods class and an array of it are visible`` () : unit =
-        let dynamicClass = RuntimeTypeHandleTarget.DynamicMethodsClass guest.DefinitionFullName
+        let dynamicClass =
+            RuntimeTypeHandleTarget.DynamicMethodsClass guest.DefinitionFullName
 
         pawPrintAnswer initialState dynamicClass |> shouldEqual true
 
-        let array = RuntimeTypeHandleTarget.composite CompositeShape.OneDimArrayZero dynamicClass
+        let array =
+            RuntimeTypeHandleTarget.composite CompositeShape.OneDimArrayZero dynamicClass
 
         match array with
         | RuntimeTypeHandleTarget.Composite _ -> ()

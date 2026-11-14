@@ -68,7 +68,10 @@ module TestTypeVisibility =
     [<Test>]
     let ``The chain rule masks each level's visibility`` () : unit =
         let decorate (level : TypeAttributes) : TypeAttributes =
-            level ||| TypeAttributes.Sealed ||| TypeAttributes.Abstract ||| TypeAttributes.BeforeFieldInit
+            level
+            ||| TypeAttributes.Sealed
+            ||| TypeAttributes.Abstract
+            ||| TypeAttributes.BeforeFieldInit
 
         for chain in [ 1..3 ] |> List.collect chainsOfLength do
             TypeVisibility.isChainExternallyVisible (List.map decorate chain)
@@ -103,7 +106,9 @@ internal class Lone { }
         AssemblyApi.read loggerFactory None stream
 
     let private typeNamed (assembly : DumpedAssembly) (name : string) : TypeInfo<GenericParamFromMetadata, TypeDefn> =
-        assembly.TypeDefs.Values |> Seq.filter (fun ty -> ty.Name = name) |> Seq.exactlyOne
+        assembly.TypeDefs.Values
+        |> Seq.filter (fun ty -> ty.Name = name)
+        |> Seq.exactlyOne
 
     [<Test>]
     let ``The chain of a nested type is its own visibility then each encloser's, innermost first`` () : unit =
@@ -111,7 +116,12 @@ internal class Lone { }
 
         TypeVisibility.nestingChain image (typeNamed image "Inner")
         |> List.map visibility
-        |> shouldEqual [ TypeAttributes.NestedFamily ; TypeAttributes.NestedPublic ; TypeAttributes.Public ]
+        |> shouldEqual
+            [
+                TypeAttributes.NestedFamily
+                TypeAttributes.NestedPublic
+                TypeAttributes.Public
+            ]
 
         TypeVisibility.nestingChain image (typeNamed image "Lone")
         |> List.map visibility
@@ -154,9 +164,7 @@ internal class Lone { }
                 )
 
         let e =
-            Assert.Throws<Exception> (fun () ->
-                TypeVisibility.nestingChain broken (typeNamed broken "Inner") |> ignore
-            )
+            Assert.Throws<Exception> (fun () -> TypeVisibility.nestingChain broken (typeNamed broken "Inner") |> ignore)
 
         e.Message |> shouldContainText "Middle"
 
@@ -183,8 +191,6 @@ internal class Lone { }
         outer.Name |> shouldEqual "Outer"
 
         let e =
-            Assert.Throws<Exception> (fun () ->
-                TypeVisibility.nestingChain broken (typeNamed broken "Inner") |> ignore
-            )
+            Assert.Throws<Exception> (fun () -> TypeVisibility.nestingChain broken (typeNamed broken "Inner") |> ignore)
 
         e.Message |> shouldContainText "Inner"
