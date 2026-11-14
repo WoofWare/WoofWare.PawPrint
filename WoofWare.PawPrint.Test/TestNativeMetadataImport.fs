@@ -4,6 +4,8 @@ open System.Collections.Immutable
 open System.IO
 open System.Reflection.Metadata
 open System.Reflection.Metadata.Ecma335
+open FsCheck
+open FsCheck.FSharp
 open FsUnitTyped
 open Microsoft.Extensions.Logging
 open NUnit.Framework
@@ -318,6 +320,51 @@ public class MarshalShapes
         [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string marshalled)
     {
     }
+}
+
+// Every event shape C# compiles in one type, so that the Event enumeration is seen to filter nothing:
+// a public, a private, a static, a protected and a custom-accessor event. The custom accessors add no
+// raise method; no compiler writes one, or other methods, or event flags (`TestFabricatedEventAccessors`
+// writes those).
+public class EventShapes
+{
+    public event System.EventHandler Public;
+    private event System.Action Private;
+    public static event System.Action Static;
+    protected event System.Action<string> Protected;
+    System.Action custom;
+    public event System.Action Custom { add { custom += value; } remove { custom -= value; } }
+    void Touch() { Public?.Invoke(null, null); Private?.Invoke(); Static?.Invoke(); Protected?.Invoke(""); }
+}
+
+// The enumeration is per type: `RuntimeType.PopulateEvents` walks the base chain itself.
+public class EventBase
+{
+    public event System.Action BaseEvent;
+    void Touch() { BaseEvent?.Invoke(); }
+}
+
+public class EventDerived : EventBase
+{
+    public event System.Action DerivedEvent;
+    void Touch() { DerivedEvent?.Invoke(); }
+}
+
+// One more event than the QCall's inline buffer holds.
+public class SeventeenEvents
+{
+    public event System.Action E00, E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12, E13, E14, E15, E16;
+    void Touch()
+    {
+        E00?.Invoke(); E01?.Invoke(); E02?.Invoke(); E03?.Invoke(); E04?.Invoke(); E05?.Invoke();
+        E06?.Invoke(); E07?.Invoke(); E08?.Invoke(); E09?.Invoke(); E10?.Invoke(); E11?.Invoke();
+        E12?.Invoke(); E13?.Invoke(); E14?.Invoke(); E15?.Invoke(); E16?.Invoke();
+    }
+}
+
+public interface IEventInterface
+{
+    event System.EventHandler Changed;
 }
 """
 
@@ -721,8 +768,12 @@ public class MarshalShapes
 
         value, state
 
+    /// The `IMDInternalImport` handle of the loaded assembly named by `assemblyFullName`.
+    let private metadataImportHandleOf (assemblyFullName : string) : CliType =
+        CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.MetadataImportHandle assemblyFullName))
+
     let private metadataImportHandle (fixture : MetadataImportFixture) : CliType =
-        CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.MetadataImportHandle fixture.Assembly.Name.FullName))
+        metadataImportHandleOf fixture.Assembly.Name.FullName
 
     let private invokeMetadataImportNative
         (fixture : MetadataImportFixture)
@@ -772,8 +823,10 @@ public class MarshalShapes
         | Some result -> failwith $"unexpected MetadataImport execution result: %O{result}"
         | None -> failwith "MetadataImport native method did not match"
 
-    let private invokeEnum
+    /// `MetadataImport.Enum` over the loaded assembly named by `assemblyFullName`, which `state` must hold.
+    let private invokeEnumIn
         (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
         (tokenType : int32)
         (parent : int32)
         (state : IlMachineState)
@@ -793,7 +846,7 @@ public class MarshalShapes
                 metadataImportType
                 enumMethod
                 [
-                    metadataImportHandle fixture
+                    metadataImportHandleOf assemblyFullName
                     CliType.Numeric (CliNumericType.Int32 tokenType)
                     CliType.Numeric (CliNumericType.Int32 parent)
                     CliType.RuntimePointer (CliRuntimePointer.Managed lengthOut)
@@ -830,6 +883,15 @@ public class MarshalShapes
             | other -> failwith $"expected object reference in long result slot, got %O{other}"
 
         length, tokens, storage, state
+
+    let private invokeEnum
+        (fixture : MetadataImportFixture)
+        (tokenType : int32)
+        (parent : int32)
+        (state : IlMachineState)
+        : int32 * int32 list * EnumResultStorage * IlMachineState
+        =
+        invokeEnumIn fixture fixture.Assembly.Name.FullName tokenType parent state
 
     /// `MetadataTokenType.FieldDef`, as `MetadataImport.EnumFields` passes it.
     let private invokeEnumFields
@@ -3059,8 +3121,10 @@ public class MarshalShapes
             loop 0 [] |> Array.ofList
         | other -> failwith $"expected a byref to the first element of a byte array, got %O{other}"
 
-    let private invokeGetName
+    /// `MetadataImport.GetName` over the loaded assembly named by `assemblyFullName`, which `state` must hold.
+    let private invokeGetNameIn
         (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
         (mdToken : int32)
         (state : IlMachineState)
         : EvalStackValue * byte array * IlMachineState
@@ -3081,7 +3145,7 @@ public class MarshalShapes
                 metadataImportType
                 getNameMethod
                 [
-                    metadataImportHandle fixture
+                    metadataImportHandleOf assemblyFullName
                     CliType.Numeric (CliNumericType.Int32 mdToken)
                     CliType.RuntimePointer (CliRuntimePointer.Managed nameOut)
                 ]
@@ -3101,6 +3165,14 @@ public class MarshalShapes
             | other -> failwith $"expected a managed pointer written to the name out param, got %O{other}"
 
         returnValue, readNameBufferIncludingTerminator state namePtr, state
+
+    let private invokeGetName
+        (fixture : MetadataImportFixture)
+        (mdToken : int32)
+        (state : IlMachineState)
+        : EvalStackValue * byte array * IlMachineState
+        =
+        invokeGetNameIn fixture fixture.Assembly.Name.FullName mdToken state
 
     [<Test>]
     let ``MetadataImport GetName returns each field's name as null-terminated UTF-8`` () : unit =
@@ -3241,7 +3313,7 @@ public class MarshalShapes
             )
 
         ex.Message
-        |> shouldContainText "expected FieldDef, PropertyDef or ParamDef token"
+        |> shouldContainText "expected FieldDef, PropertyDef, ParamDef or Event token"
 
     [<Test>]
     let ``MetadataImport GetName rejects a FieldDef token that is absent from the assembly`` () : unit =
@@ -3536,6 +3608,26 @@ public class MarshalShapes
             System.Reflection.Metadata.Ecma335.TableIndex.Event
         )
 
+    /// `invokeEnumAssociates` over the loaded assembly named by `assemblyFullName`, which `state` must
+    /// hold.
+    let private invokeEnumAssociatesIn
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (parent : int32)
+        (state : IlMachineState)
+        : int32 * (int32 * int32) list * EnumResultStorage * IlMachineState
+        =
+        let length, values, storage, state =
+            invokeEnumIn fixture assemblyFullName 0x06000000 parent state
+
+        if values.Length % 2 <> 0 then
+            failwith $"associates result should be method/semantics pairs, but had odd length %d{values.Length}"
+
+        let pairs =
+            values |> List.chunkBySize 2 |> List.map (fun pair -> pair.[0], pair.[1])
+
+        length, pairs, storage, state
+
     /// `MetadataTokenType.MethodDef` with a Property or Event parent, as
     /// <c>Associates.AssignAssociates</c> passes it. Alone among the token types this QCall answers,
     /// the INT32 buffer here is not a token list: it is `ASSOCIATE_RECORD` *pairs*, and the managed
@@ -3547,15 +3639,7 @@ public class MarshalShapes
         (state : IlMachineState)
         : int32 * (int32 * int32) list * EnumResultStorage * IlMachineState
         =
-        let length, values, storage, state = invokeEnum fixture 0x06000000 parent state
-
-        if values.Length % 2 <> 0 then
-            failwith $"associates result should be method/semantics pairs, but had odd length %d{values.Length}"
-
-        let pairs =
-            values |> List.chunkBySize 2 |> List.map (fun pair -> pair.[0], pair.[1])
-
-        length, pairs, storage, state
+        invokeEnumAssociatesIn fixture fixture.Assembly.Name.FullName parent state
 
     /// The (accessor method token, MethodSemantics value) pairs the *host* CLR reports for a
     /// property, as a set. `PropertyInfo.GetGetMethod`/`GetSetMethod` come from CoreCLR's own
@@ -3652,13 +3736,10 @@ public class MarshalShapes
         let fixture = makeFixture ()
 
         // The Event side of the same CoreCLR branch: `Association` is a HasSemantics coded index
-        // whose tag distinguishes Event (0) from Property (1), so this is the only test that pins
-        // the tag. A handler that assumed every parent was a Property would encode this token to
-        // some *property's* coded index and answer that property's rows.
-        //
-        // No guest can reach this today — an mdtEvent token is minted only by `Enum` with
-        // `type == mdtEvent`, which PawPrint does not implement — so driving the handler directly is
-        // the only coverage available, not a shortcut around an end-to-end test that exists.
+        // whose tag distinguishes Event (0) from Property (1). A handler that assumed every parent
+        // was a Property would encode this token to some *property's* coded index and answer that
+        // property's rows. Guests reach the same arm through `RuntimeEventInfo`'s constructor, once
+        // `Enum` has given them the event's token (`TypeEvents.cs`).
         let hostEvent =
             (System.Reflection.Assembly.Load fixture.Image)
                 .GetType("TypesWithMembers", true)
@@ -3737,6 +3818,674 @@ public class MarshalShapes
                 Assert.Throws (fun () -> invokeEnumAssociates fixture token fixture.State |> ignore)
 
             ex.ToString () |> shouldContainText "was not present in"
+
+    /// `MetadataTokenType.Event`, as `MetadataImport.EnumEvents` passes it.
+    let private metadataTokenTypeEvent : int32 = 0x14000000
+
+    /// ECMA-335 II.22.28's `Semantics` values an event's accessors carry, besides the two above.
+    let private semanticsOther : int32 = 0x0004
+    let private semanticsFire : int32 = 0x0020
+
+    let private invokeEnumEvents
+        (fixture : MetadataImportFixture)
+        (targetType : TypeInfo<GenericParamFromMetadata, TypeDefn>)
+        (state : IlMachineState)
+        : int32 * int32 list * EnumResultStorage * IlMachineState
+        =
+        invokeEnum fixture metadataTokenTypeEvent (typeDefToken targetType.TypeDefHandle) state
+
+    /// `GetEventProps` over the loaded assembly named by `assemblyFullName`: the `HRESULT`, the name's
+    /// bytes with their terminator, and the raw `Event.EventFlags` column.
+    let private invokeGetEventPropsIn
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (eventToken : int32)
+        (state : IlMachineState)
+        : EvalStackValue * byte array * int32 * IlMachineState
+        =
+        let state, metadataImportType, getEventPropsMethod =
+            metadataImportMethod fixture state "GetEventProps" 4
+
+        let nameOut, state =
+            allocateSlotOut
+                fixture
+                fixture.BaseClassTypes.IntPtr
+                (CliType.RuntimePointer (CliRuntimePointer.Managed ManagedPointerSource.Null))
+                state
+
+        let attributesOut, state = allocateInt32Out fixture -1 state
+
+        let state =
+            invokeMetadataImportNative
+                fixture
+                metadataImportType
+                getEventPropsMethod
+                [
+                    metadataImportHandleOf assemblyFullName
+                    CliType.Numeric (CliNumericType.Int32 eventToken)
+                    CliType.RuntimePointer (CliRuntimePointer.Managed nameOut)
+                    CliType.RuntimePointer (CliRuntimePointer.Managed attributesOut)
+                ]
+                state
+
+        let returnValue, state = IlMachineState.popEvalStack (ThreadId 0) state
+
+        let namePtr =
+            match
+                IlMachineState.readManagedByref
+                    fixture.BaseClassTypes
+                    state
+                    (ManagedPointerSource.requireAddressed nameOut)
+                |> CliType.unwrapPrimitiveLikeDeep
+            with
+            | CliType.RuntimePointer (CliRuntimePointer.Managed ptr) -> ptr
+            | other -> failwith $"expected a managed pointer written to the name out param, got %O{other}"
+
+        returnValue,
+        readNameBufferIncludingTerminator state namePtr,
+        readInt32Out fixture.BaseClassTypes state attributesOut,
+        state
+
+    let private invokeGetEventProps
+        (fixture : MetadataImportFixture)
+        (eventToken : int32)
+        (state : IlMachineState)
+        : EvalStackValue * byte array * int32 * IlMachineState
+        =
+        invokeGetEventPropsIn fixture fixture.Assembly.Name.FullName eventToken state
+
+    /// A type's own events as the host CLR lists them. `DeclaredOnly` with every visibility and
+    /// staticness is the Event run itself, provided no two of the type's events share a name, since
+    /// `RuntimeType.PopulateEvents` drops a later event of a name it has seen.
+    let private hostDeclaredEvents (hostType : System.Type) : System.Reflection.EventInfo array =
+        hostType.GetEvents (
+            System.Reflection.BindingFlags.DeclaredOnly
+            ||| System.Reflection.BindingFlags.Public
+            ||| System.Reflection.BindingFlags.NonPublic
+            ||| System.Reflection.BindingFlags.Instance
+            ||| System.Reflection.BindingFlags.Static
+        )
+
+    let private hostEventTokens (image : byte array) (typeName : string) : int32 list =
+        (System.Reflection.Assembly.Load image).GetType (typeName, true)
+        |> hostDeclaredEvents
+        |> Array.map (fun e -> e.MetadataToken)
+        |> List.ofArray
+
+    let private utf8WithTerminator (name : string) : byte array =
+        Array.append (System.Text.Encoding.UTF8.GetBytes name) [| 0uy |]
+
+    /// Checks one event's three answers, read from the loaded assembly named by `assemblyFullName`,
+    /// against the host's `EventInfo` for the same row: `GetEventProps`' name and flags, `GetName`'s
+    /// name, and the associates' add, remove, raise and other methods, the others in order.
+    let private assertEventAgreesWithHost
+        (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
+        (hostEvent : System.Reflection.EventInfo)
+        (state : IlMachineState)
+        : IlMachineState
+        =
+        let returnValue, nameBytes, flags, state =
+            invokeGetEventPropsIn fixture assemblyFullName hostEvent.MetadataToken state
+
+        returnValue |> shouldEqual (EvalStackValue.Int32 (Int32Source.Verbatim 0))
+        nameBytes |> shouldEqual (utf8WithTerminator hostEvent.Name)
+        flags |> shouldEqual (int hostEvent.Attributes)
+
+        let returnValue, nameBytes, state =
+            invokeGetNameIn fixture assemblyFullName hostEvent.MetadataToken state
+
+        returnValue |> shouldEqual (EvalStackValue.Int32 (Int32Source.Verbatim 0))
+        nameBytes |> shouldEqual (utf8WithTerminator hostEvent.Name)
+
+        let _, pairs, _, state =
+            invokeEnumAssociatesIn fixture assemblyFullName hostEvent.MetadataToken state
+
+        pairs
+        |> List.filter (fun (_, semantics) ->
+            semantics <> semanticsAddOn
+            && semantics <> semanticsRemoveOn
+            && semantics <> semanticsFire
+            && semantics <> semanticsOther
+        )
+        |> shouldEqual []
+
+        let withSemantics (semantics : int32) : int32 list =
+            pairs |> List.filter (fun (_, s) -> s = semantics) |> List.map fst
+
+        let tokenOf (method : System.Reflection.MethodInfo) : int32 list =
+            if isNull method then [] else [ method.MetadataToken ]
+
+        withSemantics semanticsAddOn
+        |> shouldEqual (tokenOf (hostEvent.GetAddMethod true))
+
+        withSemantics semanticsRemoveOn
+        |> shouldEqual (tokenOf (hostEvent.GetRemoveMethod true))
+
+        withSemantics semanticsFire
+        |> shouldEqual (tokenOf (hostEvent.GetRaiseMethod true))
+
+        withSemantics semanticsOther
+        |> shouldEqual (
+            hostEvent.GetOtherMethods true
+            |> Array.map (fun m -> m.MetadataToken)
+            |> List.ofArray
+        )
+
+        state
+
+    /// `image` read by PawPrint and added to the fixture's state, as the fixture adds its own.
+    let private withImage (fixture : MetadataImportFixture) (image : byte array) : DumpedAssembly * IlMachineState =
+        use stream = new MemoryStream (image)
+
+        let assembly =
+            global.WoofWare.PawPrint.AssemblyApi.read fixture.LoggerFactory None stream
+
+        assembly, fixture.State.WithLoadedAssembly assembly
+
+    [<Test>]
+    let ``MetadataImport Enum returns a type's Event tokens in declaration order`` () : unit =
+        let fixture = makeFixture ()
+        let eventShapes = requiredTopLevelType fixture.Assembly "" "EventShapes"
+
+        let length, tokens, storage, _ = invokeEnumEvents fixture eventShapes fixture.State
+
+        // Nothing is filtered by visibility, staticness or custom accessors, and order is
+        // guest-observable because `PopulateEvents` appends in the order it receives.
+        length |> shouldEqual 5
+        storage |> shouldEqual EnumResultStorage.ShortResult
+        tokens |> shouldEqual (hostEventTokens fixture.Image "EventShapes")
+
+        (System.Reflection.Assembly.Load fixture.Image).GetType ("EventShapes", true)
+        |> hostDeclaredEvents
+        |> Array.map (fun e -> e.Name)
+        |> List.ofArray
+        |> shouldEqual [ "Public" ; "Private" ; "Static" ; "Protected" ; "Custom" ]
+
+    [<Test>]
+    let ``MetadataImport Enum returns only a type's own Event tokens`` () : unit =
+        let fixture = makeFixture ()
+        let derivedType = requiredTopLevelType fixture.Assembly "" "EventDerived"
+        let baseType = requiredTopLevelType fixture.Assembly "" "EventBase"
+
+        let _, derivedTokens, _, state = invokeEnumEvents fixture derivedType fixture.State
+        let _, baseTokens, _, _ = invokeEnumEvents fixture baseType state
+
+        // `PopulateEvents` walks the base chain itself, so an Enum that included the base's events
+        // would report each of them twice.
+        baseTokens |> shouldEqual (hostEventTokens fixture.Image "EventBase")
+        baseTokens.Length |> shouldEqual 1
+        derivedTokens |> shouldEqual (hostEventTokens fixture.Image "EventDerived")
+        derivedTokens.Length |> shouldEqual 1
+
+        derivedTokens
+        |> List.filter (fun token -> List.contains token baseTokens)
+        |> shouldEqual []
+
+    [<Test>]
+    let ``MetadataImport Enum returns no Event tokens for a type with only fields`` () : unit =
+        let fixture = makeFixture ()
+
+        // `MetadataFields` has fields and no events, so this rules out an arm that enumerated the
+        // wrong table, which an empty type could not.
+        let length, tokens, storage, _ =
+            invokeEnumEvents fixture fixture.TargetType fixture.State
+
+        length |> shouldEqual 0
+        tokens |> shouldEqual []
+        storage |> shouldEqual EnumResultStorage.ShortResult
+
+    [<Test>]
+    let ``MetadataImport Enum returns no Event tokens for an empty type`` () : unit =
+        let fixture = makeFixture ()
+
+        // A type with no EventMap row at all.
+        let length, tokens, _, _ = invokeEnumEvents fixture fixture.EmptyType fixture.State
+
+        length |> shouldEqual 0
+        tokens |> shouldEqual []
+
+    [<Test>]
+    let ``MetadataImport Enum uses the large result for more than sixteen Event tokens`` () : unit =
+        let fixture = makeFixture ()
+        let seventeen = requiredTopLevelType fixture.Assembly "" "SeventeenEvents"
+
+        let length, tokens, storage, _ = invokeEnumEvents fixture seventeen fixture.State
+
+        length |> shouldEqual 17
+        storage |> shouldEqual EnumResultStorage.LongResult
+        tokens |> shouldEqual (hostEventTokens fixture.Image "SeventeenEvents")
+
+    [<Test>]
+    let ``MetadataImport Enum returns an interface's Event tokens`` () : unit =
+        let fixture = makeFixture ()
+        let iface = requiredTopLevelType fixture.Assembly "" "IEventInterface"
+
+        let length, tokens, _, _ = invokeEnumEvents fixture iface fixture.State
+
+        length |> shouldEqual 1
+        tokens |> shouldEqual (hostEventTokens fixture.Image "IEventInterface")
+
+    [<Test>]
+    let ``MetadataImport GetEventProps, GetName and the associates agree with the host runtime for every event``
+        ()
+        : unit
+        =
+        let fixture = makeFixture ()
+        let mutable state = fixture.State
+        let mutable seen = 0
+
+        for hostType in (System.Reflection.Assembly.Load fixture.Image).GetTypes () do
+            for hostEvent in hostDeclaredEvents hostType do
+                state <- assertEventAgreesWithHost fixture fixture.Assembly.Name.FullName hostEvent state
+                seen <- seen + 1
+
+        // `MyEvent`, the five shapes, the base and derived events, seventeen, and the interface's.
+        seen |> shouldEqual 26
+
+    [<Test>]
+    let ``MetadataImport Enum rejects a non-TypeDef parent for event enumeration`` () : unit =
+        let fixture = makeFixture ()
+
+        let exn =
+            Assert.Throws (fun () ->
+                invokeEnum fixture metadataTokenTypeEvent (fieldDefToken fixture.InstanceField.Handle) fixture.State
+                |> ignore
+            )
+
+        exn.ToString ()
+        |> shouldContainText "expected TypeDef parent token for event enumeration"
+
+    [<Test>]
+    let ``MetadataImport Enum rejects an event enumeration whose TypeDef parent is absent from the assembly``
+        ()
+        : unit
+        =
+        let fixture = makeFixture ()
+
+        let typeDefRows =
+            MetadataReaderExtensions.GetTableRowCount (
+                fixture.Assembly.PeReader.GetMetadataReader (),
+                TableIndex.TypeDef
+            )
+
+        // Far outside the table, the first row past its end, and row 0, the nil TypeDef: each names
+        // no TypeDef, and each must be refused by name rather than reach the reader as
+        // `BadImageFormatException: Read out of bounds`.
+        for token in [ 0x02FFFFFF ; 0x02000000 ||| (typeDefRows + 1) ; 0x02000000 ] do
+            let exn =
+                Assert.Throws (fun () -> invokeEnum fixture metadataTokenTypeEvent token fixture.State |> ignore)
+
+            exn.ToString () |> shouldContainText "was not present in"
+            exn.ToString () |> shouldContainText $"0x%08x{token}"
+
+    [<Test>]
+    let ``MetadataImport GetEventProps rejects a token that is not an Event`` () : unit =
+        let fixture = makeFixture ()
+
+        let propertyHandle =
+            firstPropertyOfType fixture.Assembly fixture.PropertyShapesType.TypeDefHandle
+
+        let ex =
+            Assert.Throws (fun () ->
+                invokeGetEventProps fixture (propertyToken propertyHandle) fixture.State
+                |> ignore
+            )
+
+        ex.Message |> shouldContainText "expected Event token"
+
+    [<Test>]
+    let ``MetadataImport GetEventProps and GetName reject an Event token absent from the assembly`` () : unit =
+        let fixture = makeFixture ()
+
+        // Far outside the table, the first row past its end (which an off-by-one guard waves
+        // through), and row 0 (which a guard of `row > rowCount` alone waves through). CoreCLR's
+        // FCall would answer a failing HRESULT, which the managed wrapper turns into a
+        // `BadImageFormatException`; but every token a guest passes was minted by `Enum` from this
+        // image, so an absent one is a PawPrint bug, refused by name.
+        for token in [ 0x14FFFFFF ; 0x14000000 ||| (eventTableRowCount fixture + 1) ; 0x14000000 ] do
+            let ex =
+                Assert.Throws (fun () -> invokeGetEventProps fixture token fixture.State |> ignore)
+
+            ex.Message |> shouldContainText "was not present in"
+            ex.Message |> shouldContainText $"0x%08x{token}"
+
+            let ex =
+                Assert.Throws (fun () -> invokeGetName fixture token fixture.State |> ignore)
+
+            ex.Message |> shouldContainText "was not present in"
+            ex.Message |> shouldContainText $"0x%08x{token}"
+
+    [<Test>]
+    let ``MetadataImport Enum and GetEventProps read a fabricated image's events, both of one name included``
+        ()
+        : unit
+        =
+        let fixture = makeFixture ()
+
+        let assembly, state = withImage fixture (TestFabricatedEventAccessors.fabricate ())
+
+        let fabEvents = requiredTopLevelType assembly "" "FabEvents"
+        let name = assembly.Name.FullName
+
+        let length, tokens, storage, state =
+            invokeEnumIn fixture name metadataTokenTypeEvent (typeDefToken fabEvents.TypeDefHandle) state
+
+        // Both `Dup` rows, as `EnumInit` gives the whole EventMap run (read from the source, not
+        // measured: `PopulateEvents` drops the second by name whatever this returns, so no guest can
+        // tell the two answers apart).
+        length |> shouldEqual 25
+        storage |> shouldEqual EnumResultStorage.LongResult
+
+        tokens |> shouldEqual (List.init 25 (fun i -> List.head tokens + i))
+
+        let mutable state = state
+
+        let props =
+            tokens
+            |> List.map (fun token ->
+                let _, nameBytes, flags, nextState = invokeGetEventPropsIn fixture name token state
+                state <- nextState
+                System.Text.Encoding.UTF8.GetString (nameBytes, 0, nameBytes.Length - 1), flags
+            )
+
+        props
+        |> shouldEqual (
+            [ "Ev", 0x0600 ; "Dup", 0 ; "Dup", 0 ; "Many", 0 ; "Flagged", 0xFFFF ]
+            @ List.init 20 (fun i -> $"F%d{i}", 0)
+        )
+
+    [<Test>]
+    let ``MetadataImport Enum, GetEventProps and GetName agree with the host runtime for every CoreLib type``
+        ()
+        : unit
+        =
+        let fixture = makeFixture ()
+        let corelib = fixture.BaseClassTypes.Corelib
+        let name = corelib.Name.FullName
+
+        let hostTypes = typeof<obj>.Assembly.GetTypes ()
+
+        // Every TypeDef but `<Module>`, which the host does not return and which is asked below.
+        let typeDefRows =
+            MetadataReaderExtensions.GetTableRowCount (corelib.PeReader.GetMetadataReader (), TableIndex.TypeDef)
+
+        hostTypes.Length |> shouldEqual (typeDefRows - 1)
+
+        let _, moduleEvents, _, state =
+            invokeEnumIn fixture name metadataTokenTypeEvent 0x02000001 fixture.State
+
+        moduleEvents |> shouldEqual []
+
+        let mutable state = state
+        let mutable typesWithEvents = 0
+        let mutable events = 0
+        let enumerated = System.Collections.Generic.Dictionary<int32, int32 list> ()
+        enumerated.[0x02000001] <- moduleEvents
+
+        for hostType in hostTypes do
+            let hostEvents = hostDeclaredEvents hostType
+
+            let _, tokens, _, nextState =
+                invokeEnumIn fixture name metadataTokenTypeEvent hostType.MetadataToken state
+
+            state <- nextState
+            enumerated.[hostType.MetadataToken] <- tokens
+
+            tokens
+            |> shouldEqual (hostEvents |> Array.map (fun e -> e.MetadataToken) |> List.ofArray)
+
+            if not tokens.IsEmpty then
+                typesWithEvents <- typesWithEvents + 1
+
+            for hostEvent in hostEvents do
+                state <- assertEventAgreesWithHost fixture name hostEvent state
+                events <- events + 1
+
+        // So that the sweep is not vacuous: some types have events, and some more than one.
+        typesWithEvents |> shouldBeGreaterThan 5
+        events |> shouldBeGreaterThan typesWithEvents
+
+        // Domain's parse of each type's events, which IlDump reads, holds the same rows in the same
+        // order as reflection's enumeration.
+        enumerated.Count |> shouldEqual typeDefRows
+
+        for KeyValue (handle, typeInfo) in corelib.TypeDefs do
+            typeInfo.Events
+            |> Seq.map (fun e -> eventToken e.Handle)
+            |> List.ofSeq
+            |> shouldEqual enumerated.[typeDefToken handle]
+
+    /// One event of a drawn image: its flags, which of add, remove and raise it has, and how many other
+    /// methods.
+    type private DrawnEvent =
+        {
+            Flags : uint16
+            Add : bool
+            Remove : bool
+            Raise : bool
+            Others : int
+        }
+
+    /// The shapes the event property must be seen to reach.
+    [<RequireQualifiedAccess>]
+    type private DrawnEventCoverage =
+        | RaiseMethod
+        | OtherMethods
+        | NoAccessor
+        | FlagOutsideSpecialNames
+        | Bit15
+        | MoreThanSixteenEvents
+        | NoEventsBetweenEvents
+        | LastTypeHasEvents
+        | AtLeast25SemanticsRows
+
+    let private drawnEventGen : Gen<DrawnEvent> =
+        gen {
+            let! flags =
+                Gen.frequency
+                    [
+                        2, Gen.constant 0us
+                        1, Gen.constant 0x0600us
+                        3, Gen.choose (0, 0xFFFF) |> Gen.map uint16
+                    ]
+
+            let! add = Gen.elements [ true ; false ]
+            let! remove = Gen.elements [ true ; false ]
+            let! raise = Gen.elements [ true ; false ]
+            let! others = Gen.frequency [ 3, Gen.constant 0 ; 2, Gen.choose (1, 4) ]
+
+            return
+                {
+                    Flags = flags
+                    Add = add
+                    Remove = remove
+                    Raise = raise
+                    Others = others
+                }
+        }
+
+    /// One to six types, each with no events or up to `maxPerType`, where `maxPerType` is itself drawn so
+    /// that some images have a type of more than sixteen events.
+    let private drawnImageGen : Gen<DrawnEvent list list> =
+        gen {
+            let! maxPerType = Gen.elements [ 3 ; 8 ; 24 ]
+            let! typeCount = Gen.choose (1, 6)
+
+            let typeGen =
+                Gen.frequency
+                    [
+                        1, Gen.constant []
+                        3,
+                        Gen.choose (1, maxPerType)
+                        |> Gen.bind (fun n -> Gen.listOfLength n drawnEventGen)
+                    ]
+
+            return! Gen.listOfLength typeCount typeGen
+        }
+
+    /// An image of one interface `T<i>` for each drawn type, each drawn event `E<j>` of type `Action` with
+    /// abstract accessors, written by `PersistedAssemblyBuilder`.
+    let private writeDrawnImage (types : DrawnEvent list list) : byte array =
+        let builder =
+            System.Reflection.Emit.PersistedAssemblyBuilder (
+                System.Reflection.AssemblyName "DrawnEvents",
+                typeof<obj>.Assembly
+            )
+
+        let modul = builder.DefineDynamicModule "DrawnEvents"
+
+        types
+        |> List.iteri (fun typeIndex events ->
+            let t =
+                modul.DefineType (
+                    $"T%d{typeIndex}",
+                    System.Reflection.TypeAttributes.Public
+                    ||| System.Reflection.TypeAttributes.Interface
+                    ||| System.Reflection.TypeAttributes.Abstract
+                )
+
+            let accessor (name : string) : System.Reflection.Emit.MethodBuilder =
+                t.DefineMethod (
+                    name,
+                    System.Reflection.MethodAttributes.Public
+                    ||| System.Reflection.MethodAttributes.Abstract
+                    ||| System.Reflection.MethodAttributes.Virtual
+                    ||| System.Reflection.MethodAttributes.HideBySig
+                    ||| System.Reflection.MethodAttributes.NewSlot,
+                    typeof<System.Void>,
+                    [| typeof<System.Action> |]
+                )
+
+            events
+            |> List.iteri (fun eventIndex drawn ->
+                let e =
+                    t.DefineEvent (
+                        $"E%d{eventIndex}",
+                        enum<System.Reflection.EventAttributes> (int drawn.Flags),
+                        typeof<System.Action>
+                    )
+
+                if drawn.Add then
+                    e.SetAddOnMethod (accessor $"add_E%d{eventIndex}")
+
+                if drawn.Remove then
+                    e.SetRemoveOnMethod (accessor $"remove_E%d{eventIndex}")
+
+                if drawn.Raise then
+                    e.SetRaiseMethod (accessor $"raise_E%d{eventIndex}")
+
+                for other in 0 .. drawn.Others - 1 do
+                    e.AddOtherMethod (accessor $"other%d{other}_E%d{eventIndex}")
+            )
+
+            t.CreateType () |> ignore<System.Type>
+        )
+
+        use stream = new MemoryStream ()
+        builder.Save stream
+        stream.ToArray ()
+
+    [<Test>]
+    let ``MetadataImport's event answers agree with the host runtime over drawn images`` () : unit =
+        let fixture = makeFixture ()
+
+        let property (cover : DrawnEventCoverage -> unit) (types : DrawnEvent list list) : unit =
+            let image = writeDrawnImage types
+            let assembly, state = withImage fixture image
+            let name = assembly.Name.FullName
+
+            let semanticsRows =
+                MetadataReaderExtensions.GetTableRowCount (
+                    assembly.PeReader.GetMetadataReader (),
+                    TableIndex.MethodSemantics
+                )
+
+            if semanticsRows >= 25 then
+                cover DrawnEventCoverage.AtLeast25SemanticsRows
+
+            for drawn in List.concat types do
+                if drawn.Raise then
+                    cover DrawnEventCoverage.RaiseMethod
+
+                if drawn.Others > 0 then
+                    cover DrawnEventCoverage.OtherMethods
+
+                if not drawn.Add && not drawn.Remove && not drawn.Raise && drawn.Others = 0 then
+                    cover DrawnEventCoverage.NoAccessor
+
+                if drawn.Flags &&& ~~~0x0600us <> 0us then
+                    cover DrawnEventCoverage.FlagOutsideSpecialNames
+
+                if drawn.Flags &&& 0x8000us <> 0us then
+                    cover DrawnEventCoverage.Bit15
+
+            if types |> List.exists (fun events -> events.Length > 16) then
+                cover DrawnEventCoverage.MoreThanSixteenEvents
+
+            let hasEvents = types |> List.map (fun events -> not events.IsEmpty) |> Array.ofList
+
+            if
+                hasEvents
+                |> Array.indexed
+                |> Array.exists (fun (i, has) ->
+                    not has
+                    && Array.exists id hasEvents.[.. i - 1]
+                    && Array.exists id hasEvents.[i + 1 ..]
+                )
+            then
+                cover DrawnEventCoverage.NoEventsBetweenEvents
+
+            if Array.last hasEvents then
+                cover DrawnEventCoverage.LastTypeHasEvents
+
+            let context =
+                System.Runtime.Loader.AssemblyLoadContext ("DrawnEvents", isCollectible = true)
+
+            try
+                let hostAssembly = context.LoadFromStream (new MemoryStream (image))
+                let mutable state = state
+
+                types
+                |> List.iteri (fun typeIndex drawnEvents ->
+                    let hostType = hostAssembly.GetType ($"T%d{typeIndex}", true)
+                    let hostEvents = hostDeclaredEvents hostType
+
+                    hostEvents
+                    |> Array.map (fun e -> e.Name, int e.Attributes)
+                    |> List.ofArray
+                    |> shouldEqual (drawnEvents |> List.mapi (fun i drawn -> $"E%d{i}", int drawn.Flags))
+
+                    let _, tokens, _, nextState =
+                        invokeEnumIn fixture name metadataTokenTypeEvent hostType.MetadataToken state
+
+                    state <- nextState
+
+                    tokens
+                    |> shouldEqual (hostEvents |> Array.map (fun e -> e.MetadataToken) |> List.ofArray)
+
+                    for hostEvent in hostEvents do
+                        state <- assertEventAgreesWithHost fixture name hostEvent state
+                )
+            finally
+                context.Unload ()
+
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 500) (Arb.fromGen drawnImageGen) property
+
+        for label in
+            [
+                DrawnEventCoverage.RaiseMethod
+                DrawnEventCoverage.OtherMethods
+                DrawnEventCoverage.NoAccessor
+                DrawnEventCoverage.FlagOutsideSpecialNames
+                DrawnEventCoverage.Bit15
+                DrawnEventCoverage.MoreThanSixteenEvents
+                DrawnEventCoverage.NoEventsBetweenEvents
+                DrawnEventCoverage.LastTypeHasEvents
+                DrawnEventCoverage.AtLeast25SemanticsRows
+            ] do
+            coverage.Count label |> shouldBeGreaterThan 15
 
     /// `MetadataTokenType.ParamDef`, as `MetadataImport.EnumParams` passes it.
     let private invokeEnumParams
