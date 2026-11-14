@@ -5711,3 +5711,128 @@ Taken 2026-11-14.
   * Castle over an interface whose parameter has a default value, an attribute, or a reference type under a nullable context. `MethodEmitter` is expected to call `SetConstant` or `SetCustomAttribute` for each; this is read from memory of Castle's source and is not measured. The custom-attribute stage measures all three.
   * A global method's parameter, if the guest leaves it out.
   * The slide's order is invisible to every reader PawPrint has. If a later stage reads a method's run by rank, the terminal-state check is its only existing oracle.
+
+### 5x: the decisions, amended for the stranded rows
+
+Taken 2026-11-14.
+
+Scratchpad paths below are under the scratchpad named in "5x: what it is". The first probe is `5x-impl/eotprobe` (`Program.cs`, `net10.out`, `net11.out`, `diff-net10-pawprint.txt`). The second is `5x-decide/probe2` (`Program.cs`, `net10.out`, `net11.out`). Each probe's outputs on .NET 10.0.14 and 11.0.0 are identical but for the version line.
+
+* **CoreCLR's emitter strands MethodDef rows when a slide starts the `ParamPtr` table.** Read from `md/enc/metamodelrw.cpp` in `$DOTNET_RUNTIME_SRC_NET10`; the functions named here are identical in `_NET11`.
+  * A new MethodDef row's `ParamList` is `END_OF_TABLE` (0) while no `ParamPtr` exists (`AddMethodRecord`, `NewRecordPointerEndValue`).
+  * `AddChildRowDirectForParent` gives a parameter's method, and every earlier row that still holds the marker, a real value (`ConvertMarkerToEndOfTable`).
+    * So, while no `ParamPtr` exists, the rows with a real value are a prefix of the MethodDef table. The prefix ends at the method with the greatest RID that has a parameter.
+    * When that function starts the pointer table itself (a later method already has parameters), it first converts every marker, from the last MethodDef row down.
+  * `FixParamSequence` starts the table with `CreateIndirectTable(TBL_Param, false)` and converts nothing. It is the only caller that passes `false`, and the only place other than `AddChildRowDirectForParent` that starts a pointer table.
+  * So when a slide starts the table, every MethodDef row after the slid method keeps the marker beside a pointer table. Those are the stranded rows.
+  * Once a pointer table exists, every new MethodDef row gets a real value, and no call creates a marker. A slide with a table present strands nothing. A table started by `AddChildRowDirectForParent` leaves no marker.
+* **The trigger, exactly.** A `DefineParam` call for method `m` with sequence `s` (its low sixteen bits) strands rows exactly when all three hold of the tables before the call:
+  1. No `ParamPtr` exists: the Param rows sorted by (method, Sequence, RID) are in RID order.
+  2. The last Param row belongs to `m`, and its Sequence is strictly greater than `s`.
+     * Given 1, this is "the direct step starts no table, and `FixParamSequence` moves the row".
+     * A method before the one with the last row starts the table in the direct step, with the conversion, and may then slide safely.
+     * A method after it has no row to slide past.
+  3. The MethodDef table has a row after `m`.
+  * The implementer's wording of the condition lacks the first half of 2. Without it the rule also refuses `DirectAndSlideOneCall` below, which real .NET handles correctly.
+  * A constructor is a MethodDef like any other, and it reaches the same code through its inner `MethodBuilder`. The later row may belong to another type. Measured: `CtorStrandAcrossTypes`.
+* **What real .NET does after a strand** (measured, both runtimes; the mechanism is read from `AddChildRowIndirectForParent`, `Impl_GetEndRidForColumn` and `MDInternalRW::EnumInit`).
+  * The call that strands succeeds and returns its token.
+  * A later `DefineParameter` on the slid method, or on a stranded method, throws `BadImageFormatException` "Index not found. (0x80131124)". It has already added its Param row. Measured: `SlideThenSliderAgain`, `SlideThenMiddle`, `SlideThenLast`, `StrandThenSameMethod_Y`, `StrandThenSameMethod_ret`, `ReturnAfterParam`.
+  * A later `DefineParameter` on an earlier method succeeds and silently moves the stranded rows' runs. Measured: `MiddleSlidesEarlierAdds` loses the slid method's names.
+  * A later `DefineParameter` on a method tokenised after the strand succeeds, and the slid method's run then swallows the new row. Measured: `StrandThenNewMethod` reports `X`'s first parameter as `z`, with no exception anywhere.
+  * A stranded method reads as having no Param rows, unless the row after it holds a real value. In that case `GetParameters` throws the same `BadImageFormatException`.
+    * The default constructor that `CreateType` adds is such a row. This is why the last stranded method is unreadable in `SlideNoLaterUse` and `StrandThenInvoke`, where nothing follows the strand.
+    * Invoking that method through reflection throws too.
+* **Decision: (a). `defineParam` refuses the call that strands, as data, and the handler stops the run with a TODO that names CoreCLR's defect.**
+  * `defineParam` returns a union, as `defineType` returns `TypeDefDefinition`:
+    * `ParamDefinition.Defined of ParamRid * EmitScope`;
+    * `ParamDefinition.StrandsLaterMethods of slid : MethodDefRid * last : MethodDefRid`, where `last` is the scope's last MethodDef row.
+  * The refusal's condition is the trigger above, computed from the scope before the call. The scope gains no field. The scope's MethodDef count is CoreCLR's at that moment, because both add a MethodDef row at tokenisation (5o).
+  * The handler matches on the union. For `StrandsLaterMethods` it fails with "TODO: TypeBuilder_SetParamInfo: ...". The message names the method token, the sequence and the range of stranded tokens, and says three things: CoreCLR's `FixParamSequence` starts `ParamPtr` here and leaves those methods' `ParamList` as `END_OF_TABLE`; real .NET returns a token and then misreports or refuses those methods' parameters; PawPrint does not model that.
+  * The argument checks stay `ArgumentException`s: reserved bits, a negative sequence, a method which the scope lacks. They state that PawPrint misread an argument. The stranding refusal is reachable by a guest, so it is a case of the result and the handler cannot ignore it.
+  * `EmitScope.addParam` stays the plain addition of a row, and refuses nothing more than the earlier decisions say. Its docstring says that it does not model `RegMeta` and that `defineParam` does.
+  * `EmitScopeImage`'s docstring says that the `ParamPtr` it derives is CoreCLR's for a scope whose parameters all came through `defineParam`. The rule "a `ParamPtr` exists exactly when the rows sorted by (method, Sequence, RID) are not in RID order" holds for those scopes and no others.
+  * Reasons.
+    * After the strand, real .NET's answers are a function of raw `ParamList` values that A's scope does not hold. PawPrint cannot state what it guarantees in that state, so it stops (correctness over availability).
+    * The refusal is one pure condition over tables that the scope already has, and it is checkable against a replay and against the host's emitter (below).
+    * The programs that it refuses and real .NET runs unharmed are those that, after the strand, define no parameter on any method (measured for each of: the slid method, an earlier one, a stranded one, a later one) and do not read the last stranded method's parameters. That is a narrow set, and each of its members holds metadata that real .NET itself misreads.
+* **Rejected.**
+  * (b), the exact model. It is deterministic on real .NET, so it is possible. But the scope would hold the raw `ParamList` column and the physical pointer list (option C, with the representable disagreement that C was rejected for). The image would hold `ParamList` values that SRM does not read as `CMiniMdRW` does. PawPrint's readers (`Enum`, `GetParamDefProps`, `methodOwningParameter`, `Parameter.readAll`, `parameterMarshalling`) would each need `Impl_GetEndRidForColumn`'s marker rules and the failure HRESULTs. `DefineParam` would need its partial failure, a Param row added and then an exception. That is a large model of one defect, which an upstream fix would make wrong for each runtime version.
+  * (c), refusal when a stranded row is next touched. The touches that go wrong are a later `DefineParameter` on any method at all, and a read of the last stranded method. What stays unrefused is almost nothing, and the price is new state in the scope and checks in every reader. A reader that was missed would answer silently.
+  * (d), accepting the divergence. PawPrint would answer correctly where real .NET throws or misreports, and a guest that catches the `BadImageFormatException` would take another path.
+* **Other tables and shipped stages are not affected.** Read, not measured.
+  * `AddFieldToTypeDef`, `AddMethodToTypeDef`, `AddPropertyToPropertyMap` and `AddEventToEventMap` start their pointer tables only in `AddChildRowDirectForParent`, which converts the markers first. None has a counterpart of `FixParamSequence`.
+  * `defineField`, `defineMethod`, 5s's `defineProperty` and 5w's `defineEvent` therefore have no stranding case. Stage 1's derivation of `FieldPtr`, `MethodPtr`, `PropertyPtr` and `EventPtr` stands.
+  * No shipped handler adds a Param row: `EmitScope.addParam` is called only from `EmitScopeGen.fs` and `TestEmitScopeImage.fs`. Stage 1's writer has never written a guest's parameters, so no shipped behaviour diverges and no separate PR is needed.
+* **What this replaces in "5x: the decisions".**
+  * "`defineParam` ... adds a row at the next RID and searches for nothing" becomes: it returns `ParamDefinition`; it searches for nothing; it adds the row at the next RID unless the call strands.
+  * "A pointer table starts either when a later method already has parameters or when a row slides. Both together are ..." holds only for scopes with no stranded row, which are the only scopes `defineParam` builds.
+  * "The replay may take the final MethodDef count" is withdrawn, with its "Checked" sentence. That check covered `AddChildRowDirectForParent` alone. With the final count, every slide on a method other than the last, with no table yet, strands rows.
+  * "It forces every `MethodBuilder`'s `MetadataToken`, in order, before the first `DefineParameter`" is replaced by the differential property below.
+  * "The slide's order is invisible to every reader PawPrint has" stands for the scopes PawPrint builds. On real .NET, a slide that strands rows is visible through reflection.
+  * In "5x: what it is", "a method added later never forces the pointer table" stands. "a `ParamPtr` exists exactly when ..." is qualified as above.
+* **The replay is the reference model, and it is stated once.** A test module `ParamTableReplay` holds CoreCLR's physical tables: each MethodDef row's `ParamList` with the marker 0, the Param rows' (method, Sequence), and the pointer list when one exists.
+  * It has two operations.
+    * `addMethod` is `AddMethodRecord`.
+    * `addParam` is `AddChildRowDirectForParent`, `AddChildRowIndirectForParent` and `FixParamSequence`, written step for step from the source.
+  * `addParam` reports `Stranded` when a pointer table and a marker coexist after it. It finds this by inspecting the columns, and does not evaluate the three-part trigger.
+  * It models nothing after a strand.
+  * A fixed table pins it to the eighteen measured scenarios of the two probes: for each, the tokens up to the first strand, and whether and where it strands.
+* **The generator and the round trip (7a, amended).**
+  * `EmitScopeGen` applies its operations in order and carries the replay's state beside the scope. An `Op.Method` calls `addMethod`. An `Op.Param` calls the replay first, and is skipped when the replay reports `Stranded`, as an operation with no method to name is skipped today.
+  * The round trip compares the image with the replay's final state: the `ParamPtr`'s presence, its contents, and every method's run.
+  * Its fixed sample keeps the earlier coverage, and adds three counts, each above a stated number: skipped stranding operations; slides on a method that is not the last MethodDef row while a table exists; slides which start the table on the last MethodDef row, followed by a later method that gets parameters.
+* **The Domain model (`TestEmitScopeParams`, amended).**
+  * The generated calls interleave `defineMethod` and `defineParam`, so that a method with no parameters can follow the method with the last Param row.
+  * New property: over every generated history, `defineParam` returns `StrandsLaterMethods` exactly when the replay's `addParam` reports `Stranded`. It then names the slid method and the last MethodDef row, and the scope is unchanged.
+  * The other properties run over the `Defined` calls.
+  * Coverage, each above a stated count: refusals; accepted slides with a table present; accepted slides on the last MethodDef row; accepted calls where the direct step starts the table and the same call slides.
+* **The differential property (amended).**
+  * The schedule tokenises a drawn prefix of the methods before the first `DefineParameter`, and the rest at one drawn later step. Each `MetadataToken` read is in an order that adds one row, and the test calls `defineMethod` in the same order. `DefineParameter` names only a method that has a row.
+  * For a `Defined` call: the host's token equals the RID, and the host throws nothing.
+  * For a `StrandsLaterMethods` call:
+    * The test makes the same call on the host, which must return the next Param token.
+    * It then calls `DefineParameter(0, None, null)` on the same method. That call must throw `BadImageFormatException` with `HResult` 0x80131124.
+    * That module's schedule ends there. Its types are not created and nothing of it is read.
+    * The failing call returns an HRESULT from `RecordPool::InsertRecord(0)` under `DefineParam`'s lock holder. It is the measured `SlideThenSliderAgain` and `StrandThenSameMethod_*`.
+  * A host `DefineParameter` that throws after a `Defined` call fails the property. This is the check that the trigger is not too narrow. The extra call after a refusal is the check that it is not too wide.
+  * Coverage is asserted, each above a stated count, for: a refusal; a slide accepted with a table present; a slide accepted on the last MethodDef row; a method tokenised after such a slide that then gets a parameter.
+  * The earlier corrections stand: the mask of 0xF000, the cut of a name at its first NUL, no constructors, the model of `RuntimeParameterInfo.GetParameters`.
+* **The guest (amended).**
+  * `TypeBuilderDefineParameter.cs` gains four modules, each with three methods `X(int, int)`, `Y(int, int)`, `Z(int)` whose tokens are read first where the probe reads them. Each row's tokens and names are as `5x-decide/probe2/net10.out` has them.
+    * `DirectTableThenSlide`: `Z.1`, `X.2`, `X.1`, `Y.2`, `Y.1`, `Y.0`, `Z.0`. The direct step starts the table, then two slides happen on methods that are not last. It kills a refusal that ignores condition 1.
+    * `DirectAndSlideOneCall`: `X.2`, `Y.1`, `X.1`, `Z.1`, `Y.0`. It kills a refusal that lacks the first half of condition 2.
+    * `SlideOnLastThenLater`: only `Y` tokenised; `Y.2`, `Y.1`, `X.1`, `Z.1`, `Z.0`, `Y.0`. It kills a refusal that ignores condition 3.
+    * `TieIsNoSlide`: `X.1` twice, `Y.1`, `Z.1`. It kills a refusal on an equal sequence.
+  * The terminal-state check also reads `DirectTableThenSlide`'s Param rows and its `ParamPtr` contents.
+  * The existing modules strand nothing: each of their slides is on the last MethodDef row. The guest's run under PawPrint is the check, since a strand would stop it.
+  * A second guest, `sourcesImpure/TypeBuilderDefineParameterStrandedRows.cs`, is registered and parked on every runtime. It pins what real .NET does, and returns the number of the first failing check. Its three modules:
+    * `ReturnAfterParam`: `Y` tokenised; `X.1` then `X.0` each return a token; `X.2` then throws `BadImageFormatException` with `HResult` 0x80131124.
+    * `SlideNoLaterUse`: `Z` tokenised; `X.2`, `X.1`. After `CreateType`, `X` reads `a`, `b`; `Y` reads two parameters with no row; `Z.GetParameters()` throws the same exception.
+    * `StrandThenNewMethod`: `Y` tokenised; `X.2`, `X.1`, `Z.1`. After `CreateType`, `X`'s first parameter is named `z` with token `0x08000003`.
+  * Before it is committed it is built against net10.0 and run on .NET 10.0.14 and 11.0.0-rc.3, where it must exit 0. A control inverts the third module's name and must exit with that check's number on both.
+  * Its parked ending is the handler's TODO at the first module's `X.0`. Its parked reason states the defect, the measurement, and that it is un-parked by a model of the stranded rows or by an upstream fix in every supported runtime.
+* **The order of the tests.**
+  * Before any commit: both guests on both real runtimes, with their controls.
+  * Commit 1, recorded:
+    * `ParamTableReplay` with its fixed table of the measured scenarios;
+    * the generator and the round trip, expected green against `main`'s writer (if red, stop and report, as before);
+    * both guests registered, each stopping at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetParamInfo)";
+    * the red Domain test of `addParam`'s flag width.
+  * Commit 2, recorded failing: `ParamDefinition`; `defineParam` with a body that fails by name; `TestEmitScopeParams` with the equivalence property; the differential property.
+  * Then `addParam`'s check and `defineParam`.
+  * Then the handler. The parked guest's ending is re-measured, and its reason is set to the TODO.
+* **Mutants, added to the amended list.** Each names its expected killers.
+  * The refusal removed, so that `defineParam` always defines: the equivalence property; the differential property's extra call.
+  * Condition 1 dropped: `DirectTableThenSlide`; the equivalence property; the differential property (a `Defined` call is expected and a refusal arrives).
+  * Condition 2's owner test replaced by "any row of `m` has a greater Sequence": `DirectAndSlideOneCall`; the equivalence property.
+  * Condition 2's `>` made `>=`: `TieIsNoSlide`; `TwoSame` if its method is not the last row; the equivalence property.
+  * Condition 3 dropped: `Slide`, `Order` and `SlideOnLastThenLater`; the equivalence property.
+  * Condition 3 as "a later method of the same type": the equivalence property, provided the generator draws two types. A stated count asserts that it does.
+  * The handler treating `StrandsLaterMethods` as a fault with no TODO text: the parked guest's ending, checked by naming the case.
+  * The replay's `CreateIndirectTable(false)` path given the marker conversion, so that the replay never strands: the replay's fixed table.
+  * "The writer with no slide" keeps its killers: the terminal-state check and the round trip's replay.
+* **Additions to "left to later stages".**
+  * The exact model of stranded rows (option (b)), with the parked guest as its oracle.
+  * Whether `PersistedAssemblyBuilder` or a saved image shares the defect. `PreSave` converts markers only from the last row down to the first real value. Not measured, and outside a `Run` assembly.
+  * How often real emitters reach the trigger: not measured. The shape needs a later method tokenised early (for instance by `ILGenerator.Emit(OpCodes.Call, laterMethod)`) and then parameters defined out of position order, or the return value after a parameter. Castle's measured run does not reach it.
