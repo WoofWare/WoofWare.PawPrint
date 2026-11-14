@@ -4500,3 +4500,99 @@ Taken 2026-11-14.
   * The items of 5u's list named above.
   * `TypeInfo.Events` is read by IlDump and, from 5v, by one test. Whether reflection should read it, or it should
     go, is not decided here.
+
+### 5v: as built
+
+Built 2026-11-14 as decided above. Each guest was measured first on real .NET, built against net10.0 and run on
+10.0.14 and rolled forward to 11.0.0-rc.3 (scratchpad `5v-guest`), with a control inverting one check:
+
+| Guest | .NET 10.0.14 | .NET 11.0.0-rc.3 | Control |
+|---|---|---|---|
+| `sourcesPure/TypeEvents.cs` (53 checks) | 0 | 0 | check 27 inverted: 27 on both |
+| `sourcesImpure/TypeBuilderInheritedEvents.cs` (8) | 0 | 0 | check 2 inverted: 2 on both |
+| `sourcesImpure/DispatchProxyEventInterface.cs` (8, parked) | 0 | 0 | check 3 inverted: 3 on both |
+| `sourcesImpure/DispatchProxyMethodInterface.cs` | 0 | 0 | |
+| `sourcesImpure/DispatchProxyPropertyInterface.cs` | 0 | 0 | |
+
+`TypeEvents.cs`'s `Progress<int>` rows (checks 50 to 53) pass under PawPrint, so they stayed in the guest.
+`TestFabricatedEventAccessors`' driver runs on the framework under test, so it was measured on both by running the
+fixture with `PAWPRINT_TEST_RUNTIME` unset and `Net11`; both pass, PawPrint and the real runtime alike. The three
+passing guests also pass under PawPrint with `PAWPRINT_TEST_RUNTIME=Net11`.
+
+* `NativeMetadataImport` (WoofWare.PawPrint/Native/NativeMetadataImport.fs): `metadataTokenTypeEvent`;
+  `eventDefinitionsForTypeDefinition`, beside the property enumeration, which the Enum arm calls; `EventRow` and
+  `eventRow`, the one read of an Event row from a raw token, which the new `GetEventProps` FCall arm and the Event arm
+  of `GetName` both call. `GetName`'s comment about the missing Event arm is gone and its refusal names four kinds.
+  No function changed visibility, and nothing reads `isDynamic` for the Enum.
+* Tests, committed first. `TestNativeMetadataImport` gains the event shapes in its source (appended after
+  `MarshalShapes`, so no existing token moves), `invokeEnumIn`, `invokeGetNameIn`, `invokeEnumAssociatesIn` and
+  `invokeGetEventPropsIn` (the existing helpers now call them with the fixture's assembly), the handler tests the
+  decisions list, the CoreLib sweep and the property. `TestFabricatedEventAccessors` is compiled before it, so that its
+  `fabricate` serves the unit test of both `Dup` rows. The two existing tests changed as the decisions said.
+  * The fabricated image is `5v-fabwrite`'s type with `Flagged` (flags `0xFFFF`, one add) between `Many` and `F0`: 25
+    events and 32 MethodSemantics rows (5 for `Ev`, 2 for the `Dup`s, 4 for `Many`, 1 for `Flagged`, 20 fillers). Its
+    driver has 16 checks.
+  * The CoreLib sweep compares every type the host's `GetTypes` returns, the count asserted as the TypeDef table's
+    less `<Module>`, and holds `TypeInfo.Events` of every TypeDef to the enumeration. It takes about half a second.
+  * The property draws one to six interfaces, each with no events or up to a bound itself drawn from 3, 8 and 24, so
+    that some types have more than sixteen. 500 fixed cases and 500 fresh take three seconds, so the handlers are
+    driven throughout and nothing fell back to `internal` functions. Every coverage label is asserted above 15 in the
+    fixed sample; the least reached is `MoreThanSixteenEvents`, 88 times (counted per image; the event labels are
+    counted per event).
+* Red, at the tests-first commit: `TypeEvents.cs`, `TypeBuilderInheritedEvents.cs` and the three `DispatchProxy`
+  cases named stopped at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent
+  0x02000002", and the fabricated test at the same TODO. Of the 114 tests in `TestNativeMetadataImport` and
+  `TestFabricatedEventAccessors`, 16 failed: the Enum tests, the sweep and the property (after its host-side
+  assertions passed on the first case) at that TODO; the two `GetEventProps` refusal tests and the every-event test at
+  "MetadataImport native method did not match"; the two Enum refusal tests with the TODO in place of the refusal; and
+  "GetName rejects a token of an unsupported kind" on the old message.
+* The parked cases, measured by naming them once the arms existed: `DispatchProxyMethodInterface.cs` exits 0 and is
+  registered as passing. `DispatchProxyPropertyInterface.cs` passes its first four checks and its second `Create`
+  (line 100, read from the Release App's report) stops at the invoke stub's `newobj`; its reason quotes that without
+  the entry number and names `ReflectionConstructorInvokeTwice.cs`. `DispatchProxyEventInterface.cs`, parked in the
+  tests-first commit at the Enum TODO, now stops at "Unimplemented native method (PInvokeImpl
+  QCall!TypeBuilder_DefineEvent)", and its reason says so.
+* Mutants, each built fresh and run against every test of `TestNativeMetadataImport` and `TestFabricatedEventAccessors`
+  and against the three passing guests (scratchpad `5v-mut`). A guest's number is its exit code, the number of its
+  first failing check. "U" is the handler tests, "S" the CoreLib sweep, "E" the every-event test, "P" the property, "D"
+  the unit test of the fabricated image, "F" the fabricated guest (with its driver's exit code), "A" the existing event
+  associates test:
+
+  | Mutant | Killed by |
+  |---|---|
+  | the Enum answering none | `TypeEvents.cs` (4); `TypeBuilderInheritedEvents.cs` (2); U, S, P, D, F (1) |
+  | the Enum giving the next TypeDef's events | `TypeEvents.cs` (PawPrint throws); `TypeBuilderInheritedEvents.cs` (2); U, S, P, D, F (1) |
+  | the Enum refusing a dynamic module | `TypeBuilderInheritedEvents.cs` alone: nothing else asks a dynamic module |
+  | the Enum truncated at sixteen | `TypeEvents.cs` (46); U (seventeen), P, D, F (1) |
+  | the Enum's order reversed | `TypeEvents.cs` (4); `TypeBuilderInheritedEvents.cs` (2); U, S, P, D, F (1) |
+  | the Enum including the base TypeDef's events | `TypeEvents.cs` (19); U ("only a type's own"), S |
+  | the Enum dropping a repeated name | D alone, as the decisions expected |
+  | `GetEventProps` reading the next row | `TypeEvents.cs` (4); `TypeBuilderInheritedEvents.cs` (the row past the end refused); U, S, E, P, D, F |
+  | `GetEventProps` clearing `RTSpecialName` | P, D, F (5) |
+  | `GetEventProps`' two out-pointers swapped | both guests (a store refused); S, E, P, D, F |
+  | the flags written as 0 | P, D, F (5) |
+  | the flags masked to `0x0600` | P, D, F (12) |
+  | the flags sign-extended from sixteen bits | P, D, F (12) |
+  | the `GetEventProps` arm removed | both guests, at "Unimplemented native method (InternalCall) ... MetadataImport::GetEventProps", the stop the stage measured; U, S, E, P, D, F |
+  | the `GetName` Event arm removed | both guests, at `GetName`'s refusal of an Event token; S, E, U (absent rows), P, F |
+  | `GetName` giving the next row's name | `TypeEvents.cs` (11, the first `GetEvent` by name); `TypeBuilderInheritedEvents.cs` (the row past the end refused); S, E, U, P, F (9) |
+  | `GetName` read from the Property row of the same RID | both guests ("Read out of bounds"); S, E, U, P, F |
+  | an Event parent encoded with the Property tag | `TypeEvents.cs` (4); `TypeBuilderInheritedEvents.cs` (2); A, S, E, P, F (6) |
+  | the read-write reversal applied to an Event parent on disk | A, P, F (8: `Ev`'s two other methods, before `Many`'s three) |
+  | the Enum's refusal of a non-TypeDef parent removed | U alone |
+  | the Enum's refusal of an absent TypeDef removed | U alone |
+  | the row read's refusal of a non-Event token removed | U alone |
+  | the row read's bounds check removed | U alone |
+  | the row read's lower bound removed | U alone (row 0) |
+
+  The `GetName` arm's own stop, which the stage had not measured alone, is `GetName`'s refusal; `GetName` giving the
+  wrong name passes checks 1 to 10 of `TypeEvents.cs` and fails 11, so the first `GetName` call is the first `GetEvent`
+  by name. No mutant survived, so no test was strengthened after the first run.
+* Suites, built from the whole solution at `78d6112bb` (the later commits change only a test helper's docstring and
+  this plan), each run on its own: `Guest` (234), `GuestSolo` (2), `GuestPure` (1182) and `GuestImpure` (280), all
+  passing, and the default suite (5598 passed, 37 skipped). They ran in a detached worktree while the mutants ran in
+  this one.
+* Deviations from the decisions: none in the design. Where the decisions left a choice: the sweep and the property sit
+  in `TestNativeMetadataImport`, beside the private `invoke*` helpers they drive, rather than in a fixture of their own;
+  the property's case count is 500, since it is cheap; and the sweep asserts that some types have events and some more
+  than one, rather than CoreLib's exact counts, which a CoreLib bump would move.
