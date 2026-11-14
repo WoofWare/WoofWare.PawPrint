@@ -132,6 +132,53 @@ module TestAttributeFormatting =
 
         AttributeFormatting.formatFixedArg arg |> shouldEqual "{ { 1uy, 2uy }, null }"
 
+    [<Test>]
+    let ``formatFixedArg Tagged renders the value, prefixed by an enum's name`` () : unit =
+        AttributeFormatting.formatFixedArg (
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.Primitive PrimitiveType.Byte,
+                CustomAttribFixedArg.U1 7uy
+            )
+        )
+        |> shouldEqual "7uy"
+
+        AttributeFormatting.formatFixedArg (
+            CustomAttribFixedArg.Tagged (CustomAttribTaggedType.Type, CustomAttribFixedArg.Type (Some "Other"))
+        )
+        |> shouldEqual "typeof(Other)"
+
+        AttributeFormatting.formatFixedArg (
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.Enum "ByteFlag",
+                CustomAttribFixedArg.Enum (CustomAttribFixedArg.U1 200uy)
+            )
+        )
+        |> shouldEqual "(ByteFlag)200uy"
+
+        AttributeFormatting.formatFixedArg (
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.SzArray (CustomAttribTaggedElementType.Enum "ByteFlag"),
+                CustomAttribFixedArg.Array (Some [ CustomAttribFixedArg.Enum (CustomAttribFixedArg.U1 1uy) ])
+            )
+        )
+        |> shouldEqual "(ByteFlag[]){ 1uy }"
+
+        AttributeFormatting.formatFixedArg (
+            CustomAttribFixedArg.Tagged (
+                CustomAttribTaggedType.SzArray CustomAttribTaggedElementType.Object,
+                CustomAttribFixedArg.Array (
+                    Some
+                        [
+                            CustomAttribFixedArg.Tagged (
+                                CustomAttribTaggedType.Primitive PrimitiveType.String,
+                                CustomAttribFixedArg.String None
+                            )
+                        ]
+                )
+            )
+        )
+        |> shouldEqual "{ null }"
+
     // ----- attributeTypeName: strips "Attribute" suffix ---------------------
 
     let private findTypeByName (qualified : string) : TypeInfo<GenericParamFromMetadata, TypeDefn> =

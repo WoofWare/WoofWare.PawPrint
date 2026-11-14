@@ -1,5 +1,6 @@
 namespace WoofWare.PawPrint
 
+open System.Collections.Immutable
 open Microsoft.Extensions.Logging
 
 /// <summary>
@@ -30,6 +31,9 @@ type CustomAttribArgPlan =
     /// than from the blob, so the allocated array's element type does not depend on what the bytes
     /// happen to look like.
     | SzArray of elementType : ConcreteTypeHandle * elements : CustomAttribArgPlan
+    /// An <c>object</c> parameter. Its bytes name their own type, so the plan for the value — and,
+    /// for an array, its element type — comes from the decoded tag rather than from here.
+    | TaggedObject
 
 [<RequireQualifiedAccess>]
 module CustomAttribArgPlan =
@@ -40,6 +44,31 @@ module CustomAttribArgPlan =
         | CustomAttribArgPlan.Enum underlying -> CustomAttribArgShape.Enum underlying
         | CustomAttribArgPlan.Type -> CustomAttribArgShape.Type
         | CustomAttribArgPlan.SzArray (_, elements) -> CustomAttribArgShape.SzArray (shape elements)
+        | CustomAttribArgPlan.TaggedObject -> CustomAttribArgShape.TaggedObject
+
+/// <summary>
+/// One type name from a <c>CustomAttrib</c> blob, as <c>TypeNameResolver</c> resolved it: the
+/// <c>RuntimeType</c> it answered with, and, when that type is an enum, the enum's handle and
+/// underlying type.
+/// </summary>
+/// <remarks>
+/// A <c>System.Type</c> argument needs only the object; an enum named inside a
+/// <c>TAGGED_OBJECT</c> needs the handle, to box its value as that enum, and the underlying type,
+/// which is how wide its value is in the blob.
+/// </remarks>
+type CustomAttribResolvedType =
+    {
+        RuntimeType : ManagedHeapAddress
+        Enum : (ConcreteTypeHandle * EnumUnderlyingType) option
+    }
+
+[<RequireQualifiedAccess>]
+module CustomAttribResolvedType =
+    /// What the decoder needs to know of a resolution.
+    let name (resolved : CustomAttribResolvedType) : CustomAttribResolvedName =
+        match resolved.Enum with
+        | Some (_, underlying) -> CustomAttribResolvedName.Enum underlying
+        | None -> CustomAttribResolvedName.NotEnum
 
 /// <summary>
 /// Lower a decoded <c>CustomAttribFixedArg</c> to the <c>CliType</c> value the
@@ -49,17 +78,16 @@ module CustomAttribArgPlan =
 /// Mirrors the per-arg cases that CoreCLR's <c>CustomAttribute_CreateCustomAttributeInstance</c>
 /// (<c>customattribute.cpp:900</c>) produces via <c>GetDataFromBlob</c> + <c>Box</c> just
 /// before invoking the ctor. The set is the one the blob reader emits: primitives,
-/// <c>SerString</c>, <c>ENUM</c>, <c>TYPE</c>, and <c>SZARRAY</c> of those; <c>TAGGED_OBJECT</c>
-/// will be added when the QCall handler needs it.
+/// <c>SerString</c>, <c>ENUM</c>, <c>TYPE</c>, <c>TAGGED_OBJECT</c>, and <c>SZARRAY</c> of those.
 /// </remarks>
 [<RequireQualifiedAccess>]
 module CustomAttribValueLowering =
 
     /// <summary>
     /// Convert a fixed arg whose lowering needs nothing but the decoded value itself. Returns
-    /// <c>Error</c> for the variants that need more — a heap allocation (<c>String (Some _)</c>),
-    /// a resolved type (<c>Type (Some _)</c>), or the element type an <c>Array</c> does not carry;
-    /// callers should use <c>toCliType</c> in that case.
+    /// <c>Error</c> for the variants that need more — a heap allocation (<c>String (Some _)</c>,
+    /// <c>Tagged</c>), a resolved type (<c>Type (Some _)</c>), or the element type an <c>Array</c>
+    /// does not carry; callers should use <c>toCliType</c> in that case.
     /// </summary>
     /// <remarks>
     /// CLI eval-stack rules treat <c>uint32</c>/<c>uint64</c> identically to their
@@ -106,6 +134,71 @@ module CustomAttribValueLowering =
         | CustomAttribFixedArg.Array _ ->
             Error
                 "CustomAttribFixedArg.Array requires a CustomAttribArgPlan naming the element type; use CustomAttribValueLowering.toCliType"
+        // Even a null string, which needs no box, is refused, for the same reason as the null array:
+        // without a plan nothing confirms that an `object` parameter is what receives it.
+        | CustomAttribFixedArg.Tagged _ ->
+            Error
+                "CustomAttribFixedArg.Tagged boxes its value as the type its tag names; use CustomAttribValueLowering.toCliType"
+
+    /// The handle of the corelib type a primitive serialization type names, as CoreCLR's
+    /// `CoreLibBinder::GetElementType` answers it.
+    let private primitiveHandle
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (pt : PrimitiveType)
+        (state : IlMachineState)
+        : IlMachineState * ConcreteTypeHandle
+        =
+        IlMachineTypeResolution.concretizeType
+            loggerFactory
+            baseClassTypes
+            state
+            baseClassTypes.Corelib.DefinitionFullName
+            ImmutableArray.Empty
+            ImmutableArray.Empty
+            (TypeDefn.PrimitiveType pt)
+
+    /// `System.Type`, the element type CoreCLR allocates for a `TYPE` array (`CLASS__TYPE` in
+    /// `GetTypeHandleFromBlob`).
+    let private systemTypeHandle
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        : IlMachineState * ConcreteTypeHandle
+        =
+        let typeInfo =
+            baseClassTypes.Corelib.TryGetTopLevelTypeDef "System" "Type"
+            |> Option.defaultWith (fun () -> failwith "CustomAttribValueLowering: CoreLib defines no System.Type")
+
+        LoadedTypeInfo.typeInfoToTypeDefn' baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
+        |> IlMachineTypeResolution.concretizeType
+            loggerFactory
+            baseClassTypes
+            state
+            baseClassTypes.Corelib.DefinitionFullName
+            ImmutableArray.Empty
+            ImmutableArray.Empty
+
+    /// The enum that the head of `resolvedTypes` names, for an enum named inside a TAGGED_OBJECT.
+    let private takeEnum
+        (name : string)
+        (resolvedTypes : CustomAttribResolvedType list)
+        : ConcreteTypeHandle * EnumUnderlyingType * CustomAttribResolvedType list
+        =
+        match resolvedTypes with
+        | {
+              Enum = Some (handle, underlying)
+          } :: rest -> handle, underlying, rest
+        | {
+              Enum = None
+          } :: _ ->
+            failwithf
+                "CustomAttribValueLowering.toCliType: bug — the resolved type for the enum \"%s\" is not an enum; CustomAttribute.readFixedArgsResolving refuses that blob, so it must have been decoded with other resolutions"
+                name
+        | [] ->
+            failwithf
+                "CustomAttribValueLowering.toCliType: bug — no resolved type left for the enum \"%s\"; the caller must resolve every name CustomAttribute.typeNamesToResolve lists, in order"
+                name
 
     /// <summary>
     /// Lower a fixed arg to a <c>CliType</c>, allocating on the heap when the arg is a non-null
@@ -122,14 +215,19 @@ module CustomAttribValueLowering =
     /// </param>
     /// <param name="arg">The decoded fixed argument to lower.</param>
     /// <param name="resolvedTypes">
-    /// The <c>RuntimeType</c> objects for the names <c>CustomAttribute.typeNamesToResolve</c>
-    /// listed for this arg, in that order. Each non-null <c>Type</c> met consumes the head, and
-    /// the unconsumed tail is returned, so a caller lowering several args threads it through and
-    /// checks that nothing is left at the end. Running out at a <c>Type</c> is a caller bug and
-    /// fails loudly.
+    /// The resolutions of the names <c>CustomAttribute.typeNamesToResolve</c> listed for this arg,
+    /// in that order. Each non-null <c>Type</c>, and each enum a <c>Tagged</c> value names, consumes
+    /// the head, and the unconsumed tail is returned, so a caller lowering several args threads it
+    /// through and checks that nothing is left at the end. Running out is a caller bug and fails
+    /// loudly.
     /// </param>
     /// <param name="state">The state to allocate in; the returned state holds whatever was allocated.</param>
     /// <remarks>
+    /// A <c>Tagged</c> value is boxed as the type its tag names, as CoreCLR's <c>typeObject</c> arm
+    /// does: a primitive as that corelib primitive (so <c>U4</c> boxes as <c>System.UInt32</c>,
+    /// whatever its eval-stack form), an enum as the resolved enum. A string, a <c>Type</c> and an
+    /// array are references already.
+    ///
     /// The empty <c>SerString</c> routes through the canonical interned empty
     /// string, mirroring CoreCLR's <c>GetDataFromBlob</c> for
     /// <c>SERIALIZATION_TYPE_STRING</c>: <c>StringObject::NewString(0)</c>
@@ -142,10 +240,21 @@ module CustomAttribValueLowering =
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (plan : CustomAttribArgPlan)
         (arg : CustomAttribFixedArg)
-        (resolvedTypes : ManagedHeapAddress list)
+        (resolvedTypes : CustomAttribResolvedType list)
         (state : IlMachineState)
-        : CliType * ManagedHeapAddress list * IlMachineState
+        : CliType * CustomAttribResolvedType list * IlMachineState
         =
+        let box
+            (handle : ConcreteTypeHandle)
+            (payload : CliType)
+            (resolvedTypes : CustomAttribResolvedType list)
+            (state : IlMachineState)
+            =
+            let addr, state =
+                Boxing.boxValueType loggerFactory baseClassTypes handle (EvalStackValue.ofCliType payload) state
+
+            CliType.ObjectRef (Some addr), resolvedTypes, state
+
         match plan, arg with
         // ECMA-335 II.23.3's `NumElem = 0xFFFFFFFF` is the null-array sentinel, which is a
         // different result from the zero-length array below; CoreCLR likewise leaves the argument
@@ -186,7 +295,7 @@ module CustomAttribValueLowering =
             // The head is this occurrence's type: `typeNamesToResolve` lists names in the order
             // this walk meets them, and each is resolved to exactly one object.
             match resolvedTypes with
-            | resolved :: rest -> CliType.ObjectRef (Some resolved), rest, state
+            | resolved :: rest -> CliType.ObjectRef (Some resolved.RuntimeType), rest, state
             | [] ->
                 failwithf
                     "CustomAttribValueLowering.toCliType: bug — no resolved type left for the System.Type argument named \"%s\"; the caller must resolve every name CustomAttribute.typeNamesToResolve lists, in order"
@@ -199,6 +308,73 @@ module CustomAttribValueLowering =
             failwithf
                 "CustomAttribValueLowering.toCliType: bug — Type plan paired with non-Type value %A; a value must be lowered with the plan it was decoded with"
                 other
+        | CustomAttribArgPlan.TaggedObject, CustomAttribFixedArg.Tagged (tag, value) ->
+            match tag with
+            | CustomAttribTaggedType.Primitive PrimitiveType.String ->
+                toCliType
+                    loggerFactory
+                    baseClassTypes
+                    (CustomAttribArgPlan.Primitive PrimitiveType.String)
+                    value
+                    resolvedTypes
+                    state
+            | CustomAttribTaggedType.Primitive pt ->
+                let payload, resolvedTypes, state =
+                    toCliType loggerFactory baseClassTypes (CustomAttribArgPlan.Primitive pt) value resolvedTypes state
+
+                let state, handle = primitiveHandle loggerFactory baseClassTypes pt state
+                box handle payload resolvedTypes state
+            | CustomAttribTaggedType.Type ->
+                toCliType loggerFactory baseClassTypes CustomAttribArgPlan.Type value resolvedTypes state
+            | CustomAttribTaggedType.Enum name ->
+                let handle, underlying, resolvedTypes = takeEnum name resolvedTypes
+
+                let payload, resolvedTypes, state =
+                    toCliType
+                        loggerFactory
+                        baseClassTypes
+                        (CustomAttribArgPlan.Enum underlying)
+                        value
+                        resolvedTypes
+                        state
+
+                box handle payload resolvedTypes state
+            | CustomAttribTaggedType.SzArray element ->
+                // The element type comes from the tag, as CoreCLR's `GetTypeHandleFromBlob` takes it,
+                // so an empty or null array still has it; an enum's is resolved even for a null array.
+                let state, elementType, elementPlan, resolvedTypes =
+                    match element with
+                    | CustomAttribTaggedElementType.Primitive pt ->
+                        let state, handle = primitiveHandle loggerFactory baseClassTypes pt state
+                        state, handle, CustomAttribArgPlan.Primitive pt, resolvedTypes
+                    | CustomAttribTaggedElementType.Type ->
+                        let state, handle = systemTypeHandle loggerFactory baseClassTypes state
+                        state, handle, CustomAttribArgPlan.Type, resolvedTypes
+                    | CustomAttribTaggedElementType.Object ->
+                        let state, handle =
+                            primitiveHandle loggerFactory baseClassTypes PrimitiveType.Object state
+
+                        state, handle, CustomAttribArgPlan.TaggedObject, resolvedTypes
+                    | CustomAttribTaggedElementType.Enum name ->
+                        let handle, underlying, resolvedTypes = takeEnum name resolvedTypes
+                        state, handle, CustomAttribArgPlan.Enum underlying, resolvedTypes
+
+                toCliType
+                    loggerFactory
+                    baseClassTypes
+                    (CustomAttribArgPlan.SzArray (elementType, elementPlan))
+                    value
+                    resolvedTypes
+                    state
+        | CustomAttribArgPlan.TaggedObject, other ->
+            failwithf
+                "CustomAttribValueLowering.toCliType: bug — TaggedObject plan paired with untagged value %A; a value must be lowered with the plan it was decoded with"
+                other
+        | (CustomAttribArgPlan.Primitive _ | CustomAttribArgPlan.Enum _), CustomAttribFixedArg.Tagged _ ->
+            failwithf
+                "CustomAttribValueLowering.toCliType: bug — plan %A paired with tagged value %A; a value must be lowered with the plan it was decoded with"
+                plan
+                arg
         | (CustomAttribArgPlan.Primitive _ | CustomAttribArgPlan.Enum _ | CustomAttribArgPlan.SzArray _),
           CustomAttribFixedArg.Type _ ->
             failwithf

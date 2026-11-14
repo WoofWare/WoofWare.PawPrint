@@ -92,6 +92,10 @@ module NativeCustomAttribute =
         : IlMachineState * CustomAttribArgPlan
         =
         match handle with
+        // CoreCLR's fixed-arg loop sends ELEMENT_TYPE_OBJECT to `GetDataFromBlob`'s `typeObject`
+        // arm, which reads the value's own tag first.
+        | ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Object ->
+            state, CustomAttribArgPlan.TaggedObject
         | ConcretePrimitive state.TypeSystem.ConcreteTypes pt -> state, CustomAttribArgPlan.Primitive pt
         | ConcreteOneDimArrayZero elementHandle ->
             // CoreCLR's fixed-arg loop hands `GetDataFromBlob` the *element* type handle
@@ -116,12 +120,10 @@ module NativeCustomAttribute =
 
         if not isEnum then
             // What is left here is every parameter type the fixed-args grammar has no encoding
-            // for. `object` (TAGGED_OBJECT, 0x51) is the one that real metadata carries and that
-            // PawPrint does not yet decode; a multidimensional or non-SZ array parameter also
-            // lands here, and CoreCLR refuses that one too, since `GetDataFromBlob` has no
-            // `ELEMENT_TYPE_ARRAY` case and falls through to `badBlob`.
+            // for, such as a multidimensional or non-SZ array parameter. CoreCLR refuses those too,
+            // since `GetDataFromBlob` has no `ELEMENT_TYPE_ARRAY` case and falls through to `badBlob`.
             failwith
-                $"TODO: %s{operation}: ctor parameter of type %s{describe state} is neither a primitive, an SZARRAY, System.Type, nor an enum, so the fixed-args grammar cannot decode it; TAGGED_OBJECT (0x51) fixed args in particular are not yet supported"
+                $"TODO: %s{operation}: ctor parameter of type %s{describe state} is neither a primitive, object, an SZARRAY, System.Type, nor an enum, so the fixed-args grammar cannot decode it; CoreCLR throws CustomAttributeFormatException"
 
         let state, underlyingHandle =
             IlMachineRuntimeMetadata.enumUnderlyingHandle ctx.LoggerFactory ctx.BaseClassTypes state handle
@@ -177,6 +179,65 @@ module NativeCustomAttribute =
                 paramType
 
         planOfConcreteParameter operation ctx state handle
+
+    /// <summary>
+    /// What a <c>RuntimeType</c> answered by <c>TypeNameResolver</c> is, as the blob decoder and the
+    /// lowering need it: whether it is an enum, and if so its handle and underlying type.
+    /// </summary>
+    let private resolvedTypeOf
+        (operation : string)
+        (ctx : NativeCallContext)
+        (state : IlMachineState)
+        (runtimeType : ManagedHeapAddress)
+        : IlMachineState * CustomAttribResolvedType
+        =
+        let notEnum : CustomAttribResolvedType =
+            {
+                RuntimeType = runtimeType
+                Enum = None
+            }
+
+        // Only a closed type can be an enum. A `System.Type` argument may name anything reflection
+        // can, an open generic definition included, and is passed on as the object it is.
+        match
+            NativeCall.runtimeTypeHandleTargetOfRuntimeTypeRef operation state (EvalStackValue.ObjectRef runtimeType)
+        with
+        | RuntimeTypeHandleTarget.Closed handle ->
+            let state, isEnum =
+                IlMachineRuntimeMetadata.isEnumValueType ctx.LoggerFactory ctx.BaseClassTypes state handle
+
+            if not isEnum then
+                state, notEnum
+            else
+
+            let state, underlyingHandle =
+                IlMachineRuntimeMetadata.enumUnderlyingHandle ctx.LoggerFactory ctx.BaseClassTypes state handle
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"%s{operation}: resolved type %O{handle} is an enum, but its underlying type could not be read; an enum's sole instance field must be `value__`"
+                )
+
+            match underlyingHandle with
+            | ConcretePrimitive state.TypeSystem.ConcreteTypes underlying ->
+                match EnumUnderlyingType.ofPrimitive underlying with
+                | Some underlying ->
+                    state,
+                    { notEnum with
+                        Enum = Some (handle, underlying)
+                    }
+                | None ->
+                    failwith
+                        $"%s{operation}: resolved type %O{handle} is an enum whose underlying type %O{underlying} is not a legal enum underlying type"
+            | other ->
+                failwith
+                    $"%s{operation}: resolved type %O{handle} is an enum whose `value__` did not concretize to a primitive, got %O{other}"
+        | RuntimeTypeHandleTarget.DynamicMethodsClass _
+        | RuntimeTypeHandleTarget.OpenConstructed _
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
+        | RuntimeTypeHandleTarget.GenericParameter _
+        | RuntimeTypeHandleTarget.MethodGenericParameter _
+        | RuntimeTypeHandleTarget.Composite _
+        | RuntimeTypeHandleTarget.FunctionPointer _ -> state, notEnum
 
     /// <summary>
     /// Resolve a named argument's blob-declared <c>FieldOrPropType</c> to the primitive its value
@@ -273,8 +334,8 @@ module NativeCustomAttribute =
             // by the bottom slot (`EvalStack.Values` is top-first):
             //
             //   []                              first entry
-            //   [tK; ...; t1; NullObjectRef]    resolving: K of the blob's System.Type names have
-            //                                   been answered, in blob order from the bottom up
+            //   [tK; ...; t1; NullObjectRef]    resolving: K of the blob's type names have been
+            //                                   answered, in blob order from the bottom up
             //   [ObjectRef instance]            the ctor has returned
             //
             // Every entry below the last shape re-parses the blob from `*ppBlob`, which is why the
@@ -507,40 +568,52 @@ module NativeCustomAttribute =
                     )
                     |> fun (state, acc) -> state, List.rev acc
 
-                let fixedArgs, fixedArgsConsumed =
-                    match
-                        CustomAttribute.readFixedArgs (paramPlans |> List.map CustomAttribArgPlan.shape) blobBytes
-                    with
-                    | Ok (args, next) -> args, next
-                    | Error msg -> failwith $"%s{operation}: failed to parse fixed args from CustomAttrib blob: %s{msg}"
+                let state, resolved =
+                    ((state, []),
+                     (match answered with
+                      | None -> []
+                      | Some answers -> answers))
+                    ||> List.fold (fun (state, acc) runtimeType ->
+                        let state, resolved = resolvedTypeOf operation ctx state runtimeType
+                        state, resolved :: acc
+                    )
+                    |> fun (state, acc) -> state, List.rev acc
 
-                // A System.Type argument is a name, and CoreCLR resolves it by calling back into
-                // CoreLib (typeparse.cpp:10 `GetTypeHelper` invokes `TypeNameResolver`), so this
-                // does the same: one managed call per name, in blob order, each answered on the
-                // next entry. The scope is the *decorated* module — CoreCLR passes
+                // A System.Type argument is a name, and so is an enum inside a TAGGED_OBJECT, and
+                // CoreCLR resolves each by calling back into CoreLib (typeparse.cpp:10
+                // `GetTypeHelper` invokes `TypeNameResolver`), so this does the same: one managed
+                // call per name, in blob order, each answered on the next entry. An enum's values
+                // follow its name in the blob at its underlying type's width, so the decode stops
+                // there until it is answered. The scope is the *decorated* module — CoreCLR passes
                 // `pModule->GetAssembly()`, the `QCallModule` argument, not the ctor's assembly —
                 // which is what lets an unqualified name in the blob mean a type of the decorated
                 // assembly.
-                let namesToResolve = CustomAttribute.typeNamesToResolve fixedArgs
-
-                let resolved : ManagedHeapAddress list =
-                    match answered with
-                    | None -> []
-                    | Some answers -> answers
+                let parsed, namesToResolve =
+                    match
+                        CustomAttribute.readFixedArgsResolving
+                            (paramPlans |> List.map CustomAttribArgPlan.shape)
+                            (resolved |> List.map CustomAttribResolvedType.name)
+                            blobBytes
+                    with
+                    | Ok (CustomAttribFixedArgsParse.Parsed (args, next)) ->
+                        Some (args, next), CustomAttribute.typeNamesToResolve args
+                    | Ok (CustomAttribFixedArgsParse.AwaitingResolution names) -> None, names
+                    | Error msg -> failwith $"%s{operation}: failed to parse fixed args from CustomAttrib blob: %s{msg}"
 
                 if resolved.Length > namesToResolve.Length then
                     failwith
                         $"%s{operation}: %d{resolved.Length} resolved type(s) on the eval stack but the blob names only %d{namesToResolve.Length}"
 
-                if resolved.Length < namesToResolve.Length then
+                match parsed with
+                | _ when resolved.Length < namesToResolve.Length ->
                     let nextName = namesToResolve.[resolved.Length]
 
                     // `GetTypeHandleFromBlob` rejects the empty name before any resolution
-                    // (customattribute.cpp:443, `size + 1 <= 1`), and this handler reports
-                    // malformed blobs as failures rather than raising into the guest.
+                    // (customattribute.cpp:443, `size + 1 <= 1`), an enum's included, and this
+                    // handler reports malformed blobs as failures rather than raising into the guest.
                     if nextName = "" then
                         failwith
-                            $"TODO: %s{operation}: a System.Type fixed arg is the empty string, which CoreCLR rejects with CustomAttributeFormatException; only hand-crafted metadata can produce it"
+                            $"TODO: %s{operation}: a type name in the blob is the empty string, which CoreCLR rejects with CustomAttributeFormatException; only hand-crafted metadata can produce it"
 
                     let resolverType =
                         ctx.BaseClassTypes.Corelib.TryGetTopLevelTypeDef "System.Reflection" "TypeNameResolver"
@@ -622,7 +695,10 @@ module NativeCustomAttribute =
                             state
 
                     NativeHandlerResult.pushedManagedCallee state |> Some
-                else
+                | None ->
+                    failwith
+                        $"logic error: %s{operation}: the decoder awaits a resolution, but all %d{namesToResolve.Length} name(s) it listed are answered"
+                | Some (fixedArgs, fixedArgsConsumed) ->
 
                 // ECMA-335 II.23.3: the named-arg count is a uint16 that follows the fixed args.
                 // If the blob is exhausted at this point the BCL convention is "zero named args";

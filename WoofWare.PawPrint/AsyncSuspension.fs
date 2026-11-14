@@ -18,14 +18,24 @@ open Microsoft.Extensions.Logging
 module AsyncSuspension =
 
     /// The continuation a runtime-async frame makes when it suspends at an await of a call
-    /// returning `awaited`: an `ExecutionContext` slot, which the JIT always gives one, an exception
-    /// slot if the await lies in a `try` region (`inTry`), and a slot for the call's result.
-    /// PawPrint binds no await that continues on the captured context (decision 13), so no
-    /// continuation has a slot for that context.
-    let layoutAwaiting (inTry : bool) (awaited : MethodReturnType<ConcreteTypeHandle>) : ContinuationLayout =
+    /// returning `awaited`, which `flags` describe: an `ExecutionContext` slot, which the JIT always
+    /// gives one, a slot for the continuation context if the await continues on the captured
+    /// context, an exception slot if the await lies in a `try` region (`inTry`), and a slot for the
+    /// call's result.
+    let layoutAwaiting
+        (inTry : bool)
+        (flags : SuspendedCallFlags)
+        (awaited : MethodReturnType<ConcreteTypeHandle>)
+        : ContinuationLayout
+        =
         {
             ExecutionContext = true
-            ContinuationContext = false
+            ContinuationContext =
+                match flags with
+                | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnCapturedContext -> true
+                | SuspendedCallFlags.Continues ContinuationContextHandling.NoPreference
+                | SuspendedCallFlags.Continues ContinuationContextHandling.ContinueOnThreadPool
+                | SuspendedCallFlags.ValueTaskAdaptedToTask -> false
             Exception = inTry
             Result =
                 match awaited with
@@ -255,6 +265,27 @@ module AsyncSuspension =
             field
             (EvalStackValue.toCliTypeCoerced existing executionContext)
             state
+
+    /// A pointer to the `Flags` of `continuation`, for CoreLib's suspension helper that adds to
+    /// them.
+    let flagsPointer
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (continuation : ManagedHeapAddress)
+        (state : IlMachineState)
+        : ManagedPointerSource * IlMachineState
+        =
+        let state, declaring =
+            corelibType loggerFactory baseClassTypes "System.Runtime.CompilerServices" "Continuation" state
+
+        let field = IlMachineState.requiredOwnInstanceFieldId state declaring "Flags"
+
+        ManagedPointerSource.Byref
+            {
+                Root = ByrefRoot.HeapObjectField (continuation, field)
+                Projections = []
+            },
+        state
 
     /// A pointer to `slot` of `continuation`, for CoreLib's suspension helpers, which write it.
     let slotPointer (continuation : ManagedHeapAddress) (slot : ContinuationSlot) : ManagedPointerSource =

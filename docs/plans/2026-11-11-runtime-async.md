@@ -1169,6 +1169,43 @@ Each stage is one pull request, with its tests first.
     source of the guest's gets `None` in `OnCompleted` and its context one post, as measured for
     decision 17.
 
+    As built:
+    * The stage lands in two changes. The first binds every matched await that continues on the
+      captured context, and leaves the classification's third kind with one case,
+      `AwaitNotYetBound.ConstrainedCallvirt`. The second binds the `constrained.` `callvirt` and
+      deletes the kind.
+    * `ContinuationContextHandling.ContinueOnCapturedContext` is what decision 13 gives an await
+      without `ConfigureAwait(false)`, as the JIT's importer sets it from
+      `PREFIX_TASK_AWAIT_CONTINUE_ON_CAPTURED_CONTEXT`. A continuation made at such an await has a
+      continuation-context slot, as the JIT's layout builder gives it one
+      (`SetNeedsContinuationContext`), and the frame finishes its suspension with
+      `FinishSuspensionWithContinuationContext`, passing the slot, the continuation's `Flags` and
+      its `ExecutionContext` slot by reference. PawPrint sets no flag of its own for the await: the
+      helper adds `ContinueOnCapturedSynchronizationContext`, `ContinueOnCapturedTaskScheduler` or
+      `ContinueOnThreadPool`, from what the thread runs under.
+
+    The guest, `RuntimeAsyncAwaitContinuesOnCapturedContext.cs`, run on real .NET 10 and 11 RC3
+    first, 100 runs without a failure: `Parallel.ForEachAsync` over one element, with a
+    degree of parallelism of 1 and a scheduler of the guest's that runs each task on the thread pool
+    and records which thread gave it. It completes the pending move from a thread of its own only
+    once the scheduler's first task, the worker, has returned to the scheduler: until then the
+    worker may not yet have registered its continuation, and an awaiter that finds its task
+    complete as it registers queues the continuation from the worker's thread (seen once on .NET 10
+    before the guest waited). On real .NET 11 a thread other than the completing one gives the
+    scheduler the worker's continuation; on real .NET 10 the completing thread does. The body runs
+    on the guest's scheduler on both. Before the stage PawPrint exits 10 on .NET 11; with the
+    helper for no continuation context at the bound site, it exits 8.
+
+    No captured-context site outside ASP.NET Core reaches an `AsTask` shape: the three sites'
+    callees are `MoveNextAsync`, returning a `ValueTask<bool>`, and `Stream.DisposeAsync`,
+    returning a `ValueTask`. The `OnCompleted` check therefore waits for a guest that reaches
+    ASP.NET Core's sites, and `TestRuntimeAsyncSuspension` still checks the `AsTask` shape's flag
+    alone.
+
+    `TestAwaitSiteBinding` checks the classification against stage 4f's rule, and
+    `TestRuntimeAsyncSuspension` that a continuation has a continuation-context slot exactly where
+    its await continues on the captured context.
+
 14. **(4g) Whole traces.** The guests that compare traces (`RuntimeAsyncTraceCrossesSuspension.cs`,
     `StreamWriter.DisposeAsync`'s in `RuntimeAsyncFinallyAfterSuspension.cs`, and the guests of
     stages 4b to 4f) compare whole traces with real .NET 11's, less the awaiter frames decision 20
