@@ -2968,3 +2968,409 @@ rows are.
   uses neither helper but `SearchTableForMultipleRows` for parameters and a stable VirtualSort for constraints. Measured
   after 30 rows of other types, on .NET 10 and under PawPrint alike: parameters and constraints come back in RID order.
   Nothing is left to do for them.
+
+### 5t: the order of a dynamic type's MethodImpl rows
+
+5s found that CoreCLR's read-write metadata walks a lookup hash once a table holds 25 rows, and so finds one key's
+rows in descending RID order, and recorded that 3e's MethodImpl rows go through the same hash. This stage asks what a
+guest can observe of that, and makes PawPrint agree.
+
+**What CoreCLR does.** Read from the pinned source (`$DOTNET_RUNTIME_SRC_NET10`):
+
+* `RegMeta::DefineMethodImpl` calls `AddMethodImplToHash` after every row (md/compiler/emit.cpp:178), which is
+  `GenericAddToHash(TBL_MethodImpl, COL_Class, rid)` (md/inc/metamodelrw.h:734). As for MethodSemantics, the hash is
+  built when the table reaches 25 rows (`GenericBuildHashTable`, md/enc/metamodelrw.cpp:5514), and each bucket
+  chains new entries at the front.
+* `MDInternalRW::EnumMethodImplInit` (md/enc/mdinternalrw.cpp:809-854) takes a class's rows from
+  `CMiniMdRW::FindMethodImplHelper` (md/enc/metamodelrw.cpp:5133-5187) and returns their (body, declaration) pairs in
+  that order. The helper has three arms: a sorted table's range, the hash, and a linear scan in RID order. `AddRecord`
+  clears the sorted flag (md/enc/metamodelrw.cpp:3883), so a dynamic module never takes the first arm: it scans below
+  25 rows and walks the hash from 25. Correction to 3f, which says a class's rows are read "through a `VirtualSort`":
+  `FindMethodImplHelper` uses no virtual sort. Below 25 rows the order 3f describes (the class's rows in the order
+  added) is still the order observed.
+* The enumeration has three consumers in the VM on the platforms PawPrint emulates:
+  * `MethodTableBuilder::EnumerateMethodImpls` (vm/methodtablebuilder.cpp:2220-2305) copies every pair into an array,
+    `qsort`s it by body token then declaration token (`MethodImplTokenPair::Compare`, :2117-2129; the sort at :2282)
+    and removes exact duplicates. Everything the builder does afterwards (the vtable, the dispatch map, the
+    `IDS_CLASSLOAD_MI_MULTIPLEOVERRIDES` check in `AddMethodImplDispatchMapping`, :6342) reads the sorted array, so
+    it is independent of the enumeration order. A static virtual override is validated (`ValidateStaticMethodImpl`,
+    :5986) and given no slot.
+  * `MethodTable::TryResolveVirtualStaticMethodOnThisType` (vm/methodtable.cpp:8335-8531) enumerates the class's
+    rows afresh at every call, and walks them in enumeration order. Outside verification it returns the body of the
+    first row whose declaration is the method sought (:8518); under verification a second such row is a
+    `TypeLoadException` (:8524), whether or not its body differs. It is reached from
+    `ResolveVirtualStaticMethod` (:8216 and :8260), so from a `constrained.` call of a static virtual (the JIT, and
+    a generic dictionary's slot, vm/genericdict.cpp:1157), and from `GetInterfaceMap` (vm/runtimehandles.cpp:862);
+    and from `TryGetCandidateImplementation` (:5734-5750), the default-body search, on an interface's own rows, with
+    variance allowed in its second pass.
+  * `VerifyThatAllVirtualStaticMethodsAreImplemented` (vm/methodtable.cpp:8535-8567, called at :4868 for a
+    non-abstract typical type, and from the constraint check, vm/typedesc.cpp:1705) resolves each *abstract* static
+    virtual under verification. So two rows naming an abstract static virtual are a `TypeLoadException` at load,
+    whatever the order; two rows naming one with a default body are not checked at all.
+* `classcompat.cpp:2053` enumerates them too, but is built only with COM interop (vm/CMakeLists.txt:598-601).
+  `RegMeta::EnumMethodImpls` (md/compiler/import.cpp:702) is `IMetaDataImport`, for debuggers and profilers; no
+  managed API reads a MethodImpl row.
+
+So the order is visible only through static virtual resolution, and there only when more than one row of one type
+matches the method looked for: two rows naming a static virtual that has a default body, or, on an interface, two rows
+whose declarations are different instantiations that are both variance-compatible with the call's.
+
+**Measured on .NET 10.0.14** (the devshell's runtime since #2233; 5s measured 10.0.12) with a throwaway probe
+(`5t-probe`), a fresh dynamic module for each case. `IDef` has `static virtual int M() => 0`, `IAbs` has `static
+abstract int M()`, `IVar<in T>` has `static virtual int M() => 0`, and `Caller.CallDef<T>() where T : IDef => T.M()`
+(and `CallAbs`, `CallVar<T> where T : IVar<string>`), invoked by `MakeGenericMethod` over the created type. `C` gets
+static bodies `B1` (returns 1) and `B2` (returns 2); "rows" is the module's MethodImpl row count, the rest made up by
+other types each overriding an instance interface method once; `C` is created after the last row unless stated.
+
+| Emitted | .NET 10.0.14 | PawPrint today |
+|---|---|---|
+| `C : IDef`, rows `B1`, `B2` for `IDef.M`; 2, 24 rows (`C`'s first); 24 rows (`C`'s last) | 1 | 1 |
+| the same, 25 and 26 rows (`C`'s first); 25 rows (`C`'s last) | 2 | 1 |
+| rows `B2`, `B1`; 2 rows / 25 rows | 2 / 1 | 2 / 2 |
+| interface `I2 : IDef` of the module with rows `D1`, `D2` for `IDef.M`, `C : I2`; 2 rows / 25 rows | 1 / 2 | 1 / 1 |
+| `I2 : IVar<object>, IVar<IComparable>`, rows `D1` (for `IVar<object>.M`) then `D2` (for `IVar<IComparable>.M`), `C : I2`, `CallVar<C>`; 2 rows / 25 rows | 1 / 2 | 1 / 1 |
+| the same, rows added `D2` then `D1`; 2 rows / 25 rows | 2 / 1 | 2 / 2 |
+| `C` created at 2 rows, then 23 more rows, then `CallDef<C>` and `CallDefAgain<C>` (a second generic method of the same shape) | 2, 2 | 1, 1 |
+| `C` created at 2 rows, `CallDef<C>` called, then 23 more rows, then `CallDef<C>` and `CallDefAgain<C>` | 1; then 1, 2 | 1; then 1, 1 |
+| `C : IAbs` (non-abstract), rows `B1`, `B2` for `IAbs.M`; 2 rows / 25 rows | `TypeLoadException` at `CreateType` | `CreateType` succeeds; `CallAbs<C>` gives 1 |
+| `C : IAbs`, `B1` twice; 2 rows / 25 rows | `TypeLoadException` at `CreateType` | `CreateType` succeeds; `CallAbs<C>` gives 1 |
+| abstract `C : IAbs`, rows `B1`, `B2`, `CallAbs<C>`; 2 rows / 25 rows | `TypeLoadException` from the call | refuses by name ("is abstract and can be cast to ... which PawPrint does not decide") |
+| `C : IInst` (instance), rows `B1`, `B2` for `IInst.N`, either order; 2 rows / 25 rows | `TypeLoadException` at `CreateType` naming `B2` (the larger body token) | refuses by name at the `callvirt` ("CoreCLR rejects this type at load time (IDS_CLASSLOAD_MI_MULTIPLEOVERRIDES)") |
+| `C : IInst`, `B1` twice; 2 rows / 25 rows | `N()` gives 1 | 1 |
+
+A second probe (`5t-probe2`):
+
+| Emitted | .NET 10.0.14 | PawPrint today |
+|---|---|---|
+| on disk (C#): `IDisk : IVar<object>, IVar<IComparable>` with explicit static implementations in that order, `CDisk : IDisk`, and its swapped twin, in an assembly with 34 MethodImpl rows; `CallVar<CDisk>`, `CallVar<CDiskSwapped>` | 1, 2 (RID order: an image on disk is read by range, not by the hash) | 1, 2 |
+| `C` with one row for `IDef.M` (`B1`) and one for `IDef2.M2` (`B2`), created at 2 rows, then 23 more rows, then both called | 1, 2 | 1, 2 |
+
+Every row of both tables is the same on .NET 11.0.0-rc.3 (rolled forward from the net10.0 build).
+
+So:
+
+1. A guest can observe the order. From 25 MethodImpl rows in the module, a static virtual resolution that meets two
+   matching rows on one type takes the one added last; below 25, the one added first. PawPrint always takes the one
+   added first, so it diverges from 25 rows. The variant case shows this needs no duplicate declaration: two
+   legitimate rows of a generated interface are enough.
+2. The answer depends on when the resolution happens, not on when the type was created. A type created below 25 rows
+   and resolved only after the module crosses 25 gets the reversed answer. But CoreCLR caches a resolution where it
+   makes one (a generic dictionary slot, or the JIT's direct call in exact code), so after the crossing a call site
+   that resolved before it keeps the old answer, while a site that resolves now gets the new one (`CallDef<C>` 1,
+   `CallDefAgain<C>` 2). The JIT also resolves a `constrained.` call in exact code when it compiles the method, before
+   the call executes. Which answer such a guest sees therefore depends on JIT tiering, inlining and code sharing.
+   A type created at 25 rows or more has one answer always; a type resolved while the module is below 25 rows has one
+   answer for that resolution only.
+3. Duplicates of an abstract static virtual are not an order question: CoreCLR refuses the type at `CreateType` (even
+   the same body twice, since verification counts rows, not bodies), and PawPrint creates it and runs the first row.
+   That divergence is separate from this stage (see "left to later stages").
+4. The instance-method cases and the class loader are independent of the order, on both runtimes. PawPrint refuses the
+   instance duplicate by name at the first call, but CoreCLR has already refused the type at `CreateType`, so a guest
+   that catches that exception diverges before the refusal. Not an order question either; it belongs with
+   observation 3.
+
+**GenericParam and GenericParamConstraint** do not go through the hash (5s "as built" is corrected to say so). No
+`Add*ToHash` exists for either table (the complete list is md/inc/metamodelrw.h:631-734), and neither is passed to
+`GenericFindWithHash`, so `m_pLookUpHashes` never holds a hash for them and the hash arms of `FindGenericParamHelper`
+and `FindGenericParamConstraintHelper` (md/enc/metamodelrw.cpp:5196-5321) cannot run. The VM does not call those
+helpers anyway: `MDInternalRW::EnumInit` (md/enc/mdinternalrw.cpp:1091-1133) finds an owner's parameters with
+`getGenericParamsForTypeDef` / `ForMethodDef` (`SearchTableForMultipleRows`, md/inc/metamodel.h:1693, a binary search
+with a linear fallback for an unsorted GenericParam, md/enc/metamodelrw.cpp:5824) and a parameter's constraints through
+a `VirtualSort`, which orders by owner and then RID (md/enc/metamodelrw.cpp:7253-7295). Measured with `5t-probe`: after
+30 GenericParam rows of other types, `G<A, B, C2>`'s arguments are `A#0`, `B#1`, `C2#2` (tokens `0x2A00001F` to
+`0x2A000021`); after 30 GenericParamConstraint rows of other types, `H<T> where T : IA, IB, IC` reports `IA, IB, IC`;
+PawPrint gives the same. No guest sees their order change at 25 rows; nothing for a later stage.
+
+**Where PawPrint reads the order.** `TypeInfo.MethodImpls` (WoofWare.PawPrint.Domain/TypeInfo.fs:112) holds a type's
+rows in image order, which for a dynamic module is the order added (`EmitScopeImage` sorts stably by class, :127).
+Four consumers read it:
+
+* `MethodTableLayout` (WoofWare.PawPrint.TypeSystem/MethodTableLayout.fs:1522), `ConcreteInterfaceDispatch`
+  (ConcreteInterfaceDispatch.fs:812) and `ConcreteVirtualDispatch.findMatchingMethodImplBodies`
+  (ConcreteVirtualDispatch.fs:583) model the class loader. Each fails on a conflict and otherwise gives the same result
+  for any order. They need nothing.
+* `DefaultInterfaceImplementation.implementationOnType` (DefaultInterfaceImplementation.fs:47-176). Its instance arm
+  picks the body with the lowest slot, independent of order. Its static arm (`first`, :113-128) returns the first row
+  that matches: this is `TryResolveVirtualStaticMethodOnThisType`, and it is the only place the order enters. It is
+  called for each type of the chain (StaticVirtualDispatch.fs:169, and :229 for the variant entries) and for each
+  interface the default-body search considers (DefaultInterfaceImplementation.fs:240). `StaticVirtualDispatch.resolve`
+  is also called by `WoofWare.PawPrint.Analysis` (`EscapeAnalysis.fs:6814`), which so gets the same rule and refusal:
+  it asks what a `constrained.` call runs.
+
+PawPrint resolves a `constrained.` call afresh each time (`CallSiteBinding.fs:226`; nothing caches the result), and
+`RuntimeTypeHandle_GetInterfaceMethodImplementation` has no handler yet.
+
+### 5t: the options
+
+Every option leaves the image, the emit scope and the three order-independent consumers as they are, and changes only
+what the static arm of `implementationOnType` walks, for a type of a dynamic module. They differ in what is modelled
+and where.
+
+**A. Apply the read rule where CoreCLR has it, and refuse the case whose answer depends on CoreCLR's caches.** The
+static arm walks `ReadWriteMetadataLookup.rowsOfKey` of the module's current MethodImpl row count over the level's rows
+in image order, when the level's assembly is dynamic (`TryDynamicScope`), and stops at the first match as now. To find
+the window of observation 2 it needs one more fact: how many MethodImpl rows the module had when the level's type was
+created. `LoadedAssemblies` keeps it beside the created set (`Created` becomes a map from `TypeDefRid` to that count,
+filled by `WithCreatedType`). A pure function in Domain, beside `rowsOfKey`, decides from the two counts: below 25 now,
+or 25 or more at creation, gives the order; created below 25 and 25 or more now is the window. In the window the
+static arm evaluates every row of the level, and if more than one matches with different bodies it fails with a TODO
+naming the condition and CoreCLR's behaviour (the answer depends on whether and where CoreCLR resolved this method
+before the module reached 25 rows). One match, or several with one body, resolves as now.
+
+* Correctness: every deterministic row of the tables above; the window refused only where the answer can differ.
+* Blast radius if wrong: static virtual resolution over types of dynamic modules with 25 or more MethodImpl rows and
+  two matching rows on one type. A wrong threshold or a wrong count would show in the guest at 24, 25 and 26 rows.
+  On-disk images are untouched by construction (`TryDynamicScope` is `None`).
+* Reversibility: the rule is one call in one function; the creation count is one field. Either can be removed.
+* Information: keeps the image as CoreCLR's rows in CoreCLR's order, and adds the creation-time count, which nothing
+  else records today.
+* Size: the Domain function and its property, the `Created` map and its accessor, the static arm's change, the
+  refusal, the guest, the refusal test.
+
+**B. Refuse every order-dependent resolution from 25 rows.** No new state: when the level's module is dynamic and has
+25 or more MethodImpl rows, the static arm evaluates every row, and more than one match with different bodies is a TODO
+failure. Below 25 it is as now, which is correct (and stays correct for a call site resolved then, since CoreCLR's
+cached answer is the same first row).
+
+* Correctness: never gives a wrong answer, but refuses the deterministic cases of observation 2 (a type created at 25
+  rows or more), which A answers: every 25-row line of the first table becomes a refusal.
+* Blast radius: the same programs as A, refused rather than answered.
+* Reversibility: A is B plus the creation count and the reversal, so B can be extended to A later without undoing it.
+* Information: preserves nothing new; the guest can pin only the refusal and the sub-25 behaviour.
+* Size: smallest. No change to `LoadedAssemblies`, and `rowsOfKey` is not called at all.
+
+**C. Put CoreCLR's enumeration order into `TypeInfo.MethodImpls` for a dynamic image.** The reader that builds a
+dynamic module's `DumpedAssembly` is told the image is read-write metadata and its MethodImpl row count, and stores each
+type's rows in `rowsOfKey` order; every consumer then reads CoreCLR's enumeration order. The window refusal is still
+needed, so C is A with the reversal moved from the read site into the reader.
+
+* Correctness: as A.
+* Blast radius: every consumer of `TypeInfo.MethodImpls`, for dynamic modules. The three order-independent ones
+  produce the same results; only which conflict a malformed type reports first could change, and they fail with a
+  host failure there anyway.
+* Information: `TypeInfo.MethodImpls` would mean different orders for an image on disk and a dynamic one, and the
+  Domain reader would carry a rule about CoreCLR's read-write metadata. A future order-sensitive consumer would get
+  CoreCLR's order without knowing it needed it; equally, a consumer modelling the class loader's sort would not
+  notice that its input order had changed meaning.
+* Reversibility: the reader's new parameter reaches every place a dynamic image is read.
+
+Rejected without a full write-up:
+
+* Writing the reversed order into the image (5s rejected this for MethodSemantics for the same reason): a created
+  type's rows would change places when the module crossed 25 rows, and the image would no longer be CoreCLR's rows.
+* Modelling CoreCLR's resolution caches, to answer the window: which call sites cache and when they resolve depends on
+  shared versus exact code, inlining and tiering (the `late` measurement shows two sites disagreeing). That is
+  JIT-tier behaviour, which this project refuses rather than models.
+
+**Recommended: A.** It answers everything that has one answer, refuses only what does not, and follows 5s's decision
+to model the rule on the read path where CoreCLR has it, with the image left as CoreCLR's rows. B is the fallback cut
+if the creation count is judged not worth a field; it can grow into A. C spreads a read-write rule into the reader
+for one consumer.
+
+Open questions:
+
+1. A, B or C.
+2. The window: refuse (recommended), or model the answer of a first resolution after the crossing. The second is right
+   for `late callBefore=False` and wrong for `CallDef<C>` in `late callBefore=True`, and PawPrint cannot tell which
+   sites CoreCLR's JIT resolved early.
+3. What the creation record holds: the MethodImpl row count (recommended, the one fact needed), or the whole
+   `EmitScope` at creation, which would answer the same question for CustomAttribute or Event rows later at the cost of
+   keeping old scopes reachable.
+4. Whether to pin, in this stage, the separate divergence of observation 3 (abstract static virtual overridden twice:
+   CoreCLR refuses the type at `CreateType`, PawPrint runs the first row) as a parked guest, so that it is not
+   forgotten. Recommended: yes, parked with "PawPrint does not verify a dynamic type's static virtual overrides at
+   `CreateType`" as its reason.
+5. Whether the differential property below can drive PawPrint's own resolution. That needs a test harness that loads a
+   scope's image into a `TypeSystemState` and calls `StaticVirtualDispatch.resolve`; if none exists, the property checks
+   only the model against real .NET, and the guest is the only check of PawPrint's wiring. The plan should say which.
+6. 5t needs `ReadWriteMetadataLookup` from 5s, so it stacks on 5s until 5s merges, then rebases onto `main`.
+
+### 5t: the oracle
+
+Written first, and seen to fail on this branch before the change:
+
+* `TypeBuilderStaticVirtualOverrideOrder.cs` (in `sourcesImpure`, registered in `TestImpureCases.fs`,
+  `IsDynamicCodeSupported` on), the deterministic rows of both probes, each in a module of its own and each type
+  resolved once, after its module's last row: `C : IDef` at 2, 24, 25 and 26 rows with `C`'s rows first, and 24 and 25
+  with them last; the swapped pair at 2 and 25; `I2 : IDef` at 2 and 25; the variant `I2` in both row orders at 2 and
+  25; the single-match window (one row each for `IDef.M` and `IDef2.M2`, which must run, not refuse); and the on-disk
+  `IDisk` and `IDiskSwapped` in the guest's own assembly, with enough explicit interface implementations to give it 25
+  or more MethodImpl rows. Exits 0 on .NET 10, to be confirmed before committing. Today it fails at the 25-row cases.
+* Its terminal-state check reads each module's MethodImpl rows in the order added (class, body, declaration), as 3e's
+  does, and the scope's row count, so a filler that wrote no row cannot make a 25-row case a 24-row one unseen.
+* A refusal test, in a fixture beside `TestTypeBuilderPropertyRefusals`: the `late` shape (`C` created at 2 rows with
+  `B1` and `B2` for `IDef.M`, 23 more rows, then `CallDef<C>`) fails with the window's TODO, naming the type and the
+  method.
+* A property of the Domain function: for all counts at creation and now (now at least the creation count, both from 0
+  to 60) and all row lists, it gives `rowsOfKey now` exactly when now is below 25 or the creation count is 25 or more,
+  and the window otherwise; with `rowsOfKey`'s own property from 5s unchanged.
+* A differential property against real .NET in the test host, as 5s's: generated schedules of up to four static
+  override rows on one type (a class over `IDef`-like interfaces, or an interface over two instantiations of a variant
+  one), bodies returning distinct constants, a filler count from 0 to 30 placed before, between or after the type's
+  rows, and the type created after the last row; the host's answer through a fresh generic method instantiation must
+  equal the model's (the first matching row of `rowsOfKey total rows`), and PawPrint's if question 5 allows. The fixed
+  sample must reach 23 to 27 rows with two matching rows many times. `RunAndCollect` modules.
+* A host-only oracle test pinning observation 2 on real .NET, so that a runtime bump which changes the caching shows up:
+  `late callBefore=True` gives 1, then 1 and 2.
+* Mutants, each run against the guest, the refusal test and the properties:
+  * the rule never applied (the guest's 25-row cases);
+  * the threshold at 24 (24-row cases) and at 26 (25-row cases);
+  * the rule applied to an image on disk (the guest's `IDisk`);
+  * the rule keyed on the type's own row count rather than the module's (the 25-row cases, where `C` has 2);
+  * the window refusal dropped (the refusal test);
+  * the window refusal also taken with one match (the single-match window case);
+  * the window refusal taken when two matching rows share one body (needs a guest case of `B1` twice for `IDef.M` in
+    the window, measured first; read, not measured: the builder deduplicates the pair, `IDef.M` is not abstract so
+    nothing verifies it, and resolution meets `B1` whichever row comes first);
+  * the count at creation taken now instead (the refusal test, since the window then never opens);
+  * the rule applied to the instance arm as well (expected to survive: the instance arm picks the lowest slot, so the
+    order cannot change its answer; record it as equivalent).
+
+### 5t: left to later stages
+
+* Verifying a dynamic type's static virtual overrides at `CreateType`: CoreCLR throws `TypeLoadException` for a
+  non-abstract type with two rows naming one abstract static virtual, even with the same body, and for an abstract
+  type as a generic argument against such a constraint; PawPrint creates the type and runs the first row (question 4),
+  and refuses the abstract-argument case by name. Likewise two rows overriding one instance method with different
+  bodies: CoreCLR throws at `CreateType` (`IDS_CLASSLOAD_MI_MULTIPLEOVERRIDES`), PawPrint at the first call. Not order
+  questions.
+* `RuntimeTypeHandle_GetInterfaceMethodImplementation` (`GetInterfaceMap`), which has no handler. For a static virtual
+  it must go through `StaticVirtualDispatch.resolve` with no cache, as CoreCLR's does, and so inherits this stage's rule,
+  but not its refusal: having no cache, it has one answer in the window, the order at the read. That stage moves the
+  refusal out of the static arm to the consumers which CoreCLR caches.
+* The first conflict a malformed type reports: CoreCLR's class loader reports the first in (body token, declaration
+  token) order, PawPrint the first in row order. PawPrint fails with a host failure there today, so the message is all
+  that differs.
+* CustomAttribute (5s's item) still has the same hash and will want the same measurement when custom attributes come;
+  the creation record of question 3 is where its window would be found. So do Constant, FieldMarshal, ClassLayout,
+  FieldLayout, ImplMap, FieldRVA and NestedClass (md/inc/metamodelrw.h:668-726); each holds one row for a key in
+  well-formed metadata, so the order matters only where an emitter adds a second.
+* Nothing for GenericParam or GenericParamConstraint: they have no hash (above).
+
+### 5t: the decisions
+
+Taken 2026-11-14.
+
+* **A: the static arm of `implementationOnType` walks a dynamic level's rows in CoreCLR's order, and refuses only where
+  CoreCLR's answer depends on its own caches.** Checked against the pinned source:
+  * `FindMethodImplHelper` (md/enc/metamodelrw.cpp:5133) has the three arms as described and uses no virtual sort.
+    `AddRecord` clears the sorted flag (:3883). `DefineMethodImpl` calls `AddMethodImplToHash` (md/compiler/emit.cpp:178).
+  * `TryResolveVirtualStaticMethodOnThisType` (vm/methodtable.cpp:8335) enumerates afresh at every call. It returns at
+    its first match unless verifying, and under verification it throws on a second matching row.
+  * Its callers are :5745, :8216 and :8260.
+  * B refuses what has one answer, and the user asked for the order to be right.
+  * C is rejected for a stronger reason than the options give. The order depends on the module's row count at the read,
+    so a created type's `TypeInfo.MethodImpls` would change when another type gains a row. 3f's extension check exists
+    to promise that a created type's rows read back the same and in the same order.
+  * A second structure was weighed: the resolver reports that its answer depended on the order, and the consumer that
+    caches (the `constrained.` call) refuses. It puts the refusal where CoreCLR has the cache, but it threads a marker
+    through `StaticVirtualDispatch.resolve` and the default-body search for a distinction with one consumer today. It
+    is the shape the `GetInterfaceMap` stage takes; see the correction below.
+* **Conditions on A.**
+  * The rule is keyed on the level whose rows are walked: that level's assembly, that module's MethodImpl row count now,
+    and that TypeDef's count at creation. It is never keyed on the constrained type. A base class or an interface of
+    another dynamic module is read by its own module's counts.
+  * One member of `LoadedAssemblies` answers both counts together for a TypeDef of a dynamic assembly, so that the arm
+    cannot pair one module's count with another's creation record. It answers `None` for an assembly that is not
+    dynamic. A dynamic type that is not created is a PawPrint fault, since the type system refuses to intern one.
+  * The decision is a pure function in `ReadWriteMetadataLookup`, beside `rowsOfKey`. It takes the count at creation,
+    the count now and the key's rows in RID order, and returns a union. One case is one order: now below 25, or 25 or
+    more at creation. The other case is both orders: created below 25 and 25 or more now. A count now below the count
+    at creation is an `ArgumentException`. Both orders are kept because a reader without a cache wants the second.
+  * In the window the arm walks the rows in the order added and again in reverse, each stopping at its first match. It
+    resolves when the two bodies are the same and refuses when they differ. This is narrower than "more than one match
+    with different bodies": rows `B1`, `B2`, `B1` resolve to `B1` in either regime. It is also exactly the condition
+    under which CoreCLR's two regimes disagree. An error from either walk is the result.
+  * Evaluating rows past the first match loads nothing that CoreCLR has not loaded. Read, not measured: the class loader
+    resolves every row's declaration when it builds the type (`ProcessMethodImpls`, where `ValidateStaticMethodImpl` is
+    called at vm/methodtablebuilder.cpp:5986).
+  * The refusal is a TODO failure. It names the level, the method, the two bodies and both counts, and says that
+    CoreCLR's answer depends on whether it resolved the call before the module reached 25 rows.
+  * The instance arm is untouched.
+* **In the window: refuse.** The refusal is needed, and it is not a guess avoided for form's sake.
+  * PawPrint resolves a `constrained.` call at every execution (`CallSiteBinding.fs:226`; nothing caches the result).
+    So "no cache" is the only thing it could model. That gives the reversed order, which is CoreCLR's answer for a site
+    that first resolves after the crossing and wrong for a site that resolved before it (`late callBefore=True`).
+  * Recording PawPrint's own resolutions would not close the gap. CoreCLR's resolutions are not the executions. For an
+    exact instantiation the JIT resolves when it compiles the caller, which can be before the call runs and on a path
+    never taken, and it resolves again when the method is recompiled at a higher tier, on a background thread. A
+    generic dictionary resolves at the slot's first use. Which of these applies is JIT-tier behaviour, which this
+    project refuses rather than models.
+  * 5s has no such window, and the reason is worth keeping. `RuntimeType`'s property cache is managed code that
+    PawPrint interprets, so its caching is modelled for free. The caches here are native.
+  * The cost is small. The refusal needs two matching rows with different bodies on one type, and a module that
+    crosses 25 MethodImpl rows after that type was created.
+* **The creation record holds the count, in a record of one named field, not a snapshot of the scope.** `Created`
+  becomes a map from `TypeDefRid` to that record. `WithCreatedType` reads the count from the scope it already holds,
+  so its signature does not change. A snapshot has no reader, and it keeps every old scope reachable. The stage that
+  needs another fact adds a field.
+* **The duplicate overrides which CoreCLR refuses at `CreateType` are pinned outside 5t.**
+  * The cases are two rows for one abstract static virtual, and two bodies for one instance method. A guest which
+    catches the `TypeLoadException` takes a different path under PawPrint with no refusal. That is a wrong answer
+    today, at 2 rows, on `main`, and it does not depend on this stage.
+  * One guest for each goes into a test-only PR against `main`. Each is parked with "PawPrint does not verify a dynamic
+    type's MethodImpl rows at `CreateType`" as its reason, so that 5t's diff does not claim them.
+  * They assert the exception's type, not its message. The static case's message is "Undefined resource string
+    ID:0x80004005".
+* **The differential property drives PawPrint's own resolver.** The pieces exist: `WithDynamicAssembly` and
+  `WithCreatedType` over a scope built from `EmitScopeDefinitions` (`TestEmitScopeDefinitions.fs:273`), and a test that
+  calls `StaticVirtualDispatch.resolveConstrainedStaticInterfaceMethod` on a `TypeSystemState`
+  (`TestDispatchBindingFailure.fs:1446`).
+  * The rule's three inputs (the count now, the count at creation, dynamic or not) are wiring. A property over the
+    model alone cannot kill the wiring mutants, and the guest kills them only at its fixed cases.
+  * The scope is built with the same `EmitScopeDefinitions` calls the handlers make. The interfaces come from a
+    compiled fixture assembly. The bodies are static methods whose IL the resolver never reads. The comparison is on
+    which body's MethodDef is chosen.
+  * If the scope cannot be built without reimplementing what the handlers in the interpreter project do, stop. The
+    property then checks the model against real .NET only, "as built" says so, and the guest gains every schedule
+    shape named below.
+* **The host's reader in that property is `GetInterfaceMap`, once measured.** Read, not measured:
+  * `RuntimeType.GetInterfaceMap` calls `RuntimeTypeHandle_GetInterfaceMethodImplementation` for each method at every
+    call and caches nothing (RuntimeType.CoreCLR.cs:2785).
+  * That QCall calls `ResolveVirtualStaticMethod` with variance allowed (vm/runtimehandles.cpp:862).
+  * So it is a reader with no cache. In the window it should give the order added before the crossing and the reverse
+    after it, on one type.
+  * The first step of the stage is to measure that on .NET 10 and 11: `C` created at 2 rows, the map read, 23 rows
+    added, the map read again.
+  * If it agrees, the property's schedules may read on both sides of the crossing, and the union's second order is
+    checked against real .NET. If it disagrees, keep the planner's fresh generic method instantiations and report.
+* **5t is built on 5s's branch, and its PR is not opened until 5s has merged and 5t is rebased onto `main`.** It needs
+  `ReadWriteMetadataLookup`, which only 5s has. A stacked PR runs no CI. The test-only PR above does not wait.
+* **One feature, one PR.** The read rule, the creation record, the refusal and their tests are one feature: a static
+  virtual resolved over a dynamic module's rows as CoreCLR resolves it. The commits go in the order tests, Domain,
+  Loader, the static arm, with the failing run recorded.
+* **Corrections to the other 5t sections.**
+  * "Where PawPrint reads the order" omits a caller. `StaticVirtualDispatch.resolve` is also called by
+    `WoofWare.PawPrint.Analysis` (`EscapeAnalysis.fs:6814`). It gets the same rule and the same refusal, which is right:
+    it asks what a `constrained.` call runs.
+  * "Left to later stages" says `GetInterfaceMap` inherits this stage's rule and refusal. It inherits the rule only.
+    Having no cache, it has one answer in the window, the order at the read. That stage moves the refusal out of the
+    static arm to the consumers which CoreCLR caches.
+  * Observation 2's last sentence is too wide. A type resolved while the module is below 25 has one answer for that
+    resolution only. A type created at 25 rows or more has one answer always.
+  * The hash list is longer than "CustomAttribute still has the same hash". Constant, FieldMarshal, ClassLayout,
+    FieldLayout, ImplMap, FieldRVA and NestedClass have one too (md/inc/metamodelrw.h:668-726). Each holds one row for
+    a key in well-formed metadata, so the order matters only where an emitter adds a second.
+  * 5s "as built" is wrong about GenericParam and GenericParamConstraint, as this stage's text says. Its last bullet is
+    to be corrected in place when 5t is recorded.
+* **The oracle is sufficient with these additions.**
+  * Guest cases, each measured on .NET 10 first:
+    * a struct `C` at 2 and 25 rows, so that the JIT's own resolution of exact code is covered beside the dictionary's;
+    * `C` created at 25 rows, five more rows added, then resolved: reversed, and not refused;
+    * a base `C` with rows `B1`, `B2` in a module of 25 rows and `D : C` in a module of none, with `CallDef<D>`, and the
+      converse with `C`'s module at 2 rows and `D`'s at 25;
+    * in the window, `B1` twice, and `B1`, `B2`, `B1`, which must run.
+  * The Domain property also requires that the window's two orders are the given rows and their reverse.
+  * The differential schedules draw bodies with repetition, so that `B1`, `B2`, `B1` occurs.
+  * The host-only test of the cache (`late callBefore=True`) stays, as the evidence for the refusal. It uses a
+    reference type, so the resolution sits in a dictionary slot that no recompilation revisits. Run it repeatedly
+    before committing. If it is not stable, drop it and record that as further grounds for refusing.
+  * Mutants added:
+    * the counts taken from the constrained type's module, not the level's (the two-module cases);
+    * the window taken whenever rows were added since creation (the type created at 25);
+    * the window refusing on more than one match where the two walks agree (`B1`, `B2`, `B1`);
+    * the window answered with the reversed order (the refusal test).
+* **Additions to "left to later stages".**
+  * The test-only PR's two parked guests, and the verification at `CreateType` that un-parks them.
+  * `GetInterfaceMap` as corrected above.
+  * The Constant stage checks whether a second `SetConstant` adds a row or overwrites one, since its table has the hash.
