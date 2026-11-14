@@ -586,7 +586,7 @@ module TestImpureCases =
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
             {
-                FileName = "DispatchProxyInternalInterface.cs"
+                FileName = "TypeBuilderPseudoCustomAttributes.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =
@@ -600,7 +600,119 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """`DispatchProxy.Create` over an internal interface, measured on .NET 10 and 11 to exit 0, with `IgnoresAccessChecksToAttribute` naming the guest's assembly on the proxy's assembly (a control with the interface made public exits 4 on both). `IsVisible` of the interface is false, so `DispatchProxy` defines that attribute and applies it, and stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute)" (measured by naming the case). Un-parked by custom attributes, with whatever then follows; check 4 is what tells a right answer of false from a wrong true once it runs."""
+            """What CoreCLR's emitter does with each pseudo-attribute and with its two security names, measured on .NET 10 and 11 to exit 0; a control inverting the first type's `IsSerializable` exits 7 on both. It stops at its first `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case). Un-parked by the pseudo-attributes and the security names, which later stages of the type-builder plan take in groups."""
+            {
+                FileName = "TypeBuilderCustomAttributeAfterCreate.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An ordinary attribute on a created type, on one of its methods and on a parameter of that method, measured on .NET 10 and 11 to exit 0: real .NET writes each row and reflection shows it at once, through the objects obtained before; a control expecting the type's two rows in the other order exits 1 on both. It stops at its first `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case). Un-parked by admitting a row on a created owner."""
+            {
+                FileName = "TypeBuilderAssemblyRuntimeAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Friend attributes on an `AssemblyBuilder` whose names the friend cache cannot parse, which throw out of the QCall after their rows are written, and `DebuggableAttribute` with a short blob and with none, which real .NET accepts. Measured on .NET 10 and 11 to exit 0 (an empty name throws `ArgumentException` on .NET 10 and `FileLoadException` on .NET 11); a control swapping those two exits 6 on both. It stops at its first malformed friend attribute, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case). Un-parked by modelling the friend cache's exception and the debugger bits."""
+            {
+                FileName = "TypeBuilderDuplicateRuntimeAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Two `InlineArray` attributes on one struct in modules of 25 CustomAttribute rows or more, of which CoreCLR's type loader takes the last added (#2258). Measured on .NET 10 and 11 to exit 0; a control expecting the first added exits 1 on both. It stops at its first `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case). Un-parked by modelling the 25-row rule in the readers that look an attribute up by name."""
+            {
+                FileName = "TypeBuilderCustomAttributeTaggedObject.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An emitted attribute whose constructor takes `object`, instantiated through `GetCustomAttributes`, measured on .NET 10 and 11 to exit 0; a control expecting 6 exits 1 on both. It stops at its `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case)."""
+            {
+                FileName = "TypeBuilderCustomAttributeGenericInstance.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An emitted attribute whose type is `GenAttribute<int>`, instantiated through `GetCustomAttributes`, measured on .NET 10 and 11 to exit 0; a control expecting 5 exits 1 on both. It stops at its `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case)."""
+            {
+                FileName = "TypeBuilderCustomAttributeEmptyBlobInstance.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An emitted row with an empty blob, instantiated through `GetCustomAttributes`, which real .NET refuses with `CustomAttributeFormatException`; measured on .NET 10 and 11 to exit 0, and a control expecting `ArgumentException` exits 2 on both. It stops at its `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case)."""
+            {
+                FileName = "TypeBuilderCustomAttributeOpenGenericIsDefined.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`IsDefined` over a type whose emitted row's constructor is one of the open `GenAttribute<>`, which real .NET answers with `ArgumentException` (#2257). Measured on .NET 10 and 11 to exit 0; a control expecting no exception exits 1 on both. It stops at its `SetCustomAttribute`, at Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute) (measured by naming the case)."""
             {
                 FileName = "TypeBuilderDuplicateStaticVirtualOverride.cs"
                 ExpectedReturnCode = 0
@@ -6765,6 +6877,42 @@ module TestImpureCases =
                 // ArgumentException for an unrelated type, and resolves a base type's method. Dynamic-code
                 // switch overridden to true like its siblings; verified by hand to exit 0 on real .NET 10.
                 FileName = "TypeBuilderPropertyForeignAccessor.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `TypeBuilder_DefineCustomAttribute`, through every builder's `SetCustomAttribute`, read back through
+                // reflection. Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11
+                // to exit 0, and a control expecting `B`'s seventeenth and eighteenth attributes swapped exits 83 on both.
+                FileName = "TypeBuilderCustomAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `DispatchProxy.Create` over an internal interface, which applies `IgnoresAccessChecksToAttribute` to
+                // the proxy's assembly; check 4 reads it. Dynamic-code switch overridden to true like its siblings;
+                // measured on real .NET 10 and 11 to exit 0, and a control with the interface made public exits 4 on both.
+                FileName = "DispatchProxyInternalInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =

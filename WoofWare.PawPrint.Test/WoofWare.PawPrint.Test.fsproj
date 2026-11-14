@@ -40,6 +40,7 @@
     <Compile Include="TestCustomAttributeBlob.fs" />
     <Compile Include="TestRuntimeCompatibility.fs" />
     <Compile Include="TestDebuggable.fs" />
+    <Compile Include="TestCustomAttributeIndex.fs" />
     <Compile Include="TestMultiDimArrayAllocation.fs" />
     <Compile Include="TestArrayConstructor.fs" />
     <Compile Include="TestAttributeUsageBlob.fs" />
@@ -478,6 +479,7 @@
     <Compile Include="TestDynamicAssemblyRefusals.fs" />
     <Compile Include="TestTypeBuilderGenericParamRefusals.fs" />
     <Compile Include="TestTypeBuilderPropertyRefusals.fs" />
+    <Compile Include="TestTypeBuilderCustomAttributeRefusals.fs" />
     <Compile Include="TestFabricatedPropertyAccessorOrder.fs" />
     <Compile Include="TestStaticVirtualOverrideOrderRefusals.fs" />
     <Compile Include="TestStaticVirtualOverrideOrder.fs" />
