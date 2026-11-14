@@ -229,6 +229,7 @@ module NativeQCall =
             "TypeBuilder_SetMethodIL", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetMethodIL"
             "TypeBuilder_DefineField", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineField"
             "TypeBuilder_DefineProperty", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineProperty"
+            "TypeBuilder_DefineEvent", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineEvent"
             "TypeBuilder_DefineMethodSemantics",
             NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineMethodSemantics"
             "TypeBuilder_AddInterfaceImpl", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_AddInterfaceImpl"
