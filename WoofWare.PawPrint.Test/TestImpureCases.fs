@@ -540,22 +540,6 @@ module TestImpureCases =
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
             {
-                FileName = "DispatchProxyMethodInterface.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`DispatchProxy.Create` over an interface with methods only, measured on .NET 10 to exit 0. It stops before the proxy type is emitted, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002", the interface's events (measured by naming the case, after `RuntimeTypeHandle_IsVisible`). With that answered by a throwaway edit, it exits 0 (measured). Un-parked by implementing `MetadataImport.Enum` of a type's events."""
-            {
                 FileName = "DispatchProxyPropertyInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -570,7 +554,7 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, measured on .NET 10 to exit 0. It stops where `DispatchProxyMethodInterface.cs` does, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002" (measured by naming the case, after `RuntimeTypeHandle_IsVisible`). With that answered by a throwaway edit, it exited 0 once `TypeBuilder_DefineProperty` was implemented (measured with stage 5s). Un-parked by implementing `MetadataImport.Enum` of a type's events."""
+            """`DispatchProxy.Create` over an interface with a property, written and read through the proxy, then a second proxy of the same type, measured on .NET 10 and 11 to exit 0. Its first four checks pass; the second `Create` (line 100) stops at "TODO: a dynamic method's Newobj names DynamicScope entry ... but newobj naming a DynamicMethod is an InvalidProgramException on real .NET, while newobj naming a reflected constructor constructs the object (both measured); PawPrint does neither yet" (measured by naming the case, after reflection over events). The proxy type's constructor is reflection-invoked a second time, and with dynamic code supported `MethodBaseInvoker` then emits an invoke stub whose `newobj` names the reflected constructor; nothing about events or properties is involved, and `ReflectionConstructorInvokeTwice.cs` pins the same stop. Un-parked by resolving a reflected constructor named by an invoke stub's `newobj`."""
             {
                 FileName = "DispatchProxyEventInterface.cs"
                 ExpectedReturnCode = 0
@@ -586,7 +570,7 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """`DispatchProxy.Create` over an interface with an event of its own, extending an interface with a second, measured on .NET 10 and 11 to exit 0 (a control with check 3 inverted exits 3 on both). One proxy, so that a second `Create`'s reflected constructor cannot stand in front of the events. It stops before the proxy type is emitted, at "TODO: MetadataImport.Enum does not yet support token type 0x14000000 with parent 0x02000002", the interface's events (measured by naming the case). Un-parked by reflection over events and then `TypeBuilder_DefineEvent`."""
+            """`DispatchProxy.Create` over an interface with an event of its own, extending an interface with a second, measured on .NET 10 and 11 to exit 0 (a control with check 3 inverted exits 3 on both). One proxy, so that a second `Create`'s reflected constructor cannot stand in front of the events. It stops defining the proxy type's events, at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineEvent)" (measured by naming the case, after reflection over events). Un-parked by `TypeBuilder_DefineEvent`."""
             {
                 FileName = "DispatchProxyInternalInterface.cs"
                 ExpectedReturnCode = 0
@@ -6441,6 +6425,24 @@ module TestImpureCases =
                 // events. Dynamic-code switch overridden to true like its siblings; measured to exit 0
                 // on real .NET 10 and 11.
                 FileName = "TypeBuilderInheritedEvents.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `DispatchProxy.Create` over an interface with methods only: `ProxyBuilder` asks the
+                // interface's events, of which there are none, then emits the proxy type. Dynamic-code
+                // switch overridden to true like its siblings; measured to exit 0 on real .NET 10 and 11.
+                FileName = "DispatchProxyMethodInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =

@@ -4469,7 +4469,7 @@ public interface IEventInterface
                 context.Unload ()
 
         let coverage =
-            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 200) (Arb.fromGen drawnImageGen) property
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 500) (Arb.fromGen drawnImageGen) property
 
         for label in
             [
