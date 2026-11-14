@@ -809,6 +809,119 @@ module NativeRuntimeTypeBuilder =
                 ctx.Thread
             |> NativeHandlerResult.completed
             |> Some
+        | "TypeBuilder_DefineCustomAttribute",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Byte)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32 ],
+          MethodReturnType.Void when moduleGenerics.IsEmpty ->
+            let operation = "TypeBuilder_DefineCustomAttribute"
+
+            if instruction.Arguments.Length <> 5 then
+                failwith $"%s{operation}: expected five native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+            let ownerToken = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+            // Each builder's `SetCustomAttributeCore` passes its own token: a row of one of the nine tables a builder
+            // hands out, or the assembly's or the module's.
+            let owner =
+                match HasCustomAttribute.tryOfToken ownerToken held with
+                | Some owner -> owner
+                | None ->
+                    failwith
+                        $"%s{operation}: the owner 0x%08x{ownerToken} names no row of the module's scope that an attribute can own, and the managed callers pass only a builder's own token"
+
+            let constructor =
+                methodDefOrRef
+                    operation
+                    "the constructor"
+                    (NativeCall.int32Argument operation instruction.Arguments.[2])
+                    held
+
+            let length = NativeCall.int32Argument operation instruction.Arguments.[4]
+
+            if length < 0 then
+                failwith $"%s{operation}: a blob of length %d{length}, and the managed caller passes a span's length"
+
+            // The managed caller passes a span's reference and length; with length 0 the reference is not read,
+            // whatever it is.
+            let value =
+                if length = 0 then
+                    ImmutableArray.Empty
+                else
+                    match NativeCall.managedPointerOfPointerArgument operation "pBlob" instruction.Arguments.[3] with
+                    | ManagedPointerSource.Null ->
+                        failwith
+                            $"%s{operation}: a null blob of length %d{length}, and the managed caller passes a span's reference"
+                    | pointer ->
+                        NativeCall.readCountedBytes operation ctx.BaseClassTypes state pointer length
+                        |> ImmutableArray.CreateRange
+
+            match EmitScope.typeOfCustomAttributeOwner owner held with
+            | Some typeDef when state.TypeSystem._LoadedAssemblies.IsCreatedType moduleName typeDef ->
+                failwith
+                    $"TODO: %s{operation}: the owner 0x%08x{ownerToken} belongs to TypeDef 0x%08x{(typeDefTable <<< 24) ||| typeDef.Rid}, which is created; real .NET writes the row and shows it through reflection at once, and PawPrint does not admit a row of a created type"
+            | Some _
+            | None -> ()
+
+            match EmitScopeDefinitions.defineCustomAttribute owner constructor value held with
+            | CustomAttributeDefinition.NotStoredAsGiven kind ->
+                let (ns, name), instead =
+                    match kind with
+                    | CustomAttributeEmitKind.Known known ->
+                        KnownCustomAttribute.name known,
+                        "is a pseudo-attribute (KnownCaList), which CoreCLR's _HandleKnownCustomAttribute checks against its targets, parses by its own grammar and turns into flags or rows of other tables, keeping a row only for the six it validates and keeps"
+                    | CustomAttributeEmitKind.SuppressUnmanagedCodeSecurity ->
+                        ("System.Security", "SuppressUnmanagedCodeSecurityAttribute"),
+                        "sets the owner's HasSecurity flag, as well as storing the row"
+                    | CustomAttributeEmitKind.DynamicSecurityMethod ->
+                        ("System.Security", "DynamicSecurityMethodAttribute"),
+                        "sets the method's RequireSecObject flag, and stores no row"
+                    | CustomAttributeEmitKind.Ordinary ->
+                        failwith
+                            $"BUG: %s{operation}: defineCustomAttribute did not store an attribute it classifies as ordinary"
+
+                failwith
+                    $"TODO: %s{operation}: %s{ns}.%s{name} on 0x%08x{ownerToken} %s{instead}; PawPrint does not model that"
+            | CustomAttributeDefinition.Defined (rid, extended) ->
+                let state, assembly = state.WithEmitScope ctx.LoggerFactory moduleName extended
+
+                match owner with
+                | HasCustomAttribute.Assembly ->
+                    // `UpdateRuntimeStateForAssemblyCustomAttribute` acts on an attribute of the assembly as it is
+                    // written; each check reads the row as the reader that would later decide from it does.
+                    let isNewRow (attribute : WoofWare.PawPrint.CustomAttribute) : bool =
+                        System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber (
+                            System.Reflection.Metadata.CustomAttributeHandle.op_Implicit attribute.Handle
+                            : System.Reflection.Metadata.EntityHandle
+                        ) = rid.Rid
+
+                    if
+                        NamedAttribute.ofAssembly "System.Diagnostics.DebuggableAttribute" assembly
+                        |> List.exists isNewRow
+                    then
+                        failwith
+                            $"TODO: %s{operation}: DebuggableAttribute on the assembly %s{moduleName}: CoreCLR folds each one into the assembly's debugger bits as it is written, the last deciding, whatever its blob, where PawPrint decides from the first and refuses a malformed blob; PawPrint does not model that"
+
+                    match assembly.Friends with
+                    | Error error ->
+                        failwith
+                            $"TODO: %s{operation}: the assembly %s{moduleName} now holds a friend attribute that PawPrint's friend scan rejects (%s{error}); real .NET writes the row and then throws out of the QCall, and throws again at every later friend attribute of the assembly, which PawPrint does not model"
+                    | Ok _ -> ()
+                | _ -> ()
+
+                NativeHandlerResult.completed state |> Some
         | "TypeBuilder_SetParentType",
           "System.Private.CoreLib",
           "System.Reflection.Emit",

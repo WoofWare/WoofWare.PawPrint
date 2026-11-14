@@ -11,7 +11,8 @@ using System.Runtime.CompilerServices;
 // owners a builder hands out, interleaved, with a type's and a method's generic parameter (whose rows are written when
 // the parameter is), the two attributes `GenericTypeParameterBuilder` drops, the raw overload, and `DebuggableAttribute`
 // on the module; `Refusals`, the managed refusals, and attributes on the assembly and the module after a type is
-// created; `Malformed`, blobs CoreCLR stores as given and reflection refuses; `NonAttribute`, constructors of types that
+// created; `Malformed`, blobs CoreCLR stores as given and `GetCustomAttributesData` refuses (their instantiation is
+// `TypeBuilderCustomAttributeMalformedInstance.cs`'s); `NonAttribute`, constructors of types that
 // are not attributes; `Duplicates`; `Inherited`; `Order`, 33 rows interleaved over two types and the assembly, 21 of
 // them on one type; `FirstOfTwoSmall` and `FirstOfTwoMid`, two `InlineArray` attributes on one struct, of which the type
 // loader takes the first added below 25 rows; `Args`, the kinds of argument a blob holds; and `Friends`, two rows of one
@@ -540,30 +541,15 @@ public static class Program
             return 50;
         }
 
-        if (!Throws<CustomAttributeFormatException> (() => badPrologT.GetCustomAttributes (false)))
-        {
-            return 51;
-        }
-
         if (!Throws<CustomAttributeFormatException> (() => truncatedT.GetCustomAttributesData ()))
         {
             return 52;
-        }
-
-        if (!Throws<CustomAttributeFormatException> (() => truncatedT.GetCustomAttributes (false)))
-        {
-            return 53;
         }
 
         // `GetCustomAttributesData` reads what it needs and ignores the bytes after it.
         if (Data (trailingT.GetCustomAttributesData ()) != "TagAttribute((String)a)")
         {
             return 54;
-        }
-
-        if (!Throws<CustomAttributeFormatException> (() => trailingT.GetCustomAttributes (false)))
-        {
-            return 55;
         }
 
         if (!Throws<CustomAttributeFormatException> (() => emptyT.GetCustomAttributesData ()))
@@ -884,8 +870,9 @@ public static class Program
     const int FirstOfTwoMidBefore = 10;
     const int FirstOfTwoMidAfter = 10;
 
-    /// A type of `module` given `builder`'s attribute and created, with what each reader of it gives or throws.
-    static (string data, string attrs) ReadOne (ModuleBuilder module, string name, CustomAttributeBuilder builder)
+    /// A type of `module` given `builder`'s attribute and created, with what each reader of it gives or throws; the
+    /// attribute is instantiated only if `instantiate`.
+    static (string data, string attrs) ReadOne (ModuleBuilder module, string name, CustomAttributeBuilder builder, bool instantiate)
     {
         TypeBuilder t = module.DefineType (name, TypeAttributes.Public);
         t.SetCustomAttribute (builder);
@@ -900,10 +887,13 @@ public static class Program
             data = "threw " + e.GetType ().Name;
         }
 
-        string attrs;
+        string attrs = null;
         try
         {
-            attrs = Attrs (tt.GetCustomAttributes (false));
+            if (instantiate)
+            {
+                attrs = Attrs (tt.GetCustomAttributes (false));
+            }
         }
         catch (Exception e)
         {
@@ -956,13 +946,11 @@ public static class Program
                     new object[] { 7L, typeof (byte), new[] { 9 }, Color.Red }),
                 "TagAttribute((String)n){F:OField=(Int64)7,F:TField=(Type)typeof(System.Byte),F:AField=(Int32[])[(Int32)9],F:CField=(Color)1}",
                 null),
+            // A `Type`, array or enum named argument's instantiation is `TypeBuilderCustomAttributeNamedArguments.cs`'s.
             (new CustomAttributeBuilder (
-                    TagCtor (typeof (string)),
-                    new object[] { "n2" },
-                    new[] { F ("TField"), F ("AField"), F ("CField") },
-                    new object[] { typeof (byte), new[] { 9 }, Color.Red }),
-                "TagAttribute((String)n2){F:TField=(Type)typeof(System.Byte),F:AField=(Int32[])[(Int32)9],F:CField=(Color)1}",
-                "Tag{S=n2;TField=typeof(System.Byte);AField=[9];CField=Red}"),
+                    TagCtor (typeof (string)), new object[] { "n2" }, new[] { F ("CField") }, new object[] { Color.Red }),
+                "TagAttribute((String)n2){F:CField=(Color)1}",
+                null),
             (new CustomAttributeBuilder (
                     TagCtor (typeof (string)), new object[] { "np" }, new[] { P ("Prop"), P ("OProp") }, new object[] { "pv", 1.5 }),
                 "TagAttribute((String)np){P:Prop=(String)pv,P:OProp=(Double)1.5}",
@@ -983,7 +971,7 @@ public static class Program
 
         for (int i = 0; i < cases.Length; i++)
         {
-            var (data, attrs) = ReadOne (module, "A" + i, cases[i].builder);
+            var (data, attrs) = ReadOne (module, "A" + i, cases[i].builder, cases[i].attrs != null);
             if (data != cases[i].data)
             {
                 return 100 + i;
