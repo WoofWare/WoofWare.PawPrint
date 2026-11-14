@@ -379,13 +379,78 @@ module internal UnaryMetadataObjectOps =
             ExceptionEscape.Propagate
             state
 
-    let executeNewobj (ctx : UnaryMetadataIlOpContext) (state : IlMachineState) : IlMachineState * WhatWeDid =
+    /// Ask `NewobjTarget` what CoreCLR's JIT makes of a `newobj` of `concretizedCtor`, the
+    /// executing instruction's bound method, and raise the refusal it gives, if any; otherwise
+    /// construct, as `constructObject` describes.
+    let private constructOrRefuse
+        (ctx : UnaryMetadataIlOpContext)
+        (concretizedCtor : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (declaringTypeHandle : ConcreteTypeHandle)
+        (state : IlMachineState)
+        : IlMachineState * WhatWeDid
+        =
+        // Asked here and not in `constructObject`, whose other caller, `UnsafeAccessorDispatch`,
+        // only ever finds constructors and refuses an abstract type itself. That check refuses an
+        // abstract value type too, which real .NET's accessor stub (a `newobj`) constructs.
+        let ctorType =
+            let assembly =
+                state.LoadedAssembly concretizedCtor.DeclaringAssemblyFullName
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"BUG: newobj bound %O{concretizedCtor}, whose assembly %s{concretizedCtor.DeclaringAssemblyFullName} is not loaded"
+                )
+
+            assembly.TypeDefs.[concretizedCtor.RequiredDeclaringType.Definition.Get]
+
+        let target =
+            NewobjTarget.classify
+                (MethodInfo.requireMetadata "newobj" concretizedCtor).MethodAttributes
+                concretizedCtor.Name
+                ctorType.TypeAttributes
+                (LoadedTypeInfo.isValueType ctx.BaseClassTypes state.TypeSystem._LoadedAssemblies ctorType)
+
+        match target with
+        | NewobjTarget.AbstractMethod ->
+            UnaryMetadataCallOps.raiseCompilationFailure ctx CompilationFailure.NamesAbstractMethod state
+        | NewobjTarget.StaticMethod ->
+            UnaryMetadataCallOps.raiseCompilationFailure ctx CompilationFailure.NewobjOfStaticMethod state
+        | NewobjTarget.NotInstanceConstructor ->
+            failwith
+                $"newobj names %O{concretizedCtor}, which is not static, not abstract and is not an instance constructor (RTSpecialName and the name .ctor). Real .NET constructs and calls some such methods and crashes the process compiling others, so PawPrint refuses all of them."
+        | NewobjTarget.AbstractClass ->
+            UnaryMetadataCallOps.raiseCompilationFailure ctx CompilationFailure.InstantiatesAbstractClass state
+        | NewobjTarget.Constructs ->
+
+        // No class-initialisation check here: the object is allocated first and the constructor's
+        // own prologue runs it, which is the order the CLR uses. Measured on .NET 10, a `.cctor`
+        // that throws under a plain `newobj` gives its `TypeInitializationException` a trace
+        // beginning `at T..ctor()`, so that frame is established before the initialiser runs, and
+        // the allocation it belongs to has already happened.
+        //
+        // An allocation whose `.cctor` then throws is therefore garbage, exactly as on the real
+        // runtime: the `newobj` never completes and nothing can reach the object.
+        constructObject
+            ctx.LoggerFactory
+            ctx.Logger
+            ctx.BaseClassTypes
+            ctx.Thread
+            concretizedCtor
+            declaringTypeHandle
+            true
+            state,
+        WhatWeDid.Executed
+
+    /// `newobj` of a metadata token of `activeAssy`.
+    let private executeMetadataNewobj
+        (ctx : UnaryMetadataIlOpContext)
+        (activeAssy : DumpedAssembly)
+        (metadataToken : MetadataToken)
+        (state : IlMachineState)
+        : IlMachineState * WhatWeDid
+        =
         let loggerFactory = ctx.LoggerFactory
         let baseClassTypes = ctx.BaseClassTypes
-        let activeAssy = ctx.ActiveAssembly
-        let metadataToken = ctx.MetadataToken
         let thread = ctx.Thread
-        let logger = ctx.Logger
 
         // Array constructors are runtime-synthesized (ECMA-335 II.14.2): the metadata token is a
         // MemberReference whose parent is a TypeSpec of an array. There's no managed body to
@@ -459,18 +524,26 @@ module internal UnaryMetadataObjectOps =
         | InstructionMethodBinding.ViolatesConstraints refusal ->
             UnaryMetadataIlOpContext.raiseConstraintRefusal ctx refusal state
         | InstructionMethodBinding.Bound (concretizedCtor, declaringTypeHandle) ->
+            // After the array shortcut and the binding, so that a refusal of the token's type or of
+            // its instantiation's constraints comes first, as the JIT resolves the token before it
+            // asks about the method it names.
+            constructOrRefuse ctx concretizedCtor declaringTypeHandle state
 
-        // No class-initialisation check here: the object is allocated first and the constructor's
-        // own prologue runs it, which is the order the CLR uses. Measured on .NET 10, a `.cctor`
-        // that throws under a plain `newobj` gives its `TypeInitializationException` a trace
-        // beginning `at T..ctor()`, so that frame is established before the initialiser runs, and
-        // the allocation it belongs to has already happened.
-        //
-        // An allocation whose `.cctor` then throws is therefore garbage, exactly as on the real
-        // runtime: the `newobj` never completes and nothing can reach the object.
-
-        constructObject loggerFactory logger baseClassTypes thread concretizedCtor declaringTypeHandle true state,
-        WhatWeDid.Executed
+    let executeNewobj (ctx : UnaryMetadataIlOpContext) (state : IlMachineState) : IlMachineState * WhatWeDid =
+        match ctx.Operand with
+        | ResolvedMetadataOperand.FromMetadata (activeAssy, metadataToken) ->
+            executeMetadataNewobj ctx activeAssy metadataToken state
+        | ResolvedMetadataOperand.ScopeMethod handle ->
+            failwith
+                $"TODO: newobj names the DynamicScope's %O{handle}, but a newobj in a dynamic method is not implemented; IlDecoding.scopeOperandKind refuses its body when it is minted, so the two have gone out of step"
+        | ResolvedMetadataOperand.ScopeType _
+        | ResolvedMetadataOperand.ScopeField _
+        | ResolvedMetadataOperand.ScopeTypeTarget _ ->
+            failwith
+                "BUG: newobj reads its operand as a method, but this one names a type or a field in the DynamicScope. IlDecoding.scopeOperandKind decides which kind an opcode's scope operand is read as, and it does not say so for newobj."
+        | ResolvedMetadataOperand.StubMethod method ->
+            failwith
+                $"BUG: newobj names %O{method}, which an operand of a runtime-emitted stub names and no token does; only call accepts one"
 
     /// Whether the JIT folds away the `box` of `boxed`, a byref-like type, at which the executing
     /// method is, rather than refusing to compile the method over it: whether the instructions

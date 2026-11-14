@@ -859,6 +859,46 @@ handler, can tell the difference. This is the same timing trade PawPrint makes f
 exception for each shape, with the instruction first in its method and no handler of its own, where
 the two runtimes agree.
 
+## A `newobj` that the JIT refuses fails when it is reached, and one of a non-constructor stops
+
+**CoreCLR**: the JIT refuses a method holding a `newobj` whose token names an abstract method
+(`BadImageFormatException`, "Bad IL format.", from `getCallInfo`, as for a `call`), a static method
+that is not abstract (`InvalidProgramException`, `BADCODE("newobj on static or abstract method")`),
+or an instance constructor of an abstract class (`InvalidOperationException`, "Instances of abstract
+classes cannot be created.", from `getNewHelper`), in that order. A value type is allocated without
+`getNewHelper`, so a value type flagged abstract constructs. Measured on .NET 10 and 11 over every
+method of CoreLib and over an image's own types, from metadata, from a `TypeBuilder`'s emit scope
+and from a `DynamicMethod`'s scope. As for an abstract method's `call`, the refusal happens when the
+method is compiled, so it runs nothing, the exception arrives even when the instruction is on a path
+that would never execute, and no handler inside that method can catch it.
+
+A `newobj` naming an instance method that is not a constructor has no single answer: the JIT
+compiles one of a `void` method of a class, which allocates the class and calls the method (measured
+on .NET 10 and 11), and crashes the process (SIGSEGV) compiling one of a delegate's `Invoke`, of a
+struct's method returning a `ReadOnlySpan<char>`, or of a class's returning a `ValueTask<int>`.
+
+**PawPrint**: raises each of the three exceptions, with the same message, when the instruction
+*executes*. It stops the run, naming the method, at a `newobj` of any instance method that is not an
+instance constructor (`RTSpecialName` and the name `.ctor`), including one real .NET runs.
+
+**Spec status**: ECMA-335 III.4.21 requires `newobj`'s token to be "a methodref or methoddef that
+shall be marked as a constructor", without saying what an implementation does with one that is not,
+or when. It lists `System.InvalidOperationException` "if ctor's class is abstract", and does not
+except a value type. No compiler emits any of these.
+
+**Why we chose this**: the timing is as for an abstract method's `call`. A non-constructor target is
+stopped rather than run because there is no one behaviour of real .NET to copy, and to run it as
+CoreCLR does would need the class the token names to be kept apart from the method's declaring
+class, which PawPrint does not do.
+
+**Where this lives in code**: `NewobjTarget.classify` in Semantics states the rule;
+`UnaryMetadataObjectOps.executeNewobj` asks it once the token is bound and raises through
+`UnaryMetadataCallOps.raiseCompilationFailure`. `TestNewobjTarget` checks the rule over every
+combination of its inputs, `TestNewobjTargetOnHost` against the host's JIT over every method of
+CoreLib, `TestFabricatedNewobjRefusals` each refusal from metadata with the instruction first in its
+method and no handler of its own, where the two runtimes agree, and the stop, and
+`TypeBuilderNewobjRefusals.cs` the refusals from a `TypeBuilder`'s emit scope.
+
 ## A `box` or `newarr` of a byref-like type fails when it is reached
 
 **CoreCLR**: a byref-like type (a `ref struct`, such as `Span<T>`) cannot live on the heap. The JIT

@@ -1,6 +1,6 @@
 # Emitting types with `TypeBuilder`
 
-Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p implemented (#2234); stage 5q implemented (#2235); stage 5r implemented (#2236); stage 5s implemented (#2239); stage 5t implemented (#2242); stage 5u implemented (#2244); stage 5v in progress. Tracking issue: #2091. Follows
+Status: option A chosen (2026-11-04); stage 0 implemented (#2093); stage 1 implemented (#2101); stage 2 implemented (#2109); stage 3a implemented (#2115); stage 3b implemented (#2124); stage 3c implemented (#2135); stage 3d implemented (#2141); stage 3e implemented (#2144); sorted-table rows of a created type admitted to move (3f, #2154); stage 4a implemented (#2159); stage 4b implemented (#2160); stage 4c implemented (#2162), and with it the issue's guest passes; stage 4d implemented (#2163); stage 5a implemented (#2164); stage 5b implemented (#2165); stage 5c implemented (#2166); stage 5d implemented (#2167); stage 5e implemented (#2176); stage 5f implemented (#2191); stage 5g implemented (#2192); stage 5h implemented (#2195); stage 5i implemented (#2197); stage 5j implemented (#2213); stage 5k implemented (#2220); stage 5l implemented (#2227); stage 5m implemented (#2228); stage 5n implemented (#2229); stage 5o implemented (#2231); stage 5p implemented (#2234); stage 5q implemented (#2235); stage 5r implemented (#2236); stage 5s implemented (#2239); stage 5t implemented (#2242); stage 5u implemented (#2244); stage 5v implemented (#2246); the `newobj` stage in progress. Tracking issue: #2091. Follows
 `docs/plans/2026-09-26-expression-thunk-dynamic-method.md`, whose stage 3 gave a dynamic assembly real
 metadata (#1636) and deferred "`TypeBuilder` would later have to *extend* that metadata".
 
@@ -4596,3 +4596,621 @@ passing guests also pass under PawPrint with `PAWPRINT_TEST_RUNTIME=Net11`.
   in `TestNativeMetadataImport`, beside the private `invoke*` helpers they drive, rather than in a fixture of their own;
   the property's case count is 500, since it is cheap; and the sweep asserts that some types have events and some more
   than one, rather than CoreLib's exact counts, which a CoreLib bump would move.
+
+## A reflected constructor named by a dynamic method's `newobj`
+
+### The `newobj` stage: what it is
+
+**Which stage.** 5v's decisions put this stage after 5v and before 5w, and require its planning to start by measuring,
+with a throwaway arm, what lies past the `newobj`, so that 5w goes first if more than one feature stands behind it. One
+feature stands behind it. A throwaway edit (scratchpad `newobj/throwaway.diff`, reverted) made three changes: the
+`Newobj` case of `IlDecoding.scopeOperandKind` (`WoofWare.PawPrint.Domain/IlDecoding.fs:102`) became `Method`; a `Newobj`
+arm in `StackShapeOfMethod.dynamicTokenShape` gave a reflected entry the metadata path's shape; and `executeNewobj`
+(`UnaryMetadataObjectOps.fs:382`) gave a reflected entry to `constructObject` after
+`MethodHandleResolution.concretizeClosedMetadataIdentity`, printing a line each time it did. With nothing else changed:
+
+| Program | Under PawPrint with the throwaway arm |
+|---|---|
+| `ReflectionConstructorInvokeTwice.cs` (Release App) | exits 0; the arm ran once, at the second `Invoke` |
+| `DispatchProxyPropertyInterface.cs` (Release App) | exits 0; the arm ran once, at the second `Create` |
+| `5v-proxy twice-method` | prints `twice-method 3 7` and exits 0; the arm ran once |
+| the first two, run by name as registered (`--filter "FullyQualifiedName~..."`), unset and `PAWPRINT_TEST_RUNTIME=Net11` | both `Passed` on both runtimes (Debug build, so the stack-shape depth assertion ran) |
+| `ReflectionGetMethodFromCanonicalUnshared.cs`, rebuilt with `IsDynamicCodeSupported` on (scratchpad `newobj/canon`) | exits 0, as on .NET 10.0.14 and 11.0.0-rc.3; the arm ran once (`Activator.CreateInstance` of CoreLib's `RuntimeMethodHandleInternal`) |
+
+With the edit reverted and the App rebuilt, the probe below stops at the refusal again for both a constructor's invoke
+stub and a directly emitted `newobj`. So 5w does not go first, and this stage is the `newobj` alone. The last row is
+the guest that `docs/divergences.md`'s table of first refusals (:555) records as stopping here when the dynamic-code
+baseline is emptied.
+
+**What CoreCLR does.** Read from the pinned source (`$DOTNET_RUNTIME_SRC_NET10`; every file named is the same in
+`_NET11` in the lines that matter, and the JIT and VM lines are at the offsets given in brackets):
+
+* The stub. `MethodInvokerCommon.DetermineStrategy_*` (MethodInvokerCommon.cs:104-181) runs a method's first reflection
+  call through the runtime's invoker and, from the second, through a delegate `InvokerEmitUtil` emits when
+  `RuntimeFeature.IsDynamicCodeSupported`. For a constructor `emitNew` is `method is RuntimeConstructorInfo`
+  (InvokerEmitUtil.cs:23, :90, :147); the stub pushes the arguments, emits `newobj` of the constructor (:225), boxes the
+  result if the declaring type is a value type (:237-243), and returns. There are three shapes: `Obj4Args` for up to
+  four arguments, `ObjSpanArgs` for more (each read through `Span<object>.get_Item`), and `RefArgs` when a parameter is
+  a byref (each read through `ldfld ByReference.Value` and `ldobj`). `ConstructorInvoker`, `Activator.CreateInstance`
+  with arguments, and `DispatchProxy.Create` (which constructs the proxy type through its constructor) all reach it.
+* The entry. `DynamicILGenerator.Emit(OpCode, ConstructorInfo)` (DynamicILGenerator.cs:109-127) requires a
+  `RuntimeConstructorInfo` and stores `rtConstructor.MethodHandle`, a `RuntimeMethodHandle` whose `m_value` is the
+  `RuntimeConstructorInfo` itself (RuntimeConstructorInfo.CoreCLR.cs:195), or, when the declaring type is generic or an
+  array, a `GenericMethodInfo` pairing that handle with the declaring type (`GetTokenFor`, :511-519), tagged MethodDef.
+  These are two of the four kinds `ResolveToken` reads in method position, and no new kind: no entry ever holds a
+  `RuntimeConstructorInfo` or `RuntimeMethodInfo` other than as a handle's `m_value`. `Emit(OpCode, MethodInfo)`
+  (:55-107) rules out a `DynamicMethod` only for `ldtoken`, `ldftn` and `ldvirtftn`, so `newobj` can name one, and it
+  can name any reflected method, a static or abstract one included.
+* Resolution. `ResolveToken` (:772-831) reads the entry without knowing the opcode: a handle gives its method, a
+  `GenericMethodInfo` its method and context, a `DynamicMethod` `GetMethodDescriptor()`, which mints it first. In
+  `CEEInfo::resolveToken`'s dynamic branch (vm/jitinterface.cpp:878-960) a method needs a method tag and the Method bit
+  of the token kind; `CORINFO_TOKENKIND_NewObj` is `0x200 | CORINFO_TOKENKIND_Method` (inc/corinfo.h:1399), so `newobj`
+  resolves exactly what `call` resolves, and fails where `call` fails.
+* The refusals, in order. The importer's `CEE_NEWOBJ` (jit/importer.cpp:8851 [:8996]) resolves the token, then
+  calls `getCallInfo`, which raises `BadImageFormatException` (`BFA_BAD_IL`, "Bad IL format.") for a direct call of an
+  abstract method (vm/jitinterface.cpp:5182-5190 [:5283]), as it does for `call`. Then `BADCODE("newobj on static or
+  abstract method")` (importer.cpp:8870-8873 [:9017]) makes a static method an `InvalidProgramException`; a
+  `DynamicMethod` is always static, which is why `newobj` of one is that exception. Then an array goes to
+  `impImportNewObjArray`, `String` (variable size) is called with no `this`, and anything else is allocated through
+  `getNewHelper`, which throws `InvalidOperationException` "Instances of abstract classes cannot be created."
+  (`InvalidOperation_CantInstantiateAbstractClass`, jitinterface.cpp:5630-5633 [:5720]) for an abstract class. All three
+  are raised as the method is compiled, before it runs anything.
+* Nothing in that sequence reads the token's universe. A metadata `newobj` meets the same three refusals; only the
+  resolution of the token differs.
+
+**Measured** with a throwaway probe (scratchpad `newobj/probe`), built against net10.0 with `IsDynamicCodeSupported`
+on, run on 10.0.14 and rolled forward to 11.0.0-rc.3: every line is the same on both runtimes. The first group invokes a
+constructor three times through `ConstructorInfo.Invoke`, so that the stub runs twice; the second emits `newobj`
+directly in a `DynamicMethod` (`skipVisibility` on) and calls it through a delegate; the third emits it in a
+`TypeBuilder` method's body, so that the token is metadata. A refused row calls a marker method before the `newobj`,
+and on real .NET the marker never ran (`marks=0`), so each refusal is raised at compilation. "Throwaway" is PawPrint
+with the throwaway arm; without it, every row of the first two groups that reaches the stub's or the method's `newobj`
+stops at the refusal.
+
+| Scenario | .NET 10.0.14 and 11.0.0-rc.3 | PawPrint, throwaway arm |
+|---|---|---|
+| a class's constructor, one `int` | three objects, values 1, 2, 3 | the same |
+| a struct's constructor (the stub boxes) | `S1:1/10`, `2/20`, `3/30` | the same |
+| `G<int>(int)`, `G<string>(string)` (a `GenericMethodInfo` entry) | the values | the same |
+| five arguments (`ObjSpanArgs`) | `54321`, `54322`, `54323` | the same |
+| a constructor that throws | `TargetInvocationException` wrapping it, each time | the same |
+| a class with a `.cctor` | log `cctor;ctor1;ctor2;ctor3;` | the same |
+| a private nested class | constructed | the same |
+| `ConstructorInvoker.Create(ctor).Invoke`; `Activator.CreateInstance(type, i)` | constructed | the same |
+| a `ref int` parameter (`RefArgs`) | values 1, 2, 3, the argument incremented | first call right; the stub stops at `ldfld ByReference.Value` (IL offset 1, before its `newobj`): "CliValueType.FindFieldById: field '...::Value' not found" |
+| a static method with a `ref int` parameter, through `MethodInfo.Invoke` | 101, 102, 103 | the same stop at the same instruction, with no `newobj` involved |
+| `string(char, int)`; `Nullable<int>(int)`; `int[,](int, int)` | constructed | stops before any stub: `InvokeMethod` with `isConstructor` on `String`, and on `Nullable<T>`; `GetFirstIntroducedMethod` for the array, at `GetConstructor` |
+| `newobj` of a class's, a struct's, `G<int>`'s and `String`'s constructor | constructed | the same |
+| `newobj` of `int[,]`'s constructor | `2x3` | stops at `GetConstructor`, as above |
+| `newobj` of a constructor that throws, inside the method's own `try`/`catch` | the handler gets it | the same |
+| `newobj` of `G<>`'s constructor (open) | `InvalidProgramException` | the same (`tryMethod`'s existing refusal), raised at the instruction (`marks=1`) |
+| `newobj` of a `DynamicMethod` | `InvalidProgramException`; afterwards the target's `_methodHandle` is set | the throwaway arm's refusal |
+| `newobj` of a `DynamicMethod` with no body | `InvalidOperationException` "Method 'emptytarget' does not have a method body."; `_methodHandle` still null | not run |
+| `newobj` of a reflected static method | `InvalidProgramException` | calls it as a constructor, then "Invalid CIL: method ... returned with more than one evaluation stack value" |
+| `newobj` of `Stream.Flush` (abstract, on an abstract class) | `BadImageFormatException` "Bad IL format." | "reached executeOneStep for abstract method System.IO.Stream::Flush" |
+| `newobj` of an abstract class's constructor | `InvalidOperationException` "Instances of abstract classes cannot be created." | constructs an instance of the abstract class |
+| `newobj` of `Inst.NotCtor`, a `void` instance method that is not a constructor | allocates and calls it: `V` is 77 | the same |
+| the last five in a `TypeBuilder` body (metadata token) | the same five answers | static: the same "Invalid CIL"; abstract method: the same stop; abstract class: constructs it; `NotCtor`: 77. This is PawPrint at this branch's tip, since the throwaway arm does not touch the metadata path |
+
+The two `DynamicMethod` rows show that `newobj` mints its target before refusing it: an empty body is the mint's own
+exception, and a good one is minted though never called.
+
+A second probe (scratchpad `newobj/sweep`) measures the refusal rule over all of CoreLib on real CoreCLR. For each method
+of a closed type that is not itself generic, it compiles `ldarg.0; brfalse skip; <a default per parameter>; newobj m;
+pop; skip: ret` in a `DynamicMethod` and calls it with `false`, so that compilation happens and the `newobj` never runs.
+It takes about ten seconds.
+
+| Shape (count on 10.0.14; 11.0.0-rc.3 has more methods and the same outcome per shape) | Outcome |
+|---|---|
+| abstract, instance or static, on a class or an interface (686; of them 17 static abstract interface members) | `BadImageFormatException` |
+| static, not abstract, on any kind of type (21,252) | `InvalidProgramException` |
+| an instance constructor of an abstract class, `Delegate`'s included (94) | `InvalidOperationException`, the abstract-class message |
+| an instance constructor of anything else: class, struct, byref-like struct, `String`, delegate (1,974) | compiles |
+| an instance method that is not a constructor | not swept: CoreCLR crashed the process (SIGSEGV, exit 139) compiling `newobj` of a delegate's `Invoke`, of a struct's `Interop+Sys+DirectoryEntry.GetName`, and of a class's `SafeFileHandle+ThreadPoolValueTaskSource.QueueRead` |
+
+So the rule has four outcomes and a fixed order, abstract before static before abstract class, and a fifth case real .NET
+does not handle consistently: `NotCtor` runs, and other non-constructors crash the runtime.
+
+**How PawPrint represents a scope entry today.** A dynamic method's body is decoded at mint against
+`IlTokenUniverse.DynamicScope`, and a token operand becomes `MetadataOperand.FromDynamicScope index` without reading the
+entry. `IlDecoding.scopeOperandKind` (IlDecoding.fs:78) is the one classification of what each opcode reads an entry as.
+The decoder refuses at mint, by opcode alone, every opcode it classes `NotYetSupported`, which is where `newobj` stops
+today (:102-107). When an instruction runs, `UnaryMetadataIlOp.execute` (UnaryMetadataIlOp.fs:44, :86-121) asks the same
+classification and resolves the entry before dispatching: a `Method` operand goes through `DynamicScopeOperand.method`
+(DynamicScopeOperand.fs:1079, over `tryMethod` at :892 and `reflectedMethod` at :778), which reads all four entry kinds,
+raises what real .NET raises for a malformed entry, and answers `NeedsMinting` for an unminted `DynamicMethod`, which
+`execute` mints by pushing the guest's `GetMethodDescriptor` and re-executing the instruction. The op receives
+`ResolvedMetadataOperand.ScopeMethod` of a `MethodHandle`: `FromMetadata` of a closed identity, or `FromDynamic`.
+
+Which opcodes already resolve a method entry:
+
+* `call` and `callvirt` are classed `Method`. `executeCall` (UnaryMetadataCallOps.fs:754) splits on `ctx.Operand`
+  before it touches `ctx.ActiveAssembly`, which is partial and fails for a scope operand
+  (UnaryMetadataIlOpContext.fs:139). A reflected entry is concretised by `concretizeClosedMetadataIdentity`
+  (MethodHandleResolution.fs:166) and entered through `enterNamedCallee` (:693), which refuses an abstract method with
+  `raiseNamedAbstractMethod` (:671), the same refusal the metadata path gives through
+  `CompilationFailure.NamesAbstractMethod` (CallSiteBinding.fs:9). A `DynamicMethod` is concretised by
+  `DynamicMethodExecution.concretize`. `executeScopeCallvirt` (:1015) raises `MissingMethodException` for a static
+  callee, on the scope path only, with origin `ResolutionFault.ScopeEntry`.
+* `ldftn` and `ldvirtftn` are `NotYetSupported`, with the reason that they are not wired yet; `ldtoken` of a method- or
+  field-tagged token is refused by the decoder by its tag.
+* `StackShapeOfMethod.dynamicTokenShape` (StackShapeOfMethod.fs:294) computes a shape for `call` and `callvirt` from the
+  same `tryMethod`, and for `newobj` has a `failwith "BUG: ..."` arm (:362), since the decoder refuses such a body. The
+  analysis runs on a body's first execution, so the stub reaches it before its `newobj` runs.
+
+So `newobj` follows `call`: its classification becomes `Method`, and resolution, minting, the malformed-entry refusals
+and `NeedsMinting` all come from what exists. What it needs of its own is in `executeNewobj` and the stack shape.
+
+`executeNewobj` today binds `ctx.ActiveAssembly` and `ctx.MetadataToken` on its first lines, then resolves a MethodDef or
+MemberRef (with the array-constructor shortcut first), binds the method with `bindMethodForInstruction`, and calls
+`constructObject` (UnaryMetadataObjectOps.fs:230), which redirects a `String` constructor to its `Ctor`, allocates a
+value type on the heap and copies it out, and otherwise allocates and calls the constructor. Neither checks the method
+or the class: the metadata path constructs an abstract class and calls a static method as a constructor, as the
+`TypeBuilder` rows show. `OpcodeFaults`' entry for `newobj` (WoofWare.PawPrint.Semantics/OpcodeFaults.fs:519) carries
+`TokenBinding`, whose documentation and exception list (:220) name `call`'s abstract refusal but not `newobj`'s three,
+and do not include `InvalidOperationException`.
+
+### The `newobj` stage: the options
+
+Every option that resolves the entry makes the same three changes: `scopeOperandKind` classes `Newobj` as `Method`, so
+the decoder admits it and `execute` resolves, mints and refuses entries as for `call`; `executeNewobj` splits on
+`ctx.Operand` before it reads `ActiveAssembly`, as `executeCall` does; and `dynamicTokenShape` gains a `Newobj` arm that
+gives a reflected entry `TokenShape.Callee (parameter count, None)`, as `StackShapeTokens.ofMetadataToken` does for a
+metadata `newobj`, and gives no shape for a `DynamicMethod` or a refused method, whose instruction raises. The
+`DynamicMethod` arm raises `InvalidProgramException` after the mint `execute` already performs, which is CoreCLR's
+order (measured above). They differ in where the refusals live and which universe gets them.
+
+**A. A scope arm with its own refusals; the metadata path unchanged.** `executeNewobj`'s scope arm concretises the
+identity, then refuses in CoreCLR's order (an abstract method through `raiseNamedAbstractMethod`; a static method,
+`InvalidProgramException`; an abstract declaring type, `InvalidOperationException` with the CLR message), refuses a
+method that is not an instance constructor by name, and calls `constructObject`. The metadata arm is untouched. This is
+how `executeScopeCallvirt` treats a static callee.
+
+* Correctness: every scope row above. The metadata path keeps constructing abstract classes, a wrong answer reachable
+  from any `TypeBuilder` body, and keeps calling static methods as constructors.
+* Blast radius if wrong: `newobj` in a dynamic method, all of which is refused today.
+* Reversibility: one arm; nothing existing changes shape.
+* Information: the same instruction gets two answers by universe, and the refusals for the metadata path would later
+  be written again or moved, leaving the scope arm's copy to migrate.
+
+**B. One rule for both universes.** A function over the concretised method and its declaring type gives the refusal,
+if any, in CoreCLR's order: `CompilationFailure` gains `NewobjOfStaticMethod` (`InvalidProgramException`) and
+`InstantiatesAbstractClass` (`InvalidOperationException`, the CLR message), and reuses `NamesAbstractMethod`. A method
+that is not an instance constructor is refused by name (see question 3). Both arms of `executeNewobj` call the function
+between binding and `constructObject`, and raise through `raiseCompilationFailure`. `OpcodeFaults`' `TokenBinding`
+documentation names the three refusals, and its list gains `System.InvalidOperationException`.
+
+* Correctness: every row above, in both universes; the `TypeBuilder` rows change from a wrong answer and two crashes to
+  real .NET's three exceptions.
+* Blast radius if wrong: every `newobj` of every guest calls the function: three flag reads and a type lookup the
+  binding has already made. A wrong rule refuses ordinary constructors at once, which every guest suite would show. The
+  sweep says what it changes for compiled code: no instance constructor of a non-abstract type is refused, and no
+  compiler emits the other cases.
+* Reversibility: two `CompilationFailure` cases and a call in each arm.
+* Information: one rule, stated once and checked against the sweep, which an analyser could later read if it moved to
+  Semantics (question 5).
+
+**C. Stop CoreLib emitting the stub.** Seed `System.Reflection.ForceInterpretedInvoke` (read by
+`LocalAppContextSwitches`; MethodInvokerCommon.cs:19) so that every reflection call takes the runtime's invoker.
+
+* Correctness: un-parks the three programs, but a guest's own `Emit(OpCodes.Newobj, ctor)` stays refused, and a guest
+  that reads the switch sees a value real .NET does not set.
+* Blast radius: every reflection invocation of every guest with dynamic code on, and the method stubs that
+  `ReflectionInvokeThroughEmittedStub.cs` pins would no longer run. It hides an interpreter gap by changing what
+  managed code runs, which AGENTS.md's rule about primitive boundaries forbids in spirit.
+* Rejected.
+
+**D. Turn the entry into a metadata token and reuse the metadata arm.** For a non-generic declaring type the identity
+carries a MethodDef handle in its assembly, and `executeNewobj`'s MethodDef branch could run on it. But that branch takes
+the token's assembly to be the executing method's (`ctx.ActiveAssembly`, which a dynamic method does not have) and binds
+against the executing method's generic context, and for `G<int>` (a `GenericMethodInfo` entry) no token names the
+instantiation. It coerces an identity into a token to reuse metadata code, which AGENTS.md's architecture guidelines
+rule out. Rejected.
+
+**Recommended: B.** The three refusals are rules of `newobj`, not of the scope: the sweep shows them over every shape of
+method, and the `TypeBuilder` rows show the metadata path giving a wrong answer for one of them today. `call`'s abstract
+refusal is already shared between the universes through `enterNamedCallee`; the callvirt-of-static rule is scope-only,
+so both structures exist, and B is chosen on its merits: one statement of the rule, checked against CoreCLR across
+CoreLib, and no copy to migrate later. A would add a correct arm beside a wrong one. C and D are rejected above.
+
+Open questions:
+
+1. A, B, C or D.
+2. Under B, one PR, or the shared refusals first as a PR of their own over the metadata path (pinned by the `TypeBuilder`
+   guest below), then the scope arm on top. Recommended: two PRs, the refusals first. AGENTS.md prefers a dependency
+   merged first, and the refusals are what keep the scope arm from constructing abstract classes; each PR is then one
+   feature.
+3. A method that is not an instance constructor. Real .NET runs `Inst.NotCtor` and crashes the process on others
+   (measured), and PawPrint's metadata path runs them all. Refuse it by name in both universes (recommended: correctness
+   over availability, and no compiler emits it), or let it run in both, or refuse it on the scope path only.
+4. The raise origin of the `DynamicMethod` arm's `InvalidProgramException`. `ResolutionFault.TokenBinding`
+   (recommended: it is the static rule, which a metadata token meets too), or `ScopeEntry`, as `executeScopeCallvirt`
+   classes its static refusal.
+5. Where the rule lives. In the interpreter, as `CompilationFailure` cases beside `NamesAbstractMethod` (recommended:
+   only the interpreter asks), or in Semantics as a pure classification over Domain's method and type facts, which
+   `EscapeAnalysis` could read for `newobj`'s escapes. Moving it later is mechanical.
+
+### The `newobj` stage: the oracle
+
+Written first, and seen to fail before the implementation:
+
+* `ReflectionConstructorInvokeTwice.cs` and `DispatchProxyPropertyInterface.cs` are registered as passing. Both passed
+  by name on both runtimes with the throwaway arm.
+* `sourcesImpure/ReflectionConstructorInvokeShapes.cs` (`IsDynamicCodeSupported` on): the probe's first group, each
+  constructor invoked three times with a different argument and every result checked, so that the stub runs twice:
+  the class, the struct, `G<int>` and `G<string>`, five arguments, the constructor that throws (a
+  `TargetInvocationException` with the inner exception's type and message, each time), the `.cctor` log, the private
+  nested class, `ConstructorInvoker` and `Activator.CreateInstance`. It leaves out the `ref` parameter, `String`,
+  `Nullable<int>` and the array, which stop elsewhere (below). It returns the number of the first failing check.
+* `sourcesImpure/DynamicMethodNewobj.cs`: the probe's second group, with each refusal's exception type and, where the
+  CLR gives one, its message: the class, struct (boxed), `G<int>` and `String` constructors; the throwing constructor
+  caught in the method; `G<>`'s constructor; a `DynamicMethod`, then reading its `_methodHandle` by private reflection
+  (set); an empty `DynamicMethod` (the mint's exception, and `_methodHandle` still null); a static method; `Stream.Flush`;
+  a static abstract interface member (the sweep's row; measure it in the guest on both runtimes first); an abstract
+  class's constructor; and, if question 3 keeps it running, `Inst.NotCtor`. No refused case does anything observable
+  before its `newobj`, because PawPrint raises at the instruction where CoreCLR raises at compilation, a divergence
+  already recorded for every compile-time refusal.
+* `sourcesImpure/TypeBuilderNewobjRefusals.cs` (option B): the third group, a `TypeBuilder` method per case through a
+  delegate: a constructor (the control), a static method, `Stream.Flush`, an abstract class's constructor. Today it
+  fails at the abstract class (constructed) or crashes, depending on order; under question 2's first PR it is that PR's
+  guest.
+* Each guest is measured on .NET 10.0.14 and 11.0.0-rc.3 before it is committed, with a control inverting one check,
+  as 5v's were.
+* `TestNativeGetDynamicMethod`'s "a newobj naming a dynamic-method entry is refused as unsupported rather than as
+  wrong-kind" (:1977) is replaced by a test that `newobj` naming each of the four method entry kinds is minted, beside
+  the one for `call` and `callvirt`. The PR says that an existing test changed and why.
+* The sweep as a test in the host (option B): for every method the sweep compiles (instance constructors, static
+  methods, abstract methods, of every closed type of `HostImage`'s CoreLib that is not generic), the rule function's
+  answer for the method read from the image equals the exception, or none, that real CoreCLR's compilation raised. The
+  count is asserted equal to the methods enumerated, and coverage is asserted for each of the four outcomes, for a
+  static abstract member, for a value type's and a `String` constructor, and for `Delegate`'s constructor (abstract
+  class). The host's runtime is the test host's, so this checks .NET 10; the probe has checked 11 by hand. The rule
+  function is `internal` so that the test can call it; if question 5 moves it to Semantics, it is public there.
+* Mutants, each run against the guests, the replaced unit test and the sweep:
+  * `Newobj` classed `NotYetSupported` again (all three stub programs stop at mint);
+  * the scope arm falling through to the metadata arm (`ActiveAssembly`'s "gone out of step" TODO);
+  * the stack shape counting `this` among the arguments (the Debug depth assertion in every guest run; to be seen to
+    fire, since the suites build Debug and the throwaway arm passed there);
+  * the stack shape giving no shape for a reflected entry (whether anything kills it is to be measured and recorded);
+  * the `DynamicMethod` arm constructing, or raising before the mint (the two `DynamicMethod` rows: `_methodHandle` set,
+    and the empty body's exception);
+  * the static refusal checked before the abstract one (the static abstract interface member; the sweep);
+  * the abstract-class refusal checked before the abstract-method one (`Stream.Flush`; the sweep);
+  * the abstract-class refusal dropped (the abstract class's row in both guests; the sweep);
+  * a `GenericMethodInfo` entry concretised at its definition rather than its identity (`G<int>`, `G<string>`);
+  * `constructObject` given the definition's declaring type rather than the identity's (`G<string>`);
+  * under B, the metadata arm skipping the rule (`TypeBuilderNewobjRefusals.cs`).
+
+### The `newobj` stage: left to later stages
+
+* 5w, `TypeBuilder_DefineEvent`, next, as 5v's decisions say; then `TypeBuilder_SetParamInfo`.
+* The by-ref invoke stub. `InvokerEmitUtil.CreateInvokeDelegate_RefArgs`' `ldfld ByReference.Value` over CoreLib's
+  `StackAllocatedByRefs` stops any reflection call with a byref parameter from its second invocation on, a constructor's
+  or a method's alike (measured above), and `docs/divergences.md`'s table (:555) counts 30 guests that stop there when
+  the dynamic-code baseline is emptied. It is a byref-layout question, not emit, and not this plan's.
+* Reflection invocation of a `String` constructor, of a `Nullable<T>` constructor, and of an array type's constructor,
+  each refused before any stub by `RuntimeMethodHandle.InvokeMethod` or `GetFirstIntroducedMethod` (measured above).
+* `ldftn` and `ldvirtftn` of a scope entry, and method- or field-tagged `ldtoken`: unchanged, with no measured consumer.
+* The timing of a compile-time refusal: PawPrint raises it at the instruction, after the method has run what precedes
+  it; recorded in `docs/divergences.md` already.
+* `newobj` of an array type's constructor named by a scope entry: unreachable until reflection can name one
+  (`GetConstructor` stops first). When it can, the scope arm needs the metadata arm's array shortcut.
+* Comments that describe the refusal as current: the header of `sourcesImpure/DynamicMethodExceptionRegions.cs`
+  (:10-14), `sourcesImpure/DynamicMethodStackTrace.cs` (:25-28), `IlDecoding.scopeOperandKind`'s note on the
+  method-shaped opcodes (:88-91), and `docs/divergences.md`'s paragraph listing what is still refused by name (:583).
+  These change with the stage. The dated table at :555 records a measurement and stays as it is.
+
+### The `newobj` stage: the decisions
+
+Taken 2026-11-14.
+
+* **B: one rule for both universes, in two PRs, the refusals first.** Checked against the pinned source:
+  * The importer's `CEE_NEWOBJ` (jit/importer.cpp:8851) resolves the token, calls `getCallInfo`, then raises
+    `BADCODE("newobj on static or abstract method")` (:8870-8873), then splits on the class flags, and asks
+    `getNewHelper` only on the fixed-size class path (:9013). `getCallInfo`'s abstract refusal
+    (vm/jitinterface.cpp:5182-5190) and `getNewHelper`'s abstract-class refusal (:5630-5633) are as the stage
+    describes them. `Emit(OpCode, MethodInfo)` and `Emit(OpCode, ConstructorInfo)` (DynamicILGenerator.cs:55-127)
+    are as described.
+  * The probe's rows were run again on .NET 10.0.14 and 11.0.0-rc.3 for this decision: the four `TypeBuilder` rows
+    and their control, the two `DynamicMethod` mint rows, and the by-ref method row. Each agrees with the table.
+    The sweep's two outputs have the same 31 shapes with the same outcome each (24,006 methods on 10, 26,115 on 11),
+    and the stage's four counts add up.
+  * A is rejected. It adds a correct arm beside a wrong one, and the stack-shape arm would need the same rule a
+    third time.
+  * C and D are rejected for the stage's reasons.
+  * A fifth structure was weighed: the scope arm first, with the three refused shapes stopped by name, and the
+    shared rule afterwards. It un-parks the guests one PR sooner. It is rejected because it writes three host
+    refusals in order to delete them in the next PR, and AGENTS.md prefers the dependency merged first.
+* **The stage is two features, and neither stands behind the stop.** 5v's condition was about what a guest reaches
+  past the `newobj`, and the measurement answers it: nothing. So this stage stays ahead of 5w.
+  * The refusals are not behind the stop. They are a wrong answer on the metadata path that exists today, found
+    while planning. They are their own PR because the scope arm would otherwise make the abstract-class answer
+    reachable from a second universe.
+  * PR 1, from `main` now: "Refuse a `newobj` of an abstract method, a static method or an abstract class, as
+    CoreCLR's JIT does". It depends on nothing of 5v's.
+  * PR 2, from `main` once PR 1 and #2246 have merged: "Run a `newobj` that names a reflected constructor in a
+    dynamic method". Its code needs only PR 1; un-parking `DispatchProxyPropertyInterface.cs` needs #2246. If
+    #2246 is still open, PR 2 is stacked on it, the four suites are run locally at its tip, and the PR body says so.
+  * Then 5w.
+* **The rule lives in Semantics, as a pure function of Domain facts.** The stage's "only the interpreter asks" is
+  wrong: there are four readers.
+  * Both arms of `executeNewobj` ask it.
+  * `StackShapeOfMethod.dynamicTokenShape` asks it, since it must give no shape exactly where the instruction
+    refuses, as its `call` arm does today with a copy of `call`'s rule.
+  * The escape analysis should ask it (below).
+  * The function reads only the method's attributes and name, and the declaring type's attributes. It needs no
+    machine state, so Semantics is the lowest project that can hold it. The sweep then calls a public function,
+    and nothing is made `internal` for a test.
+  * If refusals later move to method entry, a rule held as data moves with a change of caller.
+* **Conditions on the rule.**
+  * It has five outcomes, in this order: an abstract method (`BadImageFormatException`, "Bad IL format."); a static
+    method (`InvalidProgramException`); a method that is not an instance constructor (stopped by name, below); an
+    abstract declaring type (`InvalidOperationException`, the CLR message); otherwise it constructs.
+  * The third sits where it does because of what is measured. The first two outcomes are measured on
+    non-constructors: all 686 abstract methods and all 21,252 static methods in the sweep are non-constructors. The
+    abstract-class outcome is measured on constructors only.
+  * An instance constructor is CoreCLR's `IsMdInstanceInitializer` (inc/corhdr.h:433): `RTSpecialName` set and the
+    name `.ctor`. A method named `.ctor` without the flag is not one. A `.cctor` is static and takes the second
+    outcome.
+  * The abstract-class outcome is CoreCLR's for a class. A value type takes the importer's value-class path, which
+    never calls `getNewHelper`, and no loader rule forbids the `Abstract` bit on a value type. So the source says
+    an abstract value type constructs, and nothing measures it. PR 1 measures one fabricated abstract struct on
+    .NET 10 and 11. If it constructs, the rule takes "is a value type" as an input and the fabricated test gains
+    the row. Until measured, the rule stops it by name.
+  * The rule's result type has no wildcard arm at any reader. In the interpreter, the three exceptions are
+    `CompilationFailure` cases raised through `raiseCompilationFailure`.
+  * The rule is called in `executeNewobj`, never in `constructObject`. `Activator`, the runtime's reflection
+    invoker and `[UnsafeAccessor]` also reach `constructObject`, and CoreCLR gives each its own check and its own
+    exception.
+  * On the metadata arm the rule is asked after the array shortcut and after binding, so a type refusal or a
+    constraint refusal still comes first, as `resolveToken` precedes `getCallInfo`.
+  * `executeNewobj` splits on every case of `ResolvedMetadataOperand` with no wildcard: `FromMetadata` is the
+    metadata arm, `ScopeMethod` the scope arm, and `StubMethod`, `ScopeType`, `ScopeField` and `ScopeTypeTarget`
+    fail by name. The throwaway's `| _ ->` is not kept.
+* **A method that is not an instance constructor is stopped by name, in both universes.**
+  * Real .NET has no single behaviour to copy: `Inst.NotCtor` runs, and three other shapes crash the process.
+  * Two of the three crashing methods return a value (`ReadOnlySpan<char>`, `ValueTask<int>`) and the third is a
+    delegate's `Invoke`. That suggests the importer assumes a `void` non-delegate target. It is a reading of three
+    cases and is not relied on.
+  * Letting it run would also need a distinction PawPrint does not keep. CoreCLR allocates the class the token
+    names (`getNewHelper(resolvedToken.hClass)`, and `gtNewAllocObjNode(&resolvedToken, ...)`), which for an
+    inherited method is not the declaring class. For a constructor the two are the same, because a MemberRef never
+    finds an inherited constructor (vm/memberload.cpp:1160).
+  * This takes away one answer that matches real .NET today: `tb-instmethod`'s 77. No compiler emits the shape, and
+    the stop names it.
+  * Refusing it on the scope path only is rejected: it would leave the same instruction with two answers by
+    universe.
+* **The fault category is `TokenBinding` for all three refusals, the `DynamicMethod` case included.**
+  * A `DynamicMethod` is refused because it is static, which is the rule a metadata token meets too. Its arm
+    raises the same `CompilationFailure` through `raiseCompilationFailure`, after the mint `execute` already
+    performs. The category then cannot differ between the universes, and no test needs to pin it. No guest can see
+    it.
+  * `ResolutionFault.typeNames TokenBinding` gains `System.InvalidOperationException`, and the case's documentation
+    names `newobj`'s three refusals. This loosens the raise-time check slightly for every other `TokenBinding`
+    raise.
+  * A new `ResolutionFault` case for `newobj` was weighed and rejected. It would keep that check tight, but it is
+    one more case for one exception, and it would force an edit to the escape analysis's exhaustive match inside
+    PR 1.
+  * `executeScopeCallvirt` keeps `ScopeEntry` for its static callee. Whether the metadata path's `callvirt` of a
+    static method gives the same `MissingMethodException` is not measured here (below).
+* **The escape analysis needs the rule, in a PR of its own after PR 1.**
+  * It models a `newobj` as a call and an allocation. Its `abstractCallees` covers `call` and `ldftn` only. So for
+    a body in metadata that holds one of the three refused shapes, it reports nothing escaping where CoreCLR
+    raises before the body runs. That is a false negative today, whatever PawPrint's interpreter does.
+  * Its comment at EscapeAnalysis.fs:5927 says a compile-time refusal for what a token binds to is
+    `abstractCallees`' and `refusals`'. Once `TokenBinding`'s documentation names `newobj`'s three, that comment is
+    known to be incomplete. PR 1 does not touch Analysis; the follow-up does.
+  * Title: "Report what a `newobj` that CoreCLR's JIT refuses raises". It does not gate PR 2 or 5w.
+  * `TestEscapeAnalysis`'s Roslyn fixture cannot spell the IL, so its fixture is emitted, as
+    `TestEscapeAnalysisConstraintViolation`'s are.
+* **Corrections to the stage's other sections.**
+  * `probe/net10.out` and `probe/net11.out` predate the `tb-*`, `dyn-dm-empty`, `dyn-dm-mints` and `byref-method`
+    rows: neither file holds them. The rows are right (run again, above). PR 1 saves the full output of both
+    runtimes.
+  * "The last five in a `TypeBuilder` body" is four rows and a control. There is no `DynamicMethod` row in that
+    group.
+  * "An abstract declaring type" is more exactly the class the token names, on the fixed-size class path only, as
+    above.
+  * "A divergence already recorded for every compile-time refusal" is not so for `newobj`. `docs/divergences.md`
+    records the timing for `call` and `ldftn` of an abstract method, for refused type operands and for constraint
+    violations. PR 1 adds `newobj`'s three to it.
+  * The stage's oracle makes the `TypeBuilder` guest PR 1's check of the metadata path. The precedent is
+    `TestFabricatedAbstractMethodCall`: an image on disk, run under PawPrint and on the real runtime by
+    `FabricatedGuest`, in the default suite, with no dependence on emit. PR 1's main check is of that kind
+    (below).
+  * "The stack shape counting `this` among the arguments (the Debug depth assertion in every guest run)" and "giving
+    no shape ... to be measured" both lean on the guests. A token with no shape is recorded as untyped
+    (StackShapeOfMethod.fs:481-492) and the run goes on, so a guest need not notice either. Both get a unit test
+    (below).
+  * The sweep skips every generic type, so it holds no abstract generic class. The guests add one.
+  * PawPrint raises no `MethodAccessException` anywhere, for a metadata token or a scope entry. The probe's
+    abstract class has a protected constructor, named from another assembly. Real .NET still gives the
+    abstract-class exception, because it is raised at compilation, before the access helper could run. The guests
+    give their abstract class a public constructor, so that no row leans on that order.
+  * Option B's "three flag reads and a type lookup the binding has already made" stands, and `constructObject`
+    already reads the same `TypeInfo`.
+* **The oracle is sufficient with these changes.** PR 1, tests first:
+  * The rule is tested exhaustively over its inputs (abstract method, static, the constructor predicate, abstract
+    type, and value type if it becomes an input) against the order written as the sentence above.
+  * The sweep runs in the host as the stage describes, and also:
+    * for every method it skips, it asserts that the rule answers "not an instance constructor" exactly where
+      reflection says the method is neither a constructor, nor static, nor abstract;
+    * it asserts that every exception CoreCLR raised is one `ResolutionFault.typeNames TokenBinding` names;
+    * its coverage also names a `.cctor`, a static method of an interface, and a byref-like struct's constructor.
+  * The sweep's docstring says it compiles in the test host, that CoreCLR crashes the process on the shapes it
+    skips, and that a crash of the host after a CoreLib bump should be looked for here first.
+  * `TestFabricatedNewobjRefusals`, through `FabricatedGuest`, with types of the fabricated image's own:
+    * a constructor (the control);
+    * a static method;
+    * an abstract method of an abstract class;
+    * an interface's instance method;
+    * a static abstract interface member;
+    * an abstract class's public constructor;
+    * an abstract generic class's constructor at an instantiation;
+    * the abstract struct, once measured.
+
+    Each method puts the `newobj` first and has no handler, so the timing divergence cannot show.
+  * A separate test expects PawPrint to stop by name at a `newobj` of an instance method that is not a
+    constructor, and at one named `.ctor` without `RTSpecialName`.
+  * `sourcesImpure/TypeBuilderNewobjRefusals.cs` stays as the stage has it, as the check that an emit scope's
+    tokens reach the same rule.
+  * Mutants:
+    * each pair of adjacent outcomes swapped;
+    * the abstract-class refusal dropped;
+    * the metadata arm skipping the rule;
+    * the non-constructor stop dropped;
+    * the constructor predicate reading the name alone;
+    * the rule moved into `constructObject` (record which existing `Activator` or reflection guest kills it; if
+      none does, add a row to one).
+  * The four Guest suites and the default suite run at the tip, since every `newobj` of every guest now asks the
+    rule.
+* **The oracle, PR 2**, tests first:
+  * The stage's guests, mutants and replaced unit test stand.
+  * `DynamicMethodNewobj.cs` gains the abstract generic class. Every dynamic method in it is made with
+    `skipVisibility`.
+  * A unit test, beside the replaced one in `TestNativeGetDynamicMethod`, mints `ldarg.0; newobj <reflected
+    constructor of one parameter>; ret`. It asserts the shape the analysis records at the `newobj`: one argument
+    popped, one value pushed, and `this` not counted. It kills both shape mutants.
+  * A second unit test asserts no shape for an entry the rule refuses, and for a `DynamicMethod`.
+  * A refused `newobj` with its arguments not pushed is measured on .NET 10 and 11 first (a static method of one
+    parameter, with nothing pushed). If real .NET gives the rule's exception, as it does for `call`, the guest
+    gains the row. That row kills the mutant "a shape given to a refused entry".
+  * Mutants added: the scope arm skipping the rule (each refusal row), and the `DynamicMethod` arm raising its own
+    exception instead of going through the rule (the row's exception type; the category is fixed by construction,
+    as above).
+* **Additions to "left to later stages".**
+  * The escape analysis's reading of the rule, as above.
+  * The metadata path's stack shape for a refused `newobj`. `StackShapeTokens.ofMetadataToken` gives every `newobj`
+    a callee's shape. A body that refuses with its arguments not pushed would be stopped for underflow, where
+    CoreCLR raises the refusal. No compiler emits one.
+  * A delegate's constructor named by a scope `newobj`. It is unmeasured, and a guest's own body cannot reach it
+    usefully until `ldftn` of a scope entry is wired. `ConstructorInfo.Invoke` twice on a delegate's constructor
+    would reach it through the stub, and is also unmeasured.
+  * Access checks. PawPrint makes none, so a dynamic method without `skipVisibility` that names a private
+    constructor constructs, where real .NET raises `MethodAccessException`. This is the same gap `call` has.
+  * `callvirt` of a static method named by a metadata token, and whether `executeScopeCallvirt`'s rule should be
+    shared as this stage shares `newobj`'s.
+  * Raising compile-time refusals at method entry. The rule is data in Semantics so that this needs a change of
+    caller only.
+  * A non-constructor target, if a guest ever stops at it. The starting point is the measurement that `NotCtor`
+    runs, and the reading that CoreCLR allocates the token's class.
+
+### The `newobj` stage, PR 1: as built
+
+Built 2026-11-14 as decided above, from `main` at `101ebd665`.
+
+**Measured first**, each built against net10.0 and run on 10.0.14 and rolled forward to 11.0.0-rc.3:
+
+* The abstract struct (scratchpad `newobj/absstruct`). An image from `PersistedAssemblyBuilder` holds three value
+  types, each with a public constructor from `int` that stores it: `AbsSealed` (`Abstract | Sealed`), `AbsOpen`
+  (`Abstract`) and `Plain` (`Sealed`). A static method per type puts `newobj` of its constructor first, and the image is
+  loaded from disk, so the token is metadata. On both runtimes all three types load, reflection reports `IsAbstract`
+  for the first two, and all three `newobj`s construct (the field reads back 42), boxed or not. So the rule takes "is a
+  value type" as an input and `TestFabricatedNewobjRefusals` has the row. `Activator.CreateInstance` of `AbsSealed`
+  is refused by its own check (`MemberAccessException`, "Cannot create an instance of AbsSealed because it is an
+  abstract class."), on both.
+* `[UnsafeAccessor(UnsafeAccessorKind.Constructor)]` of `AbsOpen` (scratchpad `newobj/absua`, compiled against
+  CoreLib's implementation assembly so that it can name the fabricated type): it constructs on both runtimes. See the
+  deviations.
+* The probe's full output on both runtimes (scratchpad `newobj/probe/net10-full.out` and `net11-full.out`): identical
+  but for the version line, and holding the `tb-*`, `dyn-dm-empty`, `dyn-dm-mints` and `byref-method` rows, each as the
+  stage's table and the decisions give it.
+* `sourcesImpure/TypeBuilderNewobjRefusals.cs` (scratchpad `newobj/tbguest`): 0 on both; with the abstract method's
+  message altered in the check, 6 on both.
+* The sweep without its skip of a delegate type's non-constructors (scratchpad `newobj/sweep2`): the five static
+  methods that skip also left out (`MulticastDelegate::TrySetSlot` and others) compile to `InvalidProgramException` on
+  both runtimes, and nothing crashes; 24,011 methods on 10, 26,117 on 11.
+* `[SuppressGCTransition]` in the test host's CoreLib (scratchpad `newobj/sgt`): 36 methods, P/Invokes into `QCall`
+  (23) and `libSystem.Native` (13), all static, so the sweep compiles a `newobj` of each. The CoreCLR 10.0.12 JIT-lock
+  leak needs a `DllNotFoundException` during compilation; both libraries are present, and the sweep asserts that every
+  compilation raises the rule's exception, so none raised that.
+
+**Files.**
+
+* `WoofWare.PawPrint.Semantics/NewobjTarget.fs` (new, after `StringConstructor.fs`): `NewobjTarget`, five cases in
+  the decisions' order; `NewobjTarget.isInstanceConstructor`, CoreCLR's `IsMdInstanceInitializer`; and
+  `NewobjTarget.classify` over the method's attributes and name and the declaring type's attributes and
+  value-typeness. Public, so the sweep calls it directly.
+* `OpcodeFaults.fs`: `ResolutionFault.TokenBinding`'s documentation names `newobj`'s three refusals, and
+  `typeNames TokenBinding` gains `System.InvalidOperationException`.
+* `CallSiteBinding.fs`: `CompilationFailure.NewobjOfStaticMethod` and `InstantiatesAbstractClass`;
+  `NamesAbstractMethod`'s documentation names `newobj`. `UnaryMetadataCallOps.raiseCompilationFailure` raises both as
+  `TokenBinding` (`InvalidProgramException` with its default message; `InvalidOperationException` with the CLR's), and
+  `raiseNamedAbstractMethod`'s docstring names `newobj`.
+* `Exceptions.fs`: `InvalidOperationMessages.cantInstantiateAbstractClass`, which `UnsafeAccessorDispatch`'s existing
+  refusal now reads instead of its own copy of the text.
+* `UnaryMetadataObjectOps.fs`: `executeNewobj` splits on every `ResolvedMetadataOperand` case with no wildcard.
+  `FromMetadata` is `executeMetadataNewobj`, the old body; `ScopeMethod` fails by name (the decoder refuses such a body
+  at mint, so it is unreachable until PR 2); the other four fail as bugs. After the array shortcut and the binding,
+  `constructOrRefuse` asks `NewobjTarget.classify`, matches all five outcomes, raises the three refusals through
+  `raiseCompilationFailure`, stops by name at `NotInstanceConstructor`, and otherwise calls `constructObject`, which is
+  unchanged.
+* `docs/divergences.md`: "A `newobj` that the JIT refuses fails when it is reached, and one of a non-constructor
+  stops", after the section on an abstract method's `call`.
+* Tests, committed first (`bcbb0f2bd`):
+  * `TestNewobjTarget`: all 192 combinations of abstract, static, `RTSpecialName`, six names, abstract type and value
+    type, against the order written as a list of conditions, with each outcome's count asserted (96, 48, 44, 1, 3); the
+    constructor predicate's cases; and an FsCheck property over uniformly drawn 16-bit method and 32-bit type attribute
+    words (10,000 cases), whose outcome counts are each asserted at least seven standard deviations below expectation.
+  * `TestNewobjTargetOnHost`: the sweep, in the test host. It enumerates 35,478 methods, compiles 24,011 (686
+    `AbstractMethod`, 21,257 `StaticMethod`, 94 `AbstractClass`, 1,974 `Constructs`) and skips 11,467, for each of
+    which the rule says `NotInstanceConstructor`. It reads each method and type from PawPrint's image of the host's
+    CoreLib by metadata token, takes value-typeness from `LoadedTypeInfo.isValueType` (checked against reflection for
+    every type), asserts the exception type and message, that each exception is one `TokenBinding` names, the counts,
+    and the coverage the decisions list. It takes 3 to 4 seconds.
+  * `TestFabricatedNewobjRefusals`: the decisions' eight rows through `FabricatedGuest.run`, and the stop by name at a
+    `newobj` of `Inst.NotCtor` and of a `.ctor` without `RTSpecialName` (a second image, run on PawPrint alone).
+  * `sourcesImpure/TypeBuilderNewobjRefusals.cs`, registered in `TestImpureCases` beside its `TypeBuilder` siblings.
+
+**Red**, at `bcbb0f2bd`: the four rule tests at the stubs' "TODO: NewobjTarget... is not implemented yet"; the
+fabricated refusals test with the real runtime exiting 0 and PawPrint stopped at "stack shape: NewStatic ... at
+offset 5 has 2 value(s) on its evaluation stack, but the analysis expects 1" (the static method called as a
+constructor); both stop-by-name cases at "PawPrint ran the guest, which exited 0"; and the `TypeBuilder` guest at the
+same stack-shape failure in `Dyn.T.Static`.
+
+**Mutants**, each built fresh and run against the seven default-suite tests and the `TypeBuilder` guest (scratchpad
+`newobj-mut`). "C" is the combinations test, "K" the constructor predicate test, "P" the property, "S" the sweep, "F"
+the fabricated refusals (with the driver's exit code, where it exited), "N" the two stop-by-name cases, "G" the guest:
+
+| Mutant | Killed by |
+|---|---|
+| static checked before abstract | C, P, S, F (9: the static abstract interface member) |
+| not-a-constructor checked before static | C, P, S, F and G (stopped by name at the static method) |
+| abstract class checked before not-a-constructor | C, P, S (the instance methods of abstract classes) |
+| the abstract-class refusal dropped (abstract class and "otherwise" swapped) | C, P, S, F (10), G (7) |
+| the value-type exemption dropped | C, P, F (the abstract struct's `InvalidOperationException` unhandled) |
+| the metadata arm skipping the rule | F and G (the stack-shape failure), N |
+| the non-constructor stop dropped | N alone |
+| the constructor predicate reading the name alone | C, K, P, N (`NewFake`) |
+| the rule moved into `constructObject` | survived; see the deviations |
+
+No test was strengthened after the first run.
+
+**The in-process sweep**, run ten times alone and ten times beside the other fixtures that compile in the test host's
+JIT (`TestBoxPattern`, `TestArrayConstructor`, `TestOpcodeFaultsOnHost*`, `TestResolutionFaultsOnHost`,
+`TestFabricatedAbstractMethodCall`), each a `dotnet test` process of its own: 20 of 20 passed, the sweep taking 3 to 4
+seconds and each process 9 to 11 seconds of wall time.
+
+**Suites**, built from the whole solution at `b9ddf3457`, each run on its own: `Guest` (234), `GuestSolo` (2), `GuestPure` (1185) and
+`GuestImpure` (281), all passing, and the default suite (5613 passed, 37 skipped).
+
+**Deviations.**
+
+* The `StackShapeOfMethod` `newobj` arm is not in PR 1. The decoder still refuses a dynamic method's `newobj` at
+  mint, so the arm is unreachable, and its tests (the decisions' PR 2 unit tests) need the scope arm.
+* The rule moved into `constructObject` survives every test, the guests that reach the other routes included (47
+  `UnsafeAccessor` and `Activator` default-suite tests, and 118 `UnsafeAccessor`, `Activator` and `Reflection` guests in
+  `GuestPure` and `GuestImpure`, all passing as at the tip). It is equivalent, so no row was added. `constructObject`
+  has one caller besides `executeNewobj`: `UnsafeAccessorDispatch`. The runtime's reflection invoker and `Activator` do
+  not reach it, contrary to the decisions' list. `UnsafeAccessorDispatch` finds only constructors for its `Constructor`
+  kind, and refuses an abstract type before it calls `constructObject`, so the rule there never answers anything but
+  `Constructs`.
+* A finding that bears on the decisions' reason for keeping the rule out of `constructObject`: CoreCLR's
+  `[UnsafeAccessor]` constructor stub is IL whose body is a `newobj` (`vm/unsafeaccessors.cpp:908`), so its
+  abstract-class refusal is the JIT's rule, value-type exemption included: real .NET constructs an abstract struct
+  through one (measured above). PawPrint's `UnsafeAccessorDispatch` refuses every type flagged abstract, so it diverges
+  for an abstract struct. Not changed here; asking `NewobjTarget` there is a candidate follow-up.
+* The sweep compiles every static method, so 24,011 rather than the planner's 24,006: the planner's skip of a delegate
+  type's non-constructors also skipped five static methods, which compile (measured above).
+* The fabricated abstract struct's method returns the field its constructor stored, boxed, rather than the struct: C#
+  reads an abstract sealed type as a static class, so the driver cannot name it.

@@ -51,7 +51,10 @@ type ResolutionFault =
     /// names, with one of the same: a byref or `System.Void` as the type operand of any instruction
     /// but `ldtoken` (`InvalidProgramException`), `call` or `ldftn` of an abstract method
     /// (`BadImageFormatException`), `box` of a byref-like type that it does not fold away
-    /// (`InvalidProgramException`; `BoxPattern`), or `newarr` of one (`TypeLoadException`). Or it
+    /// (`InvalidProgramException`; `BoxPattern`), or `newarr` of one (`TypeLoadException`); or,
+    /// as `NewobjTarget` says, `newobj` of an abstract method (`BadImageFormatException`), of a
+    /// static method (`InvalidProgramException`), or of an abstract class's constructor, which is
+    /// the one refusal with an exception of its own (`InvalidOperationException`). Or it
     /// names a generic instantiation whose arguments its type parameters' constraints reject: a
     /// type's (`TypeLoadException`) or a method's (`VerificationException`). CoreCLR's JIT resolves
     /// every token of a method as it compiles it, so it raises most of these where the method is
@@ -227,6 +230,7 @@ module ResolutionFault =
                 "System.MissingMethodException"
                 "System.InvalidProgramException"
                 "System.Security.VerificationException"
+                "System.InvalidOperationException"
             ]
         | ResolutionFault.ScopeEntry ->
             [

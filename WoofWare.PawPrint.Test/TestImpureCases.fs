@@ -6402,6 +6402,25 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // A `newobj` in a `TypeBuilder` method's body, naming a static method, an abstract
+                // method and an abstract class's constructor, each of which the JIT refuses, beside a
+                // constructor. Dynamic-code switch overridden to true like its siblings; measured to
+                // exit 0 on real .NET 10 and 11.
+                FileName = "TypeBuilderNewobjRefusals.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `RuntimeTypeHandle_IsVisible` of the dynamic-methods class, reached through CoreLib's
                 // internals by name, and of its array type. Dynamic-code switch overridden to true like the
                 // other `DynamicMethod` guests; measured to exit 0 on real .NET 10 and 11.

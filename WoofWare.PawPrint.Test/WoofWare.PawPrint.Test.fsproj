@@ -418,6 +418,7 @@
     <Compile Include="TestFabricatedConstrainedClassMethod.fs" />
     <Compile Include="TestFabricatedDefaultBodyOrder.fs" />
     <Compile Include="TestFabricatedAbstractMethodCall.fs" />
+    <Compile Include="TestFabricatedNewobjRefusals.fs" />
     <Compile Include="TestFabricatedByRefLikeBox.fs" />
     <Compile Include="TestFabricatedInstantiationConstraints.fs" />
     <Compile Include="TestFabricatedTypeOperandRefusal.fs" />
@@ -508,6 +509,8 @@
     <Compile Include="TestExceptionMaking.fs" />
     <Compile Include="TestEntryPointCallerTrace.fs" />
     <Compile Include="TestStringConstructor.fs" />
+    <Compile Include="TestNewobjTarget.fs" />
+    <Compile Include="TestNewobjTargetOnHost.fs" />
     <Compile Include="TestHardwareIntrinsicsProfile.fs" />
     <Compile Include="TestEmulatedRuntime.fs" />
     <Compile Include="TestLinuxCoreLibFlavour.fs" />

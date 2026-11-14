@@ -1435,7 +1435,7 @@ module internal UnsafeAccessorDispatch =
             baseClassTypes.VerificationException,
             NativeRuntimeTypeHelpers.methodConstraintsViolationMessage targetType methodName typeArgument typeParameter
         | UnsafeAccessorRefusal.CantInstantiateAbstractClass ->
-            baseClassTypes.InvalidOperationException, "Instances of abstract classes cannot be created."
+            baseClassTypes.InvalidOperationException, InvalidOperationMessages.cantInstantiateAbstractClass
         | UnsafeAccessorRefusal.NotSupported message -> baseClassTypes.NotSupportedException, message
 
     /// Is this receiver null, in either of the two ways an accessor's first argument can be?

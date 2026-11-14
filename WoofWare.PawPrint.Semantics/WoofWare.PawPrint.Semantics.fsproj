@@ -39,6 +39,7 @@
         <Compile Include="VmBoundField.fs" />
         <Compile Include="VmLaidOutClass.fs" />
         <Compile Include="StringConstructor.fs" />
+        <Compile Include="NewobjTarget.fs" />
         <Compile Include="HardwareInstruction.fs" />
         <Compile Include="UnmanagedCallingConvention.fs" />
         <Compile Include="NativeMethod.fs" />
