@@ -6800,6 +6800,27 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // Each route to the `RefArgs` invoke stub, which reads its arguments as by-ref fields
+                // through an `IntPtr*`: property setters, an attribute's named properties, by-ref
+                // parameters of a method of few and of many arguments, and of a constructor; each
+                // invoked three times. Dynamic-code switch overridden to true like its siblings;
+                // measured to exit 0 on real .NET 10 and 11, and a control expecting a wrong
+                // written-back `ref` value exits 63 on both.
+                FileName = "ReflectionInvokeStubByRefArgs.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // A `newobj` in a `DynamicMethod`'s body naming a scope entry: reflected constructors,
                 // and each method the JIT refuses to construct with. Dynamic-code switch overridden to
                 // true like its siblings; measured to exit 0 on real .NET 10 and 11.
