@@ -894,6 +894,10 @@ module NativeRuntimeTypeBuilder =
 
                 failwith
                     $"TODO: %s{operation}: %s{ns}.%s{name} on 0x%08x{ownerToken} %s{instead}; PawPrint does not model that"
+            | CustomAttributeDefinition.FlagSet _
+            | CustomAttributeDefinition.Refused _ ->
+                failwith
+                    $"TODO: %s{operation}: stage 5z-1 is not implemented yet, so defineCustomAttribute sets no flag and refuses nothing"
             | CustomAttributeDefinition.Defined (rid, extended) ->
                 let state, assembly = state.WithEmitScope ctx.LoggerFactory moduleName extended
 

@@ -5,11 +5,13 @@ open FsUnitTyped
 open NUnit.Framework
 open WoofWare.PawPrint
 
-/// The attributes `TypeBuilder_DefineCustomAttribute` refuses, each by name, although real .NET accepts each (measured
-/// on .NET 10 and 11): a pseudo-attribute, which CoreCLR turns into flags or other rows; an ordinary attribute on a
-/// created type, which it writes; `DebuggableAttribute` on the assembly, which it folds into the debugger bits; and a
-/// friend attribute whose name PawPrint's friend scan rejects, for which it throws after writing the row. The attributes
-/// PawPrint stores are in `sourcesImpure/TypeBuilderCustomAttributes.cs`.
+/// The attributes `TypeBuilder_DefineCustomAttribute` refuses, each by name, where real .NET accepts or throws (measured
+/// on .NET 10 and 11): a pseudo-attribute that PawPrint does not model, on a right target, which CoreCLR turns into a
+/// flag or other rows, and on a wrong one, for which it throws; an ordinary attribute on a created type, which it writes;
+/// `DebuggableAttribute` on the assembly, which it folds into the debugger bits; and a friend attribute whose name
+/// PawPrint's friend scan rejects, for which it throws after writing the row. The attributes PawPrint stores are in
+/// `sourcesImpure/TypeBuilderCustomAttributes.cs`, and the pseudo-attributes it models in
+/// `sourcesImpure/TypeBuilderPseudoAttributeFlags.cs`.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestTypeBuilderCustomAttributeRefusals =
@@ -67,19 +69,43 @@ public class Program
         )
 
     [<Test>]
-    let ``a pseudo-attribute is refused`` () : unit =
-        // Real .NET sets `tdSerializable` on `T` and writes no row.
+    let ``an unmodelled pseudo-attribute is refused`` () : unit =
+        // Real .NET sets `tdImport` on the interface `I` and writes no row.
         let exc =
             runRefused
-                "PseudoCustomAttribute.cs"
+                "UnmodelledPseudoCustomAttribute.cs"
                 """
-        TypeBuilder t = module.DefineType("T", TypeAttributes.Public);
-        t.SetCustomAttribute(new CustomAttributeBuilder(typeof(SerializableAttribute).GetConstructor(Type.EmptyTypes), new object[0]));"""
+        TypeBuilder i = module.DefineType("I", TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract);
+        i.SetCustomAttribute(new CustomAttributeBuilder(typeof(System.Runtime.InteropServices.ComImportAttribute).GetConstructor(Type.EmptyTypes), new object[0]));"""
 
         exc.Message |> shouldContainText "TODO: TypeBuilder_DefineCustomAttribute"
 
         exc.Message
-        |> shouldContainText "System.SerializableAttribute on 0x02000002 is a pseudo-attribute"
+        |> shouldContainText "System.Runtime.InteropServices.ComImportAttribute on 0x02000002 is a pseudo-attribute"
+
+    [<Test>]
+    let ``an unmodelled pseudo-attribute on a wrong target is refused rather than raised`` () : unit =
+        // Real .NET throws ArgumentException "Invalid custom attribute provided.", which this guest catches: a field
+        // is not among `MethodImplAttribute`'s targets. PawPrint models no target list for the name.
+        let exc =
+            runRefused
+                "UnmodelledPseudoCustomAttributeWrongTarget.cs"
+                """
+        TypeBuilder t = module.DefineType("T", TypeAttributes.Public);
+        FieldBuilder f = t.DefineField("F", typeof(int), FieldAttributes.Public);
+        try
+        {
+            f.SetCustomAttribute(new CustomAttributeBuilder(typeof(MethodImplAttribute).GetConstructor(new[] { typeof(MethodImplOptions) }), new object[] { MethodImplOptions.NoInlining }));
+            return 1;
+        }
+        catch (ArgumentException)
+        {
+        }"""
+
+        exc.Message |> shouldContainText "TODO: TypeBuilder_DefineCustomAttribute"
+
+        exc.Message
+        |> shouldContainText "System.Runtime.CompilerServices.MethodImplAttribute on 0x04000001 is a pseudo-attribute"
 
     [<Test>]
     let ``an attribute on a created type is refused`` () : unit =

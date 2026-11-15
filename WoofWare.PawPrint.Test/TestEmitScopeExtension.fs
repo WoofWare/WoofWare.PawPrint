@@ -71,10 +71,10 @@ module TestEmitScopeExtension =
                     attributesView reader (GenericParameterHandle.op_Implicit p)
         ]
 
-    /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its custom
-    /// attributes and its members', its
-    /// generic parameters, its methods with their implementation flags, parameters, generic parameters
-    /// and bodies, and its fields, as handles into the image, and its interface
+    /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its flags, its
+    /// custom attributes and its members', its
+    /// generic parameters, its methods with their flags, implementation flags, parameters, generic parameters
+    /// and bodies, and its fields, as handles into the image, with each member's flags, and its interface
     /// implementations and method impls in table order; and its properties and events, each with its
     /// accessors in table order. The interface, method impl and accessor tables are sorted, so their RIDs
     /// move as rows of lower classes, properties or events are added; the runtime keeps no handle into
@@ -96,6 +96,7 @@ module TestEmitScopeExtension =
                             for p in (reader.GetMethodDefinition m).GetParameters () do
                                 yield
                                     rowNumber (ParameterHandle.op_Implicit p),
+                                    (reader.GetParameter p).Attributes,
                                     attributesView reader (ParameterHandle.op_Implicit p)
                         ]
 
@@ -115,6 +116,7 @@ module TestEmitScopeExtension =
 
                     yield
                         rowNumber (MethodDefinitionHandle.op_Implicit m),
+                        (reader.GetMethodDefinition m).Attributes,
                         (reader.GetMethodDefinition m).ImplAttributes,
                         parameters,
                         genericParamsView reader genericParamOwners (GenericParamOwner.MethodDef m),
@@ -127,6 +129,7 @@ module TestEmitScopeExtension =
                 for f in definition.GetFields () do
                     yield
                         rowNumber (FieldDefinitionHandle.op_Implicit f),
+                        (reader.GetFieldDefinition f).Attributes,
                         attributesView reader (FieldDefinitionHandle.op_Implicit f)
             ]
 
@@ -153,6 +156,7 @@ module TestEmitScopeExtension =
 
                     yield
                         rid,
+                        (reader.GetPropertyDefinition p).Attributes,
                         attributesView reader (PropertyDefinitionHandle.op_Implicit p),
                         semantics
                         |> List.filter (fun (_, _, a) -> a = association)
@@ -167,6 +171,7 @@ module TestEmitScopeExtension =
 
                     yield
                         rid,
+                        (reader.GetEventDefinition e).Attributes,
                         attributesView reader (EventDefinitionHandle.op_Implicit e),
                         semantics
                         |> List.filter (fun (_, _, a) -> a = association)
@@ -174,6 +179,7 @@ module TestEmitScopeExtension =
             ]
 
         token definition.BaseType,
+        definition.Attributes,
         attributesView reader (TypeDefinitionHandle.op_Implicit handle),
         genericParamsView reader genericParamOwners (GenericParamOwner.TypeDef handle),
         methods,
@@ -396,12 +402,15 @@ module TestEmitScopeExtension =
 
         [
             // A row reads back differently only if the scope's row at that RID changed. Nothing is
-            // created, so a column the emitter fills in may differ.
-            let afterRows = withoutFilledColumns (describeRows afterReader)
+            // created, so what the emitter fills in may differ.
+            let afterRows = describeRows afterReader
 
-            for KeyValue ((table, rid), row) in withoutFilledColumns (describeRows beforeReader) do
-                if afterRows.TryFind (table, rid) <> Some row then
-                    yield "row", has (EmitScopeExtensionViolation.RowChanged (table, rid))
+            for KeyValue ((table, rid), row) in describeRows beforeReader do
+                match afterRows.TryFind (table, rid) with
+                | Some later when filledIn table row later -> ()
+                | later ->
+                    if later <> Some row then
+                        yield "row", has (EmitScopeExtensionViolation.RowChanged (table, rid))
 
             for entry, value in Seq.indexed (EmitScope.strings before) do
                 let offset = EmitScope.internString value before |> fst
@@ -1246,7 +1255,7 @@ module TestEmitScopeExtension =
     let ``a changed event is reported at its RID`` () : unit =
         let scope, _, _ = withEvents ()
 
-        let changed (eventType : TypeDefOrRef) (flags : int) =
+        let changedWith (created : ImmutableHashSet<TypeDefRid>) (eventType : TypeDefOrRef) (flags : int) =
             let before =
                 EmitScopeDefinitions.defineEvent (TypeDefRid 3) "C" (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0 scope
                 |> snd
@@ -1254,12 +1263,23 @@ module TestEmitScopeExtension =
             let rewritten =
                 EmitScopeDefinitions.defineEvent (TypeDefRid 3) "C" eventType flags scope |> snd
 
-            EmitScopeExtension.violations ImmutableHashSet.Empty before rewritten
+            EmitScopeExtension.violations created before rewritten
+
+        let changed = changedWith ImmutableHashSet.Empty
 
         changed (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0 |> shouldEqual []
 
-        changed (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0x0200
+        changed (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0x0001
         |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Event, 3) ]
+
+        // `evSpecialName`, which `SpecialNameAttribute` sets after the row is added, is filled in.
+        changed (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0x0200 |> shouldEqual []
+
+        changedWith (ImmutableHashSet.Create (TypeDefRid 3)) (TypeDefOrRef.TypeDef (TypeDefRid 2)) 0x0200
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.FilledInCreatedType (TableIndex.Event, 3, TypeDefRid 3)
+            ]
 
         changed (TypeDefOrRef.TypeDef (TypeDefRid 3)) 0
         |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Event, 3) ]
@@ -1382,3 +1402,142 @@ module TestEmitScopeExtension =
 
         EmitScopeExtension.violations ImmutableHashSet.Empty onType scope
         |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.CustomAttribute, 1) ]
+
+    /// The six tables with a flags column that a pseudo-attribute can set, each with the bits the emitter sets in it
+    /// (md/compiler/custattr_emit.cpp): `tdSerializable` and `tdSpecialName`; `mdSpecialName`; `fdNotSerialized` and
+    /// `fdSpecialName`; `pdIn`, `pdOut` and `pdOptional`; `prSpecialName`; `evSpecialName`. Each with the width of its
+    /// column, in bits.
+    let private flagColumns : (TableIndex * int * int) list =
+        [
+            TableIndex.TypeDef, 0x2400, 32
+            TableIndex.MethodDef, 0x0800, 16
+            TableIndex.Field, 0x0280, 16
+            TableIndex.Param, 0x0013, 16
+            TableIndex.Property, 0x0200, 16
+            TableIndex.Event, 0x0200, 16
+        ]
+
+    /// A type `A` (TypeDef 2) with a method `M` with a parameter, a field, a property and an event (each RID 1), whose
+    /// rows of `table` have the flags `flags` and whose other rows have none: built row by row, so that a scope's rows
+    /// may hold any flags, not only those a pseudo-attribute ORs in.
+    let private withFlags (table : TableIndex) (flags : int) : EmitScope =
+        let flagsOf (t : TableIndex) : int = if t = table then flags else 0
+        let scope = emptyScope Guid.Empty
+        let name, scope = EmitScope.internString "A" scope
+
+        let signature, scope =
+            EmitScope.internBlob (ImmutableArray.Create<byte> [| 0x00uy ; 0x01uy ; 0x01uy ; 0x08uy |]) scope
+
+        let fieldSignature, scope =
+            EmitScope.internBlob (ImmutableArray.Create<byte> [| 0x06uy ; 0x08uy |]) scope
+
+        let a, scope =
+            EmitScope.addTypeDef
+                {
+                    Flags = enum (flagsOf TableIndex.TypeDef)
+                    Name = name
+                    Namespace = StringOffset 0
+                    Extends = None
+                }
+                scope
+
+        let method, scope =
+            EmitScope.addMethodDef
+                {
+                    Owner = a
+                    Body = None
+                    ImplFlags = Reflection.MethodImplAttributes.IL
+                    Flags = enum (flagsOf TableIndex.MethodDef)
+                    Name = name
+                    Signature = signature
+                }
+                scope
+
+        let scope =
+            EmitScope.addParam
+                {
+                    Owner = method
+                    Flags = enum (flagsOf TableIndex.Param)
+                    Sequence = 1us
+                    Name = name
+                }
+                scope
+            |> snd
+
+        let scope =
+            EmitScope.addField
+                {
+                    Owner = a
+                    Flags = enum (flagsOf TableIndex.Field)
+                    Name = name
+                    Signature = fieldSignature
+                }
+                scope
+            |> snd
+
+        let scope =
+            EmitScope.addProperty
+                {
+                    Owner = a
+                    Flags = enum (flagsOf TableIndex.Property)
+                    Name = name
+                    Signature = signature
+                }
+                scope
+            |> snd
+
+        EmitScope.addEvent
+            {
+                Owner = a
+                Flags = enum (flagsOf TableIndex.Event)
+                Name = name
+                EventType = TypeDefOrRef.TypeDef a
+            }
+            scope
+        |> snd
+
+    [<Test>]
+    let ``a flags column may gain the bits a pseudo-attribute sets, and only while its type is not created`` () : unit =
+        let a = TypeDefRid 2
+        let created = ImmutableHashSet.Create a
+
+        for table, mask, width in flagColumns do
+            let rid = if table = TableIndex.TypeDef then 2 else 1
+            let none = withFlags table 0
+
+            for bit in [ for i in 0 .. width - 1 -> 1 <<< i ] do
+                let gained = withFlags table bit
+
+                if bit &&& mask <> 0 then
+                    EmitScopeExtension.violations ImmutableHashSet.Empty none gained
+                    |> shouldEqual []
+
+                    // Another type's being created does not fix this one's flags.
+                    EmitScopeExtension.violations (ImmutableHashSet.Create (TypeDefRid 1)) none gained
+                    |> shouldEqual []
+
+                    EmitScopeExtension.violations created none gained
+                    |> shouldEqual [ EmitScopeExtensionViolation.FilledInCreatedType (table, rid, a) ]
+                else
+                    for createdTypes in [ ImmutableHashSet.Empty ; created ] do
+                        EmitScopeExtension.violations createdTypes none gained
+                        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, rid) ]
+
+    [<Test>]
+    let ``a flags column that loses a bit is changed, whichever bit it is`` () : unit =
+        let a = TypeDefRid 2
+
+        for table, mask, width in flagColumns do
+            let rid = if table = TableIndex.TypeDef then 2 else 1
+            let all = if width = 32 then -1 else 0xFFFF
+            let before = withFlags table all
+
+            for bit in [ for i in 0 .. width - 1 -> 1 <<< i ] do
+                for createdTypes in [ ImmutableHashSet.Empty ; ImmutableHashSet.Create a ] do
+                    EmitScopeExtension.violations createdTypes before (withFlags table (all &&& ~~~bit))
+                    |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, rid) ]
+
+                    // Losing a bit is no fill even beside gaining the mask's bits.
+                    if bit &&& mask = 0 then
+                        EmitScopeExtension.violations createdTypes (withFlags table bit) (withFlags table mask)
+                        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, rid) ]

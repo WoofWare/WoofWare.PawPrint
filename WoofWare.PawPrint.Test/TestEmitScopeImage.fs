@@ -1208,12 +1208,14 @@ module TestEmitScopeImage =
             let extendedPe, extendedReader = readImage (EmitScopeImage.write extended)
             use _ = extendedPe
 
-            // An extension may fill in a column of an earlier row, so those columns are left out.
-            let before = withoutFilledColumns (describeRows prefixReader)
-            let after = withoutFilledColumns (describeRows extendedReader)
+            // An extension may fill in a column of an earlier row.
+            let before = describeRows prefixReader
+            let after = describeRows extendedReader
 
-            for KeyValue (key, row) in before do
-                after.TryFind key |> shouldEqual (Some row)
+            for KeyValue ((table, _) as key, row) in before do
+                match after.TryFind key with
+                | Some later when filledIn table row later -> ()
+                | later -> later |> shouldEqual (Some row)
 
             for value in EmitScope.strings prefix do
                 let offset = EmitScope.internString value prefix |> fst

@@ -15,8 +15,9 @@ open WoofWare.PawPrint
 open WoofWare.PawPrint.Test.EmitScopeGen
 
 /// `EmitScopeDefinitions.defineCustomAttribute` and `classifyCustomAttribute`, `HasCustomAttribute.tryOfToken`,
-/// `EmitScope.addCustomAttribute` and `EmitScope.typeOfCustomAttributeOwner`: each against a model, and the classifier
-/// and the rows against the host's own emitter, read raw through CoreLib's internal `MetadataImport`.
+/// `EmitScope.addCustomAttribute`, `EmitScope.typeOfCustomAttributeOwner` and `KnownCustomAttribute.effect`: each
+/// against a model, and the classifier, the rows and the flags pseudo-attributes set against the host's own emitter,
+/// the rows read raw through CoreLib's internal `MetadataImport`.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestEmitScopeCustomAttributes =
@@ -325,16 +326,48 @@ module TestEmitScopeCustomAttributes =
                 EmitScopeDefinitions.classifyCustomAttribute owner constructor scope
                 |> shouldEqual CustomAttributeEmitKind.Ordinary
 
-    /// `scope` with constructors whose declaring types have known names, a security name, and an ordinary name.
+    /// `scope` with constructors whose declaring types have every known name, a security name, and an ordinary name.
     let private withNamedConstructors (scope : EmitScope) : EmitScope =
         [
-            KnownCustomAttribute.name KnownCustomAttribute.Serializable
-            KnownCustomAttribute.name KnownCustomAttribute.In
+            yield! KnownCustomAttribute.all |> List.map KnownCustomAttribute.name
             suppressName
             dynamicSecurityName
             "System", "ObsoleteAttribute"
         ]
         |> List.fold (fun scope name -> constructorOf (Parent.ReferenceInModule name) scope |> snd) scope
+
+    /// <summary>
+    /// The pseudo-attributes that set a flag in their owner's row, each with the owners it accepts and the bit it sets
+    /// in each, transcribed from md/compiler/custattr_emit.cpp at the pinned .NET 10 source: the target list
+    /// (<c>rTypes</c>) and the <c>AddFlags</c> of <c>RegMeta::_HandleKnownCustomAttribute</c>. An owner is named as
+    /// <c>ownerKind</c> names it; "method implementation" is a method's <c>ImplFlags</c>. Every other known name is
+    /// unmodelled.
+    /// </summary>
+    let private flagTable : (KnownCustomAttribute * (string * int) list) list =
+        [
+            // SerializableTargets :106 (mdtTypeDef); SerializableAttributeProps :236; AddFlags(tdSerializable) :1278.
+            KnownCustomAttribute.Serializable, [ "type", 0x2000 ]
+            // NonSerializedTargets :108 (mdtFieldDef); :240; AddFlags(fdNotSerialized) :1282.
+            KnownCustomAttribute.NonSerialized, [ "field", 0x0080 ]
+            // SpecialNameTargets :117 (mdtTypeDef, mdtMethodDef, mdtFieldDef, mdtProperty, mdtEvent); :244;
+            // tdSpecialName :1252, mdSpecialName :1256, fdSpecialName :1260, prSpecialName :1264, evSpecialName :1268.
+            KnownCustomAttribute.SpecialName,
+            [
+                "type", 0x0400
+                "method", 0x0800
+                "field", 0x0200
+                "property", 0x0200
+                "event", 0x0200
+            ]
+            // InOutTargets :112 (mdtParamDef); InAttributeProps :341; AddFlags(pdIn) :1286.
+            KnownCustomAttribute.In, [ "parameter", 0x0001 ]
+            // InOutTargets :112; OutAttributeProps :345; AddFlags(pdOut) :1290.
+            KnownCustomAttribute.Out, [ "parameter", 0x0002 ]
+            // InOutTargets :112; OptionalAttributeProps :349; AddFlags(pdOptional) :1294.
+            KnownCustomAttribute.Optional, [ "parameter", 0x0010 ]
+            // PreserveSigTargets :111 (mdtMethodDef); :337; AddImplFlags(miPreserveSig) :1332.
+            KnownCustomAttribute.PreserveSig, [ "method implementation", 0x0080 ]
+        ]
 
     /// What one generated call to `defineCustomAttribute` reached.
     [<RequireQualifiedAccess>]
@@ -344,6 +377,10 @@ module TestEmitScopeCustomAttributes =
         | EqualPair
         | EmptyBlob
         | Owner of string
+        | FlagSet of KnownCustomAttribute
+        | Refused of KnownCustomAttribute
+        | BitAlreadySet
+        | BitNotSet
 
     let private ownerKind (owner : HasCustomAttribute) : string =
         match owner with
@@ -370,8 +407,160 @@ module TestEmitScopeCustomAttributes =
             "generic parameter"
         ]
 
+    /// Every table and heap of `scope`, by name, as F# values that compare by content.
+    let private tables (scope : EmitScope) : Map<string, obj> =
+        Map.ofList
+            [
+                "strings", box (List.ofSeq (EmitScope.strings scope))
+                "blobs", box (EmitScope.blobs scope |> Seq.map List.ofSeq |> List.ofSeq)
+                "userStrings", box (EmitScope.userStrings scope |> Seq.map List.ofSeq |> List.ofSeq)
+                "guids", box (List.ofSeq (EmitScope.guids scope))
+                "module", box (EmitScope.moduleRow scope)
+                "assembly", box (EmitScope.assembly scope)
+                "assemblyRefs", box (List.ofSeq (EmitScope.assemblyRefs scope))
+                "typeRefs", box (List.ofSeq (EmitScope.typeRefs scope))
+                "typeDefs", box (List.ofSeq (EmitScope.typeDefs scope))
+                "fields", box (List.ofSeq (EmitScope.fields scope))
+                "methodDefs",
+                box (
+                    EmitScope.methodDefs scope
+                    |> Seq.map (fun row ->
+                        { row with
+                            Body = None
+                        },
+                        row.Body |> Option.map List.ofSeq
+                    )
+                    |> List.ofSeq
+                )
+                "params", box (List.ofSeq (EmitScope.parameters scope))
+                "memberRefs", box (List.ofSeq (EmitScope.memberRefs scope))
+                "standAloneSigs", box (List.ofSeq (EmitScope.standAloneSigs scope))
+                "typeSpecs", box (List.ofSeq (EmitScope.typeSpecs scope))
+                "methodSpecs", box (List.ofSeq (EmitScope.methodSpecs scope))
+                "genericParams", box (List.ofSeq (EmitScope.genericParams scope))
+                "genericParamConstraints", box (List.ofSeq (EmitScope.genericParamConstraints scope))
+                "interfaceImpls", box (List.ofSeq (EmitScope.interfaceImpls scope))
+                "methodImpls", box (List.ofSeq (EmitScope.methodImpls scope))
+                "properties", box (List.ofSeq (EmitScope.properties scope))
+                "methodSemantics", box (List.ofSeq (EmitScope.methodSemantics scope))
+                "events", box (List.ofSeq (EmitScope.events scope))
+                "customAttributes", box (List.ofSeq (EmitScope.customAttributes scope))
+            ]
+
+    /// `before`'s tables with `bit` ORed into `owner`'s row, in the column `target` names (`flagTable`'s names).
+    let private withBit (owner : HasCustomAttribute) (target : string) (bit : int) (before : EmitScope) =
+        let update (rows : ImmutableList<'row>) (rid : int) (f : 'row -> 'row) : 'row list =
+            rows |> Seq.mapi (fun i row -> if i = rid - 1 then f row else row) |> List.ofSeq
+
+        let expected =
+            match owner, target with
+            | HasCustomAttribute.TypeDef rid, "type" ->
+                "typeDefs",
+                box (
+                    update
+                        (EmitScope.typeDefs before)
+                        rid.Rid
+                        (fun row ->
+                            { row with
+                                Flags = row.Flags ||| enum bit
+                            }
+                        )
+                )
+            | HasCustomAttribute.MethodDef rid, ("method" | "method implementation") ->
+                "methodDefs",
+                box (
+                    update
+                        (EmitScope.methodDefs before)
+                        rid.Rid
+                        (fun row ->
+                            if target = "method" then
+                                { row with
+                                    Flags = row.Flags ||| enum bit
+                                }
+                            else
+                                { row with
+                                    ImplFlags = row.ImplFlags ||| enum bit
+                                }
+                        )
+                    |> List.map (fun row ->
+                        { row with
+                            Body = None
+                        },
+                        row.Body |> Option.map List.ofSeq
+                    )
+                )
+            | HasCustomAttribute.Field rid, "field" ->
+                "fields",
+                box (
+                    update
+                        (EmitScope.fields before)
+                        rid.Rid
+                        (fun row ->
+                            { row with
+                                Flags = row.Flags ||| enum bit
+                            }
+                        )
+                )
+            | HasCustomAttribute.Param rid, "parameter" ->
+                "params",
+                box (
+                    update
+                        (EmitScope.parameters before)
+                        rid.Rid
+                        (fun row ->
+                            { row with
+                                Flags = row.Flags ||| enum bit
+                            }
+                        )
+                )
+            | HasCustomAttribute.Property rid, "property" ->
+                "properties",
+                box (
+                    update
+                        (EmitScope.properties before)
+                        rid.Rid
+                        (fun row ->
+                            { row with
+                                Flags = row.Flags ||| enum bit
+                            }
+                        )
+                )
+            | HasCustomAttribute.Event rid, "event" ->
+                "events",
+                box (
+                    update
+                        (EmitScope.events before)
+                        rid.Rid
+                        (fun row ->
+                            { row with
+                                Flags = row.Flags ||| enum bit
+                            }
+                        )
+                )
+            | _ -> failwith $"%s{target} names no column of %A{owner}"
+
+        tables before |> Map.add (fst expected) (snd expected)
+
+    /// Whether `owner`'s row already has `bit` in the column `target` names.
+    let private hasBit (owner : HasCustomAttribute) (target : string) (bit : int) (scope : EmitScope) : bool =
+        let flags =
+            match owner, target with
+            | HasCustomAttribute.TypeDef rid, _ -> int (EmitScope.typeDefs scope).[rid.Rid - 1].Flags
+            | HasCustomAttribute.MethodDef rid, "method" -> int (EmitScope.methodDefs scope).[rid.Rid - 1].Flags
+            | HasCustomAttribute.MethodDef rid, _ -> int (EmitScope.methodDefs scope).[rid.Rid - 1].ImplFlags
+            | HasCustomAttribute.Field rid, _ -> int (EmitScope.fields scope).[rid.Rid - 1].Flags
+            | HasCustomAttribute.Param rid, _ -> int (EmitScope.parameters scope).[rid.Rid - 1].Flags
+            | HasCustomAttribute.Property rid, _ -> int (EmitScope.properties scope).[rid.Rid - 1].Flags
+            | HasCustomAttribute.Event rid, _ -> int (EmitScope.events scope).[rid.Rid - 1].Flags
+            | _ -> failwith $"%A{owner} has no flags"
+
+        flags &&& bit <> 0
+
     [<Test>]
-    let ``an attribute stored as given is a new row at the next RID, and any other adds nothing`` () : unit =
+    let ``an attribute stored as given is a new row, a flag pseudo-attribute sets its bit, and any other adds nothing``
+        ()
+        : unit
+        =
         let property (cover : DefineReach -> unit) (scope : EmitScope) (calls : (int * int * int * bool) list) : unit =
             let scope = withNamedConstructors scope
             let owners = customAttributeOwners scope
@@ -393,6 +582,22 @@ module TestEmitScopeCustomAttributes =
                 let kind = EmitScopeDefinitions.classifyCustomAttribute owner constructor scope
                 let before = EmitScope.customAttributes scope
                 cover (DefineReach.Owner (ownerKind owner))
+
+                // The model: a name of `flagTable` sets its bit on an owner it lists and is refused on any other.
+                let flag =
+                    match kind with
+                    | CustomAttributeEmitKind.Known known ->
+                        flagTable
+                        |> List.tryFind (fun (k, _) -> k = known)
+                        |> Option.map (fun (_, targets) ->
+                            known,
+                            targets
+                            |> List.tryFind (fun (target, _) ->
+                                target = ownerKind owner
+                                || (target = "method implementation" && ownerKind owner = "method")
+                            )
+                        )
+                    | _ -> None
 
                 match EmitScopeDefinitions.defineCustomAttribute owner constructor value scope with
                 | CustomAttributeDefinition.Defined (rid, after) ->
@@ -418,9 +623,35 @@ module TestEmitScopeCustomAttributes =
                         cover DefineReach.EqualPair
 
                     scope <- after
+                | CustomAttributeDefinition.FlagSet after ->
+                    match flag with
+                    | Some (known, Some (target, bit)) ->
+                        tables after |> shouldEqual (withBit owner target bit scope)
+                        cover (DefineReach.FlagSet known)
+
+                        cover (
+                            if hasBit owner target bit scope then
+                                DefineReach.BitAlreadySet
+                            else
+                                DefineReach.BitNotSet
+                        )
+
+                        // The extension rule admits the bit, while the owner's type is not created.
+                        EmitScopeExtension.violations ImmutableHashSet.Empty scope after
+                        |> shouldEqual []
+
+                        scope <- after
+                    | _ -> failwith $"%A{kind} on %A{owner} set a flag, but the model expects %A{flag}"
+                | CustomAttributeDefinition.Refused refusal ->
+                    match flag with
+                    | Some (known, None) ->
+                        refusal |> shouldEqual KnownCustomAttributeRefusal.WrongTarget
+                        cover (DefineReach.Refused known)
+                    | _ -> failwith $"%A{kind} on %A{owner} was refused, but the model expects %A{flag}"
                 | CustomAttributeDefinition.NotStoredAsGiven reported ->
                     reported |> shouldEqual kind
                     kind |> shouldNotEqual CustomAttributeEmitKind.Ordinary
+                    flag |> shouldEqual None
                     cover DefineReach.NotStored
 
                 previous <- Some (owner, constructor, value)
@@ -441,9 +672,66 @@ module TestEmitScopeCustomAttributes =
         coverage.Count DefineReach.NotStored |> shouldBeGreaterThan 50
         coverage.Count DefineReach.EqualPair |> shouldBeGreaterThan 30
         coverage.Count DefineReach.EmptyBlob |> shouldBeGreaterThan 30
+        coverage.Count DefineReach.BitAlreadySet |> shouldBeGreaterThan 20
+        coverage.Count DefineReach.BitNotSet |> shouldBeGreaterThan 20
+
+        for known, _ in flagTable do
+            coverage.Count (DefineReach.FlagSet known) |> shouldBeGreaterThan 5
+            coverage.Count (DefineReach.Refused known) |> shouldBeGreaterThan 5
 
         for kind in ownerKinds do
             coverage.Count (DefineReach.Owner kind) |> shouldBeGreaterThan 20
+
+    [<Test>]
+    let ``each pseudo-attribute that sets a flag accepts exactly CoreCLR's targets, and every other is unmodelled``
+        ()
+        : unit
+        =
+        let observed (known : KnownCustomAttribute) : (string * int) list option =
+            match KnownCustomAttribute.effect known with
+            | KnownCustomAttributeEffect.Unmodelled -> None
+            | KnownCustomAttributeEffect.SetsFlag flags ->
+                Some
+                    [
+                        match flags.TypeDef with
+                        | Some bit -> yield "type", int bit
+                        | None -> ()
+                        match flags.MethodDef with
+                        | Some (MethodDefFlag.Flags bit) -> yield "method", int bit
+                        | Some (MethodDefFlag.ImplFlags bit) -> yield "method implementation", int bit
+                        | None -> ()
+                        match flags.Field with
+                        | Some bit -> yield "field", int bit
+                        | None -> ()
+                        match flags.Param with
+                        | Some bit -> yield "parameter", int bit
+                        | None -> ()
+                        match flags.Property with
+                        | Some bit -> yield "property", int bit
+                        | None -> ()
+                        match flags.Event with
+                        | Some bit -> yield "event", int bit
+                        | None -> ()
+                    ]
+
+        KnownCustomAttribute.all
+        |> List.choose (fun known -> observed known |> Option.map (fun targets -> known, targets))
+        |> Map.ofList
+        |> shouldEqual (Map.ofList flagTable)
+
+    [<Test>]
+    let ``the extension rule's masks are the bits the pseudo-attributes set`` () : unit =
+        let mask = KnownCustomAttribute.flagMask
+
+        [
+            int mask.TypeDef
+            int mask.MethodDef
+            int mask.Field
+            int mask.Param
+            int mask.Property
+            int mask.Event
+        ]
+        |> shouldEqual [ 0x2400 ; 0x0800 ; 0x0280 ; 0x0013 ; 0x0200 ; 0x0200 ]
 
     [<Test>]
     let ``a token names an owner exactly when it is a row of one of the nine tables`` () : unit =
@@ -1311,6 +1599,9 @@ module TestEmitScopeCustomAttributes =
                     rid.Rid
                 | CustomAttributeDefinition.NotStoredAsGiven kind ->
                     failwith $"the pool holds no pseudo-attribute, but the emitter would %A{kind}"
+                | CustomAttributeDefinition.FlagSet _
+                | CustomAttributeDefinition.Refused _ ->
+                    failwith "the pool holds no pseudo-attribute, but the emitter treated one as a flag"
 
             // Attributes of each type's generic parameter, queued until the type is created, as the host queues them.
             let queued = Array.init schedule.Types (fun _ -> ResizeArray<int * byte[]> ())
@@ -1488,3 +1779,482 @@ module TestEmitScopeCustomAttributes =
 
         for kind in ownerKinds do
             coverage.Count (RowsReach.Owner kind) |> shouldBeGreaterThan 20
+
+    /// One generated `SetCustomAttribute` call of the flags' differential property: an owner, a constructor of the pool
+    /// and a blob, each as a choice.
+    type private FlagCall =
+        {
+            Owner : int
+            Constructor : int
+            Blob : int
+        }
+
+    /// The owners of one type of the flags' differential property, with the flags each is defined with.
+    type private FlagOwners =
+        {
+            Type : TypeAttributes
+            Method : MethodAttributes
+            Constructor : MethodAttributes
+            Parameter : ParameterAttributes
+            Return : ParameterAttributes
+            Field : FieldAttributes
+            Property : PropertyAttributes
+            Event : EventAttributes
+        }
+
+    type private FlagsSchedule =
+        {
+            Types : FlagOwners list
+            Calls : FlagCall list
+        }
+
+    [<RequireQualifiedAccess>]
+    type private FlagsReach =
+        | Accepted of KnownCustomAttribute * string
+        | Refused of KnownCustomAttribute
+        | BitAlreadySet
+        | BitNotSet
+        | Impostor
+
+    /// The ten owner kinds of the flags' differential property, in the order its owner choices name them.
+    let private flagOwnerKinds : string list =
+        [
+            "assembly"
+            "module"
+            "type"
+            "method"
+            "constructor"
+            "parameter"
+            "return parameter"
+            "field"
+            "property"
+            "event"
+        ]
+
+    [<Test>]
+    let ``each owner's flags after flag pseudo-attributes are what the host's emitter writes`` () : unit =
+        let all =
+            BindingFlags.Public
+            ||| BindingFlags.NonPublic
+            ||| BindingFlags.Instance
+            ||| BindingFlags.Static
+            ||| BindingFlags.DeclaredOnly
+
+        let property (cover : FlagsReach -> unit) (schedule : FlagsSchedule) : unit =
+            let assembly, host = newModule "FlagsOracle"
+            let mutable scope = emptyScope Guid.Empty
+
+            // The pool: CoreLib's seven attributes, and an impostor of each name defined in the module.
+            let pool : (KnownCustomAttribute * bool * ConstructorInfo * MethodDefOrRef) list =
+                [
+                    for known, _ in flagTable do
+                        let ns, name = KnownCustomAttribute.name known
+                        let coreLib = typeof<obj>.Assembly.GetType $"%s{ns}.%s{name}"
+                        let mirror, s = constructorOf (Parent.ReferenceInAssembly (ns, name)) scope
+                        scope <- s
+                        yield known, false, coreLib.GetConstructor Type.EmptyTypes, mirror
+
+                    for known, _ in flagTable do
+                        let ns, name = KnownCustomAttribute.name known
+
+                        let impostor =
+                            host.DefineType ($"%s{ns}.%s{name}", TypeAttributes.Public, typeof<Attribute>)
+
+                        let ctor = impostor.DefineDefaultConstructor MethodAttributes.Public
+                        let mirror, s = constructorOf (Parent.MethodOfDefinition (ns, name)) scope
+                        scope <- s
+                        yield known, true, (ctor :> ConstructorInfo), mirror
+                ]
+
+            let methodSignature =
+                ImmutableArray.Create<byte> [| 0x00uy ; 0x01uy ; 0x08uy ; 0x08uy |]
+
+            let ctorSignature = ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x01uy |]
+
+            // Each type's owners on the host, each with its owner on the mirror and its host token.
+            let owners =
+                [
+                    for i, flags in List.indexed schedule.Types do
+                        let t = host.DefineType ($"T%d{i}", flags.Type)
+                        let m = t.DefineMethod ("M", flags.Method, typeof<int>, [| typeof<int> |])
+                        let ret = m.DefineParameter (0, flags.Return, "r")
+                        let x = m.DefineParameter (1, flags.Parameter, "x")
+                        let il = m.GetILGenerator ()
+                        il.Emit OpCodes.Ldarg_0
+                        il.Emit OpCodes.Ret
+
+                        let c =
+                            t.DefineConstructor (flags.Constructor, CallingConventions.Standard, Type.EmptyTypes)
+
+                        let il = c.GetILGenerator ()
+                        il.Emit OpCodes.Ldarg_0
+                        il.Emit (OpCodes.Call, typeof<obj>.GetConstructor Type.EmptyTypes)
+                        il.Emit OpCodes.Ret
+                        let f = t.DefineField ("F", typeof<int>, flags.Field)
+                        let p = t.DefineProperty ("P", flags.Property, typeof<int>, Type.EmptyTypes)
+                        let e = t.DefineEvent ("E", flags.Event, typeof<Action>)
+
+                        let typeRid, s =
+                            match EmitScopeDefinitions.defineTopLevelTypeDef $"T%d{i}" t.Attributes None [] scope with
+                            | TypeDefDefinition.Defined (rid, s) -> rid, s
+                            | TypeDefDefinition.Duplicate _ -> failwith "each type's name is its own"
+
+                        let method, s =
+                            EmitScopeDefinitions.defineMethod typeRid "M" methodSignature m.Attributes s
+
+                        let param (sequence : int) (flags : ParameterAttributes) (s : EmitScope) =
+                            match EmitScopeDefinitions.defineParam method sequence "p" (int flags) s with
+                            | ParamDefinition.Defined (rid, s) -> rid, s
+                            | ParamDefinition.StrandsLaterMethods _ ->
+                                failwith "a method's parameters in order strand nothing"
+
+                        let retRid, s = param 0 (enum<ParameterAttributes> ret.Attributes) s
+                        let xRid, s = param 1 (enum<ParameterAttributes> x.Attributes) s
+                        // `DefineConstructor` adds `SpecialName` and `RTSpecialName` to the flags it is given.
+                        let ctorRid, s =
+                            EmitScopeDefinitions.defineMethod typeRid ".ctor" ctorSignature c.Attributes s
+
+                        let fieldRid, s =
+                            EmitScopeDefinitions.defineField
+                                typeRid
+                                "F"
+                                (ImmutableArray.Create<byte> [| 0x06uy ; 0x08uy |])
+                                f.Attributes
+                                s
+
+                        let propertyRid, s =
+                            EmitScopeDefinitions.defineProperty
+                                typeRid
+                                "P"
+                                (ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |])
+                                (int p.Attributes)
+                                s
+
+                        let eventRid, s =
+                            EmitScopeDefinitions.defineEvent
+                                typeRid
+                                "E"
+                                (TypeDefOrRef.TypeDef typeRid)
+                                (int flags.Event)
+                                s
+
+                        scope <- s
+
+                        let token (builder : obj) (field : string) : int =
+                            builder.GetType().GetField(field, instance).GetValue builder |> unbox<int>
+
+                        yield
+                            t,
+                            [
+                                "type",
+                                (fun (cab : ConstructorInfo, blob) -> t.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.TypeDef typeRid,
+                                t.MetadataToken
+                                "method",
+                                (fun (cab, blob) -> m.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.MethodDef method,
+                                m.MetadataToken
+                                "constructor",
+                                (fun (cab, blob) -> c.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.MethodDef ctorRid,
+                                c.MetadataToken
+                                "parameter",
+                                (fun (cab, blob) -> x.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.Param xRid,
+                                token x "_token"
+                                "return parameter",
+                                (fun (cab, blob) -> ret.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.Param retRid,
+                                token ret "_token"
+                                "field",
+                                (fun (cab, blob) -> f.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.Field fieldRid,
+                                f.MetadataToken
+                                "property",
+                                (fun (cab, blob) -> p.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.Property propertyRid,
+                                token p "m_tkProperty"
+                                "event",
+                                (fun (cab, blob) -> e.SetCustomAttribute (cab, blob)),
+                                HasCustomAttribute.Event eventRid,
+                                token e "m_evToken"
+                            ]
+                ]
+
+            let blobs : byte[] list =
+                [
+                    [||]
+                    [| 1uy ; 0uy |]
+                    [| 0xFFuy ; 0xFFuy |]
+                    [| 1uy |]
+                    [| 1uy ; 0uy ; 0xDEuy ; 0xADuy ; 0xBEuy ; 0xEFuy |]
+                    [| 1uy ; 0uy ; 1uy ; 0uy ; 0x99uy |]
+                    [| 1uy ; 0uy ; 0uy ; 0uy |]
+                ]
+
+            for call in schedule.Calls do
+                let known, isImpostor, constructor, mirror = pool.[call.Constructor % pool.Length]
+                let kind = flagOwnerKinds.[(call.Owner / 7) % flagOwnerKinds.Length]
+                let blob = blobs.[call.Blob % blobs.Length]
+
+                let apply, owner =
+                    match kind with
+                    | "assembly" ->
+                        (fun (cab, blob) -> assembly.SetCustomAttribute (cab, blob)), HasCustomAttribute.Assembly
+                    | "module" -> (fun (cab, blob) -> host.SetCustomAttribute (cab, blob)), HasCustomAttribute.Module
+                    | _ ->
+                        let _, typeOwners = owners.[call.Owner % owners.Length]
+                        let _, apply, owner, _ = typeOwners |> List.find (fun (k, _, _, _) -> k = kind)
+                        apply, owner
+
+                let threw =
+                    try
+                        apply (constructor, blob)
+                        false
+                    with :? ArgumentException as e ->
+                        e.Message |> shouldEqual "Invalid custom attribute provided."
+                        true
+
+                let target =
+                    flagTable
+                    |> List.find (fun (k, _) -> k = known)
+                    |> snd
+                    |> List.tryFind (fun (t, _) ->
+                        t = kind
+                        || (t = "method" && kind = "constructor")
+                        || (t = "method implementation" && (kind = "method" || kind = "constructor"))
+                        || (t = "parameter" && kind = "return parameter")
+                    )
+
+                match
+                    EmitScopeDefinitions.defineCustomAttribute owner mirror (ImmutableArray.Create<byte> blob) scope
+                with
+                | CustomAttributeDefinition.FlagSet after ->
+                    threw |> shouldEqual false
+
+                    match target with
+                    | Some (column, bit) ->
+                        cover (
+                            if hasBit owner column bit scope then
+                                FlagsReach.BitAlreadySet
+                            else
+                                FlagsReach.BitNotSet
+                        )
+                    | None -> failwith $"%A{known} on a %s{kind} set a flag, but CoreCLR's targets do not list it"
+
+                    cover (FlagsReach.Accepted (known, kind))
+
+                    if isImpostor then
+                        cover FlagsReach.Impostor
+
+                    scope <- after
+                | CustomAttributeDefinition.Refused _ ->
+                    threw |> shouldEqual true
+                    cover (FlagsReach.Refused known)
+                | outcome -> failwith $"%A{known} on a %s{kind}: %A{outcome}"
+
+            // Each owner's flags, on the created type and in the image of the scope; and no row on either.
+            let image = EmitScopeImage.write scope
+            let pe, reader = readImage image
+            use _ = pe
+
+            for t, typeOwners in owners do
+                let created = t.CreateType ()
+                let m = created.GetMethod ("M", all)
+                let c = (created.GetConstructors all).[0]
+
+                let hostFlags =
+                    [
+                        int created.Attributes
+                        int m.Attributes
+                        int m.MethodImplementationFlags
+                        int c.Attributes
+                        int c.MethodImplementationFlags
+                        int (m.GetParameters ()).[0].Attributes
+                        int m.ReturnParameter.Attributes
+                        int (created.GetField ("F", all)).Attributes
+                        int (created.GetProperty ("P", all)).Attributes
+                        int (created.GetEvent ("E", all)).Attributes
+                    ]
+
+                let rid (kind : string) : int =
+                    let _, _, owner, _ = typeOwners |> List.find (fun (k, _, _, _) -> k = kind)
+                    owner.Token &&& 0xFFFFFF
+
+                let methodRow (kind : string) =
+                    reader.GetMethodDefinition (
+                        System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle (rid kind)
+                    )
+
+                let imageFlags =
+                    [
+                        int
+                            (reader.GetTypeDefinition (
+                                System.Reflection.Metadata.Ecma335.MetadataTokens.TypeDefinitionHandle (rid "type")
+                            ))
+                                .Attributes
+                        int (methodRow "method").Attributes
+                        int (methodRow "method").ImplAttributes
+                        int (methodRow "constructor").Attributes
+                        int (methodRow "constructor").ImplAttributes
+                        int
+                            (reader.GetParameter (
+                                System.Reflection.Metadata.Ecma335.MetadataTokens.ParameterHandle (rid "parameter")
+                            ))
+                                .Attributes
+                        int
+                            (reader.GetParameter (
+                                System.Reflection.Metadata.Ecma335.MetadataTokens.ParameterHandle (
+                                    rid "return parameter"
+                                )
+                            ))
+                                .Attributes
+                        int
+                            (reader.GetFieldDefinition (
+                                System.Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle (rid "field")
+                            ))
+                                .Attributes
+                        int
+                            (reader.GetPropertyDefinition (
+                                System.Reflection.Metadata.Ecma335.MetadataTokens.PropertyDefinitionHandle (
+                                    rid "property"
+                                )
+                            ))
+                                .Attributes
+                        int
+                            (reader.GetEventDefinition (
+                                System.Reflection.Metadata.Ecma335.MetadataTokens.EventDefinitionHandle (rid "event")
+                            ))
+                                .Attributes
+                    ]
+
+                imageFlags |> shouldEqual hostFlags
+
+                for _, _, _, token in typeOwners do
+                    hostRows host token |> shouldEqual []
+
+            for token in [ 0x20000001 ; 0x00000001 ] do
+                hostRows host token |> shouldEqual []
+
+            EmitScope.customAttributes scope |> List.ofSeq |> shouldEqual []
+
+        let genOwners : Gen<FlagOwners> =
+            gen {
+                let! typeFlags =
+                    Gen.elements
+                        [
+                            TypeAttributes.Public
+                            TypeAttributes.NotPublic
+                            TypeAttributes.Public ||| TypeAttributes.Sealed
+                            TypeAttributes.Public ||| TypeAttributes.Abstract
+                            // `tdSerializable`, and `tdSpecialName`.
+                            TypeAttributes.Public ||| enum 0x2000
+                            TypeAttributes.Public ||| TypeAttributes.SpecialName
+                            TypeAttributes.Public
+                            ||| TypeAttributes.Sealed
+                            ||| TypeAttributes.BeforeFieldInit
+                        ]
+
+                let! methodFlags =
+                    Gen.elements
+                        [
+                            MethodAttributes.Public ||| MethodAttributes.Static
+                            MethodAttributes.Private ||| MethodAttributes.Static
+                            MethodAttributes.Public
+                            ||| MethodAttributes.Static
+                            ||| MethodAttributes.HideBySig
+                            MethodAttributes.Public
+                            ||| MethodAttributes.Static
+                            ||| MethodAttributes.SpecialName
+                        ]
+
+                let! ctorFlags =
+                    Gen.elements
+                        [
+                            MethodAttributes.Public
+                            MethodAttributes.Private
+                            MethodAttributes.Public ||| MethodAttributes.HideBySig
+                        ]
+
+                let parameterFlags =
+                    Gen.elements [ 0 ; 0x1 ; 0x2 ; 0x3 ; 0x10 ; 0x11 ; 0x12 ; 0x13 ]
+                    |> Gen.map enum<ParameterAttributes>
+
+                let! parameter = parameterFlags
+                let! ret = parameterFlags
+
+                let! fieldFlags =
+                    Gen.elements
+                        [
+                            FieldAttributes.Public
+                            FieldAttributes.Private ||| FieldAttributes.Static
+                            // `fdNotSerialized`.
+                            FieldAttributes.Public ||| enum 0x80
+                            FieldAttributes.Public ||| FieldAttributes.SpecialName
+                            FieldAttributes.Assembly ||| FieldAttributes.InitOnly
+                        ]
+
+                let! propertyFlags = Gen.elements [ PropertyAttributes.None ; PropertyAttributes.SpecialName ]
+                let! eventFlags = Gen.elements [ EventAttributes.None ; EventAttributes.SpecialName ]
+
+                return
+                    {
+                        Type = typeFlags
+                        Method = methodFlags
+                        Constructor = ctorFlags
+                        Parameter = parameter
+                        Return = ret
+                        Field = fieldFlags
+                        Property = propertyFlags
+                        Event = eventFlags
+                    }
+            }
+
+        let genSchedule : Gen<FlagsSchedule> =
+            gen {
+                let! typeCount = Gen.choose (1, 3)
+                let! types = Gen.listOfLength typeCount genOwners
+                let! count = Gen.choose (0, 40)
+
+                let! calls =
+                    Gen.listOfLength
+                        count
+                        (Gen.map3
+                            (fun o c b ->
+                                {
+                                    Owner = o
+                                    Constructor = c
+                                    Blob = b
+                                }
+                            )
+                            choice
+                            choice
+                            choice)
+
+                return
+                    {
+                        Types = List.ofSeq types
+                        Calls = List.ofSeq calls
+                    }
+            }
+
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 150) (Arb.fromGen genSchedule) property
+
+        for known, targets in flagTable do
+            coverage.Count (FlagsReach.Refused known) |> shouldBeGreaterThan 3
+
+            for target, _ in targets do
+                let kinds =
+                    match target with
+                    | "method"
+                    | "method implementation" -> [ "method" ; "constructor" ]
+                    | "parameter" -> [ "parameter" ; "return parameter" ]
+                    | kind -> [ kind ]
+
+                for kind in kinds do
+                    coverage.Count (FlagsReach.Accepted (known, kind)) |> shouldBeGreaterThan 3
+
+        coverage.Count FlagsReach.BitAlreadySet |> shouldBeGreaterThan 20
+        coverage.Count FlagsReach.BitNotSet |> shouldBeGreaterThan 20
+        coverage.Count FlagsReach.Impostor |> shouldBeGreaterThan 20

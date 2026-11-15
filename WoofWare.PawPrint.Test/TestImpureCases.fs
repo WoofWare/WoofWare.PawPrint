@@ -586,6 +586,22 @@ module TestImpureCases =
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
             {
+                FileName = "TypeBuilderPseudoAttributeGenericParamRetry.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`CreateType` retried after its bake threw for a pseudo-attribute on the type's generic parameter, measured on .NET 10 and 11 to exit 0; a control expecting the type created after the second call exits 4 on both. Real .NET defines the generic parameter again on the second call and throws again. PawPrint raises the first `ArgumentException` and then stops at the second definition of the parameter: "EmitScope.addGenericParam: parameter 0 of TypeDef (TypeDefRid 2), which has 1; CoreCLR's managed callers create an owner's parameters once each, in position order". Un-parked by modelling a retried `CreateType`'s second GenericParam row."""
+            {
                 FileName = "TypeBuilderPseudoCustomAttributes.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -2196,6 +2212,96 @@ module TestImpureCases =
                 // `G`'s generic parameter, written when `G` is created.
                 0x2A000002, 0x0A000001
             ]
+
+    /// `TypeBuilderPseudoAttributeFlags.cs` has applied flag pseudo-attributes in modules `Matrix`, `Order` and
+    /// `GenParam`. This checks that each flag is in its owner's row of the scope, and that neither a flag nor a refusal
+    /// consumed a CustomAttribute row: `Matrix`'s and `Order`'s rows are exactly the guest's ordinary attributes, in RID
+    /// order, and `GenParam` has none, since its types' bakes threw at a generic parameter's pseudo-attribute before
+    /// the ordinary attribute queued after it.
+    let private assertPseudoAttributeFlagRows (state : IlMachineState) : unit =
+        // `TagAttribute(string)`'s blob: the prolog, the string, and no named arguments.
+        let tag (value : string) : byte list =
+            [ 1uy ; 0uy ; byte value.Length ]
+            @ List.ofArray (Text.Encoding.UTF8.GetBytes value)
+            @ [ 0uy ; 0uy ]
+
+        let rows (scope : EmitScope) =
+            EmitScope.customAttributes scope
+            |> Seq.map (fun row -> row.Parent.Token, List.ofSeq (EmitScope.blobAt row.Value scope))
+            |> List.ofSeq
+
+        let typeNamed (scope : EmitScope) (name : string) : TypeDefRid =
+            EmitScope.typeDefs scope
+            |> Seq.findIndex (fun row -> EmitScope.stringAt row.Name scope = name)
+            |> fun i -> TypeDefRid (i + 1)
+
+        // Each of a type's rows that a flag pseudo-attribute can own, with its flags column (and a method's
+        // implementation flags): the type, `M` and its implementation flags, the constructor and its implementation
+        // flags, `M`'s parameter `x`, its return parameter, the field, the property and the event.
+        let flagsOf (scope : EmitScope) (typeDef : TypeDefRid) : int list =
+            let methodNamed (name : string) : int * MethodDefRow =
+                EmitScope.methodDefs scope
+                |> Seq.indexed
+                |> Seq.find (fun (_, row) -> row.Owner = typeDef && EmitScope.stringAt row.Name scope = name)
+                |> fun (i, row) -> i + 1, row
+
+            let m, mRow = methodNamed "M"
+            let _, ctor = methodNamed ".ctor"
+
+            let param (sequence : uint16) : int =
+                EmitScope.parameters scope
+                |> Seq.find (fun row -> row.Owner.Rid = m && row.Sequence = sequence)
+                |> fun row -> int row.Flags
+
+            let owned (rows : seq<TypeDefRid * int>) : int =
+                rows |> Seq.filter (fun (owner, _) -> owner = typeDef) |> Seq.exactlyOne |> snd
+
+            [
+                int (EmitScope.typeDefs scope).[typeDef.Rid - 1].Flags
+                int mRow.Flags
+                int mRow.ImplFlags
+                int ctor.Flags
+                int ctor.ImplFlags
+                param 1us
+                param 0us
+                owned (EmitScope.fields scope |> Seq.map (fun row -> row.Owner, int row.Flags))
+                owned (EmitScope.properties scope |> Seq.map (fun row -> row.Owner, int row.Flags))
+                owned (EmitScope.events scope |> Seq.map (fun row -> row.Owner, int row.Flags))
+            ]
+
+        let matrix = dynamicScopeNamed state "Matrix"
+
+        let expected =
+            [
+                "SerializableAttribute", [ 0x2001 ; 0x16 ; 0 ; 0x1806 ; 0 ; 0 ; 0 ; 0x06 ; 0 ; 0 ]
+                "NonSerializedAttribute", [ 0x0001 ; 0x16 ; 0 ; 0x1806 ; 0 ; 0 ; 0 ; 0x86 ; 0 ; 0 ]
+                "SpecialNameAttribute", [ 0x0401 ; 0x816 ; 0 ; 0x1806 ; 0 ; 0 ; 0 ; 0x206 ; 0x200 ; 0x200 ]
+                "InAttribute", [ 0x0001 ; 0x16 ; 0 ; 0x1806 ; 0 ; 0x01 ; 0x01 ; 0x06 ; 0 ; 0 ]
+                "OutAttribute", [ 0x0001 ; 0x16 ; 0 ; 0x1806 ; 0 ; 0x02 ; 0x02 ; 0x06 ; 0 ; 0 ]
+                "OptionalAttribute", [ 0x0001 ; 0x16 ; 0 ; 0x1806 ; 0 ; 0x10 ; 0x10 ; 0x06 ; 0 ; 0 ]
+                "PreserveSigAttribute", [ 0x0001 ; 0x16 ; 0x80 ; 0x1806 ; 0x80 ; 0 ; 0 ; 0x06 ; 0 ; 0 ]
+            ]
+
+        for name, flags in expected do
+            flagsOf matrix (typeNamed matrix name) |> shouldEqual flags
+
+        rows matrix
+        |> shouldEqual
+            [
+                for name, _ in expected do
+                    yield 0x02000000 ||| (typeNamed matrix name).Rid, tag $"after %s{name}"
+            ]
+
+        let order = dynamicScopeNamed state "Order"
+        let t = typeNamed order "T"
+
+        flagsOf order t
+        |> shouldEqual [ 0x2001 ; 0x16 ; 0 ; 0x1806 ; 0 ; 0x10 ; 0 ; 0x06 ; 0 ; 0 ]
+
+        rows order
+        |> shouldEqual [ for value in [ "a" ; "b" ; "c" ; "d" ] -> 0x02000000 ||| t.Rid, tag value ]
+
+        rows (dynamicScopeNamed state "GenParam") |> shouldEqual []
 
     /// `ModuleBuilderStringConstant.cs` has asked for six strings, `"hello"` twice. This checks the
     /// module's `#US` entries, each as its UTF-16 code units and its final byte: the space the heap
@@ -7006,6 +7112,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertCustomAttributeRows
+            }
+            {
+                // The seven pseudo-attributes that set a flag in their owner's row, through every builder's
+                // `SetCustomAttribute`; `assertPseudoAttributeFlagRows` reads the rows of three of its modules.
+                // Measured on real .NET 10 and 11 to exit 0, and a control expecting `Out` refused on a return
+                // parameter exits 47 on both.
+                FileName = "TypeBuilderPseudoAttributeFlags.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertPseudoAttributeFlagRows
             }
             {
                 // An emitted attribute whose constructor takes `object`, instantiated through `GetCustomAttributes`.
