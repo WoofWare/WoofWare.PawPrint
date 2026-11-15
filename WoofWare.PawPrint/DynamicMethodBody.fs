@@ -363,8 +363,9 @@ module internal DynamicMethodBody =
         // `m_tokens`; decoding it against the assembly's tables would silently resolve it to an
         // unrelated real row, because the bit patterns are the same. The entries themselves are not
         // read now, for an instruction's operand or for a catch clause's type: CoreCLR reads both
-        // when it compiles the method at its first invocation, and a guest can rewrite the scope
-        // before then. `DynamicMethodExecution.concretize` resolves the clause types at that point.
+        // when it compiles the method, at its first invocation or, for a restricted-skip-visibility
+        // method, at `CreateDelegate`, and a guest can rewrite the scope before then.
+        // `DynamicMethodExecution.prepare` resolves the clause types at that point.
         let instructions = IlDecoding.decodeInstructions IlTokenUniverse.DynamicScope code
 
         for region in exceptionRegions do

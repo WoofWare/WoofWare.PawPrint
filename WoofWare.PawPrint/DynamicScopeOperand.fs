@@ -114,7 +114,7 @@ type internal BadTokenKind =
 /// </para>
 /// <para>
 /// Not every scope entry is read for an instruction, and the exception is already latched: a
-/// <c>catch</c> clause's type is a scope index too, and <c>DynamicMethodExecution.concretize</c>
+/// <c>catch</c> clause's type is a scope index too, and <c>DynamicMethodExecution.prepare</c>
 /// resolves it when the method is prepared, because a clause is not attached to an instruction and
 /// real .NET refuses an unresolvable one whether or not anything ever throws. Such a caller passes
 /// the handle of the method the clause belongs to, which is not in general the executing one —

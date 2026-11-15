@@ -83,7 +83,7 @@ module ExceptionDispatching =
         | ExceptionCatchType.FromDynamicScope index ->
             // This arm is a lookup and not a resolution: a dynamic method's clause types were all
             // resolved when the method was first prepared for execution, which is where CoreCLR's
-            // JIT resolves them (see DynamicMethodExecution.concretize). Resolving one here instead
+            // JIT resolves them (see DynamicMethodExecution.prepare). Resolving one here instead
             // would read the scope as it stands during the *throw*, and a guest that rewrote the
             // slot in between is measured not to be heard by real .NET.
             let handle =

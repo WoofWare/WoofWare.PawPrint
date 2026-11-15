@@ -287,8 +287,8 @@ module AbstractMachine =
             // A method minted by `Reflection.Emit` has no `MethodInfo` sitting in the pointer: it
             // has no MethodDef row for one to be read from, so `Delegate_BindToMethodInfo` stored
             // its registry handle instead. Build the method here, at the moment of invocation --
-            // see `DynamicMethodExecution.concretize` for why not earlier, and for what the first
-            // such invocation latches.
+            // see `DynamicMethodExecution` for why not earlier, and `DynamicMethodExecution.prepare`
+            // for what the method's first preparation latches.
             let state, methodPtr =
                 match callee with
                 | FunctionPointerTarget.Managed methodPtr -> state, methodPtr |> Ok
@@ -361,7 +361,7 @@ module AbstractMachine =
             // a type to initialise and would run its `.cctor`.
             let raiseFromPoppedStub
                 (exceptionType : TypeInfo<GenericParamFromMetadata, TypeDefn>)
-                (message : string option)
+                (fields : RuntimeExceptionField list)
                 (state : IlMachineState)
                 : ExecutionResult
                 =
@@ -382,7 +382,7 @@ module AbstractMachine =
                         loggerFactory
                         baseClassTypes
                         (IlMachineStateExecution.RaiseOrigin.Callee exceptionType)
-                        (message |> Option.toList |> List.map RuntimeExceptionField.Message)
+                        fields
                         thread
                         state
 
@@ -392,7 +392,9 @@ module AbstractMachine =
             | Error (exceptionType, why) ->
                 // The target could not be compiled: measured on real .NET as an
                 // `InvalidProgramException` raised by the *first invocation*, not by
-                // `CreateDelegate`. Raised after the stub frame is popped, for the reason the
+                // `CreateDelegate` (unless the method is restricted-skip-visibility, whose
+                // `CreateDelegate` compiled it and so raised instead, leaving no delegate to
+                // invoke; see `NativeRuntimeHelpers`'s `CompileMethod`). Raised after the stub frame is popped, for the reason the
                 // paragraph above gives — a stub frame still on the stack lands in the guest's
                 // stack trace, which is what `DelegateCctorFailureTraceHasNoStubFrame.cs` pins for
                 // the sibling failure — and with the caller's PC put back to its call site, since
@@ -408,11 +410,9 @@ module AbstractMachine =
                 // whose own clauses are therefore out of scope", which is exactly this situation.
                 logger.LogWarning ("delegate invocation refused a dynamic target: {Reason}", why)
 
-                // `concretize` refuses only a `catch` clause's type, which the JIT resolves as a
-                // class token.
                 raiseFromPoppedStub
                     exceptionType
-                    (DynamicScopeOperand.clrMessageFor baseClassTypes BadTokenKind.Class exceptionType)
+                    (DynamicMethodExecution.preparationFailureFields baseClassTypes exceptionType)
                     state
             | Ok methodPtr ->
 
@@ -422,7 +422,7 @@ module AbstractMachine =
             // message, only when it is invoked.
             // `sourcesPure/DelegateBindStaticAbstractInterfaceMethod.cs` pins that.
             if dispatchesOnReceiver && methodPtr.IsStatic then
-                raiseFromPoppedStub baseClassTypes.EntryPointNotFoundException None state
+                raiseFromPoppedStub baseClassTypes.EntryPointNotFoundException [] state
             // A virtual call stub reads the receiver's type before anything else, so a null one
             // faults there — measured on real .NET as a `NullReferenceException` — where an open
             // delegate over a non-virtual method enters its target with a null `this` and faults
@@ -435,7 +435,7 @@ module AbstractMachine =
                     | _ -> false
                 )
             then
-                raiseFromPoppedStub baseClassTypes.NullReferenceException None state
+                raiseFromPoppedStub baseClassTypes.NullReferenceException [] state
             else
 
             // An abstract target has no body to run. Reachable only through
@@ -453,7 +453,10 @@ module AbstractMachine =
             // `sourcesPure/DelegateToAbstractMethodOverNull.cs` pins.
             match methodPtr.Body with
             | MethodBody.Abstract when not dispatchesOnReceiver ->
-                raiseFromPoppedStub baseClassTypes.BadImageFormatException (Some BadImageFormatMessages.ofHResult) state
+                raiseFromPoppedStub
+                    baseClassTypes.BadImageFormatException
+                    [ RuntimeExceptionField.Message BadImageFormatMessages.ofHResult ]
+                    state
             | MethodBody.Abstract
             | MethodBody.Il _
             | MethodBody.AsyncIl _

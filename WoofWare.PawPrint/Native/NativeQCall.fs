@@ -50,6 +50,8 @@ module NativeQCall =
     let private handlers : Map<string, NativeCallContext -> NativeHandlerResult option> =
         [
             "AsyncHelpers_AddContinuationToExInternal", addContinuationToEx
+            "ReflectionInvocation_CompileMethod",
+            NativeRuntimeHelpers.tryExecuteQCall "ReflectionInvocation_CompileMethod"
             "ReflectionInvocation_RunClassConstructor",
             NativeRuntimeHelpers.tryExecuteQCall "ReflectionInvocation_RunClassConstructor"
             "RuntimeFieldHandle_GetRVAFieldInfo",

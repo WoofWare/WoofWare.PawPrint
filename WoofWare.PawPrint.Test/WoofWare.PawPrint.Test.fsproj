@@ -263,6 +263,7 @@
     <Compile Include="TestMethodOwner.fs" />
     <Compile Include="TestSameDeclaredMethod.fs" />
     <Compile Include="TestDynamicMethodMintOutcome.fs" />
+    <Compile Include="TestCompileMethodPreparation.fs" />
     <Compile Include="TestDynamicMethodTracing.fs" />
     <Compile Include="TestFloatWidthJoin.fs" />
     <Compile Include="TestUnhandledExceptionReport.fs" />

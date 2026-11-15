@@ -96,7 +96,7 @@ type ExceptionCatchType =
     | FromMetadata of MetadataToken
     /// An index into the <c>DynamicScope</c> of the dynamic method whose body the clause belongs
     /// to. Resolved when that method is first prepared for execution, which is where CoreCLR
-    /// resolves it too — see <c>DynamicMethodExecution.concretize</c>.
+    /// resolves it too — see <c>DynamicMethodExecution.prepare</c>.
     | FromDynamicScope of index : int
     /// An entry of the operands of the stub the runtime emits for the method whose body the clause
     /// belongs to, as `MetadataOperand.FromStubScope` names one for an instruction.

@@ -825,6 +825,10 @@ module MethodHandleRegistry =
         =
         Map.tryFind handle reg.DynamicMethods
 
+    /// Every dynamic method this registry has minted, with what it was built from.
+    let dynamicMethods (reg : MethodHandleRegistry) : (DynamicMethodHandle * DynamicMethodDefinition) list =
+        reg.DynamicMethods |> Map.toList
+
     /// A *fresh* `RuntimeMethodInfoStub` naming the method whose registry id is `registryId`, as
     /// `allocateFreshStub` does for a method in hand. For a caller that already holds the id,
     /// as `COMDelegate::GetMethodDesc`'s transcription does.
