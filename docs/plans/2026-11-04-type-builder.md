@@ -8131,3 +8131,130 @@ Upstream source was read in `$DOTNET_RUNTIME_SRC_NET10` and compared with `_NET1
   * `PreserveSig` on a dynamic module's P/Invoke, with the stage that admits `TypeBuilder_SetPInvokeData`.
   * A modelled name on a wrong target of a created owner, which stops where real .NET throws.
   * The five issues of question 9: the invoke stub #2267, `ReflectionInvocation_CompileMethod` #2268, `AssemblyNative_GetExportedTypes` #2269, `RuntimeTypeHandle_VerifyInterfaceIsImplemented` #2270, and `XmlSerializer`'s `AssemblyNative_InternalLoad` #2271.
+
+### 5z-1: as built
+
+Built 2026-11-15 on `plan-5z` (`main` at `bf68a1d54` with the three commits of the 5z plan), as the decisions say for
+5z-1: the tests with the Domain types stubbed (`32b154c37`), and the implementation (`09863af0e`). Scratchpad paths here
+are under `5z-1/` in the scratchpad named in "5z: what it is".
+
+**What the implementer verified first.** One throwaway (`5z-1/throwaway.diff`, `5z-1/tprobe/Program.cs`), applied to
+this branch's base and reverted before any Domain code: the handler set each of the seven names' bits through an
+ad-hoc OR, raised `ArgumentException` for any other owner, and the extension rule ignored flags columns. `tprobe` ran on
+.NET 10.0.14 and 11.0.0-rc.3 (identical but for the version line; a control expecting the type without `tdSpecialName`
+exits 20 on both) and under the Release App (`5z-1/tprobe/t1.log`, `t2.log`).
+
+| Check | Real .NET | PawPrint with the throwaway |
+|---|---|---|
+| `Serializable` on a method, caught around `SetCustomAttribute` | `System.ArgumentException`, `ParamName` null, HResult `0x80070057`, message "Invalid custom attribute provided." | the same, from `RaiseException` with only the message field |
+| `Serializable`, then an ordinary attribute, on a type's generic parameter; `CreateType` | throws the same exception; `IsCreated()` false; another type of the module created and instantiated | the same: the raise unwinds through `CreateTypeNoLock`'s lock; the scope then holds no CustomAttribute row at all, so the attribute queued after the refused one was never written |
+| `CreateType` retried | throws the same exception again; `IsCreated()` false | stops: "EmitScope.addGenericParam: parameter 0 of TypeDef (TypeDefRid 3), which has 1; CoreCLR's managed callers create an owner's parameters once each, in position order" |
+| each of the six row types of an uncreated type gains its bit (`Serializable` and `SpecialName` on the type, `SpecialName` and `PreserveSig` on a method, `PreserveSig` on a constructor, `NonSerialized` and `SpecialName` on a field, `SpecialName` on a property and on an event, `In` and `Optional` on a parameter, `Out` on a return parameter), then `CreateType` | type `0x2401`, method `0x0816`/`0x0080`, constructor `0x1806`/`0x0080`, field `0x0286`, property and event `0x0200`, parameter `0x0011`, return `0x0002`; `M` runs; `IsSerializable`; `InAttribute,OptionalAttribute` and `SerializableAttribute` synthesised | the same line for line: `WithEmitScope` re-read each scope, and the type created |
+
+So the retry is a parked case (`TypeBuilderPseudoAttributeGenericParamRetry.cs`), and nothing else changed the design.
+
+**Measured on real .NET before any commit.** Each guest was built against net10.0 from the repository's source and run
+on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 (`5z-1/guest`, `5z-1/retry`), with a control made by one edit of a
+copy (`5z-1/control.sh`, `5z-1/guest-measure.sh`). Under PawPrint, "host" is the run on the test host's CoreLib and
+`Net11` the run with `PAWPRINT_TEST_RUNTIME=Net11`.
+
+| Guest | Control (exit on both) | PawPrint, host | PawPrint, `Net11` |
+|---|---|---|---|
+| `TypeBuilderPseudoAttributeFlags.cs` | `Out` expected refused on the return parameter: 47 | 0, with its terminal-state check (15 s) | 0 (20 s) |
+| `TypeBuilderPseudoAttributeGenericParamRetry.cs` (parked) | the type expected created after the second call: 4 | the first raise, then "EmitScope.addGenericParam: parameter 0 of TypeDef (TypeDefRid 2), which has 1; ..." | not run |
+| `TypeBuilderPseudoCustomAttributes.cs` (parked) | (5y's) | the security name's TODO at its third call, `SuppressUnmanagedCodeSecurity` on the type | not run |
+
+The flag guest passed on its first real run on both runtimes, and under PawPrint as soon as the implementation was
+there. The two changed guests of `TestTypeBuilderCustomAttributeRefusals` were not run as programs: what real .NET does
+with each is in the decisions' measurements (`ComImport` on an interface is accepted, `5z/probe` `comimport`;
+`MethodImpl` on a field throws, `5z-decide/probe3` `unmodelled`).
+
+**Red, as recorded** (`32b154c37`'s message). Against the stubs, 6 of the 80 tests of `TestEmitScopeCustomAttributes`,
+`TestEmitScopeExtension`, `TestEmitScopeImage` and `TestTypeBuilderCustomAttributeRefusals` failed: the table, the
+masks, the model property, the flags differential, the masks per table, and `a changed event is reported at its RID`
+(below). The flag guest stopped at its first call, `Serializable` on the assembly, at the pseudo-attribute TODO. The
+refusal fixture's two changed guests passed already, as they should: they pin a TODO that 5z-1 keeps.
+
+**What was built.**
+* Domain. `MethodDefFlag`; `PseudoAttributeFlags`, a record of an optional bit per table (TypeDef, MethodDef, Field,
+  Param, Property, Event), so that an accepted target without a bit cannot be written; `KnownCustomAttributeEffect`
+  (`SetsFlag`, `Unmodelled`); `KnownCustomAttribute.effect`, the table, with every name not in 5z-1 `Unmodelled`; the
+  mask record `PseudoAttributeFlagMask` and `KnownCustomAttribute.flagMask`, folded from `effect` over `all`;
+  `KnownCustomAttributeRefusal` with `WrongTarget` only; `CustomAttributeDefinition.FlagSet` and `Refused`;
+  `EmitScopeDefinitions.addPseudoAttributeFlag`, which ORs the bit through the six row functions
+  `EmitScope.addTypeDefFlags`, `addMethodDefFlags`, `addFieldFlags`, `addParamFlags`, `addPropertyFlags` and
+  `addEventFlags` (`PreserveSig` through the existing `setMethodImplFlags`, ORed with the column), and answers `None` for
+  a table without a bit, the assembly, the module and a generic parameter among them. These are the public additions to
+  the published Domain package.
+* Loader. `EmitScopeExtension.violations`: a TypeDef's `Flags` beside its parent, a MethodDef's `Flags` beside its
+  implementation flags and body, and the flags of a Field, Param, Property or Event row, may gain bits of `flagMask`;
+  that is a fill (`FilledInCreatedType` for a created type). Losing a bit, or gaining one outside the mask, is
+  `RowChanged`.
+* The handler (`NativeRuntimeTypeBuilder.fs`), in the decisions' order: the arguments, the created-owner TODO,
+  `defineCustomAttribute`, then `Refused` raises `ArgumentException` with only `RuntimeExceptionField.Message`,
+  `NotStoredAsGiven` keeps 5y's TODO (its text now says the name's effect is not modelled), and `FlagSet` and `Defined`
+  go through `WithEmitScope`.
+* Tests. The flag guest and its terminal-state check (`assertPseudoAttributeFlagRows`: the flags column of each owner
+  row of `Matrix` and `Order`, every CustomAttribute row of both in RID order, and none in `GenParam`); the parked retry
+  guest; the refusal fixture's two guests; the table against custattr_emit.cpp with its line numbers, the masks, the
+  model property (every known name, owners of all nine kinds with the generator's flags), the masks per table in
+  `TestEmitScopeExtension`, and the flags differential against the host's emitter (owners of a few types defined with
+  varied flags, CoreLib's seven attributes and an impostor of each in the module, the planner's blobs and a
+  well-formed one; whether each call threw, each owner's flags on the created type and in the image, and no row on
+  either side). `EmitScopeGen` has an operation that sets a pseudo-attribute's flag, so that the extension and image
+  properties draw flag changes; `typeView` compares each row's flags; and `filledIn`, with the masks spelled out
+  independently of `flagMask`, replaces `withoutFilledColumns` in the two image comparisons.
+
+**Corrections found in implementation, and where the decisions were not followed to the letter.**
+* `a changed event is reported at its RID` asserted that gaining `evSpecialName` is a changed row. Under question 4's
+  rule it is a fill, so the test now gains bit `0x0001` for the changed row, and asserts the fill for `0x0200`, refused
+  as `FilledInCreatedType` for a created type. This is the one existing test whose expectation changed.
+* The six row functions are one per table with a flags column. `PreserveSig` writes the other MethodDef column, through
+  `setMethodImplFlags`, as the decisions anticipated ("`MethodDefRow.ImplFlags` needs nothing").
+* The mutant "the refusal raised with a parameter name" cannot be written: `RuntimeExceptionField` has no parameter
+  name. "The refusal raised without its message" stands in for it.
+* "The created-owner TODO moved after the flag is set" was run as the TODO removed, which is the same for every call
+  that reaches it.
+* The flag guest names each dynamic assembly as its module, so that the terminal-state check finds `Matrix`, `Order`
+  and `GenParam` by name.
+* The Castle-shaped proxy defines each method with the interface parameters' required modifiers, as Castle does, so
+  `int Read(in long x)` carries `modreq(InAttribute)`; PawPrint takes it. Castle also replicates `IsReadOnlyAttribute`
+  (public, `Inherited = false`) onto `x`, an ordinary row; reflection then lists `InAttribute,IsReadOnlyAttribute`.
+* The refusal fixture's unmodelled name is `ComImport` on an interface, the shape the planner measured as accepted.
+* Nothing the decisions said about CoreCLR was contradicted.
+
+**Mutants.** Each applied to the committed implementation, the test project built, then the unit selection
+(`TestEmitScopeCustomAttributes`, `TestEmitScopeExtension`, `TestEmitScopeImage`,
+`TestTypeBuilderCustomAttributeRefusals`) and the flag guest run (`5z-1/mutate.py`, results in `5z-1/mut/results.txt`).
+Every one was killed.
+
+| Mutant | Killed by |
+|---|---|
+| `Serializable` as `tdImport` (`0x1000`) | the guest (71: the type's flags); the table; the masks; the model property; the flags differential; the masks per table; the image and history properties |
+| `In` and `Out` swapped | the guest (98: `In`'s parameter flags); the table; the model property; the flags differential |
+| `SpecialName` on a field as the type's bit (`0x400`) | the guest (92: the field's flags); the table; the masks; the model property; the flags differential; the masks per table; the image and history properties |
+| `Serializable` accepted on a method (a MethodDef bit of 0) | the guest (4); the table; the model property; the flags differential |
+| `Out` refused on a return parameter | the guest (47, the control's number); the model property; the flags differential |
+| a flag attribute's blob parsed (refused without the prolog `01 00`) | the guest (170: the empty blob in `Blobs`); the model property; the flags differential |
+| a token consumed by a flag (a row stored as well) | the guest (141: the row shows through reflection); the model property; the flags differential |
+| a token consumed by a refusal (the row written before the raise) | the guest (148), before `Order`'s terminal-state check is reached |
+| the refusal raised as `ArgumentNullException` | the guest (1) |
+| the refusal raised without its message | the guest (1) |
+| the extension rule admitting a lost bit | the lost-bit test; the history property |
+| the extension rule admitting a gained bit on a created type | the masks per table; `a changed event is reported at its RID` |
+| the extension rule admitting a gained bit outside the mask | the masks per table; `a changed event is reported at its RID`; the history property |
+| the mask missing the Event table | the masks; the masks per table; `a changed event is reported at its RID`; the model property; the appending property; the guest (`WithEmitScope` refuses `RowChanged (Event, 3)`) |
+| the created-owner TODO removed | the refusal fixture (`an attribute on a created type is refused`: `WithEmitScope` fails on another message) |
+| a generic parameter's attribute stopped with a TODO instead of raised | the guest (the mutant's TODO, at `GenParam`) |
+| an unmodelled name given a target check (`MethodImpl` refused off a method) | the refusal fixture's `MethodImpl` guest; the model property |
+| `PreserveSig` overwriting the implementation flags instead of ORing | the model property (the generator's methods carry `NoInlining` and others) |
+| a set flag not written to the loaded scope | the guest (71) |
+
+The generated appending property did not kill "a gained bit on a created type". It compares the set of created types
+that changed with the set the violations name, so a missing `FilledInCreatedType` is hidden whenever the same sample also
+adds a row to that type; presumably that is what happened, but it was not checked. The fixed tests kill the mutant, as
+the decisions expected of `TestEmitScopeExtension`.
+
+**Suites**, at `09863af0e`, after `rm -rf */obj/*/*/ref */obj/*/*/refint` and a build of `WoofWare.PawPrint.slnx`,
+each its own `--no-build` invocation (`5z-1/suites.out`): default 5789 tests, 5752 passed, 37 skipped; `Guest` 234
+passed; `GuestSolo` 2 passed; `GuestPure` 1195 passed; `GuestImpure` 295 passed. No failures.
