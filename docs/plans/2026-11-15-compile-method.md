@@ -1,6 +1,6 @@
 # `ReflectionInvocation_CompileMethod` (issue #2268)
 
-Status: research and options only; nothing is implemented. Measured 2026-11-15 on `origin/main` at `9206d939b`.
+Status: implemented as option B (see "As built" at the end). The study was measured 2026-11-15 on `origin/main` at `9206d939b`.
 
 ## What it is
 
@@ -353,3 +353,67 @@ The throwaway handler (20 lines) called `DynamicMethodExecution.concretize` from
 - The plan leaves PawPrint's trace for a QCall raise unmeasured. It is measured now: two frames more than real .NET's, `RuntimeHelpers.CompileMethod` and `CreateDelegate(Type)`.
 - The 2026-10-24 plan memoises a compilation's outcome, failures included, and establishes the frame before compiling. Neither fits this QCall: a dynamic method's failed compilation is retried, and the trace has no frame of the method.
 - The plan's B section says its effect is "predicted from the tables". It is now measured, and the prediction was right on every row I ran.
+
+### As built
+
+Built 2026-11-15 on `origin/main` at `6ab868184`, as the decisions say: option B.
+
+- `DynamicMethodExecution.prepare` is the latching half of the old `concretize`, with the "already latched" test inside it; `concretize` calls it and then `ExecutionConcretization.concretizeDynamicMethod`.
+- `DynamicMethodExecution.preparationFailureFields` holds the fields of the raise. The QCall, a `call` of a dynamic method and delegate invocation all use it; `raiseFromPoppedStub` in `AbstractMachine.fs` takes fields instead of a message so the third can.
+- The handler is in `NativeRuntimeHelpers.tryExecuteQCall`, registered in `NativeQCall.handlers`. It calls `prepare` unconditionally, logs a refusal at Warning, and raises it with `NativeHandlerResult.raiseExceptionWithFields`. A handle naming a metadata method stops the run; a null handle stops it in `MethodHandleResolution.resolveMethodHandleFromArg`.
+- `MethodHandleRegistry.dynamicMethods` is new, so that the unit test (`TestCompileMethodPreparation`) can find the guest's two methods by name.
+
+#### Measurements
+
+Every guest ran on real .NET 10.0.14 and on 11.0.0-rc.3.26522.148 (rolled forward), built in Release from the guest file itself:
+
+| guest | real .NET 10 | real .NET 11 | controls (each the same on both) | PawPrint, host CoreLib | PawPrint, `Net11` |
+|---|---|---|---|---|---|
+| `DynamicMethodCompiledAtCreateDelegate.cs` | 0 | 0 | repair without the rewrite: 13; "Bad method token." expected: 15; double-`CreateDelegate` rewrite dropped: 7; third `CreateDelegate` expected to raise: 7 | 0 | 0 |
+| `DynamicMethodCompileFailureTiming.cs` | 0 | 0 | restricted literal expected 8: 7 | 1 (parked) | 1 (parked) |
+| `DynamicMethodInvalidIlAtCreateDelegate.cs` | 0 | 0 | another HResult expected: 1 | stack-shape stop at the control (parked) | the same (parked) |
+| `ExpressionLambdaCompileEmitted.cs` | 3 | 3 | lambda returning 4: 4 | 3 | 3 |
+
+The repair check, which the decisions left to the oracle, agrees with the decision on both runtimes: after a failed `CreateDelegate` and a repair of the clause's slot, the next `CreateDelegate` compiles the method and the repaired clause catches.
+
+For guest 2, a temporary variant that recorded each half of each check, rather than stopping at the first, returned every unrestricted control right and every restricted half wrong (mask `10922`, bits 1, 3, …, 13), so its exit code will move forward one check at a time as the stages land.
+
+With `runtimeBaseline` emptied (the switch on), `ExpressionLambdaCompile.cs` and `ExpressionLambdaCompileWide.cs` pass on both runtimes, where the regression table had them stopping at this QCall.
+
+#### Mutants
+
+Each was applied alone (the last row is two edits), built, and run against guest 1 (with `DynamicMethodInitLocals.cs`, `DynamicMethodInvalidCatchClause.cs` and the `Expression.Compile()` guest), and separately against `TestCompileMethodPreparation` and `TestNativeGetDynamicMethod`.
+
+| mutant | killed by |
+|---|---|
+| The handler completes without preparing (option A) | guest 1 exits 6 (`catchRewriteAfterCreate`); with checks 6 and 7 disabled, check 8 (`InitLocals` cleared after `CreateDelegate`) stops on the uninitialised read; the unit test (preparation `None`) |
+| The handler swallows the `Error` and completes | guest 1 exits 10 (`catchOpenGeneric` at `CreateDelegate`) |
+| `prepare` latches on the `Error` path | guest 1 exits 9 (the control's second invocation runs the latched method); `TestNativeGetDynamicMethod`'s "a failed preparation latches nothing" |
+| `prepare` skips its "already latched" test | guest 1 exits 7, at the third `CreateDelegate`; survives the check as the decisions wrote it (see below) |
+| `prepare` skips its test and `latchPreparation` overwrites | guest 1 exits 6; `DynamicMethodInitLocals.cs` stops on the uninitialised read; `TestNativeGetDynamicMethod`'s "initLocals is latched by the first execution" |
+| The handler raises with no fields | guest 1 exits 15 ("Bad class token." at `CreateDelegate`) |
+| `preparationFailureFields` returns no fields | guest 1 exits 14 (the control's "Bad class token." at invocation) |
+
+#### Suites
+
+Run at `0846dbc8f` after building `WoofWare.PawPrint.slnx` with the reference assemblies cleared, each as its own invocation, on the host CoreLib (.NET 10):
+
+| selection | result |
+|---|---|
+| default (`dotnet test`) | 5758 passed, 37 skipped, of 5795 |
+| `TestCategory=Guest` | 234 passed of 234 |
+| `TestCategory=GuestSolo` | 2 passed of 2 |
+| `TestCategory=GuestPure` | 1195 passed of 1195 |
+| `TestCategory=GuestImpure` | 298 passed of 298 |
+
+The new guests, the unit test and the two parked guests were also run with `PAWPRINT_TEST_RUNTIME=Net11`, with the results in the measurements table.
+
+#### Where the decisions were wrong or incomplete
+
+- **The double-`CreateDelegate` check does not kill the mutant it was meant for.** `MethodHandleRegistry.latchPreparation` is itself idempotent: it returns the first latch whatever it is handed. So a `prepare` that skips its own test reads the rewritten clause, gets `Ok`, and is handed back the old latch, and the decided check passes (measured: the mutant survives guest 1 without the addition). The only observable difference is a re-read that *fails*. Guest 1's check 7 therefore also rewrites the slot to an open generic type after the second `CreateDelegate` and expects a third to succeed and the delegate to behave as compiled, which real .NET does on both runtimes (control: 7). That kills it. `DynamicMethodInitLocals.cs` does not, for the same reason; it goes red only when `latchPreparation` overwrites too.
+- **The `InitLocals = false` before `CreateDelegate` check is left out**, as the decisions allowed. With the flag latched false, the only observable is a read of unwritten bytes, which PawPrint refuses and real .NET answers with unspecified ones. Check 8 (cleared after `CreateDelegate`, latched true) and the unit test (which asserts `LocalsInit = true` after the guest clears it) pin the latch's timing instead.
+- **The mutants predicted to turn several checks red** are seen at the first red check, since the guest stops there. For option A, check 10 is hidden behind check 8's host stop; the swallowing mutant shows that check 10 kills a `CompileMethod` that raises nothing.
+- **"Prepare latches on the Error path" is killed first by check 9, not the repair check**: the unrestricted control's second invocation finds the latch and runs the method.
+- Guest 2's order: the decisions list the bad scope tokens under Stages 3, 5 and 6 by their opcode. They are `DynamicScope` operands, which Stage 8 binds; whichever stage binds them ahead of their instruction retires them. The guest's header says so.
+- Guest 3's ending is the host stop the decisions expected because each check exercises the unrestricted control first; with the restricted method first it would exit 1 instead.
+- The "`Expression.Compile()` stops before the code it compiles runs" sentence in `docs/divergences.md` is gone, as is `Expression.Compile()` from the list of what stops in the emit machinery. The regression-table row is kept, with its measurement, and says both guests now pass with the switch on: deleting it would leave the table's totals, which describe the measurement at `96f548f9`, inconsistent with its rows.
