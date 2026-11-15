@@ -3,6 +3,7 @@ namespace WoofWare.PawPrint
 open System
 open System.Collections.Immutable
 open System.Reflection
+open System.Reflection.Metadata.Ecma335
 
 /// <summary>
 /// The outcome of asking CoreCLR's emitter to define a type in a dynamic module's scope
@@ -58,6 +59,82 @@ type PseudoAttributeFlags =
         Event : EventAttributes option
     }
 
+/// <summary>
+/// The constructor arguments that a pseudo-attribute the emitter validates and keeps declares (<c>KnownCaProp.pArgs</c>,
+/// md/compiler/custattr_emit.cpp), each case with the rule <c>RegMeta::_HandleKnownCustomAttribute</c> checks of them
+/// once the blob has parsed. The emitter reads each argument by its declared type, whatever the constructor's signature
+/// says: an enum-typed constructor whose entry declares a <c>U2</c> has two bytes of its four read as the argument.
+/// </summary>
+[<RequireQualifiedAccess>]
+type ValidatedPseudoAttributeArguments =
+    /// One <c>U2</c> (two bytes, little-endian), below the bound.
+    | U2Below of bound : uint16
+    /// <summary>
+    /// One string (<c>FF</c> for the null string, or a packed length and that many bytes) that is a GUID as
+    /// <c>LPCSTRToGuid</c> reads it inside braces: exactly 36 bytes, <c>-</c> at offsets 8, 13, 18 and 23, and a
+    /// hexadecimal digit of either case at every other.
+    /// </summary>
+    | GuidString
+    /// Two <c>I4</c>s (four bytes each, little-endian), each 0 or more.
+    | TwoNonNegativeI4s
+    /// Four <c>I4</c>s, each 0 or more.
+    | FourNonNegativeI4s
+    /// No arguments, so the emitter never parses the blob, and keeps it whatever it holds.
+    | NoArguments
+
+/// <summary>
+/// The arguments the emitter read from a blob it keeps, one case for each case of
+/// <see cref="ValidatedPseudoAttributeArguments"/>.
+/// </summary>
+[<RequireQualifiedAccess>]
+type ValidatedPseudoAttributeValues =
+    | U2 of uint16
+    /// The GUID's 36 bytes, as the blob holds them.
+    | GuidString of ImmutableArray<byte>
+    | TwoI4s of int * int
+    | FourI4s of int * int * int * int
+    | NoArguments
+
+/// <summary>
+/// What CoreCLR's emitter checks of a pseudo-attribute that it validates and then keeps as an ordinary row
+/// (<c>bKEEPCA</c> in <c>KnownCaList</c>).
+/// </summary>
+type ValidatedPseudoAttribute =
+    {
+        /// <summary>
+        /// The tables of owner the emitter accepts the attribute on (<c>KnownCaProp.rTypes</c>), but for
+        /// <c>mdtTypeRef</c>, which no builder passes.
+        /// </summary>
+        Targets : Set<TableIndex>
+        /// The constructor arguments the emitter reads, and the rule they must keep.
+        Arguments : ValidatedPseudoAttributeArguments
+    }
+
+/// <summary>
+/// Why CoreCLR's emitter refuses a pseudo-attribute (<c>RegMeta::_HandleKnownCustomAttribute</c>). For each,
+/// <c>TypeBuilder_DefineCustomAttribute</c> throws <c>ArgumentException</c> "Invalid custom attribute provided.", and
+/// the scope is unchanged.
+/// </summary>
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeRefusal =
+    /// <summary>The owner's table is not among the attribute's targets (<c>META_E_CA_INVALID_TARGET</c>).</summary>
+    | WrongTarget
+    /// <summary>
+    /// The blob does not parse by the attribute's declared arguments: its first two bytes are not the prolog
+    /// <c>0x0001</c>, or an argument cannot be read from the bytes left.
+    /// </summary>
+    | MalformedBlob
+    /// <summary>
+    /// The blob declares a positive count of named arguments, which none of these attributes accepts
+    /// (<c>ParseKnownCaNamedArgs</c>).
+    /// </summary>
+    | NamedArgument
+    /// <summary>
+    /// The arguments break the rule their <see cref="ValidatedPseudoAttributeArguments"/> case gives
+    /// (<c>META_E_CA_INVALID_VALUE</c>, <c>META_E_CA_INVALID_UUID</c>).
+    /// </summary>
+    | InvalidValue
+
 /// What CoreCLR's emitter does with a pseudo-attribute, as far as PawPrint models it.
 [<RequireQualifiedAccess>]
 type KnownCustomAttributeEffect =
@@ -66,6 +143,12 @@ type KnownCustomAttributeEffect =
     /// the bit into the owner's row and stores no row; on any other owner, it refuses the attribute.
     /// </summary>
     | SetsFlag of PseudoAttributeFlags
+    /// <summary>
+    /// On an owner among the targets, the emitter parses the blob by the declared arguments (when there are any) and
+    /// checks the rule, then stores the row as it would an ordinary attribute's, its blob as given; it refuses the
+    /// attribute on any other owner, or for a blob that fails either step.
+    /// </summary>
+    | ValidatesAndKeeps of ValidatedPseudoAttribute
     /// PawPrint does not model what the emitter does with the attribute, on any owner.
     | Unmodelled
 
@@ -83,6 +166,186 @@ type PseudoAttributeFlagMask =
         Property : PropertyAttributes
         Event : EventAttributes
     }
+
+/// How CoreCLR's emitter reads and checks the blob of a pseudo-attribute that it validates and keeps.
+[<RequireQualifiedAccess>]
+module KnownCustomAttributeBlob =
+    /// <summary>
+    /// What <c>RegMeta::_HandleKnownCustomAttribute</c> does with <paramref name="blob"/>, for an attribute declaring
+    /// <paramref name="arguments"/> on one of its targets: for an attribute with arguments, it reads them as
+    /// <c>ParseKnownCaArgs</c> and <c>ParseKnownCaNamedArgs</c> do (md/compiler/custattr_emit.cpp), the prolog
+    /// <c>0x0001</c>, each argument in turn, then, if any bytes are left, a signed two-byte count of named arguments, of
+    /// which these attributes declare none: a count that one lone byte cannot hold is 0, a count above 0 is refused, and
+    /// nothing after the count is read. Then it checks the arguments' rule. An attribute without arguments is never
+    /// parsed. The arguments read, or why the emitter refuses the blob (never <c>WrongTarget</c>).
+    /// </summary>
+    let validate
+        (arguments : ValidatedPseudoAttributeArguments)
+        (blob : ImmutableArray<byte>)
+        : Result<ValidatedPseudoAttributeValues, KnownCustomAttributeRefusal>
+        =
+        let length = blob.Length
+
+        // `CPackedLen::SafeGetLength` (utilcode/stgpooli.cpp): each of the three forms is taken whatever value it
+        // holds, shortest or not, if its bytes are there; any other first byte fails. The length, and the offset after
+        // it.
+        let packedLength (offset : int) : (int * int) option =
+            let available = length - offset
+
+            if available < 1 then
+                None
+            else
+                let first = int blob.[offset]
+
+                if first &&& 0x80 = 0 then
+                    Some (first, offset + 1)
+                elif available < 2 then
+                    None
+                elif first &&& 0xC0 = 0x80 then
+                    Some (((first &&& 0x3F) <<< 8) ||| int blob.[offset + 1], offset + 2)
+                elif available < 4 then
+                    None
+                elif first &&& 0xE0 = 0xC0 then
+                    Some (
+                        ((first &&& 0x1F) <<< 24)
+                        ||| (int blob.[offset + 1] <<< 16)
+                        ||| (int blob.[offset + 2] <<< 8)
+                        ||| int blob.[offset + 3],
+                        offset + 4
+                    )
+                else
+                    None
+
+        let u2At (offset : int) : uint16 =
+            uint16 blob.[offset] ||| (uint16 blob.[offset + 1] <<< 8)
+
+        // `ParseKnownCaValue` for each declared type: the argument at `offset`, and the offset after it.
+        let readU2 (offset : int) : (uint16 * int) option =
+            if length - offset < 2 then
+                None
+            else
+                Some (u2At offset, offset + 2)
+
+        let readI4 (offset : int) : (int * int) option =
+            if length - offset < 4 then
+                None
+            else
+                Some (int (u2At offset) ||| (int (u2At (offset + 2)) <<< 16), offset + 4)
+
+        // `CustomAttributeParser::GetString`: one byte is needed for the null string's sentinel. `None` inside for the
+        // null string.
+        let readString (offset : int) : (ImmutableArray<byte> option * int) option =
+            if offset >= length then
+                None
+            elif blob.[offset] = 0xFFuy then
+                Some (None, offset + 1)
+            else
+                match packedLength offset with
+                | Some (count, start) when count <= length - start ->
+                    Some (Some (ImmutableArray.Create (blob, start, count)), start + count)
+                | Some _
+                | None -> None
+
+        // `ParseKnownCaNamedArgs`, reached only while bytes are left after the arguments at `offset`:
+        // `INT16 cActualArgs`, 0 when it cannot be read, and each named argument fails to match, there being none to
+        // match.
+        let namedArgumentsAt (offset : int) : Result<unit, KnownCustomAttributeRefusal> =
+            let count = if length - offset < 2 then 0s else int16 (u2At offset)
+
+            if count > 0s then
+                Error KnownCustomAttributeRefusal.NamedArgument
+            else
+                Ok ()
+
+        let isHexDigit (b : byte) : bool =
+            (b >= byte '0' && b <= byte '9')
+            || (b >= byte 'A' && b <= byte 'F')
+            || (b >= byte 'a' && b <= byte 'f')
+
+        // The arguments, read from the end of the prolog, then the named-argument count after them, then the rule.
+        let read
+            (readArguments : int -> ('values * int) option)
+            (keeps : 'values -> ValidatedPseudoAttributeValues option)
+            : Result<ValidatedPseudoAttributeValues, KnownCustomAttributeRefusal>
+            =
+            // `CustomAttributeParser::ValidateProlog`.
+            if length < 2 || u2At 0 <> 1us then
+                Error KnownCustomAttributeRefusal.MalformedBlob
+            else
+                match readArguments 2 with
+                | None -> Error KnownCustomAttributeRefusal.MalformedBlob
+                | Some (values, offset) ->
+                    namedArgumentsAt offset
+                    |> Result.bind (fun () ->
+                        match keeps values with
+                        | Some kept -> Ok kept
+                        | None -> Error KnownCustomAttributeRefusal.InvalidValue
+                    )
+
+        let i4s (count : int) (offset : int) : (int list * int) option =
+            (Some ([], offset), [ 1..count ])
+            ||> List.fold (fun read _ ->
+                read
+                |> Option.bind (fun (values, offset) ->
+                    readI4 offset |> Option.map (fun (value, offset) -> values @ [ value ], offset)
+                )
+            )
+
+        match arguments with
+        | ValidatedPseudoAttributeArguments.U2Below bound ->
+            read
+                readU2
+                (fun value ->
+                    if value < bound then
+                        Some (ValidatedPseudoAttributeValues.U2 value)
+                    else
+                        None
+                )
+        | ValidatedPseudoAttributeArguments.GuidString ->
+            read
+                readString
+                (fun text ->
+                    match text with
+                    // `cbStr == 36`, which the null string's 0 is not.
+                    | None -> None
+                    | Some text ->
+                        let isGuid =
+                            text.Length = 36
+                            && text
+                               |> Seq.indexed
+                               |> Seq.forall (fun (i, b) ->
+                                   match i with
+                                   | 8
+                                   | 13
+                                   | 18
+                                   | 23 -> b = byte '-'
+                                   | _ -> isHexDigit b
+                               )
+
+                        if isGuid then
+                            Some (ValidatedPseudoAttributeValues.GuidString text)
+                        else
+                            None
+                )
+        | ValidatedPseudoAttributeArguments.TwoNonNegativeI4s ->
+            read
+                (i4s 2)
+                (fun values ->
+                    match values with
+                    | [ a ; b ] when a >= 0 && b >= 0 -> Some (ValidatedPseudoAttributeValues.TwoI4s (a, b))
+                    | _ -> None
+                )
+        | ValidatedPseudoAttributeArguments.FourNonNegativeI4s ->
+            read
+                (i4s 4)
+                (fun values ->
+                    match values with
+                    | [ a ; b ; c ; d ] when a >= 0 && b >= 0 && c >= 0 && d >= 0 ->
+                        Some (ValidatedPseudoAttributeValues.FourI4s (a, b, c, d))
+                    | _ -> None
+                )
+        // `if (props->cArgs || props->cNamedArgs)`: not parsed.
+        | ValidatedPseudoAttributeArguments.NoArguments -> Ok ValidatedPseudoAttributeValues.NoArguments
 
 /// <summary>
 /// The pseudo-attributes of CoreCLR's emitter (<c>KnownCaList</c>, md/compiler/custattr_emit.cpp): each name the
@@ -226,18 +489,50 @@ module KnownCustomAttribute =
                 { none with
                     MethodDef = Some (MethodDefFlag.ImplFlags MethodImplAttributes.PreserveSig)
                 }
+        | KnownCustomAttribute.Guid ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.ofList [ TableIndex.TypeDef ; TableIndex.Module ; TableIndex.Assembly ]
+                    Arguments = ValidatedPseudoAttributeArguments.GuidString
+                }
+        | KnownCustomAttribute.InterfaceType ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.TypeDef
+                    // `ifLast` (inc/metadata.h).
+                    Arguments = ValidatedPseudoAttributeArguments.U2Below 4us
+                }
+        | KnownCustomAttribute.ClassInterface ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.ofList [ TableIndex.TypeDef ; TableIndex.Assembly ]
+                    // `clsIfLast` (inc/metadata.h).
+                    Arguments = ValidatedPseudoAttributeArguments.U2Below 3us
+                }
+        | KnownCustomAttribute.TypeLibVersion ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.Assembly
+                    Arguments = ValidatedPseudoAttributeArguments.TwoNonNegativeI4s
+                }
+        | KnownCustomAttribute.ComCompatibleVersion ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.Assembly
+                    Arguments = ValidatedPseudoAttributeArguments.FourNonNegativeI4s
+                }
+        | KnownCustomAttribute.AllowPartiallyTrustedCallers ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.Assembly
+                    Arguments = ValidatedPseudoAttributeArguments.NoArguments
+                }
         | KnownCustomAttribute.DllImport
-        | KnownCustomAttribute.Guid
         | KnownCustomAttribute.ComImport
-        | KnownCustomAttribute.InterfaceType
-        | KnownCustomAttribute.ClassInterface
         | KnownCustomAttribute.MethodImpl
         | KnownCustomAttribute.MarshalAs
         | KnownCustomAttribute.StructLayout
         | KnownCustomAttribute.FieldOffset
-        | KnownCustomAttribute.TypeLibVersion
-        | KnownCustomAttribute.ComCompatibleVersion
-        | KnownCustomAttribute.AllowPartiallyTrustedCallers
         | KnownCustomAttribute.WindowsRuntimeImport -> KnownCustomAttributeEffect.Unmodelled
 
     /// The bits of each flags column that <c>effect</c> gives some attribute.
@@ -260,6 +555,7 @@ module KnownCustomAttribute =
         (empty, all)
         ||> List.fold (fun mask known ->
             match effect known with
+            | KnownCustomAttributeEffect.ValidatesAndKeeps _
             | KnownCustomAttributeEffect.Unmodelled -> mask
             | KnownCustomAttributeEffect.SetsFlag flags ->
                 let methodFlags =
@@ -298,16 +594,6 @@ type CustomAttributeEmitKind =
     /// <c>RequireSecObject</c> flag and stores no row.
     /// </summary>
     | DynamicSecurityMethod
-
-/// <summary>
-/// Why CoreCLR's emitter refuses a pseudo-attribute (<c>RegMeta::_HandleKnownCustomAttribute</c>). For each,
-/// <c>TypeBuilder_DefineCustomAttribute</c> throws <c>ArgumentException</c> "Invalid custom attribute provided.", and
-/// the scope is unchanged.
-/// </summary>
-[<RequireQualifiedAccess>]
-type KnownCustomAttributeRefusal =
-    /// <summary>The owner's table is not among the attribute's targets (<c>META_E_CA_INVALID_TARGET</c>).</summary>
-    | WrongTarget
 
 /// <summary>
 /// The outcome of asking CoreCLR's emitter to define a custom attribute in a dynamic module's scope
@@ -1029,12 +1315,61 @@ module EmitScopeDefinitions =
         | HasCustomAttribute.Module
         | HasCustomAttribute.GenericParam _ -> None
 
+    // A new row at the next RID, its blob interned as given, with no search for an equal row.
+    let private storeAsGiven
+        (owner : HasCustomAttribute)
+        (constructor : MethodDefOrRef)
+        (value : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : CustomAttributeDefinition
+        =
+        let blob, scope = EmitScope.internBlob value scope
+
+        let rid, scope =
+            EmitScope.addCustomAttribute
+                {
+                    Parent = owner
+                    Constructor = constructor
+                    Value = blob
+                }
+                scope
+
+        CustomAttributeDefinition.Defined (rid, scope)
+
+    // `RegMeta::_HandleKnownCustomAttribute` for an attribute it keeps: the owner's table among the targets, then the
+    // blob. Why it refuses, if it does.
+    let private validatePseudoAttribute
+        (validated : ValidatedPseudoAttribute)
+        (owner : HasCustomAttribute)
+        (value : ImmutableArray<byte>)
+        : KnownCustomAttributeRefusal option
+        =
+        let table =
+            match owner with
+            | HasCustomAttribute.Assembly -> TableIndex.Assembly
+            | HasCustomAttribute.Module -> TableIndex.Module
+            | HasCustomAttribute.TypeDef _ -> TableIndex.TypeDef
+            | HasCustomAttribute.MethodDef _ -> TableIndex.MethodDef
+            | HasCustomAttribute.Field _ -> TableIndex.Field
+            | HasCustomAttribute.Param _ -> TableIndex.Param
+            | HasCustomAttribute.Property _ -> TableIndex.Property
+            | HasCustomAttribute.Event _ -> TableIndex.Event
+            | HasCustomAttribute.GenericParam _ -> TableIndex.GenericParam
+
+        if not (validated.Targets.Contains table) then
+            Some KnownCustomAttributeRefusal.WrongTarget
+        else
+            match KnownCustomAttributeBlob.validate validated.Arguments value with
+            | Error refusal -> Some refusal
+            | Ok _ -> None
+
     /// <summary>
     /// Define a custom attribute of <paramref name="owner"/>, as <c>RegMeta::DefineCustomAttribute</c> does for
     /// <c>TypeBuilder_DefineCustomAttribute</c>: unless <c>classifyCustomAttribute</c> says that the emitter does
     /// something else with it, a new row at the next RID, its blob interned as given, with no search for an equal row.
-    /// A pseudo-attribute whose <c>KnownCustomAttribute.effect</c> is modelled sets its flag or is refused, and its blob
-    /// is not read; any other is <c>NotStoredAsGiven</c>.
+    /// A pseudo-attribute whose <c>KnownCustomAttribute.effect</c> sets a flag sets it or is refused, and its blob is not
+    /// read; one the emitter validates and keeps is stored as an ordinary attribute is, or refused; any other is
+    /// <c>NotStoredAsGiven</c>.
     /// </summary>
     /// <exception cref="ArgumentException">The scope lacks the owner or the constructor.</exception>
     let defineCustomAttribute
@@ -1045,24 +1380,16 @@ module EmitScopeDefinitions =
         : CustomAttributeDefinition
         =
         match classifyCustomAttribute owner constructor scope with
-        | CustomAttributeEmitKind.Ordinary ->
-            let blob, scope = EmitScope.internBlob value scope
-
-            let rid, scope =
-                EmitScope.addCustomAttribute
-                    {
-                        Parent = owner
-                        Constructor = constructor
-                        Value = blob
-                    }
-                    scope
-
-            CustomAttributeDefinition.Defined (rid, scope)
+        | CustomAttributeEmitKind.Ordinary -> storeAsGiven owner constructor value scope
         | CustomAttributeEmitKind.Known known as kind ->
             match KnownCustomAttribute.effect known with
             | KnownCustomAttributeEffect.SetsFlag flags ->
                 match addPseudoAttributeFlag flags owner scope with
                 | Some scope -> CustomAttributeDefinition.FlagSet scope
                 | None -> CustomAttributeDefinition.Refused KnownCustomAttributeRefusal.WrongTarget
+            | KnownCustomAttributeEffect.ValidatesAndKeeps validated ->
+                match validatePseudoAttribute validated owner value with
+                | Some refusal -> CustomAttributeDefinition.Refused refusal
+                | None -> storeAsGiven owner constructor value scope
             | KnownCustomAttributeEffect.Unmodelled -> CustomAttributeDefinition.NotStoredAsGiven kind
         | kind -> CustomAttributeDefinition.NotStoredAsGiven kind

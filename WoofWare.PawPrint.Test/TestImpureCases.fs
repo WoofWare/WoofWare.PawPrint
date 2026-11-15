@@ -602,6 +602,22 @@ module TestImpureCases =
             },
             """`CreateType` retried after its bake threw for a pseudo-attribute on the type's generic parameter, measured on .NET 10 and 11 to exit 0; a control expecting the type created after the second call exits 4 on both. Real .NET defines the generic parameter again on the second call and throws again. PawPrint raises the first `ArgumentException` and then stops at the second definition of the parameter: "EmitScope.addGenericParam: parameter 0 of TypeDef (TypeDefRid 2), which has 1; CoreCLR's managed callers create an owner's parameters once each, in position order". Un-parked by modelling a retried `CreateType`'s second GenericParam row."""
             {
+                FileName = "TypeBuilderValidatedPseudoAttributeUnreadable.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Rows that the emitter keeps but `GetCustomAttributes` cannot read back (type-builder stage 5z-2), each alone on its owner, measured on .NET 10 and 11 to exit 0; a control expecting the last row read exits 8 on both. Real .NET throws `CustomAttributeFormatException` for each. PawPrint stores each row as real .NET does (`TypeBuilderValidatedPseudoAttributes.cs` checks them, and reads their data), but its attribute reader stops where CoreCLR's throws, on three paths, each measured row by row: a named-argument count with nothing after it ("CustomAttribute.CreatePropertyOrFieldData: failed to parse named arg from CustomAttrib blob: CustomAttrib blob: NamedArg begins at offset 0 but blob has only 0 bytes", the first stop here, and "byte 0xBE at offset 0 is n..." for junk after it); a fixed argument cut short ("CustomAttribute.CreateCustomAttributeInstance: failed to parse fixed args from CustomAttrib blob: CustomAttrib blob: primitive of size 4 ...", and "has 1 byte(s) after fixed args, but the named-arg count requires 2 bytes"); and an `AllowPartiallyTrustedCallers` blob `FF FF` ("TODO: byte-view read past array bounds at cell 2 of length 2 while gathering 4 bytes"). The root cause is `TypeBuilderCustomAttributeMalformedInstance.cs`'s. Un-parked by raising `CustomAttributeFormatException` from PawPrint's attribute reader where CoreCLR's `CustomAttribute_CreateCustomAttribute` and `CustomAttribute_CreatePropertyOrFieldData` throw it."""
+            {
                 FileName = "TypeBuilderPseudoCustomAttributes.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -2300,6 +2316,170 @@ module TestImpureCases =
 
         rows order
         |> shouldEqual [ for value in [ "a" ; "b" ; "c" ; "d" ] -> 0x02000000 ||| t.Rid, tag value ]
+
+        rows (dynamicScopeNamed state "GenParam") |> shouldEqual []
+
+    /// <summary>
+    /// <c>TypeBuilderValidatedPseudoAttributes.cs</c> has applied the six pseudo-attributes that the emitter validates
+    /// and keeps. This checks every CustomAttribute row of its modules <c>Targets0</c> to <c>Targets7</c>,
+    /// <c>Values</c>, <c>Assembly0</c> to <c>Assembly12</c>, <c>Order</c> and <c>GenParam</c>, in RID order, by its
+    /// owner, its attribute type's name and its blob: each kept row as given, including those real .NET cannot read
+    /// back, and no row, nor any token, for a refused one.
+    /// </summary>
+    let private assertValidatedPseudoAttributeRows (state : IlMachineState) : unit =
+        let hex (text : string) : byte list =
+            text.Split (' ', StringSplitOptions.RemoveEmptyEntries)
+            |> Seq.map (fun b -> Convert.ToByte (b, 16))
+            |> List.ofSeq
+
+        let tag (value : string) : byte list =
+            [ 1uy ; 0uy ; byte value.Length ]
+            @ List.ofArray (Text.Encoding.UTF8.GetBytes value)
+            @ [ 0uy ; 0uy ]
+
+        let guidText = "01234567-89ab-cdef-0123-456789abcdef"
+
+        let ascii (text : string) : byte list =
+            List.ofArray (Text.Encoding.ASCII.GetBytes text)
+        // A blob holding one GUID-like string with a one-byte length, then `tail`.
+        let guid (text : string) (tail : byte list) : byte list =
+            [ 1uy ; 0uy ; byte text.Length ] @ ascii text @ tail
+
+        // Each row as its owner's token, its attribute type's name (read through the MemberRef's TypeRef) and its blob.
+        let rows (scope : EmitScope) : (int * string * byte list) list =
+            EmitScope.customAttributes scope
+            |> Seq.map (fun row ->
+                let name =
+                    match row.Constructor with
+                    | MethodDefOrRef.MemberRef rid ->
+                        match (EmitScope.memberRefs scope).[rid.Rid - 1].Parent with
+                        | MemberRefParent.TypeRef typeRef ->
+                            EmitScope.stringAt (EmitScope.typeRefs scope).[typeRef.Rid - 1].Name scope
+                        | parent -> failwith $"the guest's attributes are all CoreLib's or its own, not on %A{parent}"
+                    | MethodDefOrRef.MethodDef rid ->
+                        let owner = (EmitScope.methodDefs scope).[rid.Rid - 1].Owner
+                        EmitScope.stringAt (EmitScope.typeDefs scope).[owner.Rid - 1].Name scope
+
+                row.Parent.Token, name, List.ofSeq (EmitScope.blobAt row.Value scope)
+            )
+            |> List.ofSeq
+
+        let typeToken (scope : EmitScope) (name : string) : int =
+            EmitScope.typeDefs scope
+            |> Seq.findIndex (fun row -> EmitScope.stringAt row.Name scope = name)
+            |> fun i -> 0x02000000 ||| (i + 1)
+
+        let classInterface = "ClassInterfaceAttribute"
+        let interfaceType = "InterfaceTypeAttribute"
+        let guidAttribute = "GuidAttribute"
+        let typeLibVersion = "TypeLibVersionAttribute"
+
+        // Each constructor's well-formed blob, and the owners that accept it among the assembly, the module and the
+        // type, in that order; no other owner accepts any.
+        let targets =
+            [
+                classInterface, hex "01 00 01 00 00 00", [ "assembly" ; "type" ]
+                classInterface, hex "01 00 01 00 00 00 00 00", [ "assembly" ; "type" ]
+                interfaceType, hex "01 00 01 00 00 00", [ "type" ]
+                interfaceType, hex "01 00 01 00 00 00 00 00", [ "type" ]
+                guidAttribute, guid guidText [ 0uy ; 0uy ], [ "assembly" ; "module" ; "type" ]
+                typeLibVersion, hex "01 00 01 00 00 00 02 00 00 00 00 00", [ "assembly" ]
+                "ComCompatibleVersionAttribute",
+                hex "01 00 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 00 00",
+                [ "assembly" ]
+                "AllowPartiallyTrustedCallersAttribute", hex "01 00 00 00", [ "assembly" ]
+            ]
+
+        for c, (name, blob, owners) in List.indexed targets do
+            let scope = dynamicScopeNamed state $"Targets%d{c}"
+            let t = typeToken scope "T"
+
+            rows scope
+            |> shouldEqual (
+                [
+                    for owner in owners do
+                        let token =
+                            match owner with
+                            | "assembly" -> 0x20000001
+                            | "module" -> 0x00000001
+                            | _ -> t
+
+                        yield token, name, blob
+                ]
+                @ [ t, "TagAttribute", tag "after" ]
+            )
+
+        // The kept rows of the guest's `TypeRows`, each on its own type `V{index}`; every other row was refused.
+        let values =
+            [
+                0, classInterface, hex "01 00 00 00 00 00 00 00"
+                1, classInterface, hex "01 00 02 00 00 00 00 00"
+                9, classInterface, hex "01 00 01 00 00 00"
+                10, classInterface, hex "01 00 01 00 00 00 01 00 54 08 03 46 6F 6F 01 00 00 00"
+                13, interfaceType, hex "01 00 00 00 00 00 00 00"
+                14, interfaceType, hex "01 00 03 00 00 00 00 00"
+                24, classInterface, hex "01 00 01 00 FF FF"
+                25, classInterface, hex "01 00 01 00 00 80"
+                26, classInterface, hex "01 00 01 00 FF FF DE AD"
+                28, classInterface, hex "01 00 01 00 00"
+                29, classInterface, hex "01 00 01 00 FF"
+                33, classInterface, hex "01 00 01 00 00 00 DE AD BE EF"
+                36, classInterface, hex "01 00 01 00"
+                39, guidAttribute, guid guidText []
+                40, guidAttribute, guid (guidText.ToUpperInvariant ()) [ 0uy ; 0uy ]
+                41, guidAttribute, guid "01234567-89AB-cdef-0123-456789ABcdef" [ 0uy ; 0uy ]
+                42, guidAttribute, [ 1uy ; 0uy ; 0x80uy ; 36uy ] @ ascii guidText @ [ 0uy ; 0uy ]
+                43, guidAttribute, [ 1uy ; 0uy ; 0xC0uy ; 0uy ; 0uy ; 36uy ] @ ascii guidText @ [ 0uy ; 0uy ]
+                44, guidAttribute, guid guidText [ 0xFFuy ; 0xFFuy ]
+                46, guidAttribute, guid guidText [ 7uy ]
+            ]
+
+        let valuesScope = dynamicScopeNamed state "Values"
+
+        rows valuesScope
+        |> shouldEqual [ for i, name, blob in values -> typeToken valuesScope $"V%d{i}", name, blob ]
+
+        // The guest's `AssemblyRows`: each kept one alone on its own assembly.
+        let assemblies =
+            [
+                Some (classInterface, hex "01 00 02 00 00 00 00 00")
+                None
+                None
+                None
+                None
+                Some ("AllowPartiallyTrustedCallersAttribute", hex "FF FF")
+                Some ("AllowPartiallyTrustedCallersAttribute", [])
+                Some (typeLibVersion, hex "01 00 01 00 00 00 02 00 00 00")
+                Some (typeLibVersion, hex "01 00 01 00 00 00 02 00 00 00 FF FF")
+                None
+                Some (typeLibVersion, hex "01 00 00 00 00 00 00 00 00 00")
+                None
+                None
+            ]
+
+        for i, kept in List.indexed assemblies do
+            rows (dynamicScopeNamed state $"Assembly%d{i}")
+            |> shouldEqual
+                [
+                    match kept with
+                    | Some (name, blob) -> yield 0x20000001, name, blob
+                    | None -> ()
+                ]
+
+        let order = dynamicScopeNamed state "Order"
+        let t = typeToken order "T"
+        let classInterfaceOne = hex "01 00 01 00 00 00 00 00"
+
+        rows order
+        |> shouldEqual
+            [
+                t, "TagAttribute", tag "a"
+                t, classInterface, classInterfaceOne
+                t, "TagAttribute", tag "b"
+                t, "TagAttribute", tag "c"
+                t, classInterface, classInterfaceOne
+                t, "TagAttribute", tag "d"
+            ]
 
         rows (dynamicScopeNamed state "GenParam") |> shouldEqual []
 
@@ -7131,6 +7311,25 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertPseudoAttributeFlagRows
+            }
+            {
+                // The six pseudo-attributes that the emitter validates and keeps, through `SetCustomAttribute`;
+                // `assertValidatedPseudoAttributeRows` reads the rows of its modules. Measured on real .NET 10 and 11 to
+                // exit 0, and a control expecting `ClassInterface` with the four-byte enum 0x10001 accepted exits 124
+                // on both.
+                FileName = "TypeBuilderValidatedPseudoAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertValidatedPseudoAttributeRows
             }
             {
                 // An emitted attribute whose constructor takes `object`, instantiated through `GetCustomAttributes`.

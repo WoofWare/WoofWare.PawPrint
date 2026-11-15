@@ -8258,3 +8258,171 @@ the decisions expected of `TestEmitScopeExtension`.
 **Suites**, at `09863af0e`, after `rm -rf */obj/*/*/ref */obj/*/*/refint` and a build of `WoofWare.PawPrint.slnx`,
 each its own `--no-build` invocation (`5z-1/suites.out`): default 5789 tests, 5752 passed, 37 skipped; `Guest` 234
 passed; `GuestSolo` 2 passed; `GuestPure` 1195 passed; `GuestImpure` 295 passed. No failures.
+
+### 5z-2: as built
+
+Built 2026-11-15 on `type-builder-5z-2`, first stacked on `type-builder-5z-1` (PR #2274) and then rebased onto `main`
+at `9206d939b`, its squash, as the decisions say for 5z-2: the tests with the Domain types stubbed (`d59e81195`), the
+implementation (`94f888d04`), a test fix that killed the one surviving mutant (`0f96993d3`), and a follow-up that fused
+the descriptor's arguments and rule into one union (below). Scratchpad paths here are under `5z-2/` in the scratchpad
+named in "5z: what it is".
+
+**What the implementer verified first.** One throwaway (`5z-2/throwaway.diff`, `5z-2/tprobe/Program.cs`), applied to
+5z-1's tip and reverted before any Domain code: `defineCustomAttribute` stored `ClassInterface`, `Guid`,
+`TypeLibVersion` and `AllowPartiallyTrustedCallers` as ordinary rows, whatever the blob. `tprobe` puts each row that
+real .NET stores but cannot read alone on its own type or assembly, and reads it back through
+`GetCustomAttributesData` ("data") and `GetCustomAttributes` ("instances"). It ran on .NET 10.0.14 and 11.0.0-rc.3,
+identical but for the version line (`5z-2/tprobe/all-net10.out`, `all-net11.out`), and under the Release App
+(`5z-2/tprobe/t1.log`, `t2.log`).
+
+| Row, alone on its owner | Real .NET: data; instances | PawPrint with the throwaway |
+|---|---|---|
+| `ClassInterface(ClassInterfaceType)` `01 00 01 00 00 00 00 00` (the control) | the attribute; value 1 | the same |
+| the same constructor, `01 00 01 00 FF FF` | `CustomAttributeFormatException`; value -65535 | the same |
+| the same, `01 00 01 00 00 00` (six bytes) | `CustomAttributeFormatException`; value 1 | the same |
+| the same, the planner's named `Foo` after the enum | `CustomAttributeFormatException`; `CustomAttributeFormatException` | the same |
+| `Guid` followed by `FF FF` | the attribute; `CustomAttributeFormatException` | data the same; instances stop: "CustomAttribute.CreatePropertyOrFieldData: failed to parse named arg from CustomAttrib blob: CustomAttrib blob: NamedArg begins at offset 0 but blob has only 0 bytes" |
+| `AllowPartiallyTrustedCallers` `FF FF`, on an assembly | `CustomAttributeFormatException`; `CustomAttributeFormatException` | data the same; instances stop: "TODO: byte-view read past array bounds at cell 2 of length 2 while gathering 4 bytes" |
+
+So the check held only in part, and its premise needed a correction (below). The decision's fallback was followed for
+the reads PawPrint gets wrong: those rows are checked by the terminal state alone, and a parked case holds the reads.
+Nothing else changed the design.
+
+Once the implementation stored them, every row the guest keeps was read back alone, data and instances, on .NET 10.0.14
+and under the Release App (`5z-2/rowprobe/Program.cs`, `5z-2/rowprobe.sh`, `5z-2/rowprobe/results.txt`: 52 reads). Every
+data read agrees. Eight instance reads diverge, where real .NET throws `CustomAttributeFormatException` and PawPrint's
+attribute reader stops, on three paths: a named-argument count with nothing, or no named argument, after it (`Guid` and
+`TypeLibVersion` followed by `FF FF`; `ClassInterface(ClassInterfaceType)` with `01 00 01 00 FF FF DE AD` and with
+`01 00 01 00 00 00 DE AD BE EF`); a fixed argument cut short (`01 00 01 00 00`, `01 00 01 00 FF`, and a `Guid` followed
+by one byte); and `AllowPartiallyTrustedCallers` `FF FF`. These are the parked case's eight reads. The root cause is
+`TypeBuilderCustomAttributeMalformedInstance.cs`'s, parked by 5y.
+
+**Measured on real .NET before any commit.** Each guest was built against net10.0 from the repository's source and
+run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 (`5z-2/guest`, `5z-2/unread`, `5z-2/real-guest.sh`,
+`5z-2/unread.sh`), with a control made by one edit of a copy (`5z-2/control.sh`). The guest's expected reads were
+measured this way, one mismatch at a time: the guest prints what each failed read saw.
+
+| Guest | Control (exit on both) | PawPrint, host | PawPrint, `Net11` |
+|---|---|---|---|
+| `TypeBuilderValidatedPseudoAttributes.cs` | `ClassInterface` with the four-byte enum `0x10001` expected accepted: 124 | 0, with its terminal-state check (40 s) | 0 (41 s) |
+| `TypeBuilderValidatedPseudoAttributeUnreadable.cs` (parked) | its last row expected readable: 8 | its first read stops at the `CreatePropertyOrFieldData` message above | not run |
+| `TypeBuilderPseudoCustomAttributes.cs` (parked) | (5y's) | still the security name's TODO at its third call, `SuppressUnmanagedCodeSecurity` on the type | not run |
+
+**Red, as recorded** (`d59e81195`'s message). Against the stubs, 6 of the 95 tests of `TestEmitScopeCustomAttributes`,
+`TestEmitScopeExtension`, `TestEmitScopeImage`, `TestTypeBuilderCustomAttributeRefusals` and `TestGuestParking`
+failed: the table, the model property over every known name, the parser property, the measured blobs, the validation
+differential and the model property over the six. The guest stopped at its first call, `ClassInterface` on the
+assembly, at the pseudo-attribute TODO.
+
+**What was built.**
+* Domain. `ValidatedPseudoAttributeArguments`, the arguments a name declares fused with the rule they keep, one case
+  per shape the six need: `U2Below of bound` (`ClassInterface`, bound 3; `InterfaceType`, bound 4), `GuidString`
+  (`Guid`), `TwoNonNegativeI4s` (`TypeLibVersion`), `FourNonNegativeI4s` (`ComCompatibleVersion`) and `NoArguments`
+  (`AllowPartiallyTrustedCallers`); `ValidatedPseudoAttributeValues`, the arguments read from a kept blob, one case for
+  each; `ValidatedPseudoAttribute`, the descriptor (`Targets`, a set of `TableIndex`; `Arguments`);
+  `KnownCustomAttributeEffect.ValidatesAndKeeps`, given to the six names in `KnownCustomAttribute.effect`;
+  `KnownCustomAttributeRefusal.MalformedBlob`, `NamedArgument` and `InvalidValue`; and `KnownCustomAttributeBlob.validate`,
+  CoreCLR's parser and the case's rule in one function, whose every case reads its own arguments and checks its own
+  rule, so that no pairing of a rule with arguments of another type can be written. `defineCustomAttribute` checks the
+  target, then `validate`s the blob, and stores the row as it stores an ordinary one (`storeAsGiven`, now shared by
+  both). These are the public additions to the published Domain package. `KnownCustomAttributeRefusal` moved ahead of
+  `KnownCustomAttributeEffect` in its file.
+* The handler: no change. A kept attribute answers `Defined`, so 5y's two checks on an `Assembly` owner run for it, and
+  5z-1's `Refused` arm raises for every reason.
+* Tests. In `TestEmitScopeCustomAttributes`: the table of the six against custattr_emit.cpp and inc/metadata.h with
+  their line numbers, transcribed as argument types and a rule, and each mapped to the case that means it; a model of
+  `CustomAttributeParser` and of the rules over byte lists, and `validate` against it over blobs generated around the grammar (each case's arguments, or another case's, and `U2Below` with any bound; prologs, each argument whole or
+  cut short, the enum's four bytes with each high half,
+  strings null, GUID-shaped with every variant of the decisions, with lengths in each form, past the end or with a first
+  byte from `E0` to `FE`, then nothing, one byte, or each count with nothing, junk or a well-formed named argument
+  after it), with every feature's coverage asserted; the six against a model through `defineCustomAttribute`, owners
+  of all nine kinds, impostors included, each refusal reason asserted reached for each name it applies to; the model
+  property over every known name, now with the six; the measured blobs of the planner's `kept` and the decisions'
+  `kept2` as a fixed table, each through the host's emitter (which checks the transcription) and through Domain (which
+  checks the reason too); and the validation differential, the same generator's blobs on eight owner kinds of a host
+  module and its mirror, every call's outcome and every owner's rows (RID, constructor, blob) compared. The guest and
+  its terminal-state check (`assertValidatedPseudoAttributeRows`: every row of the 24 modules it checks in RID order, by
+  owner, attribute name and blob), and the parked guest.
+
+**Corrections found in implementation, and where the decisions were not followed to the letter.**
+* The decisions' premise for the 5z-2 check, that real .NET throws for each stored-but-unparseable row "through
+  `GetCustomAttributesData` and through `GetCustomAttributes`", is true only of the rows `kept2` put together on one
+  type. Alone, a row may fail one reader and not the other: the emitter, the data reader and the instance reader each
+  read a blob by a different grammar. The emitter reads a `U2` and a signed count; `CustomAttributeData` reads the
+  constructor's signature, and treats a count of `DE AD` after it as no named argument (measured: rows 26 and 33 of
+  the guest read as data); the instance reader (`CustomAttribute_CreateCustomAttribute`, vm/customattribute.cpp:1002)
+  reads the signature and an unsigned count (`GET_UNALIGNED_VAL16`). The guest pins each row's own outcome.
+* The descriptor fuses the declared arguments and the rule into one union, `ValidatedPseudoAttributeArguments`, where
+  the decisions name them separately. As first built (`94f888d04`), `ValidatedPseudoAttribute` held
+  `Arguments : KnownCustomAttributeArgument list` and `Rule : KnownCustomAttributeValueRule`, so a rule paired with
+  arguments of the wrong type was representable and a public `KnownCustomAttributeBlob.keeps` threw
+  `ArgumentException` for one. The union is still the decisions' closed union of rules, each case now fixing its
+  argument shape too, and its cases are the shapes the six need, no more: a count of `I4`s is two cases rather than a
+  number, which no attribute could give as 0. `KnownCustomAttributeArgument`, `KnownCustomAttributeValue`,
+  `KnownCustomAttributeValueRule`, `parse` and `keeps` are gone from the public API; `validate` and
+  `ValidatedPseudoAttributeValues` replace them. The test keeps its own transcription of each name's argument types and
+  rule (`ModelArgument`, `ModelRule`), so that the meaning of each case is checked against the model, not restated.
+* The decisions' mutants "the count read as unsigned" and "every non-zero count refused" are the same behaviour: an
+  unsigned count above 0 is a non-zero one. Both were applied, as different text, and died alike.
+* Guest exit codes must stay below 256 (a process's exit status is 8 bits): the first draft numbered checks up to 475
+  and real .NET exited 69 for check 325. Each `Values` and `Assembly{n}` row now has one number for its acceptance and
+  its reads, and a failed read prints what it saw.
+* Under PawPrint, the guest's first green run stopped at a reader path where real .NET throws; the eight such reads
+  moved to the parked case (above).
+* The two generated properties over the six bias half their owners to the name's targets, and the blob generator
+  draws a non-negative `I4` more often than a negative one: without both, `ComCompatibleVersion`'s four arguments were
+  kept too rarely for its coverage. The `E0`-to-`FE` length generator now follows the byte with the payload's length,
+  which the surviving mutant showed was needed (below).
+* Nothing the decisions said about CoreCLR's emitter was contradicted.
+
+**Mutants.** Each applied to the committed implementation, the test project built, then the unit selection
+(`TestEmitScopeCustomAttributes`, `TestEmitScopeExtension`, `TestEmitScopeImage`,
+`TestTypeBuilderCustomAttributeRefusals`) and the kept guest run (`5z-2/mutate.py`, results in `5z-2/mut/results.txt`).
+"Fixed" is the measured blobs' table; "parser", the parser property; "six", the model property over the six; "broad",
+the model property over every known name; "table", the table test; "differential", the validation differential. A
+guest number is its exit code: 121 plus a `Values` row's index, 180 plus an `Assembly{n}` row's, or 1 plus 10 times a
+constructor plus an owner in `Targets`.
+
+| Mutant | Killed by |
+|---|---|
+| the count read as unsigned | the guest (145: `01 00 01 00 FF FF`); fixed; parser; six; differential |
+| every non-zero count refused | the same |
+| the packed length accepted only in its shortest form | the guest (163: `80 24`); fixed; parser; six; differential |
+| the GUID's hex digits accepted in lower case only | the guest (161: the upper-case GUID); fixed; six; differential |
+| a kept attribute stored without its value checked (`ClassInterface` 3 accepted) | the guest (123); fixed; six; broad; differential |
+| the enum-typed argument read as an `I4` | the guest (124, the control's number: `0x10001` accepted); fixed; parser; six; broad; differential (re-run on the fused union, below) |
+| a missing named-argument count refused | the guest (157: `ClassInterface(short)` `01 00 01 00`); fixed; parser; six; broad; differential |
+| one trailing byte refused | the guest (149: `01 00 01 00 00`); fixed; parser; six; broad; differential |
+| bytes after a count of 0 or below read (refused) | the guest (11: `ClassInterface(ClassInterfaceType)`'s own blob on the assembly, whose `U2` leaves a count of 0 and two bytes); fixed; parser; six; broad; differential |
+| the prolog not checked | the guest (127: `FF FF ...`); fixed; parser; six; broad; differential |
+| the bound inclusive (`<=`) | the guest (123: `ClassInterface` 3); fixed; six; differential |
+| `NonNegative` checking only the first argument | the guest (184: `ComCompatibleVersion` with a negative fourth); fixed; six; broad; differential |
+| a target list too wide (`Guid` on a method) | the guest (44); table; fixed; six; broad; differential |
+| a target list too narrow (`ClassInterface` refused on the assembly) | the guest (1); table; fixed; six; broad; differential |
+| a kept row not appended | the guest (81: the type's attributes in `Targets0`); fixed; six; broad; differential |
+| a kept row appended twice | the guest (81); fixed; six; broad; differential |
+| `MalformedBlob` reported as `InvalidValue` | fixed; parser; six; broad (the guest cannot tell: CoreCLR collapses the reasons) |
+| an attribute without arguments parsed | the guest (185: `AllowPartiallyTrustedCallers` `FF FF`); fixed; six; broad; differential |
+| a first byte from `E0` to `FE` read as a four-byte length | parser; six; differential, after `0f96993d3` (it survived the first battery: the generator followed the byte with a length past the blob's end) |
+| a string's length past the end truncated instead of refused | the guest (170: the `Guid` of length 37); fixed; parser; six; broad; differential |
+| the null string accepted as a GUID | the guest (143: `01 00 FF 00 00`); fixed; six; differential |
+
+The decisions' other 5z-2 mutants, "a kept row not appended, or appended twice" and "the enum-typed argument read as
+an I4", are rows above. No surviving mutant remains.
+
+Five mutants that touch the rule or the arguments were run again on the fused union (`5z-2/mutate2.py`, results in
+`5z-2/mut2/results.txt`), against the same unit selection and the guest. Each was killed: "the value not checked"
+(`U2Below` accepting every value) and "the bound inclusive" by the guest (123) with fixed, parser, six and
+differential, and the first by broad too; "`NonNegative` checking only the first" (both `I4` cases) by the guest (184)
+with fixed, parser, six, broad and differential; "the enum argument read as an `I4`", now written as the `U2Below` case
+reading four bytes, which the type no longer lets a descriptor declare, by the guest (124) with fixed, parser, six,
+broad and differential; and "an attribute without arguments parsed" by the guest (185) with fixed, parser, six, broad
+and differential.
+
+**Suites**, at `0f96993d3` before the rebase, after `rm -rf */obj/*/*/ref */obj/*/*/refint` and a build of `WoofWare.PawPrint.slnx`,
+each its own `--no-build` invocation (`5z-2/suites.out`): default 5794 tests, 5757 passed, 37 skipped; `Guest` 234
+passed; `GuestSolo` 2 passed; `GuestPure` 1195 passed; `GuestImpure` 296 passed. No failures.
+
+After the fusion, the solution rebuilt from scratch after the same `rm -rf`, on the build box, then each its own
+`--no-build` invocation there (`5z-2/remote-build1.log`, `5z-2/remote-suites.out`): default 5794 tests, 5757 passed, 37
+skipped; `GuestImpure` 296 passed. No failures.

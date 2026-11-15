@@ -935,6 +935,7 @@ module EmitScopeGen =
                 |> List.choose (fun known ->
                     match KnownCustomAttribute.effect known with
                     | KnownCustomAttributeEffect.SetsFlag flags -> Some flags
+                    | KnownCustomAttributeEffect.ValidatesAndKeeps _
                     | KnownCustomAttributeEffect.Unmodelled -> None
                 )
 
