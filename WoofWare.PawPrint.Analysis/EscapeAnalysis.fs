@@ -499,6 +499,9 @@ type internal Runs =
     /// CoreLib's `Object.GetType`, whose contract (`ObjectGetType`) the analysis takes in place of
     /// its body.
     | ObjectGetType
+    /// Nothing: the JIT replaces every call with the value the method returns
+    /// (`IntrinsicBody.foldsAsyncVariantCall`).
+    | Folded
     /// The method this assumption summarises, whose contract the analysis takes in place of its
     /// body.
     | Assumed of Assumption
@@ -4211,9 +4214,24 @@ module EscapeAnalysis =
 
         match key.Variant with
         | MethodVariant.AsyncVariant ->
+            let intrinsic =
+                if IntrinsicBody.isIntrinsic assembly key.Method.Get then
+                    Some (IntrinsicBody.classify assembly key.Method.Get)
+                else
+                    None
+
+            match intrinsic with
+            | Some _ when IntrinsicBody.foldsAsyncVariantCall assembly key.Method.Get -> state, Runs.Folded
+            | Some (IntrinsicBody.JitExpansion _ | IntrinsicBody.VmSubstitution | IntrinsicBody.CallSiteExpansion | IntrinsicBody.StructMarshalling _ as classified) ->
+                failwith
+                    $"TODO: %O{key} is the async variant of a JIT intrinsic that CoreCLR implements as %A{classified} rather than by its IL; the analysis does not say what runs for its async variant"
+            // An intrinsic whose IL is its semantics, or one without IL, whose body says so below.
+            | Some IntrinsicBody.OwnIl
+            | Some IntrinsicBody.NoIl
+            | None ->
+
             if
-                IntrinsicBody.isIntrinsic assembly key.Method.Get
-                || (Assumption.summarises assembly key.Method.Get).IsSome
+                (Assumption.summarises assembly key.Method.Get).IsSome
                 || ResourceLookup.isLookup assembly key.Method.Get
                 || ObjectGetType.isGetType assembly key.Method.Get
             then
@@ -4352,6 +4370,7 @@ module EscapeAnalysis =
 
         match runs with
         | Runs.Opaque reason -> state, opaqueFromEntry reason
+        | Runs.Folded -> state, contracted [] [] []
         | Runs.Primitive primitive ->
             let raised = contractRaises state (IntrinsicPrimitive.contract primitive)
 
