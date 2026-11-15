@@ -2779,8 +2779,11 @@ public interface IEventInterface
             CorElementType : int32
         }
 
-    let private invokeGetDefaultValue
+    /// `MetadataImport.GetDefaultValue` over the loaded assembly named by `assemblyFullName`, which
+    /// `state` must hold.
+    let private invokeGetDefaultValueIn
         (fixture : MetadataImportFixture)
+        (assemblyFullName : string)
         (fieldToken : int32)
         (state : IlMachineState)
         : EvalStackValue * DefaultValueOut * IlMachineState
@@ -2811,7 +2814,7 @@ public interface IEventInterface
                 metadataImportType
                 getDefaultValueMethod
                 [
-                    metadataImportHandle fixture
+                    metadataImportHandleOf assemblyFullName
                     CliType.Numeric (CliNumericType.Int32 fieldToken)
                     CliType.RuntimePointer (CliRuntimePointer.Managed valueOut)
                     CliType.RuntimePointer (CliRuntimePointer.Managed stringValueOut)
@@ -2853,6 +2856,39 @@ public interface IEventInterface
             }
 
         returnValue, out, state
+
+    let private invokeGetDefaultValue
+        (fixture : MetadataImportFixture)
+        (fieldToken : int32)
+        (state : IlMachineState)
+        : EvalStackValue * DefaultValueOut * IlMachineState
+        =
+        invokeGetDefaultValueIn fixture fixture.Assembly.Name.FullName fieldToken state
+
+    /// The UTF-16 code unit `byteOffset` bytes past the `char*` `pointer`, read through the
+    /// interpreter's own dereference of a byte cursor.
+    let private readCharThrough
+        (fixture : MetadataImportFixture)
+        (state : IlMachineState)
+        (pointer : ManagedPointerSource)
+        (byteOffset : int)
+        : char
+        =
+        let advanced =
+            ManagedPointerSource.addByteOffsetToByteView
+                ByteOffsetNormalisationContext.nonArrayRootsOnly
+                byteOffset
+                pointer
+
+        match
+            IlMachineState.readManagedByref
+                fixture.BaseClassTypes
+                state
+                (ManagedPointerSource.requireAddressed advanced)
+            |> CliType.unwrapPrimitiveLikeDeep
+        with
+        | CliType.Char (hi, lo) -> char ((int hi <<< 8) ||| int lo)
+        | other -> failwith $"expected a Char through %O{advanced}, got %O{other}"
 
     let private constantField
         (fixture : MetadataImportFixture)
@@ -2925,26 +2961,30 @@ public interface IEventInterface
         // The pointer must carry a `ReinterpretAs` projection, not just name the range:
         // `String.Ctor(char*, int, int)` offsets it before reading, and pointer arithmetic on a
         // bare PE-byte-range root is refused outright — the guest case fails without one. The
-        // projection's *type* is not what makes the guest work (the offset is zero and the copy is
-        // byte-wise, so `byte` would also do); `char` is pinned here because it is the type the API
-        // declares, and pinning it is what stops it drifting silently.
+        // projection's *type* is not what makes the guest work (the copy is byte-wise, so `byte`
+        // would also do); `char` is pinned here because it is the type the API declares, and
+        // pinning it is what stops it drifting silently.
         match out.StringPointer with
         | ManagedPointerSource.Byref {
                                          Root = ByrefRoot.PeByteRange range
-                                         Projections = [ ByrefProjection.ReinterpretAs charType ]
+                                         Projections = [ ByrefProjection.ReinterpretAs charType
+                                                         ByrefProjection.ByteOffset cursor ]
                                      } ->
-            range.AssemblyFullName |> shouldEqual fixture.Assembly.Name.FullName
-            range.Size |> shouldEqual 10
-
-            // Keyed on the Constant row, not on the field that owns it.
             let mr = fixture.Assembly.PeReader.GetMetadataReader ()
 
+            range.AssemblyFullName |> shouldEqual fixture.Assembly.Name.FullName
+            range.Size |> shouldEqual (mr.GetHeapSize HeapIndex.Blob)
+
+            // The whole `#Blob` heap, as CoreCLR's pointer is into its blob heap; the blob is found
+            // by the cursor. "hello"'s blob is under 128 bytes, so its length prefix is one byte.
             let constantHandle = (mr.GetFieldDefinition field.Handle).GetDefaultValue ()
 
             constantHandle.IsNil |> shouldEqual false
 
-            range.Source
-            |> shouldEqual (PeByteRangePointerSource.ConstantBlob (ComparableConstantHandle.Make constantHandle))
+            range.Source |> shouldEqual PeByteRangePointerSource.BlobHeap
+
+            cursor
+            |> shouldEqual (MetadataTokens.GetHeapOffset (mr.GetConstant constantHandle).Value + 1)
 
             // Look up Char in the *post*-invocation state: the handler is what concretizes it.
             let expectedCharType =
@@ -2968,6 +3008,157 @@ public interface IEventInterface
         out.CorElementType |> shouldEqual 0x0E
         out.Length |> shouldEqual 0
         out.StringPointer |> shouldEqual ManagedPointerSource.Null
+
+    /// Every string-typed Constant row of the fixture image and of CoreLib, each with the assembly
+    /// that holds it and its HasConstant parent's token.
+    let private stringConstantsUnderTest (fixture : MetadataImportFixture) : (DumpedAssembly * int32 * Constant) list =
+        [ fixture.Assembly ; fixture.BaseClassTypes.Corelib ]
+        |> List.collect (fun assembly ->
+            let mr = assembly.PeReader.GetMetadataReader ()
+
+            [
+                for rid in 1 .. mr.GetTableRowCount TableIndex.Constant do
+                    let constant = mr.GetConstant (MetadataTokens.ConstantHandle rid)
+
+                    if constant.TypeCode = ConstantTypeCode.String then
+                        yield assembly, MetadataTokens.GetToken constant.Parent, constant
+            ]
+        )
+
+    /// Where a blob's contents start in its image's `#Blob` heap: past its ECMA-335 II.24.2.4
+    /// length prefix, taken to be the shortest II.23.2 compressed form of the blob's length.
+    let private blobContentOffset (mr : MetadataReader) (blob : BlobHandle) : int =
+        let length = (mr.GetBlobReader blob).Length
+
+        let prefixWidth =
+            if length < 0x80 then 1
+            elif length < 0x4000 then 2
+            else 4
+
+        MetadataTokens.GetHeapOffset blob + prefixWidth
+
+    [<Test>]
+    let ``MetadataImport GetDefaultValue points every string constant into the Blob heap at its contents`` () : unit =
+        // CoreCLR's pointer is into its blob heap, which only grows, so it names the same bytes
+        // however the Constant table is later re-sorted or rewritten. A `#Blob` heap offset is the
+        // one coordinate of PawPrint's images with that property.
+        let fixture = makeFixture ()
+        let constants = stringConstantsUnderTest fixture
+
+        let mutable state = fixture.State
+        let mutable oddContents = 0
+        let mutable evenContents = 0
+        let mutable emptyBlobs = 0
+
+        for assembly, token, constant in constants do
+            let mr = assembly.PeReader.GetMetadataReader ()
+            let blob = mr.GetBlobBytes constant.Value
+
+            let returnValue, out, nextState =
+                invokeGetDefaultValueIn fixture assembly.Name.FullName token state
+
+            state <- nextState
+
+            returnValue |> shouldEqual (EvalStackValue.Int32 (Int32Source.Verbatim 0))
+            out.CorElementType |> shouldEqual 0x0E
+            out.Length |> shouldEqual (blob.Length / 2)
+
+            if blob.Length = 0 then
+                emptyBlobs <- emptyBlobs + 1
+                out.StringPointer |> shouldEqual ManagedPointerSource.Null
+            else
+                let contentOffset = blobContentOffset mr constant.Value
+
+                if contentOffset % 2 = 0 then
+                    evenContents <- evenContents + 1
+                else
+                    oddContents <- oddContents + 1
+
+                let charType =
+                    AllConcreteTypes.getRequiredNonGenericHandle
+                        state.TypeSystem.ConcreteTypes
+                        fixture.BaseClassTypes.Char
+
+                out.StringPointer
+                |> shouldEqual (
+                    ManagedPointerSource.Byref
+                        {
+                            Root =
+                                ByrefRoot.PeByteRange
+                                    {
+                                        AssemblyFullName = assembly.Name.FullName
+                                        Source = PeByteRangePointerSource.BlobHeap
+                                        RelativeVirtualAddress = 0
+                                        Size = mr.GetHeapSize HeapIndex.Blob
+                                    }
+                            Projections =
+                                [
+                                    ByrefProjection.ReinterpretAs charType
+                                    ByrefProjection.ByteOffset contentOffset
+                                ]
+                        }
+                )
+
+                // Code unit by code unit rather than through `Encoding.Unicode`, which would replace
+                // a lone surrogate.
+                let expected =
+                    Array.init out.Length (fun i -> char (int blob.[2 * i] ||| (int blob.[2 * i + 1] <<< 8)))
+
+                Array.init out.Length (fun i -> readCharThrough fixture state out.StringPointer (2 * i))
+                |> shouldEqual expected
+
+        // A blob's contents start wherever the heap puts them, so both parities must be read; and
+        // an empty blob is the one string constant whose pointer is null.
+        oddContents |> shouldBeGreaterThan 0
+        evenContents |> shouldBeGreaterThan 0
+        emptyBlobs |> shouldBeGreaterThan 0
+
+    [<Test>]
+    let ``MetadataImport GetDefaultValue's string pointer reads on past the blob into the Blob heap`` () : unit =
+        // Over CoreCLR's mapped metadata, a read that runs off the end of a string constant's blob
+        // sees whatever the heap holds next, and only the end of the heap bounds it.
+        let fixture = makeFixture ()
+
+        let constants =
+            stringConstantsUnderTest fixture
+            |> List.filter (fun (assembly, _, constant) ->
+                ((assembly.PeReader.GetMetadataReader ()).GetBlobReader constant.Value).Length
+                <> 0
+            )
+
+        let mutable state = fixture.State
+        let mutable readsPastTheEnd = 0
+
+        for assembly, token, constant in constants do
+            let mr = assembly.PeReader.GetMetadataReader ()
+            let blobLength = (mr.GetBlobReader constant.Value).Length
+            let contentOffset = blobContentOffset mr constant.Value
+            let heapSize = mr.GetHeapSize HeapIndex.Blob
+
+            let _, out, nextState =
+                invokeGetDefaultValueIn fixture assembly.Name.FullName token state
+
+            state <- nextState
+
+            if contentOffset + blobLength + 2 <= heapSize then
+                readsPastTheEnd <- readsPastTheEnd + 1
+
+                let heapBytes =
+                    assembly.PeReader
+                        .GetMetadata()
+                        .GetContent (mr.GetHeapMetadataOffset HeapIndex.Blob + contentOffset + blobLength, 2)
+
+                readCharThrough fixture state out.StringPointer blobLength
+                |> shouldEqual (char (int heapBytes.[0] ||| (int heapBytes.[1] <<< 8)))
+            else
+                // The last blob in the heap: a read past the heap's end is refused, not invented.
+                Assert.Throws (fun () ->
+                    readCharThrough fixture state out.StringPointer (heapSize - contentOffset)
+                    |> ignore
+                )
+                |> ignore
+
+        readsPastTheEnd |> shouldBeGreaterThan 0
 
     [<Test>]
     let ``MetadataImport GetDefaultValue reports a null constant as ELEMENT_TYPE_CLASS`` () : unit =
@@ -3028,29 +3219,9 @@ public interface IEventInterface
             match out.StringPointer with
             | ManagedPointerSource.Null -> box ""
             | ManagedPointerSource.Byref {
-                                             Root = ByrefRoot.PeByteRange range
-                                             Projections = _
-                                         } ->
-                let charTemplate, _ =
-                    IlMachineState.cliTypeZeroOfHandle
-                        state
-                        fixture.BaseClassTypes
-                        (AllConcreteTypes.getRequiredNonGenericHandle
-                            state.TypeSystem.ConcreteTypes
-                            fixture.BaseClassTypes.Char)
-
-                System.String (
-                    Array.init
-                        out.Length
-                        (fun i ->
-                            match
-                                IlMachineState.readPeByteRangeBytesAs state range (i * 2) charTemplate
-                                |> CliType.unwrapPrimitiveLikeDeep
-                            with
-                            | CliType.Char (hi, lo) -> char ((int hi <<< 8) ||| int lo)
-                            | other -> failwith $"expected Char in constant blob, got %O{other}"
-                        )
-                )
+                                             Root = ByrefRoot.PeByteRange _
+                                         } as pointer ->
+                System.String (Array.init out.Length (fun i -> readCharThrough fixture state pointer (i * 2)))
                 |> box
             | other -> failwith $"unexpected string pointer %O{other}"
         | 0x12 -> null
@@ -5642,16 +5813,14 @@ public unsafe class FunctionPointers { public delegate*<void> F; }
         match out.StringPointer with
         | ManagedPointerSource.Byref {
                                          Root = ByrefRoot.PeByteRange range
-                                         Projections = [ ByrefProjection.ReinterpretAs _ ]
+                                         Projections = [ ByrefProjection.ReinterpretAs _
+                                                         ByrefProjection.ByteOffset cursor ]
                                      } ->
-            range.Size |> shouldEqual 10
+            range.Size |> shouldEqual (mr.GetHeapSize HeapIndex.Blob)
+            range.Source |> shouldEqual PeByteRangePointerSource.BlobHeap
 
-            range.Source
-            |> shouldEqual (
-                PeByteRangePointerSource.ConstantBlob (
-                    ComparableConstantHandle.Make ((mr.GetParameter astralParameter).GetDefaultValue ())
-                )
-            )
+            let constant = mr.GetConstant ((mr.GetParameter astralParameter).GetDefaultValue ())
+            cursor |> shouldEqual (MetadataTokens.GetHeapOffset constant.Value + 1)
         | other -> failwith $"expected a char pointer over the constant blob, got %O{other}"
 
         decodeDefaultValueOut fixture state "astral" out
