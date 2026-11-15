@@ -7325,7 +7325,7 @@ CoreLib and `Net11` the run with `PAWPRINT_TEST_RUNTIME=Net11`.
 | `TypeBuilderAssemblyRuntimeAttributes.cs` (parked) | the empty name's exception types swapped: 6 | the friend TODO at the first malformed friend attribute | not run |
 | `TypeBuilderDuplicateRuntimeAttributes.cs` (parked) | the first added expected at 25 rows: 1 | exits 1: the first added, a wrong answer (#2258) | not run |
 | `TypeBuilderCustomAttributeTaggedObject.cs` (registered by `07851fdcc`) | 6 expected: 1 | 0 since #2259; before it, "primitive type obj is not yet supported as a CustomAttrib Elem" | 0 |
-| `TypeBuilderCustomAttributeGenericInstance.cs` (parked) | 5 expected: 1 | "RuntimeConstructorInfo does not declare expected instance field 'm_value'"; #2260, in the merge queue, is expected to un-park it | not run |
+| `TypeBuilderCustomAttributeGenericInstance.cs` (registered after rebasing onto #2260) | 5 expected: 1 | 0 since #2260; before it, "RuntimeConstructorInfo does not declare expected instance field 'm_value'" | 0 |
 | `TypeBuilderCustomAttributeEmptyBlobInstance.cs` (parked) | `ArgumentException` expected: 2 | "*ppBlob (start) pointer is null" | not run |
 | `TypeBuilderCustomAttributeOpenGenericIsDefined.cs` (parked) | no exception expected: 1 | exits 1: `IsDefined` answers false, a wrong answer (#2257) | not run |
 | `TypeBuilderCustomAttributeMalformedInstance.cs` (parked, new) | no exception for the third: 3 | "CustomAttrib blob has unexpected prolog 0x0002", with no guest exception | not run |
@@ -7499,6 +7499,4 @@ CustomAttribute row, which it neither sorts nor remaps.
 * Instantiating an emitted attribute whose blob does not parse, which real .NET refuses with
   `CustomAttributeFormatException` and PawPrint fails the run on (`TypeBuilderCustomAttributeMalformedInstance.cs`).
 * Named arguments of type `Type`, an array or an enum at instantiation (`TypeBuilderCustomAttributeNamedArguments.cs`).
-* Instantiating a generic attribute, which #2260 is expected to bring, un-parking
-  `TypeBuilderCustomAttributeGenericInstance.cs`.
 * The main guest's `Args` instantiates no `object`-typed value; since #2259 it could.

@@ -650,22 +650,6 @@ module TestImpureCases =
             },
             """Two `InlineArray` attributes on one struct in modules of 25 CustomAttribute rows or more, of which CoreCLR's type loader takes the last added, counted when the type is created (#2258). Measured on .NET 10 and 11 to exit 0; a control expecting the first added exits 1 on both. PawPrint answers wrongly and does not stop: it takes the first added, and exits 1 (measured). Un-parked by modelling the 25-row rule in the readers that look an attribute up by name."""
             {
-                FileName = "TypeBuilderCustomAttributeGenericInstance.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """An emitted attribute whose type is `GenAttribute<int>`, instantiated through `GetCustomAttributes`, measured on .NET 10 and 11 to exit 0; a control expecting 5 exits 1 on both. It stops at the instantiation (measured): "System.Reflection.RuntimeConstructorInfo does not declare expected instance field 'm_value'". A compiled assembly reaches the same stop. Un-parked by instantiating a generic attribute's constructor."""
-            {
                 FileName = "TypeBuilderCustomAttributeEmptyBlobInstance.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -7023,6 +7007,24 @@ module TestImpureCases =
                 // Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0,
                 // and a control expecting 6 exits 1 on both.
                 FileName = "TypeBuilderCustomAttributeTaggedObject.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // An emitted attribute whose type is `GenAttribute<int>`, instantiated through `GetCustomAttributes`.
+                // Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0,
+                // and a control expecting 5 exits 1 on both.
+                FileName = "TypeBuilderCustomAttributeGenericInstance.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =
