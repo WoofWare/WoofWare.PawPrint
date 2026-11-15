@@ -7575,3 +7575,405 @@ measured). This fix leaves that case alone.
 | `GuestImpure` | 293 | 0 | 0 | 293 | 6 m 20 s |
 
 `fantomas`, the docstring-attachment check and `footprint.py generate` changed nothing.
+
+### 5z: what it is
+
+**Which stage.** 5z is the pseudo-attributes that a mocking library reaches: those whose effect stays in the owner's
+row (a flag) and those that CoreCLR's emitter validates and keeps as a row. 5y refuses every one of them with a TODO
+naming `_HandleKnownCustomAttribute`. Measured on `main` at 3c8287d77, they are the first stop inside this plan for
+NSubstitute 5.1.0 and FakeItEasy 8.0.0 on every substitute, and for Castle DynamicProxy 5.1.1 (behind all three, and
+behind Moq) on any interface member with an `in`, `out` or optional parameter. No other candidate on the list is
+reached by any of them. `SetConstant` is the next stop after it, for a parameter with a default value.
+
+Scratchpad paths below are under this session's scratchpad,
+`/private/tmp/claude-501/-Users-patrick-Documents-GitHub-WoofWare-PawPrint--claude-worktrees-test-pipeline-performance-724897/ba89fbb1-81d8-460f-a9be-c4df3a5bd899/scratchpad/`.
+Every probe was built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148
+(`DOTNET_ROLL_FORWARD=LatestMajor`, `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`); PawPrint runs used the Release App built
+from this branch (`5z/run-pawprint.sh`), each taking 7 to 17 s.
+
+**The consumers, measured.** `5z/consumers/Program.cs` references Castle.Core 5.1.1, Moq 4.18.4, NSubstitute 5.1.0 and
+FakeItEasy 8.0.0 from the local NuGet cache (so it cannot be a guest), and runs one scenario per argument. Each prints
+what a test would observe: the proxy's return value and the proxy method's parameters (name, flags, default). On .NET
+10 and 11 every scenario exits 0 with identical output (`5z/consumers/all-net10.out`, `all-net11.out`,
+`extra-net10.out`, `extra-net11.out`, `interp-net10.out`, `interp-net11.out`). `5z/compare.py` compares each PawPrint
+log with real .NET's output, scenario by scenario (`5z/consumers/diffs.txt`).
+
+| Scenario | PawPrint on `main` (`5z/consumers/main-*.log`) |
+|---|---|
+| Castle `CreateInterfaceProxyWithoutTarget` over `int Add(int, int)`; a property; a generic method; a method attribute with `Inherited = true`; `params int[]`; `CreateClassProxy` of a class, with and without constructor arguments | exit 0, output identical |
+| Moq without `Setup` | exit 0, identical |
+| Castle over `bool TryGet(string, out int)` | `TODO: TypeBuilder_DefineCustomAttribute: System.Runtime.InteropServices.OutAttribute on 0x08000002 is a pseudo-attribute` |
+| Castle over `int Read(in long)` | the same TODO for `InAttribute` |
+| Castle over a default value: `int factor = 3`, `string name = "world"`, `CancellationToken cancellationToken = default`, `Colour c = Colour.Green`, `int? x = null`, `decimal p = 1.5m` | the same TODO for `OptionalAttribute` |
+| NSubstitute `Substitute.For<ICalc>()`, with or without `Returns` and `Received` | the same TODO for `System.SerializableAttribute` on 0x02000002 |
+| Castle over `string? Find(string key, object? context)` under `#nullable enable`; over an interface with an event | `CliValueType.FindFieldById: field '...::Value (Field(0x0400036d))' not found` in `InvokeStub_AttributeUsageAttribute.set_Inherited` (outside this plan: below) |
+| Moq with `Setup` and `Verify` | `Unimplemented native method (PInvokeImpl QCall!ReflectionInvocation_CompileMethod)` from `Moq.DefaultExpressionCompiler.Compile` (outside this plan) |
+| FakeItEasy `A.Fake<ICalc>()` | `Unimplemented native method (PInvokeImpl QCall!AssemblyNative_GetExportedTypes)` from `FakeItEasy.BootstrapperLocator` (outside this plan) |
+| `XmlSerializer.Serialize` | `TODO: AssemblyNative_InternalLoad of 'consumers.XmlSerializers'`, as 5w recorded (outside this plan) |
+
+`GC._CollectionCount`, Castle's first stop when 5x measured it, is implemented on `main` (`Native/NativeGc.fs:278`), and
+Castle's basic interface proxy now runs to completion. Where it comes from: Castle copies every non-inheritable
+attribute of the proxied method's parameters onto the proxy's (`AttributeUtil.GetNonInheritableAttributes` and
+`ShouldSkipAttributeReplication`, read with `WoofWare.PawPrint.IlDump`: `5z/ildump-castle-attributeutil.txt`), and
+reflection synthesises `[In]`, `[Out]` and `[Optional]` from a parameter's flags, each with `Inherited = false`.
+NSubstitute substitutes an interface with `CreateClassProxy(typeof(object), [ICalc], ...)`
+(`CastleDynamicProxyFactory.CreateProxyUsingCastleProxyGenerator`, `5z/ildump-nsub-all.txt:3554-3600`), and Castle
+copies `object`'s non-inheritable attributes onto the proxy type: `Serializable`, `NullableContext(2)`,
+`ClassInterface(AutoDispatch)`, `ComVisible(true)` and `TypeForwardedFrom` (scenario `nsub-type`, measured on real
+.NET).
+
+**Past the pseudo-attributes, measured with throwaways.** `5z/throwaway1.diff` set the flag for `Serializable` on a
+TypeDef and for `In`, `Out` and `Optional` on a Param; `5z/throwaway2.diff` also stored `ClassInterface` as a row;
+`5z/throwaway-final.diff` (the same as `throwaway3.diff`) also answered `ReflectionInvocation_CompileMethod` with nothing
+and `AssemblyNative_GetExportedTypes` with the top-level public TypeDefs. Some runs pass `--interp`, which sets
+`Switch.System.Reflection.ForceInterpretedInvoke` before anything else so that CoreLib never emits an invoke stub. The
+logs are in `5z/consumers/`.
+
+| Scenario | PawPrint with the throwaway | Log |
+|---|---|---|
+| Castle over `out`, over `in`, over `decimal p = 1.5m` (no constant: Castle replicates `DecimalConstantAttribute`) | exit 0, identical to real .NET | `t1-castle-out.log`, `t3i-castle-in.log`, `t3i-castle-decimaldefault.log` |
+| Castle over `int factor = 3`, `CancellationToken = default`, `Colour = Green`, `int? = null` | `Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetConstantValue)` | `t1-castle-default.log`, `t3i-castle-token.log`, `t3i-castle-enumdefault.log`, `t3i-castle-nullabledefault.log` |
+| NSubstitute, `Serializable` and the flags only | the invoke-stub stop; with `--interp`, `TODO ... ClassInterfaceAttribute on 0x02000002 is a pseudo-attribute` | `t1-nsubstitute.log`, `t1i-nsubstitute.log` |
+| NSubstitute with `ClassInterface` kept too, `--interp` | exit 0, identical (`Returns` and `Received` included); the proxy type's attributes identical | `t2i-nsubstitute.log`, `t3i-nsub-type.log` |
+| Castle over the nullable interface and over the event, `--interp` | exit 0, identical | `t1i-castle-nullable.log`, `t1i-castle-event.log` |
+| Moq with `Setup` and `Verify`, `CompileMethod` answered | exit 0, identical, with or without `--interp` | `t3-moq.log`, `t3i-moq.log` |
+| FakeItEasy without `CallTo`, `--interp` | `Serializable` and `ClassInterface` (Castle's class proxy over `object` again), then exit 0, identical | `t3i-fakeiteasy-loose.log` |
+| FakeItEasy with `A.CallTo`, `--interp` | `Unimplemented native method (PInvokeImpl QCall!RuntimeTypeHandle_VerifyInterfaceIsImplemented)` (outside this plan) | `t3i-fakeiteasy.log` |
+
+With the throwaway reverted and the App rebuilt, NSubstitute and Castle over `out` stop at the pseudo-attribute TODO
+again (`5z/consumers/rev-nsubstitute.log`, `rev-castle-out.log`).
+
+Every flag that a consumer's call sets is already in the row. Castle's `ClassEmitter` defines each proxy type with
+`TypeAttributes` 8193, `Public | Serializable` (`5z/ildump-castle-all.txt:12404-12413`), and copies each parameter
+with `DefineParameter(position, p.Attributes, p.Name)` (5x), which already carries `In`, `Out` or `Optional`.
+`LoadedAssemblies.WithEmitScope` (`Loader/LoadedAssemblies.fs:431`) refuses a TypeDef or Param row whose flags change,
+and the throwaway runs did not stop there, which agrees. So the consumers need the attribute accepted, and the bit
+written is redundant for them; a program that applies `[Out]` to a parameter defined with `None` needs the row changed
+(measured below).
+
+**The stop outside this plan that NSubstitute reaches next.** `5z/stubrepro/Program.cs`, with no emit at all: a property
+setter of one argument (`bool`, `int`, and `AttributeUsageAttribute.Inherited` through `GetCustomAttributes`) invoked
+through reflection three times. Real .NET prints the three values (`5z/stubrepro/all-net10.out`, `all-net11.out`). Under
+PawPrint with `IsDynamicCodeSupported` set, the first call works and the second, through CoreLib's emitted
+`InvokeStub_<Type>.<setter>`, stops at the `FindFieldById` message above: the stub's `ldfld` names a field `Value`
+(`0x0400036d`) that PawPrint looks for on a value whose only fields are `_arg0` and its inline-array slots
+(`5z/stubrepro/t2-usage.log`, `t2-setbool.log`, `t2-setint.log`; presumably `ByReference.Value` read from a slot of
+`StackAllocatedByRefs`, not checked). Without the switch, CoreLib never emits the stub and all three pass
+(`5z/stubrepro/t1-*.log`). `ReflectionInvokeThroughEmittedStub.cs` covers only methods without arguments. The repro uses
+no emit of its own, so this is outside the plan, and is recorded under "left to later stages".
+
+**What the guest needs.** The emitter's rule for each pseudo-attribute that stays in its owner's row, applied as
+CoreCLR applies it: the target checked, the blob parsed only for an attribute that takes arguments, a flag ORed into
+the owner's row or a validated row appended, and an `ArgumentException` for a wrong target or a bad value. NSubstitute
+needs `Serializable` (a TypeDef flag) and `ClassInterface` (validated and kept); Castle needs `In`, `Out` and
+`Optional` (Param flags).
+
+**What CoreCLR does.** Read from `$DOTNET_RUNTIME_SRC_NET10`. `md/compiler/custattr_emit.cpp` differs in `_NET11` only
+in `StructLayout`'s new layout kind (5y), and `md/compiler/custattr.h` and `inc/caparser.h` not at all.
+
+* `RegMeta::DefineCustomAttribute` (custattr_emit.cpp:693) calls `_IsKnownCustomAttribute`, and for a known one
+  `_HandleKnownCustomAttribute` (:1004). On a failed HRESULT it returns without writing a row, and
+  `TypeBuilder_DefineCustomAttribute` (vm/comdynamic.cpp:915) throws `ArgumentException` with `IDS_EE_INVALID_CA`.
+* `_HandleKnownCustomAttribute` first checks the owner's table against the attribute's target list
+  (`KnownCaProp.rTypes`, :101-119); a miss is `META_E_CA_INVALID_TARGET`. No list names GenericParam.
+* Only an attribute that declares constructor or named arguments has its blob parsed (`if (props->cArgs ||
+  props->cNamedArgs)`, :1044). `ParseKnownCaArgs` (:663) checks the prolog (`ValidateProlog`, caparser.h:254: two
+  bytes, value 1) and reads each declared argument by its declared serialisation type (`ParseKnownCaValue`, :479). If
+  bytes are left, or the attribute declares named arguments, `ParseKnownCaNamedArgs` (:556) reads a two-byte count, and
+  a count that cannot be read is 0 ("Everett behavior"); each named argument must then match a declared one by tag and
+  name, so for an attribute with none, any named argument fails. Bytes after the count are never looked at.
+* The effects (:1203-1430), for the attributes 5z concerns:
+
+  | Attribute | Arguments (`KnownCaProp`) | Targets a builder reaches | Effect | Row kept |
+  |---|---|---|---|---|
+  | `Serializable` (:236) | none | TypeDef | `tdSerializable` 0x2000 | no |
+  | `NonSerialized` (:240) | none | Field | `fdNotSerialized` 0x80 | no |
+  | `SpecialName` (:244) | none | TypeDef, MethodDef, Field, Property, Event | `tdSpecialName` 0x400, `mdSpecialName` 0x800, `fdSpecialName` 0x200, `prSpecialName` 0x200, `evSpecialName` 0x200 | no |
+  | `In`, `Out`, `Optional` (:341-349) | none | Param | `pdIn` 1, `pdOut` 2, `pdOptional` 0x10 | no |
+  | `PreserveSig` (:337) | none | MethodDef | `miPreserveSig` 0x80 in ImplFlags | no |
+  | `ClassInterface` (:227-232) | one U2 | TypeDef, Assembly | refused unless the U2 is below `clsIfLast` (3, inc/metadata.h:58) | yes |
+  | `InterfaceType` (:218-223) | one U2 | TypeDef | refused unless below `ifLast` (4, :45) | yes |
+  | `Guid` (:205-210) | one string | TypeDef, Module, Assembly | refused unless 36 characters that `LPCSTRToGuid` reads inside braces | yes |
+  | `TypeLibVersion` (:394-399) | two I4 | Assembly | refused if either is negative | yes |
+  | `ComCompatibleVersion` (:403-410) | four I4 | Assembly | refused if any is negative | yes |
+  | `AllowPartiallyTrustedCallers` (:416) | none | Assembly | none | yes, blob as given |
+
+  A flag is ORed into the row (`AddFlags`), and `UpdateENCLog(tkObj)` follows. A kept row is written as an ordinary
+  row would be, its blob as given. `ComImport` (`tdImport`), `WindowsRuntimeImport` (`tdWindowsRuntime`) and
+  `MethodImpl` (three constructors, validated against `miUserMask`, a named `MethodCodeType`) also stay in the row;
+  `DllImport`, `MarshalAs`, `StructLayout` and `FieldOffset` write other tables.
+* `ClassInterfaceAttribute(ClassInterfaceType)` and `InterfaceTypeAttribute(ComInterfaceType)` encode their argument as a
+  four-byte enum, but the emitter reads a U2 and then the enum's high half as the named-argument count.
+
+**Measured on .NET 10.0.14 and 11.0.0-rc.3** with `5z/probe/Program.cs`, which reads raw CustomAttribute rows through
+CoreLib's internal `MetadataImport` as 5y's probe does. Each scenario is its own module. The outputs are identical but
+for the version line (`5z/probe/all-net10.out`, `all-net11.out`; `5z/probe/diff-net10-net11.txt` empty). "AE" is
+`ArgumentException` "Invalid custom attribute provided.", HResult 0x80070057, no parameter name.
+
+| Emitted | Observed |
+|---|---|
+| `Matrix`: each of `Serializable`, `NonSerialized`, `SpecialName`, `In`, `Out`, `Optional`, `PreserveSig` on the assembly, the module, a type, a method, a constructor, a parameter, the return parameter, a field, a property and an event, then the type created | accepted exactly on the targets of the table, AE everywhere else; after `CreateType`, each accepted target has its flag (`Serializable` 0x00002001 on the type, `NonSerialized` field 0x0086, `SpecialName` type 0x401, method 0x0816, field 0x0206, property and event 0x0200, `In`/`Out`/`Optional` 0x0001/0x0002/0x0010 on the parameter and on the return parameter, `PreserveSig` ImplFlags 0x0080 on the method and on the constructor); no CustomAttribute row on any owner; a `Tag` row added last is `0x0C000001`; reflection synthesises `SerializableAttribute` on the type and `InAttribute`, `OutAttribute`, `OptionalAttribute` on the parameter; the type instantiates and `M` runs |
+| `ComImport` on a type | accepted, then `CreateType` throws `TypeLoadException` "Method with non-zero RVA in an Import." for a class with a constructor body, and succeeds for an interface (flags 0x000010A1) (`comimport`) |
+| `Blobs`: `Serializable` on a type, `Optional` on a parameter, `Out` on the return parameter, each with an empty blob, a bare prolog, the prolog `FF FF`, one byte, the prolog and junk, and a named count of 1 followed by junk | every one accepted, the flag set, no row: the blob is never read. `Serializable` on a method with each blob: AE |
+| `Kept`: `ClassInterface(ClassInterfaceType)` with 0, 1, 2 | rows, blobs as given |
+| the same with 3; with `0x10001`; with `-1`; with an empty blob; the prolog `FF FF`; a bare prolog; one value byte | AE, no row (`0x10001`: the high half is read as a named-argument count of 1, whose tag 0 is neither field nor property) |
+| the same with six bytes (`01 00 01 00 00 00`, no count after the enum); with a named argument after the enum (`... 01 00 54 08 03 Foo 01 00 00 00`) | rows, blobs as given: the enum's high half is a count of 0, so nothing after it is read. Reading them back throws `CustomAttributeFormatException` |
+| `ClassInterface` on the assembly | the same outcomes, rows on the assembly |
+| `ClassInterface` on a method, a parameter, a field, the module | AE for every blob |
+| `ClassInterface(short)` 1; 3; `0x7FFF` | a row; AE; AE |
+| `InterfaceType(ComInterfaceType)` 0, 3; 4, `0x10002` | rows; AE. On the assembly: AE. `InterfaceType(short)` 1; 4: a row; AE |
+| `Guid` "01234567-89ab-cdef-0123-456789abcdef"; braced; four characters; a non-hex digit; no dashes (36 characters); a null string; an empty blob | a row on the type, the module and the assembly, AE on a method and a parameter; AE for every other blob |
+| `TypeLibVersion` (1, 2); (-1, 0); a truncated blob | a row on the assembly; AE; AE. On a type: AE |
+| `ComCompatibleVersion` (1, 2, 3, 4); (0, 0, 0, -1) | a row on the assembly; AE. On a type: AE |
+| `AllowPartiallyTrustedCallers` with `01 00 00 00`, `FF FF`, an empty blob | three rows on the assembly, blobs as given (no arguments, so no parse); AE on a type and on the module |
+| `Dup`: `Serializable` twice; `Out` twice and `In` on one parameter defined with `None`; `ClassInterface(AutoDispatch)` twice | type 0x00002001; the parameter's row 0x0003, its builder's `Attributes` still 0; two `ClassInterface` rows, both read back |
+| `Order`: `Tag` a, `Serializable`, `Tag` b, `Serializable` on a method (AE), `Tag` c, `Optional`, `ClassInterface(None)`, `ClassInterface(short) 9` (AE), `Tag` d | rows `0x0C000001` to `0x0C000005`: a, b, c, the `ClassInterface`, d. No refusal and no flag consumes a token |
+| `GenParam`: `Serializable`, `Out`, `ClassInterface` on a type's generic parameter | `SetCustomAttribute` accepted (queued, 5y); `CreateType` throws AE when it bakes the queue; `IsCreated()` false; a second `CreateType` throws AE again |
+| `Castle`: a proxy over `object` given `object`'s non-inheritable attributes through `CustomAttributeData` and `CustomAttributeBuilder` | flags 0x00002001; rows for `NullableContext`, `ClassInterface`, `ComVisible`, `TypeForwardedFrom`; `GetCustomAttributesData` lists the five as `object`'s does |
+| `Impostor`: the module's own `System.Runtime.InteropServices.OutAttribute`, through its `ConstructorBuilder`, on a parameter | the parameter's flags 0x0002, no row: the name decides (5y's classifier) |
+
+Under PawPrint on `main`, the probe stops at the first pseudo-attribute of each scenario (`5z/probe/pawprint-main-*.log`,
+run with `--noraw`: the raw reader is a skip-visibility `DynamicMethod`, whose `CreateDelegate` reaches
+`ReflectionInvocation_CompileMethod`).
+
+**What 5z must change in PawPrint.** Cited at `main` 3c8287d77.
+
+* `WoofWare.PawPrint.Domain/EmitScopeDefinitions.fs`: `KnownCustomAttribute` (`:44-121`, twenty cases with their names)
+  carries no target list, arguments or effect. `CustomAttributeDefinition` (`:149-156`) has `Defined` and
+  `NotStoredAsGiven` only. `defineCustomAttribute` (`:831-855`) answers `NotStoredAsGiven` for every known name.
+  `classifyCustomAttribute` (`:772-829`) stands.
+* `WoofWare.PawPrint.Domain/EmitScope.fs`: the rows with a flags column are `TypeDefRow` (`:339`), `FieldRow`
+  (`:348`), `MethodDefRow` (`:358`, and its `ImplFlags`), `ParamRow` (`:371`), `PropertyRow` (`:442`) and `EventRow`
+  (`:453`). Only `setMethodImplFlags` (`:961`) and `setTypeDefExtends` (`:1010`) change a column of an existing row.
+* `WoofWare.PawPrint.Loader/EmitScopeExtension.fs`: `methodsRewritten` (`:104-133`) admits a changed `ImplFlags` and
+  body, and `typeDefsRewritten` (`:135-160`) a changed `Extends`, for a type not created. Every other changed row is
+  `RowChanged`, so a flag ORed into a Field, Param, Property or Event row, or into a TypeDef's or MethodDef's `Flags`,
+  is refused by `WithEmitScope` today.
+* `WoofWare.PawPrint/Native/NativeRuntimeTypeBuilder.fs`: the handler (`:812-924`) stops with the TODO on
+  `NotStoredAsGiven` (`:879-896`), after the created-owner TODO (`:871-876`). A native handler raises a guest exception
+  by returning `NativeHandlerResult.RaiseException` (`IlMachineStateModel.fs:645`).
+* Readers: none expected. Under the throwaway every flag and kept row read back as on real .NET, through CoreLib's own
+  `PseudoCustomAttribute` and `MetadataImport` (`5z/consumers/t3i-nsub-type.log`, `t1-castle-out.log`).
+* Tests: `TestEmitScopeCustomAttributes.fs` (the classifier, the model, the two differential properties),
+  `TestEmitScopeExtension.fs`, `TestTypeBuilderCustomAttributeRefusals.fs` (one of its four guests applies a
+  pseudo-attribute and expects the TODO), and the parked `sourcesImpure/TypeBuilderPseudoCustomAttributes.cs`, whose
+  calls are, in order, `Serializable`, `SpecialName` and `SuppressUnmanagedCodeSecurity` on a type, then the rest of
+  5y's table.
+
+**Why not the other candidates.** None of them is reached by any consumer above. `SetConstant` is reached only after
+`Optional`, for the same parameter (measured with the throwaway: Castle applies a parameter's attributes before its
+default value). The 25-row rule (#2258) is a wrong answer, not a stop, for two attributes of one name on one owner read
+by name inside the VM; every throwaway run above that finished printed what real .NET prints. The interface access
+check for `DispatchProxy` is a permissive answer, not a stop. `DynamicInterfaceCastableImplementationAttribute`, nested
+dynamic types, `TypeInfo.Events` and `<Module>` were not reached: no run stopped at the NestedClass TODO or at
+`TypeBuilder_TermCreateClass`'s refusal for `<Module>`.
+
+### 5z: the options
+
+Every option keeps 5y's classifier and its created-owner TODO ahead of it, and adds to the handler's
+`NotStoredAsGiven` branch. They differ in which names are modelled, where a flag lives, how the emitter's rules are
+stated, and what a refusal does.
+
+1. **Which names 5z models.**
+   * (A) The five measured: `Serializable`, `In`, `Out`, `Optional`, `ClassInterface`. Smallest; every other name keeps
+     the TODO. But the code then distinguishes names that CoreCLR handles by one rule, and each of the other eight
+     row-local names becomes a stage of its own later. A wrong choice spreads to nothing but those names; reversible by
+     adding rows.
+   * (B) Every name whose effect stays in its owner's row and touches no execution semantics: `Serializable`,
+     `NonSerialized`, `SpecialName`, `In`, `Out`, `Optional`, `PreserveSig`, and the six that are validated and kept
+     (`ClassInterface`, `InterfaceType`, `Guid`, `TypeLibVersion`, `ComCompatibleVersion`,
+     `AllowPartiallyTrustedCallers`). Each is a row of the table above, all measured here on every owner kind. Left out:
+     `ComImport` (measured: the type loader refuses a class with a method body), `WindowsRuntimeImport` (not
+     measured), `MethodImpl` (`Synchronized`, `NoInlining`, `InternalCall` and the code type change how a method runs),
+     the two security names (5y's uninitialised comparison, to be measured on Linux x64), and the four that write other
+     tables.
+   * (C) (B) and `ComImport`, `WindowsRuntimeImport` and `MethodImpl`. Each needs an oracle of its effect beyond
+     metadata: the type loader's import rule, WinRT refusal, and the method flags' meaning to the interpreter.
+   * Recommended: (B). The cost over (A) is eight rows of a table and their tests, measured already, and the stage's
+     structure is the same; (C) adds three features with their own oracles.
+2. **Whether 5z includes `SetConstant`.** (a) No: `SetConstant` (the Constant table, `HasDefault`, a value blob per
+   element type, three owner kinds) is the next stage, planned from Castle's default values (recommended: it shares
+   no code with the pseudo-attributes, and 5z alone unblocks NSubstitute's and FakeItEasy's every substitute and
+   Castle's `in` and `out` parameters). (b) Yes, because Castle's default-valued parameters need both: one larger PR
+   with two features, against the plan's rule of one feature per stage.
+3. **Where a flag lives.**
+   * (A) In the owner's row: a Domain function ORs the bit into the row's flags column at the call, as `AddFlags`
+     does. The image needs no change, and the extension rule must admit the change (question 4).
+     * Information: exactly what CoreCLR keeps, which is the flag and no record of the attribute (measured: no row;
+       reflection synthesises the attribute from the flag).
+     * Blast radius if wrong: one column of six row types; a wrong bit shows in the matrix guest at once.
+   * (D) In a new append-only table of pseudo-attribute applications (owner, attribute), the writer ORing each into
+     its owner's row. No row of the scope changes, so the extension rule needs nothing. But the scope then holds
+     something CoreCLR's `CMiniMdRW` does not, every reader of a row's flags in the scope (the terminal-state checks,
+     `typeOfCustomAttributeOwner`'s callers) must consult the table, and the writer's output for a row depends on two
+     tables.
+   * (E) Accept a flag attribute only when its bit is already in the row, and keep the TODO otherwise. Every measured
+     consumer is in that case (Castle defines its rows with the bits already set), so this unblocks them with no change
+     to any row or to the extension rule. But it refuses what real .NET does without fault (the `Dup` and `Blobs`
+     rows apply `Out` and `Optional` to parameters defined with `None`), and the classifier's answer would then depend
+     on the row, which is a partial model to be replaced later.
+   * Recommended: (A). It is the structure every other filled-in column follows (3c's `ImplFlags`, 4b's `Extends`).
+4. **The extension rule, under 3(A).**
+   * (a) A flags column of a TypeDef, MethodDef, Field, Param, Property or Event row whose type is not created may
+     gain bits: the old value is a subset of the new. Gaining bits on a created type's row is `FilledInCreatedType`;
+     losing a bit is `RowChanged`. The pseudo-attributes only ever OR, so this is the rule they need and nothing wider.
+   * (b) Rows of a type not created are not compared at all. Simpler, but it stops the rule from catching a fault that
+     rewrites such a row in any other way, which today it catches.
+   * Recommended: (a). (`typeOfCustomAttributeOwner` gives each row's type; a Param's is its method's owner.)
+5. **How the emitter's rules are stated.**
+   * (A) As data in Domain: each case of `KnownCustomAttribute` gets CoreCLR's `KnownCaProp` (target tables, declared
+     constructor arguments, whether the row is kept) and an effect (`SetsFlag` per owner table, `Validates` a rule over
+     the parsed arguments, or `Unmodelled` for the names left out), and one function interprets it.
+     `defineCustomAttribute` answers a new `CustomAttributeDefinition` case for a flag (the extended scope), `Defined`
+     for a kept row, a new `Refused` case for a wrong target or a bad value, and `NotStoredAsGiven` for an unmodelled
+     name. The table can be compared with CoreCLR's line by line, and a later stage adds an effect, not a code path.
+   * (B) One match arm per name in `defineCustomAttribute`, each with its own target check and parse. Fewer types,
+     but thirteen arms that each restate the target check, and nothing for a test to enumerate.
+   * Recommended: (A). Whatever the choice, the target tables of the seven unmodelled names are data too, so that a
+     later stage does not re-derive them.
+6. **The blob grammar of the six kept names.**
+   * (a) CoreCLR's parser exactly: the prolog, each declared argument by its declared type (a U2 for the two
+     enum-typed constructors), then, if bytes remain, a two-byte count read as 0 when it cannot be read, and failure
+     for any named argument. A pure function over the bytes, in Domain.
+   * (b) Decode the blob by the attribute constructor's own signature (ECMA-335 II.23.3), then apply the value rule.
+     Rejected: measured divergent: `0x10001` and the six-byte blob would be decided the other way.
+   * Recommended: (a). An attribute without arguments (`AllowPartiallyTrustedCallers`, and every flag attribute) is
+     never parsed, which (a) states by the descriptor having no arguments.
+7. **A refusal: a wrong target, a bad value, or any known attribute on a generic parameter.**
+   * (a) Raise `ArgumentException` in the guest, message "Invalid custom attribute provided.", no parameter name, as
+     `TypeBuilder_DefineCustomAttribute` does, with no row and no token consumed (measured on both runtimes). A generic
+     parameter's attribute reaches the QCall when `CreateType` bakes it, so `CreateType` throws and the type stays
+     uncreated (measured), which CoreLib's managed code does unchanged.
+   * (b) Keep the TODO for refusals and model only the accepted calls. Smaller, but a guest's `catch` of a measured
+     exception is then a stop.
+   * Recommended: (a), for the thirteen names only. An unmodelled name keeps the TODO whatever its target, so that a
+     refusal of an unmodelled name is not answered from a target list that no guest has checked.
+8. **A pseudo-attribute on a created type or a member of one.** (a) 5y's created-owner TODO stays ahead of the
+   classifier, so it is refused before any flag is set (recommended: real .NET writes the flag and some readers show it
+   and some do not, measured by 5y; that is a model of reflection's caches, not of the emitter). (b) Model it: a later
+   stage with its own oracle.
+9. **The stops outside this plan.** Each is its own PR against `main`, outside this plan.
+   * The invoke stub of a one-argument method: NSubstitute's next stop after 5z, and Castle's first over a
+     nullable-annotated interface or an interface with an event. (a) Before 5z (recommended: it is independent, it is
+     reproduced without emit by `5z/stubrepro`, and 5z's guest wants to read an `AttributeUsageAttribute` more than
+     once, which reaches it). (b) After 5z; 5z's guest then avoids the second read.
+   * `ReflectionInvocation_CompileMethod` (Moq's `Setup`; `CreateDelegate` of any skip-visibility `DynamicMethod`,
+     `DynamicMethod.CoreCLR.cs:47-55`), `AssemblyNative_GetExportedTypes` and
+     `RuntimeTypeHandle_VerifyInterfaceIsImplemented` (FakeItEasy), and `XmlSerializer`'s `InternalLoad`: each when its
+     consumer is next in line.
+10. **The guests' consumer shapes.** (a) The main guest includes an NSubstitute-shaped proxy (a type over `object`
+    given `object`'s non-inheritable attributes through `CustomAttributeData` and `CustomAttributeBuilder`) and a
+    Castle-shaped copy of an interface method's `in`, `out` and optional parameters, each once with the bits already in
+    the row (the consumers' case) and once without (recommended: the consumers cannot be guests, and the second case is
+    the one that changes a row). (b) The guest tests the attributes alone.
+11. **The parked `TypeBuilderPseudoCustomAttributes.cs`.** (a) It stays parked, its ending measured again; under (B)
+    it moves from `Serializable` to `SuppressUnmanagedCodeSecurity`, its third call (recommended: the 5z guests cover
+    the modelled names, and the parked guest keeps pinning the rest). (b) Split it, moving its modelled checks into
+    the 5z guests and leaving the rest parked: tidier, but it edits a measured guest for no new coverage.
+12. **The split.** (a) One PR: the table and its interpreter, the parser, the six flag-setting functions, the extension
+    rule, the handler's two new outcomes (a flag set, a refusal raised), and their tests (recommended: none of these
+    does anything without the handler, and 5y's PR was larger). (b) Domain first (the table, the parser, the extension
+    rule, with their tests), then the handler.
+
+### 5z: the oracle
+
+Written first, and seen to fail before the handler changes, at the pseudo-attribute TODO.
+
+* **The guests**, in `sourcesImpure`, `IsDynamicCodeSupported` on, registered in `TestImpureCases.fs`, each returning
+  the number of its first failing check:
+  * `TypeBuilderPseudoAttributeFlags.cs`, the probe's flag scenarios without the raw reads:
+    * `Matrix`: each modelled flag attribute on each of the ten owner kinds, accepted with its flag or refused with the
+      AE (type, message, null `ParamName`); after `CreateType`, each owner's flags, the synthesised attributes of the
+      type and the parameter, an instance created and `M` invoked.
+    * `Blobs`: the six blobs on a type, a parameter and a return parameter, each accepted with its flag; on a method,
+      each refused.
+    * `Dup` and `Order` as measured, the order checked through `GetCustomAttributesData`.
+    * `GenParam`: `Serializable` on a type's generic parameter; `CreateType` throws the AE and `IsCreated()` is false.
+      No retry (below).
+    * The consumer shapes of question 10, and `Impostor`.
+    * Its terminal-state check reads the scope of `Matrix`'s and `Order`'s modules: each owner row's flags column, and
+      every CustomAttribute row in RID order. That is the only check that no token is consumed and that the flag is in
+      the scope's row rather than synthesised somewhere else.
+  * `TypeBuilderValidatedPseudoAttributes.cs`: the `Kept` rows for the six kept names on each owner kind, accepted or
+    refused as measured, `0x10001` and the six-byte blob included. The well-formed rows are read back through
+    `GetCustomAttributesData` and `GetCustomAttributes` (no named arguments, so no setter is invoked); the two that
+    real .NET stores but cannot read back are checked only by the terminal-state check, which reads each kept row's
+    owner, constructor and blob.
+  * Each is built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 before it is committed, with
+    a control that must exit with that check's number on both: in the flag guest, `Out` on the return parameter
+    expected refused; in the kept guest, `0x10001` expected accepted (so that the control exercises the parser's
+    misreading). Under PawPrint each runs with `PAWPRINT_TEST_RUNTIME` unset and with `Net11`.
+  * Neither guest reads an `AttributeUsageAttribute` twice under emitted invoke stubs unless the stub defect of
+    question 9 is fixed first.
+* **The parked guest** `TypeBuilderPseudoCustomAttributes.cs`: its ending is measured again and its reason updated
+  (question 11).
+* **The refusal fixture** (`TestTypeBuilderCustomAttributeRefusals`): its pseudo-attribute guest is changed to an
+  unmodelled name (`ComImport` on a type), which must still stop with the TODO, and one guest is added for
+  `MethodImpl` on a field, a wrong target, which must stop with the TODO too rather than raise.
+* **Domain**, in `TestEmitScopeCustomAttributes` or a sibling:
+  * The table against CoreCLR's, as a fixed test: each of the twenty names' targets, declared arguments and keep flag,
+    transcribed from `custattr_emit.cpp` with line numbers, so that a transcription error is a reviewable diff.
+  * `defineCustomAttribute` for known names against a model, over generated calls: owners of all nine kinds with
+    arbitrary initial flags, names from all twenty, blobs from the measured set and random bytes. A flag call gives the
+    scope with exactly that bit ORed into that row and nothing else changed; a kept call appends one row at the next
+    RID; a refusal and an unmodelled name leave the scope unchanged.
+  * The parser against a model of `CustomAttributeParser`, and against the probe's measured blobs as a fixed table.
+  * `TestEmitScopeExtension`: a flags column gaining bits on a type not created is admitted, on a created type is
+    `FilledInCreatedType`; losing a bit is `RowChanged`; the generated property draws flag changes and stays green.
+* **Differential properties against the host's emitter**, in process, as 5y's are:
+  * **Flags.** A generated schedule over a few types with members: each owner defined with arbitrary valid flags, then
+    modelled flag attributes applied with blobs drawn from the measured set and random bytes. On the host, whether each
+    call threw, and each owner's flags read from the created type's reflection objects; through `defineCustomAttribute`
+    and the image, the same. Coverage asserted: each name on each of its targets and on a wrong one, a bit already set,
+    a bit not set, a return parameter.
+  * **Validation.** For the six kept names, blobs generated around the grammar (prolog right and wrong; each declared
+    argument at, below and above its bound; four-byte enums whose high half is 0, 1 and other; trailing bytes; a
+    truncated tail), on each owner kind. On the host, whether a row was written and its blob, read raw through CoreLib's
+    internal `MetadataImport`; in Domain, `Defined` with the same blob or `Refused`. Coverage asserted: each name
+    accepted and refused, the named-count misreading in both directions, a bad prolog, an empty blob.
+* **Mutants**, each built fresh after the work is committed, and recorded with what killed each:
+  * a flag bit wrong: `Serializable` as `tdImport`; `In` and `Out` swapped; `SpecialName` on a field as the type's bit
+    (the matrix guest; the flags differential);
+  * a target list too wide (`Serializable` accepted on a method) or too narrow (`Out` refused on the return parameter)
+    (the matrix guest; the table test);
+  * a flag attribute's blob parsed (the `Blobs` module; the flags differential);
+  * a kept attribute stored without validation (`ClassInterface` 3 accepted) (the kept guest; the validation
+    differential);
+  * the enum-typed argument read as an I4 (`0x10001` accepted, the named argument refused) (the kept guest; the
+    validation differential);
+  * a missing named-argument count refused (the six-byte blob) (the kept guest; the parser's table);
+  * a kept row not appended, or appended twice (the kept guest's terminal-state check; the Domain model);
+  * a token consumed by a flag or by a refusal (the `Order` terminal-state check; the Domain model);
+  * the refusal raised with a parameter name, or as another exception type (the matrix guest);
+  * the extension rule admitting a lost bit, or a gained bit on a created type (`TestEmitScopeExtension` alone, since
+    the handler stops first for a created owner);
+  * the created-owner TODO moved after the flag is set (the refusal fixture: `WithEmitScope` then fails on another
+    message);
+  * a generic parameter's attribute stopped with the TODO instead of raising (the `GenParam` module);
+  * an unmodelled name given a target check (the refusal fixture's `MethodImpl` guest).
+* At the tip, the default suite and the four Guest suites, each as its own invocation, built from the whole solution.
+
+### 5z: left to later stages
+
+* `SetConstant` (`TypeBuilder_SetConstantValue`), Castle's next stop for a parameter with a default value (measured for
+  `int`, `CancellationToken`, an enum and `int?`), with the Constant table that enums, literal fields and properties
+  want too, and 5t's question whether a second `SetConstant` adds a row or overwrites one: `_DefineSetConstant`
+  (`md/compiler/regmeta_emit.cpp:1463`) searches for the owner's row when `IsCallerExternal()`, which a
+  `TypeBuilder_SetConstantValue` call is (read, not measured). `TypeBuilder_SetConstantValue` passes
+  `mdMethodDefNil` as a property's getter and setter to `SetPropertyProps`, which `_SetPropertyProps` hands to
+  `_DefineMethodSemantics` with `bClear` (read, not measured): whether `PropertyBuilder.SetConstant` after
+  `SetGetMethod` clears the getter is that stage's first measurement.
+* The one-argument invoke stub (`5z/stubrepro`), and `ReflectionInvocation_CompileMethod`,
+  `AssemblyNative_GetExportedTypes`, `RuntimeTypeHandle_VerifyInterfaceIsImplemented`, outside this plan (question 9).
+* `ComImport` with the type loader's rule for an import class, `WindowsRuntimeImport`, `MethodImpl`, the two security
+  names, and the four attributes that write other tables, each with its table's stage.
+* A pseudo-attribute on a created type or a member of one (question 8).
+* `CreateType` retried after a generic parameter's attribute was refused: `CreateTypeNoLock` defines the generic
+  parameter again (`RuntimeTypeBuilder.cs:1535-1544`; `m_hasBeenCreated` is set only after the bake), so real .NET
+  writes a second GenericParam row; measured only that the second call throws the AE again.
+* `Type.GUID` of a dynamic type with a `[Guid]` row, which the VM reads from metadata (`MethodTable::GetGuid`,
+  vm/methodtable.cpp:6256, through `GetItemGuid`), not through reflection's readers. Not measured under PawPrint.
+* 5y's list stands: the 25-row rule (#2258), rows on created owners, the read-side stops, the access check for
+  `DispatchProxy`, `DynamicInterfaceCastableImplementationAttribute`, and 5x's list (`XmlSerializer`, nested dynamic
+  types, `TypeInfo.Events`, `<Module>` and `CreateGlobalFunctions`, the step budget for
+  `TypeBuilderDefineParameterWide.cs`).
