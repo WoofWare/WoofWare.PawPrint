@@ -1285,3 +1285,37 @@ Each stage is one pull request, with its tests first.
     whose exceptions escape at the site, rather than the opaque thunk. Depends on stage 4a alone
     for the data, and on stage 4f for the classification being final; its oracle is
     `TestEscapeAnalysis`, whose fixture needs runtime-async methods of its own (see "Test guests").
+
+    Decided on 2026-11-15: a method key names its variant (`MethodKey.Variant`, the `MethodVariant`
+    of the `MethodDesc` it is), rather than keeping the key a row and keying the variants' facts
+    apart, so that a fact's place, an opaque site's among them, says which of a row's two methods
+    it is in; and the fixture's runtime-async methods are hand-emitted IL, as the test project's
+    Roslyn cannot compile them. The stage is two changes:
+
+    * **(4h-1)** The variant's identity, and the awaits of a runtime-async method's own body. As
+      built:
+      * `MethodKey.make` names the ordinary variant, and `MethodKey.ofMethod` whichever variant a
+        method is; the analysis makes an async variant's key only from what
+        `RuntimeAsyncMethod.asyncVariantOf` made, and `EscapeAnalysis.asyncVariant` makes one for a
+        caller. A variant runs its row's runtime-async IL, or is a name to dispatch on; an async
+        version's is opaque (`Opacity.AsyncVersion`) until 4h-2. Dispatch keys what it reaches by
+        the variant the type system resolves (decision 19), and does nothing else differently.
+      * In the variant of a runtime-async method, a call the JIT reads as the start of an await
+        (`AwaitPattern.awaitAfter`, its operands confirmed as `ConfigureAwait` and
+        `AsyncHelpers.Await`, as the interpreter confirms them) is classified by
+        `AwaitSiteBinding.classify`. Where it binds, the call's site names the variant, and the
+        instructions after it up to and including the await's call contribute nothing; their
+        tokens still bind, as the JIT resolves all three. The value the pattern leaves is still
+        typed as the await's result, which the analysis knows only by its declared type. A matched
+        await in a frame of runtime async's machinery is refused by name, as the interpreter
+        refuses it.
+      * `TestEscapeAnalysis` emits `Awaits`, whose runtime-async methods await one another: an
+        await, with and without `ConfigureAwait`, of a method throwing what an ordinary control
+        method throws gives the control's answer; one in a `try` is caught there; a `callvirt` on an
+        exact receiver reaches the override's variant; a `constrained.` call on a value type
+        reaches its own implementation's; an await of an async version is opaque; and a call
+        outside a pattern, or in a method without the calling convention, binds the thunk. Three
+        mutants (the swallowed instructions not skipped, a range one short, an unrecognised
+        `ConfigureAwait`) fail it.
+    * **(4h-2)** Async versions: a call in a tail shape calls its callee's variant, and any other
+      `ret` awaits the promise it returns through `AsyncHelpers.TransparentAwait`.

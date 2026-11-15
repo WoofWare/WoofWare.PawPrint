@@ -151,6 +151,14 @@ method) may add more:
   them, name a type that is not there, one naming a method whose own body has a local of such a
   type, and one naming a method whose signature names a type that does not load. An instantiation nested more than eight deep is analysed as its definition, so that a
   method calling itself at ever deeper instantiations reaches finitely many;
+* a call of a runtime-async method returning a promise type binds its ordinary variant, the
+  task-returning thunk CoreCLR's VM emits in its place, which is opaque. In such a method's own body,
+  an await the JIT matches (the call, perhaps a `ConfigureAwait`, then `AsyncHelpers.Await`) calls
+  the awaited method's async variant instead, where the interpreter's `AwaitSiteBinding.classify`
+  binds one, through dispatch or a `constrained.` prefix as for any call: what escapes the variant's
+  body escapes at the call, and the instructions the pattern swallows do nothing.
+  `EscapeAnalysis.asyncVariant` names a method's variant, to ask about it by itself. The variant of a
+  method with ordinary IL, an async version, is opaque;
 * a `catch` absorbs what derives from its type, decided on the real base chains of types in any
   assembly, which `WoofWare.PawPrint.Loader` resolves exactly as the interpreter does;
 * an object thrown that is not an exception is named as itself; a `catch` sees it as a
