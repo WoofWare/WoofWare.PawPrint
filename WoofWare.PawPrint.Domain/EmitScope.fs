@@ -176,6 +176,17 @@ type EventRid =
         match this with
         | EventRid rid -> rid
 
+/// The RID of an emit scope's `CustomAttribute` row: its token, in the order the attributes were defined, whatever
+/// their owners.
+[<Struct>]
+type CustomAttributeRid =
+    internal
+    | CustomAttributeRid of int
+
+    member this.Rid : int =
+        match this with
+        | CustomAttributeRid rid -> rid
+
 /// ECMA-335 II.24.2.6's `ResolutionScope` coded index, for the targets an emit scope can hold.
 [<RequireQualifiedAccess>]
 type ResolutionScope =
@@ -234,6 +245,47 @@ type HasSemantics =
         match this with
         | HasSemantics.Event rid -> (rid.Rid <<< 1) ||| 0
         | HasSemantics.Property rid -> (rid.Rid <<< 1) ||| 1
+
+/// ECMA-335 II.24.2.6's `HasCustomAttribute` coded index, for the owners a dynamic module's builders hand out.
+[<RequireQualifiedAccess>]
+type HasCustomAttribute =
+    /// The assembly: the `Assembly` table's one row, whose token is `0x20000001`.
+    | Assembly
+    /// The module: the `Module` table's one row, which the managed caller names with the token `0x00000001`.
+    | Module
+    | TypeDef of TypeDefRid
+    | MethodDef of MethodDefRid
+    | Field of FieldRid
+    | Param of ParamRid
+    | Property of PropertyRid
+    | Event of EventRid
+    | GenericParam of GenericParamRid
+
+    /// The coded index: the RID shifted left five bits, tagged as ECMA-335 II.24.2.6 tags this owner's table.
+    member this.CodedIndex : int =
+        match this with
+        | HasCustomAttribute.MethodDef rid -> (rid.Rid <<< 5) ||| 0
+        | HasCustomAttribute.Field rid -> (rid.Rid <<< 5) ||| 1
+        | HasCustomAttribute.TypeDef rid -> (rid.Rid <<< 5) ||| 3
+        | HasCustomAttribute.Param rid -> (rid.Rid <<< 5) ||| 4
+        | HasCustomAttribute.Module -> (1 <<< 5) ||| 7
+        | HasCustomAttribute.Property rid -> (rid.Rid <<< 5) ||| 9
+        | HasCustomAttribute.Event rid -> (rid.Rid <<< 5) ||| 10
+        | HasCustomAttribute.Assembly -> (1 <<< 5) ||| 14
+        | HasCustomAttribute.GenericParam rid -> (rid.Rid <<< 5) ||| 19
+
+    /// The owner's metadata token.
+    member this.Token : int =
+        match this with
+        | HasCustomAttribute.Assembly -> 0x20000001
+        | HasCustomAttribute.Module -> 0x00000001
+        | HasCustomAttribute.TypeDef rid -> 0x02000000 ||| rid.Rid
+        | HasCustomAttribute.MethodDef rid -> 0x06000000 ||| rid.Rid
+        | HasCustomAttribute.Field rid -> 0x04000000 ||| rid.Rid
+        | HasCustomAttribute.Param rid -> 0x08000000 ||| rid.Rid
+        | HasCustomAttribute.Property rid -> 0x17000000 ||| rid.Rid
+        | HasCustomAttribute.Event rid -> 0x14000000 ||| rid.Rid
+        | HasCustomAttribute.GenericParam rid -> 0x2A000000 ||| rid.Rid
 
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
 type MetadataVersion =
@@ -417,6 +469,14 @@ type MethodSemanticsRow =
         Association : HasSemantics
     }
 
+/// A `CustomAttribute` row (ECMA-335 II.22.10). The blob is stored as given, whether or not it parses.
+type CustomAttributeRow =
+    {
+        Parent : HasCustomAttribute
+        Constructor : MethodDefOrRef
+        Value : BlobOffset
+    }
+
 type private ByteContentComparer () =
     interface IEqualityComparer<ImmutableArray<byte>> with
         member _.Equals (x : ImmutableArray<byte>, y : ImmutableArray<byte>) : bool =
@@ -469,6 +529,7 @@ type EmitScope =
             Properties : ImmutableList<PropertyRow>
             MethodSemantics : ImmutableList<MethodSemanticsRow>
             Events : ImmutableList<EventRow>
+            CustomAttributes : ImmutableList<CustomAttributeRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -516,6 +577,25 @@ module EmitScope =
         match target with
         | MethodDefOrRef.MethodDef rid -> requireRid operation "MethodDef" scope.MethodDefs.Count rid.Rid
         | MethodDefOrRef.MemberRef rid -> requireRid operation "MemberRef" scope.MemberRefs.Count rid.Rid
+
+    let private requireCustomAttributeOwner
+        (operation : string)
+        (scope : EmitScope)
+        (owner : HasCustomAttribute)
+        : unit
+        =
+        match owner with
+        | HasCustomAttribute.Assembly ->
+            if scope.Assembly.IsNone then
+                invalidArg (nameof owner) $"%s{operation}: this scope has no Assembly row to own an attribute"
+        | HasCustomAttribute.Module -> ()
+        | HasCustomAttribute.TypeDef rid -> requireRid operation "TypeDef" scope.TypeDefs.Count rid.Rid
+        | HasCustomAttribute.MethodDef rid -> requireRid operation "MethodDef" scope.MethodDefs.Count rid.Rid
+        | HasCustomAttribute.Field rid -> requireRid operation "Field" scope.Fields.Count rid.Rid
+        | HasCustomAttribute.Param rid -> requireRid operation "Param" scope.Params.Count rid.Rid
+        | HasCustomAttribute.Property rid -> requireRid operation "Property" scope.Properties.Count rid.Rid
+        | HasCustomAttribute.Event rid -> requireRid operation "Event" scope.Events.Count rid.Rid
+        | HasCustomAttribute.GenericParam rid -> requireRid operation "GenericParam" scope.GenericParams.Count rid.Rid
 
     /// The string at an offset this scope handed out.
     let stringAt (offset : StringOffset) (scope : EmitScope) : string =
@@ -631,6 +711,34 @@ module EmitScope =
         else
             None
 
+    /// The `Field` row with this RID, if the scope has one.
+    let tryFieldRid (rid : int) (scope : EmitScope) : FieldRid option =
+        if rid >= 1 && rid <= scope.Fields.Count then
+            Some (FieldRid rid)
+        else
+            None
+
+    /// The `Param` row with this RID, if the scope has one.
+    let tryParamRid (rid : int) (scope : EmitScope) : ParamRid option =
+        if rid >= 1 && rid <= scope.Params.Count then
+            Some (ParamRid rid)
+        else
+            None
+
+    /// The `GenericParam` row with this RID, if the scope has one.
+    let tryGenericParamRid (rid : int) (scope : EmitScope) : GenericParamRid option =
+        if rid >= 1 && rid <= scope.GenericParams.Count then
+            Some (GenericParamRid rid)
+        else
+            None
+
+    /// The `CustomAttribute` row with this RID, if the scope has one.
+    let tryCustomAttributeRid (rid : int) (scope : EmitScope) : CustomAttributeRid option =
+        if rid >= 1 && rid <= scope.CustomAttributes.Count then
+            Some (CustomAttributeRid rid)
+        else
+            None
+
     /// The offset `internString` would return for `value` if the heap already holds what CoreCLR's
     /// emitter stores for it, without adding it.
     let tryStringOffset (value : string) (scope : EmitScope) : StringOffset option =
@@ -732,6 +840,7 @@ module EmitScope =
                 Properties = ImmutableList.Empty
                 MethodSemantics = ImmutableList.Empty
                 Events = ImmutableList.Empty
+                CustomAttributes = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -1113,6 +1222,47 @@ module EmitScope =
             Events = scope.Events.Add row
         }
 
+    /// <summary>
+    /// Add a <c>CustomAttribute</c> row, at the next RID, which is the token CoreCLR hands out for it, whatever owns
+    /// the rows before it. This does not model <c>RegMeta::DefineCustomAttribute</c>;
+    /// <c>EmitScopeDefinitions.defineCustomAttribute</c> does.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner, the constructor or the blob.</exception>
+    let addCustomAttribute (row : CustomAttributeRow) (scope : EmitScope) : CustomAttributeRid * EmitScope =
+        let operation = "EmitScope.addCustomAttribute"
+        requireCustomAttributeOwner operation scope row.Parent
+        requireMethodDefOrRef operation scope row.Constructor
+        requireBlob operation scope row.Value
+
+        CustomAttributeRid (scope.CustomAttributes.Count + 1),
+        { scope with
+            CustomAttributes = scope.CustomAttributes.Add row
+        }
+
+    /// <summary>
+    /// The type a <c>CustomAttribute</c> row's owner belongs to: a type itself; the type that declares a method,
+    /// field, property or event; the type of a parameter's method; the type, or the type of the method, that owns a
+    /// generic parameter. <c>None</c> for the assembly and the module.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner.</exception>
+    let typeOfCustomAttributeOwner (owner : HasCustomAttribute) (scope : EmitScope) : TypeDefRid option =
+        requireCustomAttributeOwner "EmitScope.typeOfCustomAttributeOwner" scope owner
+        let methodOwner (method : MethodDefRid) : TypeDefRid = scope.MethodDefs.[method.Rid - 1].Owner
+
+        match owner with
+        | HasCustomAttribute.Assembly
+        | HasCustomAttribute.Module -> None
+        | HasCustomAttribute.TypeDef rid -> Some rid
+        | HasCustomAttribute.MethodDef rid -> Some (methodOwner rid)
+        | HasCustomAttribute.Field rid -> Some scope.Fields.[rid.Rid - 1].Owner
+        | HasCustomAttribute.Param rid -> Some (methodOwner scope.Params.[rid.Rid - 1].Owner)
+        | HasCustomAttribute.Property rid -> Some scope.Properties.[rid.Rid - 1].Owner
+        | HasCustomAttribute.Event rid -> Some scope.Events.[rid.Rid - 1].Owner
+        | HasCustomAttribute.GenericParam rid ->
+            match scope.GenericParams.[rid.Rid - 1].Owner with
+            | TypeOrMethodDef.TypeDef typeDef -> Some typeDef
+            | TypeOrMethodDef.MethodDef method -> Some (methodOwner method)
+
     let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
         let operation = "EmitScope.addMethodSpec"
         requireMethodDefOrRef operation scope row.Method
@@ -1172,6 +1322,38 @@ module EmitScope =
     /// In the order they were added, which is not the image's: the image sorts them by association.
     let methodSemantics (scope : EmitScope) : ImmutableList<MethodSemanticsRow> = scope.MethodSemantics
 
+    /// In RID order, which is the order they were defined, whatever their owners.
+    let customAttributes (scope : EmitScope) : ImmutableList<CustomAttributeRow> = scope.CustomAttributes
+
     /// In RID order, which is definition order across the module; the image lists each type's events
     /// through an `EventPtr` when they are not already grouped.
     let events (scope : EmitScope) : ImmutableList<EventRow> = scope.Events
+
+/// Reading a `HasCustomAttribute` from the token a managed caller passes.
+[<RequireQualifiedAccess>]
+module HasCustomAttribute =
+    /// <summary>
+    /// The owner this token names in <paramref name="scope"/>: a row of one of the nine tables a builder hands out an
+    /// owner from. <c>None</c> for a token of any other table, for an <c>Assembly</c> or <c>Module</c> token whose RID
+    /// is not 1, and for a RID that names no row of the scope.
+    /// </summary>
+    let tryOfToken (token : int) (scope : EmitScope) : HasCustomAttribute option =
+        let rid = token &&& 0x00FFFFFF
+
+        match token >>> 24 &&& 0xFF with
+        | 0x00 -> if rid = 1 then Some HasCustomAttribute.Module else None
+        | 0x20 ->
+            if rid = 1 && (EmitScope.assembly scope).IsSome then
+                Some HasCustomAttribute.Assembly
+            else
+                None
+        | 0x02 -> EmitScope.tryTypeDefRid rid scope |> Option.map HasCustomAttribute.TypeDef
+        | 0x06 -> EmitScope.tryMethodDefRid rid scope |> Option.map HasCustomAttribute.MethodDef
+        | 0x04 -> EmitScope.tryFieldRid rid scope |> Option.map HasCustomAttribute.Field
+        | 0x08 -> EmitScope.tryParamRid rid scope |> Option.map HasCustomAttribute.Param
+        | 0x17 -> EmitScope.tryPropertyRid rid scope |> Option.map HasCustomAttribute.Property
+        | 0x14 -> EmitScope.tryEventRid rid scope |> Option.map HasCustomAttribute.Event
+        | 0x2A ->
+            EmitScope.tryGenericParamRid rid scope
+            |> Option.map HasCustomAttribute.GenericParam
+        | _ -> None

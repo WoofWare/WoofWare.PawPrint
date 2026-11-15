@@ -586,7 +586,7 @@ module TestImpureCases =
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
             {
-                FileName = "DispatchProxyInternalInterface.cs"
+                FileName = "TypeBuilderPseudoCustomAttributes.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =
@@ -600,7 +600,119 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """`DispatchProxy.Create` over an internal interface, measured on .NET 10 and 11 to exit 0, with `IgnoresAccessChecksToAttribute` naming the guest's assembly on the proxy's assembly (a control with the interface made public exits 4 on both). `IsVisible` of the interface is false, so `DispatchProxy` defines that attribute and applies it, and stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute)" (measured by naming the case). Un-parked by custom attributes, with whatever then follows; check 4 is what tells a right answer of false from a wrong true once it runs."""
+            """What CoreCLR's emitter does with each pseudo-attribute and with its two security names: flags, rows of other tables, rows kept after validation, `ArgumentException` for a wrong target or a bad value, and impostors in the module, in another assembly and nested treated as the real attribute. Measured on .NET 10 and 11 to exit 0; a control inverting the first type's `IsSerializable` exits 7 on both. It stops at its first `SetCustomAttribute`, at the classifier's TODO (measured): "TODO: TypeBuilder_DefineCustomAttribute: System.SerializableAttribute on 0x02000002 is a pseudo-attribute (KnownCaList)". Un-parked by the pseudo-attributes and the security names, which later stages of the type-builder plan take in groups."""
+            {
+                FileName = "TypeBuilderCustomAttributeAfterCreate.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An ordinary attribute on a created type, on one of its methods and on a parameter of that method, measured on .NET 10 and 11 to exit 0: real .NET writes each row and reflection shows it at once, through the objects obtained before; a control expecting the type's two rows in the other order exits 1 on both. It stops at the first, at the created-owner TODO (measured): "TODO: TypeBuilder_DefineCustomAttribute: the owner 0x02000002 belongs to TypeDef 0x02000002, which is created". Un-parked by admitting a row on a created owner whose attribute the runtime does not read."""
+            {
+                FileName = "TypeBuilderAssemblyRuntimeAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Friend attributes on an `AssemblyBuilder` whose names the friend cache cannot parse, which throw out of the QCall after their rows are written, and `DebuggableAttribute` with a short blob and with none, which real .NET accepts. Measured on .NET 10 and 11 to exit 0 (an empty name throws `ArgumentException` on .NET 10 and `FileLoadException` on .NET 11); a control swapping those two exits 6 on both. It stops at its first malformed friend attribute, at the friend TODO (measured): "TODO: TypeBuilder_DefineCustomAttribute: the assembly F0, ... now holds a friend attribute that PawPrint's friend scan rejects". Un-parked by modelling the friend cache's exception and the debugger bits."""
+            {
+                FileName = "TypeBuilderDuplicateRuntimeAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Two `InlineArray` attributes on one struct in modules of 25 CustomAttribute rows or more, of which CoreCLR's type loader takes the last added, counted when the type is created (#2258). Measured on .NET 10 and 11 to exit 0; a control expecting the first added exits 1 on both. PawPrint answers wrongly and does not stop: it takes the first added, and exits 1 (measured). Un-parked by modelling the 25-row rule in the readers that look an attribute up by name."""
+            {
+                FileName = "TypeBuilderCustomAttributeEmptyBlobInstance.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An emitted row with an empty blob, instantiated through `GetCustomAttributes`, which real .NET refuses with `CustomAttributeFormatException`; measured on .NET 10 and 11 to exit 0, and a control expecting `ArgumentException` exits 2 on both. It stops at the instantiation (measured): "TODO: CustomAttribute.CreateCustomAttributeInstance *ppBlob (start) pointer is null". Un-parked by modelling an empty blob in `NativeCustomAttribute`."""
+            {
+                FileName = "TypeBuilderCustomAttributeMalformedInstance.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Emitted rows whose blobs do not parse (a bad prolog, a truncated string, bytes after the arguments), instantiated through `GetCustomAttributes`, which real .NET refuses with `CustomAttributeFormatException`; measured on .NET 10 and 11 to exit 0, and a control expecting no exception for the third exits 3 on both. It stops at the first instantiation, with no guest exception (measured): "CustomAttribute.CreateCustomAttributeInstance: failed to parse fixed args from CustomAttrib blob: CustomAttrib blob has unexpected prolog 0x0002 (expected 0x0001)". Un-parked by raising `CustomAttributeFormatException` in the guest for a blob that does not parse."""
+            {
+                FileName = "TypeBuilderCustomAttributeNamedArguments.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An emitted attribute with named fields of type `Type`, `int[]` and an enum, instantiated through `GetCustomAttributes`; measured on .NET 10 and 11 to exit 0, and a control expecting another type exits 1 on both. It stops at the first instantiation (measured): "TODO: CustomAttribute.CreatePropertyOrFieldData: named argument has TYPE (0x50) type"; the array and the enum named argument stop likewise (measured in the main guest before it left them out). Un-parked by reading those named arguments in `NativeCustomAttribute`."""
+            {
+                FileName = "TypeBuilderCustomAttributeOpenGenericIsDefined.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """`IsDefined` over a type whose emitted row's constructor is one of the open `GenAttribute<>`, which real .NET answers with `ArgumentException` (#2257). Measured on .NET 10 and 11 to exit 0; a control expecting no exception exits 1 on both. PawPrint answers wrongly and does not stop: `IsDefined` returns false, and the guest exits 1 (measured). Only an emitted row reaches it. Un-parked by failing the read as real .NET does."""
             {
                 FileName = "TypeBuilderDuplicateStaticVirtualOverride.cs"
                 ExpectedReturnCode = 0
@@ -2006,6 +2118,100 @@ module TestImpureCases =
             ],
             Some [ 3 ; 2 ; 6 ; 5 ; 4 ; 7 ; 1 ]
         )
+
+    /// `TypeBuilderCustomAttributes.cs` has defined custom attributes in modules `Order` and `Parents`. This checks the
+    /// rows no reflection API shows. `Order`: every row in RID order (its owner's token, its constructor and its blob),
+    /// interleaved over `A` (TypeDef 2), `B` (TypeDef 3) and the assembly, as CoreCLR hands out the tokens; and the index
+    /// of the image, which gives each owner its rows in RID order. `Parents`: each row's owner and constructor tokens as
+    /// SRM reads them from the image, so that a swapped tag is seen without reflection.
+    let private assertCustomAttributeRows (state : IlMachineState) : unit =
+        let order = dynamicScopeNamed state "Order"
+
+        // `MultiInhAttribute(int)`'s blob: the prolog, the argument, and no named arguments.
+        let multi (n : int) : byte list =
+            [
+                1uy
+                0uy
+                byte n
+                byte (n >>> 8)
+                byte (n >>> 16)
+                byte (n >>> 24)
+                0uy
+                0uy
+            ]
+
+        let expected =
+            [
+                for i in 0..29 do
+                    yield (if i % 3 = 0 then 0x02000002 else 0x02000003), multi i
+
+                    if i = 12 then
+                        yield 0x20000001, multi 112
+                yield 0x02000003, multi 998
+                yield 0x20000001, multi 999
+            ]
+
+        let constructor = MethodDefOrRef.MemberRef (EmitScope.tryMemberRefRid 1 order).Value
+
+        EmitScope.customAttributes order
+        |> Seq.map (fun row -> row.Parent.Token, row.Constructor, List.ofSeq (EmitScope.blobAt row.Value order))
+        |> List.ofSeq
+        |> shouldEqual (expected |> List.map (fun (owner, blob) -> owner, constructor, blob))
+
+        use dumped =
+            Assembly.read
+                Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance
+                (Some "Order.dll")
+                (new MemoryStream (EmitScopeImage.write order))
+
+        for owner in [ 0x02000002 ; 0x02000003 ; 0x20000001 ] do
+            List.ofSeq dumped.CustomAttributesByParentToken.[owner]
+            |> shouldEqual
+                [
+                    for i, (o, _) in List.indexed expected do
+                        if o = owner then
+                            yield 0x0C000000 ||| (i + 1)
+                ]
+
+        let pe, reader =
+            EmitScopeGen.readImage (EmitScopeImage.write (dynamicScopeNamed state "Parents"))
+
+        use _ = pe
+
+        [
+            for i in
+                1 .. System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableRowCount (
+                    reader,
+                    System.Reflection.Metadata.Ecma335.TableIndex.CustomAttribute
+                ) do
+                let row =
+                    reader.GetCustomAttribute (
+                        System.Reflection.Metadata.Ecma335.MetadataTokens.CustomAttributeHandle i
+                    )
+
+                yield EmitScopeGen.token row.Parent, EmitScopeGen.token row.Constructor
+        ]
+        |> shouldEqual
+            [
+                // `M2`'s generic parameter, written when `DefineConstructor` tokenises `M2`.
+                0x2A000001, 0x0A000001
+                0x20000001, 0x0A000001
+                0x02000002, 0x0A000001
+                0x00000001, 0x0A000001
+                0x06000001, 0x0A000001
+                0x04000001, 0x0A000001
+                0x02000002, 0x0A000001
+                0x06000003, 0x0A000001
+                0x17000001, 0x0A000001
+                0x14000001, 0x0A000001
+                0x08000001, 0x0A000001
+                0x20000001, 0x0A000001
+                0x02000002, 0x0A000001
+                // `DebuggableAttribute` on the module.
+                0x00000001, 0x0A000002
+                // `G`'s generic parameter, written when `G` is created.
+                0x2A000002, 0x0A000001
+            ]
 
     /// `ModuleBuilderStringConstant.cs` has asked for six strings, `"hello"` twice. This checks the
     /// module's `#US` entries, each as its UTF-16 code units and its final byte: the space the heap
@@ -6765,6 +6971,78 @@ module TestImpureCases =
                 // ArgumentException for an unrelated type, and resolves a base type's method. Dynamic-code
                 // switch overridden to true like its siblings; verified by hand to exit 0 on real .NET 10.
                 FileName = "TypeBuilderPropertyForeignAccessor.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `TypeBuilder_DefineCustomAttribute`, through every builder's `SetCustomAttribute`, read back through
+                // reflection; `assertCustomAttributeRows` reads the rows of two of its modules. Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11
+                // to exit 0, and a control expecting `B`'s seventeenth and eighteenth attributes swapped exits 83 on both.
+                FileName = "TypeBuilderCustomAttributes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertCustomAttributeRows
+            }
+            {
+                // An emitted attribute whose constructor takes `object`, instantiated through `GetCustomAttributes`.
+                // Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0,
+                // and a control expecting 6 exits 1 on both.
+                FileName = "TypeBuilderCustomAttributeTaggedObject.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // An emitted attribute whose type is `GenAttribute<int>`, instantiated through `GetCustomAttributes`.
+                // Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0,
+                // and a control expecting 5 exits 1 on both.
+                FileName = "TypeBuilderCustomAttributeGenericInstance.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `DispatchProxy.Create` over an internal interface, which applies `IgnoresAccessChecksToAttribute` to
+                // the proxy's assembly; check 4 reads it. Dynamic-code switch overridden to true like its siblings;
+                // measured on real .NET 10 and 11 to exit 0, and a control with the interface made public exits 4 on both.
+                FileName = "DispatchProxyInternalInterface.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =

@@ -85,6 +85,74 @@ module TestEmitScopeImage =
         |> Seq.map (fun (i, _) -> i + 1)
         |> List.ofSeq
 
+    /// The metadata token of a custom attribute's owner, as SRM reads the `Parent` column.
+    let private ownerToken (owner : HasCustomAttribute) : int =
+        match owner with
+        | HasCustomAttribute.Assembly -> 0x20000001
+        | HasCustomAttribute.Module -> 0x00000001
+        | HasCustomAttribute.TypeDef rid -> 0x02000000 ||| rid.Rid
+        | HasCustomAttribute.MethodDef rid -> 0x06000000 ||| rid.Rid
+        | HasCustomAttribute.Field rid -> 0x04000000 ||| rid.Rid
+        | HasCustomAttribute.Param rid -> 0x08000000 ||| rid.Rid
+        | HasCustomAttribute.Property rid -> 0x17000000 ||| rid.Rid
+        | HasCustomAttribute.Event rid -> 0x14000000 ||| rid.Rid
+        | HasCustomAttribute.GenericParam rid -> 0x2A000000 ||| rid.Rid
+
+    /// Every `CustomAttribute` row reads back at the RID the scope gave it, with its owner, constructor and blob; the
+    /// index `Assembly.read` builds gives each owner its rows in RID order, as `CustomAttribute.ofOwnerInRidOrder`
+    /// does for each type, method, field and parameter.
+    let private checkCustomAttributes (scope : EmitScope) (image : byte[]) (reader : MetadataReader) : unit =
+        let rows = EmitScope.customAttributes scope
+        reader.GetTableRowCount TableIndex.CustomAttribute |> shouldEqual rows.Count
+
+        for i in 1 .. rows.Count do
+            let row = rows.[i - 1]
+            let read = reader.GetCustomAttribute (MetadataTokens.CustomAttributeHandle i)
+            token read.Parent |> shouldEqual (ownerToken row.Parent)
+            token read.Constructor |> shouldEqual (methodDefOrRefToken row.Constructor)
+
+            List.ofArray (reader.GetBlobBytes read.Value)
+            |> shouldEqual (List.ofSeq (EmitScope.blobAt row.Value scope))
+
+        let expectedOf (owner : int) : int list =
+            [
+                for i in 1 .. rows.Count do
+                    if ownerToken rows.[i - 1].Parent = owner then
+                        yield 0x0C000000 ||| i
+            ]
+
+        use dumped =
+            Assembly.read NullLoggerFactory.Instance (Some "Generated.dll") (new MemoryStream (image))
+
+        for owner in rows |> Seq.map (fun row -> ownerToken row.Parent) |> Seq.distinct do
+            List.ofSeq dumped.CustomAttributesByParentToken.[owner]
+            |> shouldEqual (expectedOf owner)
+
+        dumped.CustomAttributesByParentToken.Count
+        |> shouldEqual (rows |> Seq.map (fun row -> ownerToken row.Parent) |> Seq.distinct |> Seq.length)
+
+        let inRidOrder (owner : EntityHandle) : int list =
+            CustomAttribute.ofOwnerInRidOrder reader owner
+            |> List.map (fun handle ->
+                MetadataTokens.GetToken (CustomAttributeHandle.op_Implicit handle : EntityHandle)
+            )
+
+        for i in 1 .. (EmitScope.typeDefs scope).Count do
+            inRidOrder (TypeDefinitionHandle.op_Implicit (MetadataTokens.TypeDefinitionHandle i))
+            |> shouldEqual (expectedOf (0x02000000 ||| i))
+
+        for i in 1 .. (EmitScope.methodDefs scope).Count do
+            inRidOrder (MethodDefinitionHandle.op_Implicit (MetadataTokens.MethodDefinitionHandle i))
+            |> shouldEqual (expectedOf (0x06000000 ||| i))
+
+        for i in 1 .. (EmitScope.fields scope).Count do
+            inRidOrder (FieldDefinitionHandle.op_Implicit (MetadataTokens.FieldDefinitionHandle i))
+            |> shouldEqual (expectedOf (0x04000000 ||| i))
+
+        for i in 1 .. (EmitScope.parameters scope).Count do
+            inRidOrder (ParameterHandle.op_Implicit (MetadataTokens.ParameterHandle i))
+            |> shouldEqual (expectedOf (0x08000000 ||| i))
+
     /// Every row of the scope reads back from the image with the same columns at the RID the scope gave
     /// it, and every heap reference at the offset the scope gave it; and the `ParamPtr` table and every
     /// method's run of parameters are those of `replay`, CoreCLR's tables after the same definitions.
@@ -460,14 +528,10 @@ module TestEmitScopeImage =
                 |> List.ofSeq
             )
 
+        checkCustomAttributes scope image reader
+
         // Nothing the scope cannot hold.
-        for table in
-            [
-                TableIndex.Constant
-                TableIndex.CustomAttribute
-                TableIndex.ModuleRef
-                TableIndex.NestedClass
-            ] do
+        for table in [ TableIndex.Constant ; TableIndex.ModuleRef ; TableIndex.NestedClass ] do
             reader.GetTableRowCount table |> shouldEqual 0
 
         reader.GetUserString (MetadataTokens.UserStringHandle 0) |> shouldEqual ""
@@ -634,6 +698,156 @@ module TestEmitScopeImage =
         count ParamShape.FlagsAboveTwelveBits |> shouldBeGreaterThan 100
         count ParamShape.SlideNotLastWithTable |> shouldBeGreaterThan 20
         count ParamShape.SlideOnLastThenLaterMethod |> shouldBeGreaterThan 5
+
+    [<Test>]
+    let ``the generator's custom attributes reach every shape the round trip must see`` () : unit =
+        let scopes = Gen.sampleWithSeed (Rnd 20261114UL) 30 200 genScope
+
+        let ownersOf (scope : EmitScope) : HasCustomAttribute list =
+            EmitScope.customAttributes scope |> Seq.map _.Parent |> List.ofSeq
+
+        let rowCount (scope : EmitScope) : int =
+            (EmitScope.customAttributes scope).Count
+
+        // Each floor is about half the count measured over this fixed sample.
+        let atLeast (label : string) (floor : int) (predicate : EmitScope -> bool) : unit =
+            let n = scopes |> Seq.filter predicate |> Seq.length
+            System.Console.WriteLine $"%s{label}: %d{n} of %d{scopes.Length} scopes"
+            n |> shouldBeGreaterThan floor
+
+        // An owner with more rows than the 16 below which SRM's sort of the table is an insertion sort.
+        atLeast
+            "an owner with 17 rows"
+            20
+            (fun s -> ownersOf s |> List.countBy id |> List.exists (fun (_, n) -> n >= 17))
+
+        // Owners interleaved: some owner's rows are in two runs, so that the table is not in owner order.
+        atLeast
+            "interleaved owners"
+            35
+            (fun s ->
+                let owners = ownersOf s
+
+                let runs =
+                    owners |> List.pairwise |> List.filter (fun (a, b) -> a <> b) |> List.length
+
+                not owners.IsEmpty && runs + 1 > List.length (List.distinct owners)
+            )
+
+        // Table sizes on each side of 17 and 25.
+        atLeast "1 to 16 rows" 30 (fun s -> rowCount s > 0 && rowCount s < 17)
+        atLeast "17 to 24 rows" 25 (fun s -> rowCount s >= 17 && rowCount s < 25)
+        atLeast "25 rows or more" 20 (fun s -> rowCount s >= 25)
+
+        let kinds : (string * (HasCustomAttribute -> bool)) list =
+            [
+                "the assembly", (fun o -> o = HasCustomAttribute.Assembly)
+                "the module", (fun o -> o = HasCustomAttribute.Module)
+                "a type", (fun o -> o.IsTypeDef)
+                "a method", (fun o -> o.IsMethodDef)
+                "a field", (fun o -> o.IsField)
+                "a parameter", (fun o -> o.IsParam)
+                "a property", (fun o -> o.IsProperty)
+                "an event", (fun o -> o.IsEvent)
+                "a generic parameter", (fun o -> o.IsGenericParam)
+            ]
+
+        for label, kind in kinds do
+            atLeast $"an attribute of %s{label}" 20 (fun s -> ownersOf s |> List.exists kind)
+
+        atLeast
+            "an empty blob"
+            70
+            (fun s -> EmitScope.customAttributes s |> Seq.exists (fun row -> row.Value.Offset = 0))
+
+        atLeast
+            "two equal rows"
+            60
+            (fun s ->
+                EmitScope.customAttributes s
+                |> Seq.countBy id
+                |> Seq.exists (fun (_, n) -> n >= 2)
+            )
+
+        // SRM's own per-owner order differs from RID order, which is why `CustomAttribute.ofOwnerInRidOrder` sorts.
+        // If SRM's sort becomes stable this fails, and the sweep no longer shows why the function sorts.
+        atLeast
+            "SRM's own order of an owner's rows not RID order"
+            40
+            (fun s ->
+                let pe, reader = readImage (EmitScopeImage.write s)
+                use _ = pe
+
+                ownersOf s
+                |> List.distinct
+                |> List.exists (fun owner ->
+                    let srm =
+                        reader.GetCustomAttributes (MetadataTokens.EntityHandle (ownerToken owner))
+                        |> Seq.map (fun h ->
+                            MetadataTokens.GetRowNumber (CustomAttributeHandle.op_Implicit h : EntityHandle)
+                        )
+                        |> List.ofSeq
+
+                    srm <> List.sort srm
+                )
+            )
+
+    /// A scope of `memberRefs` MemberRef rows, with one custom attribute on a type whose constructor is the last.
+    let private withMemberRefs (memberRefs : int) : EmitScope * CustomAttributeRow =
+        let scope = emptyScope Guid.Empty
+        let name, scope = EmitScope.internString "T" scope
+
+        let typeDef, scope =
+            EmitScope.addTypeDef
+                {
+                    Flags = TypeAttributes.Public
+                    Name = name
+                    Namespace = StringOffset 0
+                    Extends = None
+                }
+                scope
+
+        let signature, scope =
+            EmitScope.internBlob (ImmutableArray.Create<byte> [| 0x20uy ; 0x00uy ; 0x01uy |]) scope
+
+        let ctorName, scope = EmitScope.internString ".ctor" scope
+
+        let scope =
+            (scope, [ 1..memberRefs ])
+            ||> List.fold (fun scope _ ->
+                EmitScope.addMemberRef
+                    {
+                        Parent = MemberRefParent.TypeDef typeDef
+                        Name = ctorName
+                        Signature = signature
+                    }
+                    scope
+                |> snd
+            )
+
+        let row : CustomAttributeRow =
+            {
+                Parent = HasCustomAttribute.TypeDef typeDef
+                Constructor = MethodDefOrRef.MemberRef (EmitScope.tryMemberRefRid memberRefs scope).Value
+                Value = BlobOffset 0
+            }
+
+        snd (EmitScope.addCustomAttribute row scope), row
+
+    /// The `Parent` column is four bytes once any of the 22 tables `HasCustomAttribute` can name has 2^11 rows, among
+    /// them MemberRef, which no builder hands out as an owner; the `Type` column once MethodDef or MemberRef has 2^13.
+    [<TestCase 2047>]
+    [<TestCase 2048>]
+    [<TestCase 8191>]
+    [<TestCase 8192>]
+    let ``a custom attribute reads back on both sides of its columns' width boundaries`` (memberRefs : int) : unit =
+        let scope, row = withMemberRefs memberRefs
+        let pe, reader = readImage (EmitScopeImage.write scope)
+        use _ = pe
+        let read = reader.GetCustomAttribute (MetadataTokens.CustomAttributeHandle 1)
+        token read.Parent |> shouldEqual (ownerToken row.Parent)
+        token read.Constructor |> shouldEqual (0x0A000000 ||| memberRefs)
+        reader.GetBlobBytes read.Value |> shouldEqual [||]
 
     [<Test>]
     let ``the generator makes scopes with and without pointer tables`` () : unit =

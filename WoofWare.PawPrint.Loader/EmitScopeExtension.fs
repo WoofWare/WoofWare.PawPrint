@@ -28,8 +28,10 @@ type EmitScopeExtensionViolation =
 
     /// A row the later scope adds is a member of a type already created: a field, method, property or
     /// event it declares, a parameter of one of its methods, one of its interface implementations or method
-    /// impls, a generic parameter of it or of one of its methods, or a constraint of one, or an accessor
-    /// of one of its properties or events, whatever type the accessor's method belongs to.
+    /// impls, a generic parameter of it or of one of its methods, or a constraint of one, an accessor
+    /// of one of its properties or events, whatever type the accessor's method belongs to, or a custom attribute of
+    /// it or of any of those members (<c>EmitScope.typeOfCustomAttributeOwner</c>). A custom attribute of the
+    /// assembly or the module is no type's.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
     /// A row of the earlier scope differs in the later one only in a column the emitter fills in after
@@ -217,6 +219,22 @@ module EmitScopeExtension =
                     (fun row -> row.Class)
 
 
+            yield!
+                rewritten
+                    TableIndex.CustomAttribute
+                    (EmitScope.customAttributes before)
+                    (EmitScope.customAttributes after)
+
+            let attributesBefore = (EmitScope.customAttributes before).Count
+            let attributesAfter = EmitScope.customAttributes after
+
+            for i in attributesBefore .. attributesAfter.Count - 1 do
+                match EmitScope.typeOfCustomAttributeOwner attributesAfter.[i].Parent after with
+                | Some owner when created.Contains owner ->
+                    yield EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.CustomAttribute, i + 1, owner)
+                | Some _
+                | None -> ()
+
             yield! rewritten TableIndex.MemberRef (EmitScope.memberRefs before) (EmitScope.memberRefs after)
             yield! rewritten TableIndex.StandAloneSig (EmitScope.standAloneSigs before) (EmitScope.standAloneSigs after)
 
@@ -250,6 +268,7 @@ module EmitScopeExtension =
                     (EmitScope.methodSemantics before).Count
                     (EmitScope.methodSemantics after)
                     associationOwner
+
             yield! rewritten TableIndex.TypeSpec (EmitScope.typeSpecs before) (EmitScope.typeSpecs after)
 
             yield! rewritten TableIndex.MethodImpl (EmitScope.methodImpls before) (EmitScope.methodImpls after)
