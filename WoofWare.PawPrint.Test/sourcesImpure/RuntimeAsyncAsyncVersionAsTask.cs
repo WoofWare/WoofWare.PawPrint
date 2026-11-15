@@ -22,8 +22,8 @@ using System.Threading.Tasks;
 // `WriteEntryAsync` at the offset of its call and `CreateFromDirectoryInternalAsync` at that of its
 // `call Await`. Were the await of the task the ordinary variant returns, `WriteEntryAsync` would
 // have returned before anything suspended, leaving no frame, and an awaiter's `GetResult` would come
-// between the other two. The frames beneath the callee come from an await this stage does not
-// bind, so the guest checks only these three.
+// between the other two. The guest also compares the formatted trace whole, and every frame with
+// real .NET 11's, less the awaiter's frames, which depend on what the JIT inlined into them.
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
@@ -98,9 +98,14 @@ public class Program
         + "System.Formats.Tar.TarFile::CreateFromDirectoryInternalAsync\n";
 
     private const string FormattedNet11 =
-        "   at System.Formats.Tar.TarWriter.ReadFileFromDiskAndWriteToArchiveStreamAsEntryCoreAsync[TAdapter](String fullPath, String entryName, FileOptions fileOptions, CancellationToken cancellationToken)\n"
+        "   at System.Formats.Tar.TarHeader.WriteWithSeekableDataStreamCoreAsync[TAdapter](TarEntryFormat format, Stream archiveStream, Memory`1 buffer, CancellationToken cancellationToken)\n"
+        + "   at System.Formats.Tar.TarHeader.WriteAsPaxCoreAsync[TAdapter](Stream archiveStream, Memory`1 buffer, CancellationToken cancellationToken)\n"
+        + "   at System.Formats.Tar.TarWriter.WriteEntryCoreAsync[TAdapter](TarEntry entry, CancellationToken cancellationToken)\n"
+        + "   at System.Formats.Tar.TarWriter.ReadFileFromDiskAndWriteToArchiveStreamAsEntryCoreAsync[TAdapter](String fullPath, String entryName, FileOptions fileOptions, CancellationToken cancellationToken)\n"
         + "   at System.Formats.Tar.TarWriter.WriteEntryAsync(String fileName, String entryName, CancellationToken cancellationToken)\n"
-        + "   at System.Formats.Tar.TarFile.CreateFromDirectoryInternalAsync(String sourceDirectoryName, Stream destination, Boolean includeBaseDirectory, Boolean leaveOpen, TarWriterOptions options, CancellationToken cancellationToken)\n";
+        + "   at System.Formats.Tar.TarFile.CreateFromDirectoryInternalAsync(String sourceDirectoryName, Stream destination, Boolean includeBaseDirectory, Boolean leaveOpen, TarWriterOptions options, CancellationToken cancellationToken)\n"
+        + "   at System.Formats.Tar.TarFile.CreateFromDirectoryInternalAsync(String sourceDirectoryName, Stream destination, Boolean includeBaseDirectory, Boolean leaveOpen, TarWriterOptions options, CancellationToken cancellationToken)\n"
+        + "   at System.Runtime.CompilerServices.AsyncHelpers.RuntimeAsyncTask`1.DispatchContinuations()\n";
 
     private static int IndexOfFrame (StackFrame[] frames, string name)
     {
@@ -111,6 +116,47 @@ public class Program
 
         return -1;
     }
+
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Formats.Tar.TarHeader::WriteWithSeekableDataStreamCoreAsync\n"
+        + "System.Formats.Tar.TarHeader::WriteAsPaxCoreAsync\n"
+        + "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Formats.Tar.TarWriter::WriteEntryCoreAsync\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Formats.Tar.TarWriter::ReadFileFromDiskAndWriteToArchiveStreamAsEntryCoreAsync\n"
+        + "System.Formats.Tar.TarWriter::WriteEntryAsync\n"
+        + "System.Formats.Tar.TarFile::CreateFromDirectoryInternalAsync\n"
+        + "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Formats.Tar.TarFile::CreateFromDirectoryInternalAsync\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
 
     public static int Main (string[] args)
     {
@@ -141,9 +187,10 @@ public class Program
                 if (frames[writing].GetILOffset () != 0x2E) return 5;
                 if (frames[writing + 1].GetILOffset () != 0xAF) return 6;
 
-                string formatted = new StackTrace (failure, false).ToString ();
-                if (!formatted.Contains (FormattedNet11.Replace ("\n", Environment.NewLine), StringComparison.Ordinal))
-                    return 7;
+                string formatted = new StackTrace (failure, false).ToString ().TrimEnd () + Environment.NewLine;
+                if (formatted != FormattedNet11.Replace ("\n", Environment.NewLine)) return 7;
+
+                if (DescribeWhole (frames) != WholeNet11) return 8;
             }
 
             return 0;

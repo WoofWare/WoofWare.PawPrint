@@ -26,6 +26,9 @@ using System.Threading.Tasks;
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
+// On .NET 11 the guest also compares every frame of the trace with real .NET 11's, less the
+// awaiter's frames, which depend on what the JIT inlined into them.
+//
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
 {
@@ -123,6 +126,42 @@ public class Program
         + "   at System.Formats.Tar.TarWriter.WriteEntryCoreAsync[TAdapter](TarEntry entry, CancellationToken cancellationToken)\n"
         + "   at System.Runtime.CompilerServices.AsyncHelpers.RuntimeAsyncTask`1.DispatchContinuations()";
 
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.Stream::<CopyToAsync>g__Core|30_0\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Formats.Tar.TarHeader::WriteWithUnseekableDataStreamCoreAsync\n"
+        + "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Formats.Tar.TarWriter::WriteEntryCoreAsync\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
+
     public static int Main (string[] args)
     {
         bool net11 = Environment.Version.Major >= 11;
@@ -160,6 +199,8 @@ public class Program
             if (!AwaiterResumes (frames, core)) return 13;
             // Only the dispatcher's frames between `Core` and the frame awaiting the adapter.
             if (NextPastDispatcher (frames, core) != "System.Formats.Tar.TarHeader::WriteWithUnseekableDataStreamCoreAsync") return 14;
+
+            if (DescribeWhole (frames) != WholeNet11) return 15;
         }
 
         return 0;

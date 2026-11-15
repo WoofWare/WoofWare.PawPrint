@@ -29,6 +29,9 @@ using System.Threading.Tasks;
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
+// On .NET 11 the guest also compares every frame of the trace with real .NET 11's, less the
+// awaiter's frames, which depend on what the JIT inlined into them.
+//
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
 {
@@ -148,6 +151,48 @@ public class Program
         + "   at System.IO.StreamWriter.FlushAsyncInternalWithGuard(Boolean flushStream, Boolean flushEncoder, CancellationToken cancellationToken)\n"
         + "   at System.IO.TextWriter.BroadcastingTextWriter.FlushAsync()";
 
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string DisposeWholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.StreamWriter::<FlushAsyncInternal>g__Core|82_0\n"
+        + "System.IO.StreamWriter::FlushAsyncInternalWithGuard\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.StreamWriter::DisposeAsyncCore\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
+
+    private const string BroadcastWholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.StreamWriter::<FlushAsyncInternal>g__Core|82_0\n"
+        + "System.IO.StreamWriter::FlushAsyncInternalWithGuard\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.TextWriter+BroadcastingTextWriter::FlushAsync\n";
+
     public static int Main (string[] args)
     {
         bool net11 = Environment.Version.Major >= 11;
@@ -190,6 +235,8 @@ public class Program
             if (formatted != DisposeFormattedNet11.Replace ("\n", Environment.NewLine)) return 13;
 
             if (!AwaiterResumes (frames, core)) return 14;
+
+            if (DescribeWhole (frames) != DisposeWholeNet11) return 15;
         }
 
         // A broadcasting writer's `FlushAsync`, whose first writer's write completes after the
@@ -199,11 +246,11 @@ public class Program
         writer.Write ("there");
         var broadcasting = TextWriter.CreateBroadcasting (writer, TextWriter.Null);
         Task flushing = broadcasting.FlushAsync ();
-        if (flushing.IsCompleted) return 15;
-        if (stream.Writes != 1) return 16;
+        if (flushing.IsCompleted) return 16;
+        if (stream.Writes != 1) return 17;
         stream.Pending.SetResult ();
-        if (FaultOf (flushing) != null) return 17;
-        if (Encoding.UTF8.GetString (stream.Written.ToArray ()) != "there") return 18;
+        if (FaultOf (flushing) != null) return 18;
+        if (Encoding.UTF8.GetString (stream.Written.ToArray ()) != "there") return 19;
 
         // The same, whose write faults after the methods have suspended.
         stream = new PendingWriteStream ();
@@ -211,25 +258,27 @@ public class Program
         writer.Write ("there");
         broadcasting = TextWriter.CreateBroadcasting (writer, TextWriter.Null);
         flushing = broadcasting.FlushAsync ();
-        if (flushing.IsCompleted) return 19;
+        if (flushing.IsCompleted) return 20;
         failure = new IOException ("the broadcast write failed");
         stream.Pending.SetException (failure);
-        if (!ReferenceEquals (FaultOf (flushing), failure)) return 20;
+        if (!ReferenceEquals (FaultOf (flushing), failure)) return 21;
 
         if (net11)
         {
             StackFrame[] frames = new StackTrace (failure, false).GetFrames ();
             int core = CoreFrame (frames);
-            if (core < 0) return 21;
-            if (Describe (frames[core..]) != BroadcastResumedNet11) return 22;
+            if (core < 0) return 22;
+            if (Describe (frames[core..]) != BroadcastResumedNet11) return 23;
 
             // `BroadcastingTextWriter.FlushAsync`'s frame is at its `call Await`.
-            if (frames[frames.Length - 1].GetILOffset () != 0x19) return 23;
+            if (frames[frames.Length - 1].GetILOffset () != 0x19) return 24;
 
             string formatted = new StackTrace (failure, false).ToString ().TrimEnd ();
-            if (formatted != BroadcastFormattedNet11.Replace ("\n", Environment.NewLine)) return 24;
+            if (formatted != BroadcastFormattedNet11.Replace ("\n", Environment.NewLine)) return 25;
 
-            if (!AwaiterResumes (frames, core)) return 25;
+            if (!AwaiterResumes (frames, core)) return 26;
+
+            if (DescribeWhole (frames) != BroadcastWholeNet11) return 27;
         }
 
         return 0;

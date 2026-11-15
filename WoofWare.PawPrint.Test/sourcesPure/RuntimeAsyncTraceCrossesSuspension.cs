@@ -23,8 +23,8 @@ using System.Threading.Tasks;
 // Which of the awaiter's frames come before that depends on what the JIT inlined, and the formatted
 // trace hides all of them and the dispatcher's first frame. So the guest checks the frames from the
 // dispatcher's first catch onward, and how they begin; that the last frame the formatted trace hides
-// before the method, past the dispatcher's, is a `RuntimeAsyncTaskContinuation.GetResult`; and the
-// formatted trace whole.
+// before the method, past the dispatcher's, is a `RuntimeAsyncTaskContinuation.GetResult`; the
+// formatted trace whole; and every frame but the awaiter's.
 //
 // The first exception was never thrown, so its trace begins where the awaiter throws it. The second
 // was thrown before the guest faulted the task with it, so its trace begins with that throw, and the
@@ -111,9 +111,39 @@ public class Program
 
     private const string CatchingNet10 = "System.Net.Http.HttpContent+<LoadIntoBufferAsyncCore>d__53::MoveNext\n";
 
+    private const string WholeResumedNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Net.Http.HttpContent::LoadIntoBufferAsyncCore\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
+
     private const string FormattedResumedNet11 =
         "   at System.Net.Http.HttpContent.LoadIntoBufferAsyncCore(Task serializeToStreamTask, LimitArrayPoolWriteStream tempBuffer)\n"
         + "   at System.Runtime.CompilerServices.AsyncHelpers.RuntimeAsyncTask`1.DispatchContinuations()";
+
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
 
     // The exception `fault` of a pending serialisation, as `LoadIntoBufferAsync` faults with it.
     private static Exception Rethrown (Exception fault)
@@ -148,6 +178,8 @@ public class Program
 
             string formatted = new StackTrace (rethrown, false).ToString ().TrimEnd ();
             if (formatted != (formattedBefore + FormattedResumedNet11).Replace ("\n", Environment.NewLine)) return first + 5;
+
+            if (DescribeWhole (frames) != before + WholeResumedNet11) return first + 6;
         }
 
         return 0;
@@ -167,7 +199,7 @@ public class Program
         try
         {
             Throwing ();
-            return 8;
+            return 9;
         }
         catch (InvalidOperationException e)
         {
@@ -175,12 +207,12 @@ public class Program
         }
 
         rethrown = Rethrown (thrown);
-        if (!ReferenceEquals (rethrown, thrown)) return 9;
+        if (!ReferenceEquals (rethrown, thrown)) return 10;
 
         return Check (
             rethrown,
             "Program::Throwing\nProgram::Main\n",
             "   at Program.Throwing()\n   at Program.Main(String[] args)\n--- End of stack trace from previous location ---\n",
-            10);
+            11);
     }
 }

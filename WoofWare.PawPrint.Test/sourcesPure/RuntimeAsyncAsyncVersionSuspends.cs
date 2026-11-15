@@ -23,11 +23,15 @@ using System.Xml;
 // its call. Were the await of the task
 // the ordinary variant returns, `SwitchEncodingAsync` would have returned before anything
 // suspended, leaving no frame, and an awaiter's `GetResult` would come between the other two.
-// The formatted trace hides the awaiter's frames and the dispatcher's, so it begins with the three;
+// The formatted trace hides the awaiter's frames and the dispatcher's, so it begins with the three,
+// and ends with the reader's own read that awaited the first of them;
 // among the frames, the last it hides before them, past the dispatcher's, is a
 // `RuntimeAsyncTaskContinuation.GetResult`.
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
+//
+// On .NET 11 the guest also compares every frame of the trace with real .NET 11's, less the
+// awaiter's frames, which depend on what the JIT inlined into them.
 //
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
@@ -144,7 +148,8 @@ public class Program
     private const string FormattedNet11 =
         "   at System.Xml.XmlTextReaderImpl.ReadDataAsync()\n"
         + "   at System.Xml.XmlTextReaderImpl.SwitchEncodingAsync(Encoding newEncoding)\n"
-        + "   at System.Xml.XmlTextReaderImpl.ParseXmlDeclarationAsync(Boolean isTextDecl)\n";
+        + "   at System.Xml.XmlTextReaderImpl.ParseXmlDeclarationAsync(Boolean isTextDecl)\n"
+        + "   at System.Xml.XmlTextReaderImpl._ReadAsync_SwitchToInteractiveXmlDecl(Task`1 task)";
 
     private static int IndexOfFrame (StackFrame[] frames, string name)
     {
@@ -155,6 +160,41 @@ public class Program
 
         return -1;
     }
+
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Xml.XmlTextReaderImpl::ReadDataAsync\n"
+        + "System.Xml.XmlTextReaderImpl::SwitchEncodingAsync\n"
+        + "System.Xml.XmlTextReaderImpl::ParseXmlDeclarationAsync\n"
+        + "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Xml.XmlTextReaderImpl::_ReadAsync_SwitchToInteractiveXmlDecl\n";
 
     public static int Main (string[] args)
     {
@@ -197,10 +237,12 @@ public class Program
             int switching = IndexOfFrame (frames, "SwitchEncodingAsync");
             if (frames[switching].GetILOffset () != 0x51) return 13;
 
-            string formatted = new StackTrace (failure, false).ToString ();
-            if (!formatted.StartsWith (FormattedNet11.Replace ("\n", Environment.NewLine), StringComparison.Ordinal)) return 14;
+            string formatted = new StackTrace (failure, false).ToString ().TrimEnd ();
+            if (formatted != FormattedNet11.Replace ("\n", Environment.NewLine)) return 14;
 
             if (!AwaiterResumes (frames, IndexOfFrame (frames, "ReadDataAsync"))) return 15;
+
+            if (DescribeWhole (frames) != WholeNet11) return 16;
         }
 
         return 0;

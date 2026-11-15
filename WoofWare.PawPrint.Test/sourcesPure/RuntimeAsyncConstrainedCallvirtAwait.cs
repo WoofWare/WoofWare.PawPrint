@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,6 +24,9 @@ using System.Threading.Tasks;
 // and the implementation's async version passes its own suspension on. Were the await of the
 // `ValueTask` the ordinary `MoveNextAsync` returns, the wrapper's `ret` would pass that on, and the
 // wrapper would have no frame among those resumed.
+//
+// The guest also compares every frame of the trace with real .NET 11's, less the awaiter's frames,
+// which depend on what the JIT inlined into them.
 //
 // .NET 10 compiles the methods it calls as state machines, so there the guest checks the results
 // alone.
@@ -179,6 +183,36 @@ public class Program
         return Parallel.ForEachAsync (source, options, (value, cancellationToken) => default);
     }
 
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "Program+Wrapper`1[T]::MoveNextAsync\n"
+        + "System.Threading.Tasks.Parallel+<>c__57`1[TSource]::<ForEachAsync>b__57_0\n";
+
     // Run a loop over `source` whose one move faults, and check what the fault crossed; `pending`
     // and `moves` read the move's state. The exit code is `base` plus the index of the first check
     // that failed, or 0.
@@ -211,6 +245,7 @@ public class Program
             if (frames[wrapper].GetILOffset () != 0x0C) return @base + 8;
             if (NextPastDispatcher (frames, wrapper, -1) != "RuntimeAsyncTaskContinuation::GetResult") return @base + 9;
             if (NextPastDispatcher (frames, wrapper, 1) != "<>c__57`1::<ForEachAsync>b__57_0") return @base + 10;
+            if (DescribeWhole (frames) != WholeNet11) return @base + 11;
         }
 
         return 0;
@@ -232,16 +267,16 @@ public class Program
         // Moves that fault, through each of the prefix's cases. The value type's own method runs on
         // `Inner` itself; the others on the object or its box, whose state the holder keeps.
         var own = new Wrapper<PendingEnumerator> ();
-        int result = Faults (10, own, () => own.Inner.Pending, () => own.Inner.Moves);
+        int result = Faults (20, own, () => own.Inner.Pending, () => own.Inner.Moves);
         if (result != 0) return result;
 
         var reference = new Wrapper<PendingClass> { Inner = new PendingClass () };
-        result = Faults (20, reference, () => reference.Inner.Pending, () => reference.Inner.Moves);
+        result = Faults (40, reference, () => reference.Inner.Pending, () => reference.Inner.Moves);
         if (result != 0) return result;
 
         var holder = new Holder ();
         var boxed = new Wrapper<DefaultStruct> { Inner = new DefaultStruct { State = holder } };
-        result = Faults (30, boxed, () => holder.Pending, () => holder.Moves);
+        result = Faults (60, boxed, () => holder.Pending, () => holder.Moves);
         if (result != 0) return result;
 
         return 0;

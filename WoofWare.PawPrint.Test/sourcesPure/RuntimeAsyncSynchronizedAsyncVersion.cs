@@ -25,6 +25,11 @@ using System.Threading.Tasks;
 // methods, with the same results; there the trace has a state machine's `MoveNext` in place of the
 // broadcasting writer's `FlushAsync`, so the guest does not check it.
 //
+// On .NET 11 the guest also compares every frame of that trace with real .NET 11's, less the frame
+// of `StreamWriter.Flush()`, which calls `Flush(bool, bool)` last. Real .NET 11's precompiled
+// framework has no frame for it there; with `DOTNET_ReadyToRun=0`, so that the JIT's first tier
+// compiles it, it has one.
+//
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
 {
@@ -85,6 +90,29 @@ public class Program
         + "System.IO.TextWriter+SyncTextWriter::FlushAsync\n"
         + "System.IO.TextWriter+BroadcastingTextWriter::FlushAsync\n";
 
+    // The method of every frame but that of `StreamWriter.Flush()`, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            var method = frame.GetMethod ();
+            if (method.DeclaringType.FullName == "System.IO.StreamWriter" && method.Name == "Flush" && method.GetParameters ().Length == 0)
+                continue;
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "Program+ThrowingStream::Write\n"
+        + "System.IO.Stream::Write\n"
+        + "System.IO.StreamWriter::Flush\n"
+        + "System.IO.TextWriter+SyncTextWriter::Flush\n"
+        + "System.IO.TextWriter+SyncTextWriter::FlushAsync\n"
+        + "System.IO.TextWriter+BroadcastingTextWriter::FlushAsync\n";
+
     public static int Main (string[] args)
     {
         // Calls that complete.
@@ -120,6 +148,7 @@ public class Program
         {
             StackFrame[] frames = new StackTrace (fault, false).GetFrames ();
             if (DescribeFrom (frames, "System.IO.TextWriter+SyncTextWriter") != FlushTrace) return 11;
+            if (DescribeWhole (frames) != WholeNet11) return 12;
         }
 
         // The wrapper's monitor is free for another thread.
@@ -131,7 +160,7 @@ public class Program
         });
         other.Start ();
         other.Join ();
-        if (!taken) return 12;
+        if (!taken) return 13;
 
         return 0;
     }

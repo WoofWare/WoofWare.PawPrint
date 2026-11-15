@@ -24,6 +24,9 @@ using System.Threading.Tasks;
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
+// On .NET 11 the guest also compares every frame of the trace with real .NET 11's, less the
+// awaiter's frames, which depend on what the JIT inlined into them.
+//
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
 {
@@ -91,6 +94,36 @@ public class Program
         "   at System.CodeDom.Compiler.IndentedTextWriter.OutputTabsAsync()\n"
         + "   at System.CodeDom.Compiler.IndentedTextWriter.WriteAsync(String value)";
 
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.CodeDom.Compiler.IndentedTextWriter::OutputTabsAsync\n"
+        + "System.CodeDom.Compiler.IndentedTextWriter::WriteAsync\n";
+
     public static int Main (string[] args)
     {
         bool net11 = Environment.Version.Major >= 11;
@@ -132,6 +165,8 @@ public class Program
             if (formatted != FormattedNet11.Replace ("\n", Environment.NewLine)) return 14;
 
             if (!AwaiterResumes (frames, frames.Length - 2)) return 15;
+
+            if (DescribeWhole (frames) != WholeNet11) return 16;
         }
 
         return 0;

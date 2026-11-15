@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 // returns the task-returning thunk of `DisposeAsyncCore`, which awaits `FlushAsync()` in
 // `try { ... } finally { CloseStreamFromDispose(...) }`, and that flush comes down to the local
 // function `FlushAsyncInternal.Core`, which awaits the guest's `WriteAsync` outside any `try`.
-// (Real .NET 11's await binds the async version of `FlushAsync`, which goes through
+// (On .NET 11 the await binds the async version of `FlushAsync`, which goes through
 // `FlushAsyncInternalWithGuard`, awaiting inside a `using`, on the way.) The guest leaves the write
 // pending, so the methods suspend, and later completes or faults it.
 //
@@ -21,6 +21,9 @@ using System.Threading.Tasks;
 //
 // .NET 10 compiles the same methods as state machines, with the same results; its trace names
 // each method's state machine.
+//
+// On .NET 11 the guest also compares every frame of the trace with real .NET 11's, less the
+// awaiter's frames, which depend on what the JIT inlined into them.
 //
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
@@ -94,6 +97,39 @@ public class Program
         return -1;
     }
 
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.StreamWriter::<FlushAsyncInternal>g__Core|82_0\n"
+        + "System.IO.StreamWriter::FlushAsyncInternalWithGuard\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.IO.StreamWriter::DisposeAsyncCore\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n";
+
     public static int Main (string[] args)
     {
         // The write completes after the methods have suspended.
@@ -127,6 +163,7 @@ public class Program
         int core = FrameNaming (frames, 0, "g__Core|");
         if (core < 0) return 12;
         if (FrameNaming (frames, core + 1, "DisposeAsyncCore") < 0) return 13;
+        if (Environment.Version.Major >= 11 && DescribeWhole (frames) != WholeNet11) return 14;
 
         return 0;
     }
