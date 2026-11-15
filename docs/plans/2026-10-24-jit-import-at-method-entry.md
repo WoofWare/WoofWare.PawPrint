@@ -138,6 +138,19 @@ entry point. A `DynamicMethod`'s body is compiled too, binding its `DynamicScope
 interpreter's own synthesised bodies (the marshal stub, the multicast `Invoke` stub, the entry
 placeholder) are not.
 
+A dynamic method built with `restrictedSkipVisibility: true` and no owner is compiled earlier, by
+`RuntimeHelpers.CompileMethod` inside its `CreateDelegate` (`docs/plans/2026-11-15-compile-method.md`).
+PawPrint's handler for that QCall calls `DynamicMethodExecution.prepare`, which latches the
+`catch` clause types and `initLocals` and nothing else. Three things follow for this stage:
+
+- The compile step must be a function of a method and a state that pushes no frame, so that the
+  prologue and that QCall both call it.
+- At that QCall the trace has no frame of the dynamic method (measured on .NET 10 and 11), where the
+  prologue's has one.
+- A dynamic method's failed compilation is not memoised: a second `CreateDelegate` compiles it again
+  (measured), and so does an invocation after a failed one. The memo above holds outcomes that
+  succeeded, for a dynamic method.
+
 Binding may load assemblies. The prologue is part of a step, so `AssemblyLoadEvent` discards and
 reruns it as it does any step that loads, which is sound because binding writes nothing but the
 load context and the memo.

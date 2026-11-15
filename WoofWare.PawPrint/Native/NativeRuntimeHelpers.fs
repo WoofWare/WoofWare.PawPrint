@@ -1,5 +1,7 @@
 namespace WoofWare.PawPrint
 
+open Microsoft.Extensions.Logging
+
 [<RequireQualifiedAccess>]
 module NativeRuntimeHelpers =
     let tryExecuteQCall (entryPoint : string) (ctx : NativeCallContext) : NativeHandlerResult option =
@@ -88,6 +90,45 @@ module NativeRuntimeHelpers =
                         NativeHandlerResult.blockedOnClassInit blockedBy state |> Some
                     | WhatWeDid.VoluntaryYield _ ->
                         failwith "logic error: ensureTypeInitialised cannot produce a VoluntaryYield"
+        | "ReflectionInvocation_CompileMethod",
+          "System.Private.CoreLib",
+          "System.Runtime.CompilerServices",
+          "RuntimeHelpers",
+          "CompileMethod",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System", "RuntimeMethodHandleInternal", generics) ],
+          MethodReturnType.Void when generics.IsEmpty ->
+            // CoreCLR JIT-compiles the method here unless it is already compiled
+            // (`reflectioninvocation.cpp`, `IsPointingToPrestub` on .NET 10, `ShouldCallPrestub` on
+            // .NET 11), and the failures of that compilation come out of the QCall.
+            // `DynamicMethod.CreateDelegate` is its only caller in CoreLib, for a
+            // restricted-skip-visibility method, so the method is always a dynamic one, and
+            // compiling it is what `DynamicMethodExecution.prepare` models: latching its
+            // `initLocals` and its `catch` clause types, or refusing a clause type with the
+            // exception the JIT raises. `prepare` does nothing for a method already prepared, and
+            // latches nothing when it refuses, so a second `CreateDelegate` prepares it again, as a
+            // failed compilation is not remembered either. The instruction operands are still bound
+            // when each instruction executes (docs/divergences.md, "What a
+            // restricted-skip-visibility method's `CreateDelegate` compiles").
+            let operation = "RuntimeHelpers.CompileMethod"
+
+            let handle =
+                match MethodHandleResolution.resolveMethodHandleFromArg operation state instruction.Arguments.[0] with
+                | MethodHandle.FromDynamic handle -> handle
+                | MethodHandle.FromMetadata identity ->
+                    failwith
+                        $"%s{operation}: the method handle names the metadata method %O{identity}; DynamicMethod.CreateDelegate, the QCall's only caller in CoreLib, passes a dynamic method's handle"
+
+            match DynamicMethodExecution.prepare ctx.BaseClassTypes operation handle state with
+            | state, Ok _ -> NativeHandlerResult.completed state |> Some
+            | state, Error (exceptionType, why) ->
+                let logger = ctx.LoggerFactory.CreateLogger "NativeRuntimeHelpers"
+                logger.LogWarning ("RuntimeHelpers.CompileMethod refused a DynamicMethod: {Reason}", why)
+
+                NativeHandlerResult.raiseExceptionWithFields
+                    exceptionType
+                    (DynamicMethodExecution.preparationFailureFields ctx.BaseClassTypes exceptionType)
+                    state
+                |> Some
         | _ -> None
 
     /// Identity hash for a managed object reference. Heap addresses are positive and
