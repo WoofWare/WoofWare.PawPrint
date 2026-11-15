@@ -6157,7 +6157,7 @@ module EscapeAnalysis =
         // Each call that binds the async variant of an intrinsic whose call the JIT folds into the
         // value it returns (`IntrinsicBody.foldsAsyncVariantCall`), where it makes its tier-0
         // optimisations: like a folded `typeof`, it is no instruction at all.
-        let folded =
+        let foldedCalls =
             if optimised then
                 awaitSites
                 |> Map.filter (fun _ variant ->
@@ -6166,9 +6166,10 @@ module EscapeAnalysis =
                 )
                 |> Map.keys
                 |> Set.ofSeq
-                |> Set.union folded
             else
-                folded
+                Set.empty
+
+        let folded = Set.union folded foldedCalls
 
         // Whether each `ret` that ends no tail shape awaits the promise it returns: in an async
         // version (`impWrapTopOfStackInAwait`, importer.cpp).
@@ -6744,9 +6745,11 @@ module EscapeAnalysis =
         {
             Raises = List.rev raises
             Opaque = opaque
-            // Were the JIT not to fold a query, or expand a span, its calls would run there.
+            // Were the JIT not to fold a query, expand a span, or fold an intrinsic's async variant,
+            // its calls would run there.
             Assumed =
                 Seq.append (typeQueries |> Map.keys) (createdSpans |> Seq.map (fun index -> snd ops.[index + 1]))
+                |> Seq.append (foldedCalls |> Seq.map (fun index -> snd ops.[index]))
                 |> Seq.filter executed.Contains
                 |> Seq.map (fun offset -> offset, Assumption.JitOptimises)
                 |> Seq.append (List.rev accessAssumed)

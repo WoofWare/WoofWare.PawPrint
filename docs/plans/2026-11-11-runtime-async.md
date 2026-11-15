@@ -1346,7 +1346,7 @@ Each stage is one pull request, with its tests first.
         makes its tier-0 optimisations, the condition under which the analysis already folds a
         `typeof` (`Assumption.JitOptimises`, no `NoOptimization` or debuggable assembly, no call of
         `NextCallReturnAddress`); there the call is no instruction at all, as a folded `typeof` is
-        not. Elsewhere, and for any other intrinsic whose IL is its semantics
+        not, and the answer records that it assumes `JitOptimises` there. Elsewhere, and for any other intrinsic whose IL is its semantics
         (`IntrinsicBody.OwnIl`, such as `ValueTask<T>.AsTask`), the variant runs its IL, as the
         interpreter runs it; any other intrinsic's variant is refused by name. `TestIntrinsicBody`
         checks the transcription against .NET 11's pinned `importercalls.cpp` and CoreLib. The
