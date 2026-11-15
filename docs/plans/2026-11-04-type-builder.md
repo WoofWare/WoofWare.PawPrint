@@ -9002,3 +9002,47 @@ Upstream source was read in `$DOTNET_RUNTIME_SRC_NET10`. Nothing in the reposito
 * Deleting `Parameter.DefaultValue` (#2283).
 * `NativeEnum`: `char` and `bool` underlying types, beside the planner's three (#2281).
 * A `SetConstant` argument which the managed caller cannot pass (another element type, a null pointer for a primitive) is a host failure. CoreCLR would write a row or throw "Bad default value."; nothing reaches it.
+
+### The Constant stage: the pointer PR, as built
+
+Built 2026-11-15 on `plan-setconstant-decided` (two plan commits on `main` at 005169cfa). Scratchpad paths are under `constant-pointer/`, a sibling of `setconstant/`.
+
+**What changed.**
+* `MetadataImport.GetDefaultValue` hands back a string constant's `char*` as a `BlobHeap` pointer: the root is the whole `#Blob` heap (`Size` the heap's length), the projections `[ReinterpretAs char; ByteOffset c]`, where `c` is the heap offset of the blob's first content byte. That is the same for every assembly. An empty blob still gives a null pointer; a one-byte blob gives a pointer and 0 characters (unchanged code, no image on disk has one).
+* `IlMachineTypeResolution.blobHeapContentCharPointer` is the new `char*` beside the existing `byte*` `blobHeapContentPointer` (which `GetFieldMarshal` uses). The two share the prefix decoding, now the private `blobHeapContentOffset`.
+* Deleted, each left without a user: `PeByteRangePointerSource.ConstantBlob` (a public case of `WoofWare.PawPrint`), `ComparableConstantHandle` (a public type of the published Domain package), and `peByteRangeForConstantBlob` and `peByteRangeCharPointer` with their `IlMachineState` aliases. The decisions named the first three; `peByteRangeCharPointer` had `GetDefaultValue` as its only caller.
+
+**The throwaway** (`throwaway.diff`, `throwaway-guests.log`). The handler built the heap pointer and printed each string constant's content offset; six guests that read string constants ran under it. `LiteralFieldValue.cs` read `"hello"` (10 bytes) at content offset 143 and passed, and `ReflectionParameterDefaultValue.cs` read its strings at offsets 160 and 190 and passed. So `new string(char*, 0, n)` (`MdImport.ConvertMetadataStringPermitInvalidContent`) reads through a `BlobHeap` pointer at an odd byte offset with no further change: the byte-wise copy does not care about alignment.
+
+**Tests.** The unit tests were committed red first, with their failing output in the commit message.
+* `TestNativeMetadataImport`: every string constant of the fixture image and of CoreLib. The pointer is the heap pointer above, with the cursor from an independent computation (the blob's heap offset plus the shortest compressed width of its length), and the characters read through the interpreter's own dereference equal the blob's code units. Coverage, asserted: CoreLib alone has 13 contents at odd offsets, 15 at even, and 3 empty blobs (`count.fsx` over 10.0.14's CoreLib).
+* A read just past each blob's end equals the heap's own bytes there; through every constant's pointer, the heap's last two bytes are readable and a read one byte further on is refused.
+* The two assertions on `ConstantBlob` now expect the heap source, the heap's size and the cursor. Their match patterns gained the `ByteOffset` projection, and the first lost its `range.Size = 10`.
+* One existing test helper changed, which the decisions did not foresee: `decodeDefaultValueOut`, which the two "agrees with the host runtime" tests use, read a string from the start of the pointer's range and ignored its cursor. It now reads through the pointer. No test's assertion changed apart from the two above.
+* A guest, `sourcesPure/LiteralStringConstantOffsets.cs`: nine string literals and three string parameter defaults, read through `GetRawConstantValue`, `DefaultValue` and `RawDefaultValue`. Under the test harness's compile its contents sit at heap offsets 108, 111, 116, 123, 132, 143, 156, 172, 301, 308, 317 and 328 (five odd; 172 behind a two-byte length prefix), measured with a temporary trace. Real .NET 10.0.14 and 11.0.0-rc.3 exit 0; the control (check 5 expecting `"klmnp"`) exits 5 on both. It is not a red test.
+* Not written: the planner's unit test that replaces a dynamic module's image under the pointer. No dynamic module holds Constant rows until the stage itself, so it belongs to the stage's PR.
+
+**Mutants** (`mutate.py`, `mutants.sh`, each built fresh from the committed tip and reverted):
+
+| Mutant | Killed by |
+|---|---|
+| the cursor left at the length prefix | every pointer test, both host-oracle tests, and the guests `LiteralStringConstantOffsets`, `LiteralFieldValue` and `ReflectionParameterDefaultValue` |
+| the range's size taken from the blob | the read past the end ("PE byte-view read at offset 271 for 2 bytes is outside byte range"), and the three pointer-equality tests |
+| the range one byte longer than the heap | the refusal of a read straddling the heap's end, and the pointer-equality tests |
+| the cursor rounded down to an even offset | the pointer tests, the read past the end, the parameter host-oracle test, and the guests `LiteralStringConstantOffsets` and `LiteralFieldValue`. `ReflectionParameterDefaultValue`, whose strings start at even offsets, passes |
+| an empty blob given a pointer instead of null | "reports an empty string as a null pointer", the every-constant test, and both host-oracle tests |
+| a `byte*` instead of a `char*` | the pointer-equality tests, the read past the end, and both host-oracle tests |
+
+**Suites**, at the tip, the whole solution built first:
+
+| Suite | Total | Passed | Skipped |
+|---|---|---|---|
+| default (no filter) | 5797 | 5759 | 38 |
+| `TestCategory=Guest` | 234 | 234 | 0 |
+| `TestCategory=GuestSolo` | 2 | 2 | 0 |
+| `TestCategory=GuestPure` | 1196 | 1196 | 0 |
+| `TestCategory=GuestImpure` | 296 | 296 | 0 |
+
+Each ended `Test Run Successful`; the logs are `suite-*.log`.
+
+**Where the decisions were wrong.** Nowhere in substance. Two small omissions: the test helper above, and `peByteRangeCharPointer`, which also loses its only user.
