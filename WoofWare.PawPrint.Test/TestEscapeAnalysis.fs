@@ -14869,6 +14869,440 @@ public static class Runners
         |> Option.map _.Reason
         |> shouldEqual (Some Opacity.UnresolvedAssembly)
 
+    /// An image whose static class `Awaits` holds runtime-async methods (`MethodImplAttributes.Async`)
+    /// awaiting one another, as no compiler the test project has can spell them, and ordinary methods
+    /// beside them. `Thrown` and `Other` are exceptions of its own. Each runtime-async method ending
+    /// in `Leaf` throws a `Thrown`, and each awaiting method returns what its await gives.
+    let private emitAwaits () : byte[] =
+        let builder =
+            Emit.PersistedAssemblyBuilder (AssemblyName "Awaits", typeof<obj>.Assembly)
+
+        let modul = builder.DefineDynamicModule "Awaits"
+
+        let asyncHelpers =
+            typeof<obj>.Assembly.GetType ("System.Runtime.CompilerServices.AsyncHelpers", true)
+
+        // `AsyncHelpers.Await<int>` of the promise type whose generic definition is `awaited`.
+        let awaitOf (awaited : Type) : MethodInfo =
+            asyncHelpers.GetMethods ()
+            |> Array.filter (fun m ->
+                m.Name = "Await"
+                && m.IsGenericMethodDefinition
+                && (m.GetParameters ()).[0].ParameterType.IsGenericType
+                && (m.GetParameters ()).[0].ParameterType.GetGenericTypeDefinition () = awaited
+            )
+            |> Array.exactlyOne
+            |> fun m -> m.MakeGenericMethod typeof<int>
+
+        let awaitTask =
+            awaitOf (typeof<Threading.Tasks.Task<int>>.GetGenericTypeDefinition ())
+
+        let awaitConfigured =
+            awaitOf (typeof<Runtime.CompilerServices.ConfiguredTaskAwaitable<int>>.GetGenericTypeDefinition ())
+
+        let configureAwait =
+            typeof<Threading.Tasks.Task<int>>.GetMethod ("ConfigureAwait", [| typeof<bool> |])
+
+        let exceptionNamed (name : string) : Type =
+            let ty = modul.DefineType (name, TypeAttributes.Public, typeof<Exception>)
+
+            ty.DefineDefaultConstructor MethodAttributes.Public
+            |> ignore<Emit.ConstructorBuilder>
+
+            ty.CreateType ()
+
+        let thrown = exceptionNamed "Thrown"
+        let other = exceptionNamed "Other"
+
+        let runtimeAsync (method : Emit.MethodBuilder) : unit =
+            method.SetImplementationFlags (MethodImplAttributes.IL ||| enum<MethodImplAttributes> 0x2000)
+
+        let throwing (il : Emit.ILGenerator) (exceptionType : Type) : unit =
+            il.Emit (Emit.OpCodes.Newobj, exceptionType.GetConstructor Type.EmptyTypes)
+            il.Emit Emit.OpCodes.Throw
+
+        // `Base.V`, virtual, throws a `Thrown`; the sealed `Derived` overrides it to throw an `Other`.
+        let baseBuilder = modul.DefineType ("Base", TypeAttributes.Public)
+
+        baseBuilder.DefineDefaultConstructor MethodAttributes.Public
+        |> ignore<Emit.ConstructorBuilder>
+
+        let baseV =
+            baseBuilder.DefineMethod (
+                "V",
+                MethodAttributes.Public
+                ||| MethodAttributes.Virtual
+                ||| MethodAttributes.HideBySig
+                ||| MethodAttributes.NewSlot,
+                typeof<Threading.Tasks.Task<int>>,
+                Type.EmptyTypes
+            )
+
+        runtimeAsync baseV
+        throwing (baseV.GetILGenerator ()) thrown
+        let baseType = baseBuilder.CreateType ()
+
+        let derivedBuilder =
+            modul.DefineType ("Derived", TypeAttributes.Public ||| TypeAttributes.Sealed, baseType)
+
+        let derivedCtor = derivedBuilder.DefineDefaultConstructor MethodAttributes.Public
+
+        let derivedV =
+            derivedBuilder.DefineMethod (
+                "V",
+                MethodAttributes.Public
+                ||| MethodAttributes.Virtual
+                ||| MethodAttributes.HideBySig,
+                typeof<Threading.Tasks.Task<int>>,
+                Type.EmptyTypes
+            )
+
+        runtimeAsync derivedV
+        throwing (derivedV.GetILGenerator ()) other
+        derivedBuilder.CreateType () |> ignore<Type>
+
+        // `IAsks.M`, which the value type `Answers` implements to throw an `Other`.
+        let asksBuilder =
+            modul.DefineType ("IAsks", TypeAttributes.Public ||| TypeAttributes.Interface ||| TypeAttributes.Abstract)
+
+        let asksM =
+            asksBuilder.DefineMethod (
+                "M",
+                MethodAttributes.Public
+                ||| MethodAttributes.Abstract
+                ||| MethodAttributes.Virtual
+                ||| MethodAttributes.HideBySig
+                ||| MethodAttributes.NewSlot,
+                typeof<Threading.Tasks.Task<int>>,
+                Type.EmptyTypes
+            )
+
+        let asks = asksBuilder.CreateType ()
+
+        let answersBuilder =
+            modul.DefineType (
+                "Answers",
+                TypeAttributes.Public
+                ||| TypeAttributes.Sealed
+                ||| TypeAttributes.SequentialLayout,
+                typeof<ValueType>
+            )
+
+        answersBuilder.AddInterfaceImplementation asks
+
+        let answersM =
+            answersBuilder.DefineMethod (
+                "M",
+                MethodAttributes.Public
+                ||| MethodAttributes.Virtual
+                ||| MethodAttributes.Final
+                ||| MethodAttributes.HideBySig
+                ||| MethodAttributes.NewSlot,
+                typeof<Threading.Tasks.Task<int>>,
+                Type.EmptyTypes
+            )
+
+        runtimeAsync answersM
+        throwing (answersM.GetILGenerator ()) other
+        let answers = answersBuilder.CreateType ()
+
+        // A type of the fixture's own with the name and namespace of CoreLib's, whose `Await` throws
+        // an `Other`: it is no intrinsic, so the JIT matches no await through it.
+        let lookalikeBuilder =
+            modul.DefineType (
+                "System.Runtime.CompilerServices.AsyncHelpers",
+                TypeAttributes.Public ||| TypeAttributes.Abstract ||| TypeAttributes.Sealed
+            )
+
+        let lookalikeAwait =
+            lookalikeBuilder.DefineMethod (
+                "Await",
+                MethodAttributes.Public ||| MethodAttributes.Static,
+                typeof<int>,
+                [| typeof<Threading.Tasks.Task<int>> |]
+            )
+
+        throwing (lookalikeAwait.GetILGenerator ()) other
+        lookalikeBuilder.CreateType () |> ignore<Type>
+
+        let awaits =
+            modul.DefineType ("Awaits", TypeAttributes.Public ||| TypeAttributes.Abstract ||| TypeAttributes.Sealed)
+
+        // A P/Invoke returning a promise type, whose async variant the analysis does not model.
+        let native =
+            awaits.DefinePInvokeMethod (
+                "Native",
+                "native",
+                MethodAttributes.Public
+                ||| MethodAttributes.Static
+                ||| MethodAttributes.PinvokeImpl,
+                CallingConventions.Standard,
+                typeof<Threading.Tasks.Task<int>>,
+                Type.EmptyTypes,
+                Runtime.InteropServices.CallingConvention.Winapi,
+                Runtime.InteropServices.CharSet.Auto
+            )
+
+        let define
+            (name : string)
+            (isAsync : bool)
+            (returns : Type)
+            (body : Emit.ILGenerator -> unit)
+            : Emit.MethodBuilder
+            =
+            let method =
+                awaits.DefineMethod (
+                    name,
+                    MethodAttributes.Public ||| MethodAttributes.Static,
+                    returns,
+                    Type.EmptyTypes
+                )
+
+            if isAsync then
+                runtimeAsync method
+
+            body (method.GetILGenerator ())
+            method
+
+        // An ordinary method throwing a `Thrown`, against which the awaits are compared.
+        define "Throws" false typeof<Void> (fun il -> throwing il thrown)
+        |> ignore<Emit.MethodBuilder>
+
+        let leaf =
+            define "Leaf" true typeof<Threading.Tasks.Task<int>> (fun il -> throwing il thrown)
+
+        // An async version: ordinary IL returning a promise type.
+        let version =
+            define "Version" false typeof<Threading.Tasks.Task<int>> (fun il -> throwing il thrown)
+
+        let awaiting (name : string) (call : Emit.ILGenerator -> unit) =
+            define
+                name
+                true
+                typeof<Threading.Tasks.Task<int>>
+                (fun il ->
+                    call il
+                    il.Emit (Emit.OpCodes.Call, awaitTask)
+                    il.Emit Emit.OpCodes.Ret
+                )
+            |> ignore<Emit.MethodBuilder>
+
+        awaiting "AwaitsLeaf" (fun il -> il.Emit (Emit.OpCodes.Call, leaf))
+
+        define
+            "AwaitsLookalike"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit (Emit.OpCodes.Call, lookalikeAwait)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // An await the JIT never compiles, after the method has returned.
+        define
+            "ReturnsBeforeAwait"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.Emit Emit.OpCodes.Ldc_I4_0
+                il.Emit Emit.OpCodes.Ret
+                il.Emit (Emit.OpCodes.Call, native)
+                il.Emit (Emit.OpCodes.Call, awaitTask)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        awaiting "AwaitsVersion" (fun il -> il.Emit (Emit.OpCodes.Call, version))
+
+        awaiting
+            "AwaitsVirtual"
+            (fun il ->
+                il.Emit (Emit.OpCodes.Newobj, derivedCtor)
+                il.Emit (Emit.OpCodes.Callvirt, baseV)
+            )
+
+        define
+            "AwaitsConstrained"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.DeclareLocal answers |> ignore<Emit.LocalBuilder>
+                il.Emit (Emit.OpCodes.Ldloca_S, 0uy)
+                il.Emit (Emit.OpCodes.Constrained, answers)
+                il.Emit (Emit.OpCodes.Callvirt, asksM)
+                il.Emit (Emit.OpCodes.Call, awaitTask)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        define
+            "AwaitsLeafConfigured"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit Emit.OpCodes.Ldc_I4_0
+                il.Emit (Emit.OpCodes.Call, configureAwait)
+                il.Emit (Emit.OpCodes.Call, awaitConfigured)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // The await's region is the call's: what the variant throws is caught.
+        define
+            "CatchesLeaf"
+            true
+            typeof<Threading.Tasks.Task>
+            (fun il ->
+                il.BeginExceptionBlock () |> ignore<Emit.Label>
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit (Emit.OpCodes.Call, awaitTask)
+                il.Emit Emit.OpCodes.Pop
+                il.BeginCatchBlock thrown
+                il.Emit Emit.OpCodes.Pop
+                il.EndExceptionBlock ()
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // A local between the call and the await: no pattern the JIT matches, so the call binds the
+        // ordinary variant, the task-returning thunk.
+        define
+            "AwaitsStored"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.DeclareLocal typeof<Threading.Tasks.Task<int>> |> ignore<Emit.LocalBuilder>
+
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit Emit.OpCodes.Stloc_0
+                il.Emit Emit.OpCodes.Ldloc_0
+                il.Emit (Emit.OpCodes.Call, awaitTask)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // The same pattern in a method without runtime async's calling convention, where the JIT
+        // matches none.
+        define
+            "OrdinaryAwaitsLeaf"
+            false
+            typeof<int>
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit (Emit.OpCodes.Call, awaitTask)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        awaits.CreateType () |> ignore<Type>
+
+        use stream = new MemoryStream ()
+        builder.Save stream
+        stream.ToArray ()
+
+    /// A matched await in a runtime-async body binds the awaited method's async variant
+    /// (`AwaitSiteBinding.classify`, decision 13 of `docs/plans/2026-11-11-runtime-async.md`), which
+    /// runs the method's own body in place of the thunk, so what escapes that body escapes at the
+    /// call, in the call's regions; the instructions up to the await's call never run. The variant of
+    /// an async version is opaque, and a call outside a matched pattern binds the ordinary variant as
+    /// before.
+    [<Test>]
+    let ``a matched await runs the awaited method's async variant`` () : unit =
+        match FrameworkUnderTest.runtime () with
+        | EmulatedRuntime.Net10 -> Assert.Ignore ".NET 10's CoreCLR makes no async variant"
+        | EmulatedRuntime.Net11 -> ()
+
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let fixture =
+            Assembly.read loggerFactory (Some "Awaits.dll") (new MemoryStream (emitAwaits ()))
+
+        let analysis = analysisOver [ fixture ] id
+
+        let variantOf (analysis : EscapeAnalysisState) (name : string) : EscapeAnalysisState * MethodKey =
+            match EscapeAnalysis.asyncVariant analysis (methodNamed fixture "Awaits" name) with
+            | analysis, Ok variant -> analysis, variant
+            | _, Error refusal -> failwith $"Awaits::%s{name} has no async variant: %A{refusal}"
+
+        let sourcesOf (analysis : EscapeAnalysisState) (key : MethodKey) : EscapeAnalysisState * Set<string> =
+            let analysis, sources = EscapeAnalysis.unknownSources analysis key
+            analysis, sources |> Seq.map (renderSite analysis) |> Set.ofSeq
+
+        // The control: an ordinary method throwing what `Leaf` throws.
+        let analysis, control =
+            EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "Throws")
+
+        (render analysis control |> Set.contains "=Thrown", control.Unknown)
+        |> shouldEqual (true, false)
+
+        let analysis =
+            (analysis, [ "Leaf" ; "AwaitsLeaf" ; "AwaitsLeafConfigured" ])
+            ||> List.fold (fun analysis name ->
+                let analysis, variant = variantOf analysis name
+                let analysis, escapes = EscapeAnalysis.escapes analysis variant
+                (name, escapes) |> shouldEqual (name, control)
+                analysis
+            )
+
+        let analysis, catches = variantOf analysis "CatchesLeaf"
+        let analysis, caught = EscapeAnalysis.escapes analysis catches
+
+        (render analysis caught |> Set.contains "=Thrown", caught.Unknown)
+        |> shouldEqual (false, false)
+
+        // Dispatch on the exact receiver reaches the override's variant.
+        let analysis, dispatches = variantOf analysis "AwaitsVirtual"
+        let analysis, dispatched = EscapeAnalysis.escapes analysis dispatches
+        let shown = render analysis dispatched
+
+        (shown.Contains "=Other", shown.Contains "=Thrown", dispatched.Unknown)
+        |> shouldEqual (true, false, false)
+
+        // The prefix resolves the value type's own implementation, whose variant runs.
+        let analysis, constrains = variantOf analysis "AwaitsConstrained"
+        let analysis, constrained = EscapeAnalysis.escapes analysis constrains
+        let shown = render analysis constrained
+
+        (shown.Contains "=Other", shown.Contains "=Thrown", constrained.Unknown)
+        |> shouldEqual (true, false, false)
+
+        // Only CoreLib's intrinsic `Await` ends a pattern, so the lookalike runs, after `Leaf`'s
+        // thunk.
+        let analysis, lookalike = variantOf analysis "AwaitsLookalike"
+        let analysis, lookedAlike = EscapeAnalysis.escapes analysis lookalike
+
+        (render analysis lookedAlike |> Set.contains "=Other", lookedAlike.Unknown)
+        |> shouldEqual (true, true)
+
+        // The await after the `ret` is never compiled, so the P/Invoke's variant is never bound.
+        let analysis, returns = variantOf analysis "ReturnsBeforeAwait"
+        let analysis, returned = EscapeAnalysis.escapes analysis returns
+        returned.Unknown |> shouldEqual false
+
+        let analysis, versionAwait = variantOf analysis "AwaitsVersion"
+        let analysis, versionSources = sourcesOf analysis versionAwait
+
+        versionSources
+        |> shouldEqual (Set.singleton "Awaits::Version (async variant) entry AsyncVersion")
+
+        // No pattern matches, so the call binds `Leaf`'s ordinary variant.
+        let analysis, stored = variantOf analysis "AwaitsStored"
+        let analysis, storedSources = sourcesOf analysis stored
+
+        storedSources
+        |> Set.contains "Awaits::Leaf entry TaskReturningThunk"
+        |> shouldEqual true
+
+        let _, ordinarySources =
+            sourcesOf analysis (methodNamed fixture "Awaits" "OrdinaryAwaitsLeaf")
+
+        ordinarySources
+        |> Set.contains "Awaits::Leaf entry TaskReturningThunk"
+        |> shouldEqual true
+
     /// Where the object a `throw` raises comes from, in an emitted method.
     [<RequireQualifiedAccess>]
     type private Raise =
