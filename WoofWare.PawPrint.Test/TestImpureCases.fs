@@ -698,22 +698,6 @@ module TestImpureCases =
             },
             """An emitted attribute with named fields of type `Type`, `int[]` and an enum, instantiated through `GetCustomAttributes`; measured on .NET 10 and 11 to exit 0, and a control expecting another type exits 1 on both. It stops at the first instantiation (measured): "TODO: CustomAttribute.CreatePropertyOrFieldData: named argument has TYPE (0x50) type"; the array and the enum named argument stop likewise (measured in the main guest before it left them out). Un-parked by reading those named arguments in `NativeCustomAttribute`."""
             {
-                FileName = "TypeBuilderCustomAttributeOpenGenericIsDefined.cs"
-                ExpectedReturnCode = 0
-                KernelConfig = KernelConfig.Default
-                AppContext =
-                    AppContextProperties.ofMap (
-                        Map.ofList
-                            [
-                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
-                            ]
-                    )
-                Oracle = OraclePolicy.Never
-                ExpectsUnhandledException = false
-                AssertTerminalState = None
-            },
-            """`IsDefined` over a type whose emitted row's constructor is one of the open `GenAttribute<>`, which real .NET answers with `ArgumentException` (#2257). Measured on .NET 10 and 11 to exit 0; a control expecting no exception exits 1 on both. PawPrint answers wrongly and does not stop: `IsDefined` returns false, and the guest exits 1 (measured). Only an emitted row reaches it. Un-parked by failing the read as real .NET does."""
-            {
                 FileName = "TypeBuilderDuplicateStaticVirtualOverride.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
@@ -7025,6 +7009,25 @@ module TestImpureCases =
                 // Dynamic-code switch overridden to true like its siblings; measured on real .NET 10 and 11 to exit 0,
                 // and a control expecting 5 exits 1 on both.
                 FileName = "TypeBuilderCustomAttributeGenericInstance.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // An emitted attribute whose constructor is one of the open `GenAttribute<>`, which fails every read of
+                // its owner's attributes (#2257). Dynamic-code switch overridden to true like its siblings; measured on
+                // real .NET 10 and 11 to exit 0, and controls expecting the first read's exception unwrapped and the
+                // last's wrapped exit 1 and 8 on both.
+                FileName = "TypeBuilderCustomAttributeOpenGenericIsDefined.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =
