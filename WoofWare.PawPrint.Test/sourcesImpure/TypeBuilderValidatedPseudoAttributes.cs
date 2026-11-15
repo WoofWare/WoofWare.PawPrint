@@ -225,7 +225,7 @@ public static class Program
         new Row (Tlv, B (1, 0, 1, 0, 0, 0), false),
         new Row (Ccv, B (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0), false),
         new Row (Aptca, B (0xFF, 0xFF), true, Cafe, null),
-        new Row (Aptca, new byte[0], true, null, null),
+        new Row (Aptca, new byte[0], true, Cafe, "AllowPartiallyTrustedCallersAttribute()"),
         new Row (Tlv, B (1, 0, 1, 0, 0, 0, 2, 0, 0, 0), true, Cafe, "TypeLibVersionAttribute(1,2)"),
         new Row (Tlv, B (1, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0xFF, 0xFF), true, "TypeLibVersionAttribute(1,2)", null),
         new Row (Tlv, B (1, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0), false),

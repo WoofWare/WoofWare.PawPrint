@@ -658,10 +658,15 @@ module TestEmitScopeCustomAttributes =
                     1, Gen.constant ([ 0xFFuy ], Set.singleton "null string")
                     1,
                     gen {
-                        let! first = Gen.choose (0xE0, 0xFE)
-                        let! rest = Gen.listOfLength 3 anyByte
+                        // A first byte that no form allows, then three bytes that, read as a four-byte form's,
+                        // would give the payload's length exactly when the first byte is `E0`.
+                        let! first = Gen.frequency [ 1, Gen.constant 0xE0 ; 1, Gen.choose (0xE1, 0xFE) ]
                         let! text, features = payload
-                        return (byte first :: List.ofSeq rest) @ text, Set.add "length E0-FE" features
+                        let n = text.Length
+
+                        return
+                            [ byte first ; 0uy ; byte (n >>> 8) ; byte (n &&& 0xFF) ] @ text,
+                            Set.add "length E0-FE" features
                     }
                     8,
                     gen {
