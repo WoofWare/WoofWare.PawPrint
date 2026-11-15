@@ -15316,19 +15316,9 @@ public static class Runners
 
         awaiting "AwaitsTailLeaf" (fun il -> il.Emit (Emit.OpCodes.Call, tailLeaf))
 
-        // An ordinary method calling one that does nothing, against which the folded intrinsics are
-        // compared: as at any call the JIT expands, the instruction's own faults stand.
-        let nothing =
-            define "Nothing" false typeof<Void> (fun il -> il.Emit Emit.OpCodes.Ret)
-
-        define
-            "CallsNothing"
-            false
-            typeof<Void>
-            (fun il ->
-                il.Emit (Emit.OpCodes.Call, nothing)
-                il.Emit Emit.OpCodes.Ret
-            )
+        // An ordinary method that does nothing, against which the folded intrinsics are compared:
+        // a folded call is no instruction at all, as a folded `typeof` is not.
+        define "Nothing" false typeof<Void> (fun il -> il.Emit Emit.OpCodes.Ret)
         |> ignore<Emit.MethodBuilder>
 
         // Tail shapes of the intrinsics whose async variant's call the JIT replaces with its value.
@@ -15354,6 +15344,20 @@ public static class Runners
         let loadsNothing (_ : Emit.ILGenerator) = ()
 
         tailOf "TailFromResult" taskOfInt loadsOne taskFromResult
+
+        // The JIT folds nothing in a method it does not optimise.
+        let unoptimised =
+            define
+                "TailFromResultNoOptimization"
+                false
+                taskOfInt
+                (fun il ->
+                    il.Emit Emit.OpCodes.Ldc_I4_1
+                    il.Emit (Emit.OpCodes.Call, taskFromResult)
+                    il.Emit Emit.OpCodes.Ret
+                )
+
+        unoptimised.SetImplementationFlags (MethodImplAttributes.IL ||| MethodImplAttributes.NoOptimization)
         tailOf "TailValueTaskFromResult" valueTaskOfInt loadsOne valueTaskFromResult
 
         tailOf
@@ -15503,7 +15507,8 @@ public static class Runners
     /// follow (`Opacity.AwaitedPromise`). The async version of a synchronized method reads no tail
     /// shape, and the ordinary variant runs the IL as written. The variant of an intrinsic whose IL is
     /// its semantics runs that IL too, except where the JIT replaces the variant's call with its value
-    /// (`IntrinsicBody.foldsAsyncVariantCall`), where nothing runs.
+    /// (`IntrinsicBody.foldsAsyncVariantCall`), as it does where it makes its tier-0 optimisations:
+    /// then the call is no instruction at all.
     [<Test>]
     let ``an async version's tail shapes call the callee's async variant`` () : unit =
         match FrameworkUnderTest.runtime () with
@@ -15591,7 +15596,7 @@ public static class Runners
         // The JIT replaces the call of each of these intrinsics' async variant with its value, so
         // nothing runs; so too where an await binds one.
         let analysis, nothing =
-            EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "CallsNothing")
+            EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "Nothing")
 
         let analysis =
             (analysis,
@@ -15608,6 +15613,30 @@ public static class Runners
                 (name, escapes) |> shouldEqual (name, nothing)
                 analysis
             )
+
+        // Where the JIT does not fold the call, the variant of `Task.FromResult` runs its IL as an
+        // async version, whose `ret` awaits.
+        let fromResultAwaits =
+            "System.Threading.Tasks.Task::FromResult (async variant) IL AwaitedPromise"
+
+        let analysis, unoptimised = variantOf analysis "TailFromResultNoOptimization"
+        let analysis, unoptimisedSources = sourcesOf analysis unoptimised
+        unoptimisedSources.Contains fromResultAwaits |> shouldEqual true
+
+        // So too where the analysis may not assume the JIT makes its tier-0 optimisations.
+        let unassumed =
+            analysisOf
+                (hostCoreLib ())
+                (FrameworkUnderTest.runtimeDirs ())
+                (hostTarget ())
+                HardwareIntrinsicsProfile.ScalarOnly
+                (Set.remove Assumption.JitOptimises Assumption.all)
+                [ fixture ]
+                id
+
+        let unassumed, unassumedVariant = variantOf unassumed "TailFromResult"
+        let _, unassumedSources = sourcesOf unassumed unassumedVariant
+        unassumedSources.Contains fromResultAwaits |> shouldEqual true
 
         // The variant of `ValueTask<int>.AsTask` runs its IL as an async version, whose `ret` awaits.
         let analysis, asTask = variantOf analysis "TailAsTaskOfArgument"
