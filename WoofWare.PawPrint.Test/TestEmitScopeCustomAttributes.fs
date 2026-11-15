@@ -369,6 +369,21 @@ module TestEmitScopeCustomAttributes =
             KnownCustomAttribute.PreserveSig, [ "method implementation", 0x0080 ]
         ]
 
+    /// The serialisation type of an argument a validated pseudo-attribute declares, as the test transcribes it.
+    [<RequireQualifiedAccess>]
+    type private ModelArgument =
+        | U2
+        | I4
+        | String
+
+    /// The rule a validated pseudo-attribute's arguments must keep, as the test transcribes it.
+    [<RequireQualifiedAccess>]
+    type private ModelRule =
+        | Below of bound : int
+        | Guid
+        | NonNegative
+        | Unchecked
+
     /// <summary>
     /// The pseudo-attributes that CoreCLR's emitter validates and then keeps as a row, each with the owners it accepts
     /// (named as <c>ownerKind</c> names them), the arguments it reads and the rule they must keep, transcribed from
@@ -376,36 +391,27 @@ module TestEmitScopeCustomAttributes =
     /// <c>mdtTypeRef</c>), the declared arguments (<c>DEFINE_CA_CTOR_ARGS</c>) and the checks of
     /// <c>RegMeta::_HandleKnownCustomAttribute</c>, with the two bounds from inc/metadata.h.
     /// </summary>
-    let private keptTable
-        : (KnownCustomAttribute * (string list * KnownCustomAttributeArgument list * KnownCustomAttributeValueRule)) list =
+    let private keptTable : (KnownCustomAttribute * (string list * ModelArgument list * ModelRule)) list =
         [
             // GuidTargets :102 (mdtTypeDef, mdtTypeRef, mdtModule, mdtAssembly); GuidAttribute args :205 (STRING);
             // 36 characters that LPCSTRToGuid reads inside braces :1203.
-            KnownCustomAttribute.Guid,
-            ([ "type" ; "module" ; "assembly" ],
-             [ KnownCustomAttributeArgument.String ],
-             KnownCustomAttributeValueRule.Guid)
+            KnownCustomAttribute.Guid, ([ "type" ; "module" ; "assembly" ], [ ModelArgument.String ], ModelRule.Guid)
             // InterfaceTypeTargets :104 (mdtTypeDef); args :218 (U2); `u2 >= ifLast` refused :1231, ifLast = 4
             // (metadata.h:45).
-            KnownCustomAttribute.InterfaceType,
-            ([ "type" ], [ KnownCustomAttributeArgument.U2 ], KnownCustomAttributeValueRule.Below 4us)
+            KnownCustomAttribute.InterfaceType, ([ "type" ], [ ModelArgument.U2 ], ModelRule.Below 4)
             // ClassInterfaceTargets :105 (mdtTypeDef, mdtAssembly, mdtTypeRef); args :227 (U2); `u2 >= clsIfLast` refused
             // :1239, clsIfLast = 3 (metadata.h:58).
-            KnownCustomAttribute.ClassInterface,
-            ([ "type" ; "assembly" ], [ KnownCustomAttributeArgument.U2 ], KnownCustomAttributeValueRule.Below 3us)
+            KnownCustomAttribute.ClassInterface, ([ "type" ; "assembly" ], [ ModelArgument.U2 ], ModelRule.Below 3)
             // TypeLibVersionTargets :115 (mdtAssembly, mdtTypeRef); args :394 (I4, I4); either negative refused :1416.
             KnownCustomAttribute.TypeLibVersion,
-            ([ "assembly" ],
-             [ KnownCustomAttributeArgument.I4 ; KnownCustomAttributeArgument.I4 ],
-             KnownCustomAttributeValueRule.NonNegative)
+            ([ "assembly" ], [ ModelArgument.I4 ; ModelArgument.I4 ], ModelRule.NonNegative)
             // ComCompatibleVersionTargets :116 (mdtAssembly, mdtTypeRef); args :403 (four I4); any negative refused
             // :1421.
             KnownCustomAttribute.ComCompatibleVersion,
-            ([ "assembly" ], List.replicate 4 KnownCustomAttributeArgument.I4, KnownCustomAttributeValueRule.NonNegative)
+            ([ "assembly" ], List.replicate 4 ModelArgument.I4, ModelRule.NonNegative)
             // AllowPartiallyTrustedCallersTargets :118 (mdtAssembly, mdtTypeRef); no arguments :416, so the blob is never
             // parsed (:1044); no check :1426.
-            KnownCustomAttribute.AllowPartiallyTrustedCallers,
-            ([ "assembly" ], [], KnownCustomAttributeValueRule.Unchecked)
+            KnownCustomAttribute.AllowPartiallyTrustedCallers, ([ "assembly" ], [], ModelRule.Unchecked)
         ]
 
     /// An argument as the model of the emitter's blob parser reads it.
@@ -415,11 +421,28 @@ module TestEmitScopeCustomAttributes =
         | I4 of int
         | String of byte list option
 
-    let private ofValue (value : KnownCustomAttributeValue) : ModelValue =
-        match value with
-        | KnownCustomAttributeValue.U2 v -> ModelValue.U2 (int v)
-        | KnownCustomAttributeValue.I4 v -> ModelValue.I4 v
-        | KnownCustomAttributeValue.String s -> ModelValue.String (s |> Option.map List.ofSeq)
+    let private ofValues (values : ValidatedPseudoAttributeValues) : ModelValue list =
+        match values with
+        | ValidatedPseudoAttributeValues.U2 v -> [ ModelValue.U2 (int v) ]
+        | ValidatedPseudoAttributeValues.GuidString text -> [ ModelValue.String (Some (List.ofSeq text)) ]
+        | ValidatedPseudoAttributeValues.TwoI4s (a, b) -> [ ModelValue.I4 a ; ModelValue.I4 b ]
+        | ValidatedPseudoAttributeValues.FourI4s (a, b, c, d) ->
+            [ ModelValue.I4 a ; ModelValue.I4 b ; ModelValue.I4 c ; ModelValue.I4 d ]
+        | ValidatedPseudoAttributeValues.NoArguments -> []
+
+    /// <summary>
+    /// The <see cref="ValidatedPseudoAttributeArguments"/> case whose meaning is these transcribed arguments and rule.
+    /// </summary>
+    let private shapeOf (arguments : ModelArgument list) (rule : ModelRule) : ValidatedPseudoAttributeArguments =
+        match arguments, rule with
+        | [ ModelArgument.U2 ], ModelRule.Below bound -> ValidatedPseudoAttributeArguments.U2Below (uint16 bound)
+        | [ ModelArgument.String ], ModelRule.Guid -> ValidatedPseudoAttributeArguments.GuidString
+        | [ ModelArgument.I4 ; ModelArgument.I4 ], ModelRule.NonNegative ->
+            ValidatedPseudoAttributeArguments.TwoNonNegativeI4s
+        | [ ModelArgument.I4 ; ModelArgument.I4 ; ModelArgument.I4 ; ModelArgument.I4 ], ModelRule.NonNegative ->
+            ValidatedPseudoAttributeArguments.FourNonNegativeI4s
+        | [], ModelRule.Unchecked -> ValidatedPseudoAttributeArguments.NoArguments
+        | arguments, rule -> failwith $"no case of ValidatedPseudoAttributeArguments means %A{arguments} with %A{rule}"
 
     /// <summary>
     /// A model of CoreCLR's <c>CustomAttributeParser</c> as <c>ParseKnownCaArgs</c> and <c>ParseKnownCaNamedArgs</c> use
@@ -427,7 +450,7 @@ module TestEmitScopeCustomAttributes =
     /// <c>CPackedLen::SafeGetLength</c> in utilcode/stgpooli.cpp), over a list of bytes.
     /// </summary>
     let private modelParse
-        (arguments : KnownCustomAttributeArgument list)
+        (arguments : ModelArgument list)
         (blob : byte list)
         : Result<ModelValue list, KnownCustomAttributeRefusal>
         =
@@ -440,13 +463,13 @@ module TestEmitScopeCustomAttributes =
                 Some (int (b &&& 0x1Fuy) * 0x1000000 + int c * 0x10000 + int d * 0x100 + int e, rest)
             | _ -> None
 
-        let readOne (argument : KnownCustomAttributeArgument) (bytes : byte list) : (ModelValue * byte list) option =
+        let readOne (argument : ModelArgument) (bytes : byte list) : (ModelValue * byte list) option =
             match argument, bytes with
-            | KnownCustomAttributeArgument.U2, lo :: hi :: rest -> Some (ModelValue.U2 (int lo + 0x100 * int hi), rest)
-            | KnownCustomAttributeArgument.I4, a :: b :: c :: d :: rest ->
+            | ModelArgument.U2, lo :: hi :: rest -> Some (ModelValue.U2 (int lo + 0x100 * int hi), rest)
+            | ModelArgument.I4, a :: b :: c :: d :: rest ->
                 Some (ModelValue.I4 (BitConverter.ToInt32 ([| a ; b ; c ; d |], 0)), rest)
-            | KnownCustomAttributeArgument.String, 0xFFuy :: rest -> Some (ModelValue.String None, rest)
-            | KnownCustomAttributeArgument.String, _ ->
+            | ModelArgument.String, 0xFFuy :: rest -> Some (ModelValue.String None, rest)
+            | ModelArgument.String, _ ->
                 match packedLength bytes with
                 | Some (count, rest) when List.length rest >= count ->
                     Some (ModelValue.String (Some (List.take count rest)), List.skip count rest)
@@ -454,7 +477,7 @@ module TestEmitScopeCustomAttributes =
             | _ -> None
 
         let rec readAll
-            (arguments : KnownCustomAttributeArgument list)
+            (arguments : ModelArgument list)
             (bytes : byte list)
             (read : ModelValue list)
             : (ModelValue list * byte list) option
@@ -477,45 +500,56 @@ module TestEmitScopeCustomAttributes =
         | _ -> Error KnownCustomAttributeRefusal.MalformedBlob
 
     /// Whether `values` keep `rule`, as a model of the checks of `RegMeta::_HandleKnownCustomAttribute`.
-    let private modelKeeps (rule : KnownCustomAttributeValueRule) (values : ModelValue list) : bool =
+    let private modelKeeps (rule : ModelRule) (values : ModelValue list) : bool =
         match rule, values with
-        | KnownCustomAttributeValueRule.Below bound, [ ModelValue.U2 v ] -> v < int bound
-        | KnownCustomAttributeValueRule.Guid, [ ModelValue.String None ] -> false
-        | KnownCustomAttributeValueRule.Guid, [ ModelValue.String (Some bytes) ] ->
+        | ModelRule.Below bound, [ ModelValue.U2 v ] -> v < bound
+        | ModelRule.Guid, [ ModelValue.String None ] -> false
+        | ModelRule.Guid, [ ModelValue.String (Some bytes) ] ->
             Text.RegularExpressions.Regex.IsMatch (
                 System.String (bytes |> List.map char |> Array.ofList),
                 "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\\z"
             )
-        | KnownCustomAttributeValueRule.NonNegative, values ->
+        | ModelRule.NonNegative, values ->
             values
             |> List.forall (fun value ->
                 match value with
                 | ModelValue.I4 v -> v >= 0
                 | other -> failwith $"NonNegative applies to I4 arguments only, not %A{other}"
             )
-        | KnownCustomAttributeValueRule.Unchecked, _ -> true
+        | ModelRule.Unchecked, _ -> true
         | rule, values -> failwith $"the table pairs %A{rule} with arguments that read as %A{values}"
+
+    /// What the emitter does with the blob of a validated pseudo-attribute on one of its targets: parsed only if the
+    /// attribute declares arguments, then the rule checked. The arguments read.
+    let private modelValidate
+        (arguments : ModelArgument list)
+        (rule : ModelRule)
+        (blob : byte list)
+        : Result<ModelValue list, KnownCustomAttributeRefusal>
+        =
+        if arguments.IsEmpty then
+            Ok []
+        else
+            modelParse arguments blob
+            |> Result.bind (fun values ->
+                if modelKeeps rule values then
+                    Ok values
+                else
+                    Error KnownCustomAttributeRefusal.InvalidValue
+            )
 
     /// What the emitter does with a validated pseudo-attribute of `keptTable` on an owner of kind `owner`: the target
     /// checked first, then the blob parsed only if the attribute declares arguments, then the rule.
     let private modelKept
-        (targets : string list, arguments : KnownCustomAttributeArgument list, rule : KnownCustomAttributeValueRule)
+        (targets : string list, arguments : ModelArgument list, rule : ModelRule)
         (owner : string)
         (blob : byte list)
         : Result<unit, KnownCustomAttributeRefusal>
         =
         if not (List.contains owner targets) then
             Error KnownCustomAttributeRefusal.WrongTarget
-        elif arguments.IsEmpty then
-            Ok ()
         else
-            modelParse arguments blob
-            |> Result.bind (fun values ->
-                if modelKeeps rule values then
-                    Ok ()
-                else
-                    Error KnownCustomAttributeRefusal.InvalidValue
-            )
+            modelValidate arguments rule blob |> Result.map ignore<ModelValue list>
 
     /// A GUID's 36 characters, as the emitter accepts them.
     let private guidText : string = "01234567-89ab-cdef-0123-456789abcdef"
@@ -544,7 +578,7 @@ module TestEmitScopeCustomAttributes =
     /// nothing, one byte, or a named-argument count followed by nothing, junk or a well-formed named argument. One in
     /// ten is random bytes.
     /// </summary>
-    let private genGrammarBlob (arguments : KnownCustomAttributeArgument list) : Gen<byte list * Set<string>> =
+    let private genGrammarBlob (arguments : ModelArgument list) : Gen<byte list * Set<string>> =
         let tagged (feature : string) (g : Gen<byte list>) : Gen<byte list * Set<string>> =
             g |> Gen.map (fun bytes -> bytes, Set.singleton feature)
 
@@ -699,11 +733,11 @@ module TestEmitScopeCustomAttributes =
                     }
                 ]
 
-        let argument (argument : KnownCustomAttributeArgument) : Gen<byte list * Set<string>> =
+        let argument (argument : ModelArgument) : Gen<byte list * Set<string>> =
             match argument with
-            | KnownCustomAttributeArgument.U2 -> u2
-            | KnownCustomAttributeArgument.I4 -> i4
-            | KnownCustomAttributeArgument.String -> str
+            | ModelArgument.U2 -> u2
+            | ModelArgument.I4 -> i4
+            | ModelArgument.String -> str
 
         let tail : Gen<byte list * Set<string>> =
             Gen.frequency
@@ -748,7 +782,7 @@ module TestEmitScopeCustomAttributes =
                     }
                 ]
 
-        let rec all (arguments : KnownCustomAttributeArgument list) : Gen<byte list * Set<string>> =
+        let rec all (arguments : ModelArgument list) : Gen<byte list * Set<string>> =
             match arguments with
             | [] -> Gen.constant ([], Set.empty)
             | a :: rest ->
@@ -1250,7 +1284,7 @@ module TestEmitScopeCustomAttributes =
                 coverage.Count (KeptReach.Refused (name, KnownCustomAttributeRefusal.NamedArgument))
                 |> shouldBeGreaterThan 20
 
-            if rule <> KnownCustomAttributeValueRule.Unchecked then
+            if rule <> ModelRule.Unchecked then
                 coverage.Count (KeptReach.Refused (name, KnownCustomAttributeRefusal.InvalidValue))
                 |> shouldBeGreaterThan 20
 
@@ -1276,14 +1310,14 @@ module TestEmitScopeCustomAttributes =
         |> List.choose (fun known ->
             match KnownCustomAttribute.effect known with
             | KnownCustomAttributeEffect.ValidatesAndKeeps validated ->
-                Some (known, (validated.Targets |> Seq.map tableOf |> Set.ofSeq, validated.Arguments, validated.Rule))
+                Some (known, (validated.Targets |> Seq.map tableOf |> Set.ofSeq, validated.Arguments))
             | KnownCustomAttributeEffect.SetsFlag _
             | KnownCustomAttributeEffect.Unmodelled -> None
         )
         |> Map.ofList
         |> shouldEqual (
             keptTable
-            |> List.map (fun (known, (targets, arguments, rule)) -> known, (Set.ofList targets, arguments, rule))
+            |> List.map (fun (known, (targets, arguments, rule)) -> known, (Set.ofList targets, shapeOf arguments rule))
             |> Map.ofList
         )
 
@@ -1347,48 +1381,39 @@ module TestEmitScopeCustomAttributes =
 
     [<Test>]
     let ``the blob parser reads what the model of CoreCLR's parser reads`` () : unit =
-        let genArguments : Gen<KnownCustomAttributeArgument list> =
+        // The six names' arguments and rules, and a `U2` below a bound of any value.
+        let genArguments : Gen<ModelArgument list * ModelRule> =
             Gen.frequency
                 [
-                    3, Gen.elements (keptTable |> List.map (fun (_, (_, arguments, _)) -> arguments))
+                    3, Gen.elements (keptTable |> List.map (fun (_, (_, arguments, rule)) -> arguments, rule))
                     1,
-                    Gen.choose (0, 4)
-                    |> Gen.bind (fun n ->
-                        Gen.listOfLength
-                            n
-                            (Gen.elements
-                                [
-                                    KnownCustomAttributeArgument.U2
-                                    KnownCustomAttributeArgument.I4
-                                    KnownCustomAttributeArgument.String
-                                ])
-                    )
-                    |> Gen.map List.ofSeq
+                    Gen.oneof [ Gen.elements [ 0 ; 1 ; 0x8000 ; 0xFFFF ] ; Gen.choose (0, 0xFFFF) ]
+                    |> Gen.map (fun bound -> [ ModelArgument.U2 ], ModelRule.Below bound)
                 ]
 
-        // The blob is built for one list of arguments and, one time in four, parsed by another.
+        // The blob is built for one case's arguments and, one time in four, validated by another's.
         let genCase =
             gen {
-                let! arguments = genArguments
-                let! other = genArguments
+                let! arguments, rule = genArguments
+                let! other, _ = genArguments
                 let! mismatched = Gen.frequency [ 3, Gen.constant false ; 1, Gen.constant true ]
                 let! blob, features = genGrammarBlob (if mismatched then other else arguments)
-                return arguments, blob, features
+                return arguments, rule, blob, features
             }
 
         let property
             (cover : ParseReach -> unit)
-            (arguments : KnownCustomAttributeArgument list, blob : byte list, features : Set<string>)
+            (arguments : ModelArgument list, rule : ModelRule, blob : byte list, features : Set<string>)
             : unit
             =
             for feature in features do
                 cover (ParseReach.Feature feature)
 
             let actual =
-                KnownCustomAttributeBlob.parse arguments (ImmutableArray.CreateRange blob)
-                |> Result.map (List.map ofValue)
+                KnownCustomAttributeBlob.validate (shapeOf arguments rule) (ImmutableArray.CreateRange blob)
+                |> Result.map ofValues
 
-            actual |> shouldEqual (modelParse arguments blob)
+            actual |> shouldEqual (modelValidate arguments rule blob)
 
             match actual with
             | Ok _ -> cover ParseReach.Parsed
@@ -1406,6 +1431,9 @@ module TestEmitScopeCustomAttributes =
         |> shouldBeGreaterThan 300
 
         coverage.Count (ParseReach.Refused KnownCustomAttributeRefusal.NamedArgument)
+        |> shouldBeGreaterThan 300
+
+        coverage.Count (ParseReach.Refused KnownCustomAttributeRefusal.InvalidValue)
         |> shouldBeGreaterThan 300
 
         for feature in
