@@ -2307,17 +2307,17 @@ module IlMachineManagedByref =
         | _ -> TransparentWrapperOutcome.NotTransparent
 
     /// Read `field` of the value a byte-view byref `src` addresses, `view` being `src`'s chain as
-    /// `peelByteView` classified it.
+    /// `peelByteView` classified it and `viewTemplate` what `view.ViewTemplate` returns.
     let private readByteViewField
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
         (src : AddressedByref)
         (root : ByrefRoot)
         (view : ByteView)
+        (viewTemplate : CliType)
         (field : FieldId)
         : CliType
         =
-        let viewTemplate = view.ViewTemplate ()
         let fieldTemplate = CliType.getFieldById field viewTemplate
         let fieldOffset, _ = CliType.getFieldLayoutById field viewTemplate
 
@@ -2372,58 +2372,65 @@ module IlMachineManagedByref =
                 (AddressedByref.appendProjection (ByrefProjection.Field field) src)
                 fieldTemplate
 
-    /// `src` viewed as the value type `D` that declares `field`, when what `src` addresses is not a
-    /// `D`: an access to `field` through `src` reads `D`'s layout at the address, whatever the
-    /// pointer views the memory there as. `ValueNone` when `src` already addresses a `D`, when
-    /// `field` has no declaring type, and when its declaring type is a reference type or one of
-    /// CoreLib's primitives.
+    /// The value type `D` that declares `field`, when a pointer addressing `addressed` does not
+    /// address a `D`: an access to `field` through it reads `D`'s layout at the address, whatever
+    /// the pointer views the memory there as. `ValueNone` when `addressed` is a `D`, when `field`
+    /// has no declaring type, and when its declaring type is a reference type or one of CoreLib's
+    /// primitives.
+    ///
+    /// What a pointer addresses is the type its byte view ends on, or, for a chain with no byte
+    /// view, the value its `Field` steps reach. When that is a `D` the field is resolved in it by
+    /// identity, which also tells apart two fields that explicit layout places at one offset.
     ///
     /// This is the rule `tryAnchorRawRootFieldPrefix` applies to a leading `Field` step off a raw
-    /// byte root, for the pointers that rule does not anchor. CoreLib's emitted
-    /// `RefArgs` reflection invoke stub reads argument `i` as `ldfld ByReference::Value` through
+    /// byte root, for the pointers that rule does not anchor. CoreLib's emitted `RefArgs`
+    /// reflection invoke stub reads argument `i` as `ldfld ByReference::Value` through
     /// `(IntPtr*)&byrefs + i` (`InvokerEmitUtil.CreateInvokeDelegate_RefArgs`), where `byrefs` is
     /// a `StackAllocatedByRefs`: that pointer addresses the whole buffer for `i = 0`, and is a
     /// `System.Byte` cursor beyond.
-    ///
-    /// What `src` addresses is the type its byte view ends on, or, for a chain with no byte view,
-    /// the value its `Field` steps reach. When that is a `D` the field is resolved in it by
-    /// identity, which also tells apart two fields that explicit layout places at one offset.
-    let private tryViewAsFieldDeclaringType
+    let private declaringTypeViewFor
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
-        (src : AddressedByref)
+        (addressed : CliType)
         (field : FieldId)
-        : AddressedByref voption
+        : ConcreteTypeHandle voption
         =
         match FieldId.tryDeclaringType field with
         | None -> ValueNone
         | Some declaringType ->
 
+        // A value type has no subtypes, so storage that holds `D`'s field by identity is a `D`.
+        // Asked first because it is every ordinary field read, and needs no zero of `D`.
+        match addressed with
+        | CliType.ValueType addressedValue when addressedValue.Declared = declaringType -> ValueNone
+        | _ ->
+
         // Only a value type's zero has a layout that a `ReinterpretAs` can view memory as. A
         // reference type's zero is an object reference; a CoreLib primitive's is a bare cell, whose
         // own field `ldfld` resolves before reaching here (`classifyFieldThroughByref`). Either
-        // keeps the identity lookup below, which names what the pointer does address.
+        // keeps the identity lookup, which names what the pointer does address.
         match zeroOfHandleWithoutLoading baseClassTypes state declaringType with
         | CliType.Numeric _
         | CliType.Bool _
         | CliType.Char _
         | CliType.ObjectRef _
         | CliType.RuntimePointer _ -> ValueNone
-        | CliType.ValueType _ ->
+        | CliType.ValueType _ -> ValueSome declaringType
 
-        let addressed =
-            match peelByteView (Some baseClassTypes) state src.Projections with
-            | ValueSome view -> view.ViewTemplate ()
-            | ValueNone ->
-                requireNoUnanchoredByteOffset src src.Projections
-                readProjectedValue state (readRootValueFor state src.Root src.Projections) src.Projections
-
-        // A value type has no subtypes, so storage that holds `D`'s field by identity is a `D`.
-        match addressed with
-        | CliType.ValueType addressedValue when addressedValue.Declared = declaringType -> ValueNone
-        | _ ->
-            AddressedByref.appendProjection (ByrefProjection.ReinterpretAs declaringType) src
-            |> ValueSome
+    /// Read `field` at its address under the layout of `declaringType`, which declares it, through
+    /// `src`, as any access through a byte view is read: from the one cell it names, or from bytes.
+    let private readFieldThroughDeclaringType
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (src : AddressedByref)
+        (declaringType : ConcreteTypeHandle)
+        (field : FieldId)
+        : CliType
+        =
+        src
+        |> AddressedByref.appendProjection (ByrefProjection.ReinterpretAs declaringType)
+        |> AddressedByref.appendProjection (ByrefProjection.Field field)
+        |> readManagedByref baseClassTypes state
 
     let readManagedByrefField
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -2445,20 +2452,20 @@ module IlMachineManagedByref =
             readManagedByref baseClassTypes state anchored
         | ValueNone ->
 
-        match tryViewAsFieldDeclaringType baseClassTypes state src field with
-        | ValueSome viewed ->
-            // The field's address under its declaring type's layout, read there as any access
-            // through a byte view is: from the one cell it names, or from bytes.
-            readManagedByref baseClassTypes state (AddressedByref.appendProjection (ByrefProjection.Field field) viewed)
-        | ValueNone ->
-
         match peelByteView (Some baseClassTypes) state projs with
-        | ValueSome view -> readByteViewField baseClassTypes state src root view field
+        | ValueSome view ->
+            let viewTemplate = view.ViewTemplate ()
+
+            match declaringTypeViewFor baseClassTypes state viewTemplate field with
+            | ValueSome declaringType -> readFieldThroughDeclaringType baseClassTypes state src declaringType field
+            | ValueNone -> readByteViewField baseClassTypes state src root view viewTemplate field
         | ValueNone ->
             requireNoUnanchoredByteOffset src projs
+            let addressed = readProjectedValue state (readRootValueFor state root projs) projs
 
-            readProjectedValue state (readRootValueFor state root projs) projs
-            |> CliType.getFieldById field
+            match declaringTypeViewFor baseClassTypes state addressed field with
+            | ValueSome declaringType -> readFieldThroughDeclaringType baseClassTypes state src declaringType field
+            | ValueNone -> CliType.getFieldById field addressed
 
     let private applyProjectionsForWriteIfChanged
         (state : IlMachineState)
