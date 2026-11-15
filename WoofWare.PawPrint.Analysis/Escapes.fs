@@ -3,24 +3,52 @@ namespace WoofWare.PawPrint.Analysis
 open System.Reflection.Metadata
 open WoofWare.PawPrint
 
-/// A method definition, identified across every assembly an analysis has loaded: the definition
-/// identity of the assembly that declares it, and its MethodDef row there.
+/// A method, identified across every assembly an analysis has loaded: the definition identity of
+/// the assembly that declares it, its MethodDef row there, and which of the row's `MethodDesc`s it
+/// is. A row returning a promise type has two on .NET 11: the ordinary variant, which its token
+/// binds, and the async variant, which an await binds (`RuntimeAsyncMethod.asyncVariantOf`).
 type MethodKey =
     {
         AssemblyFullName : string
         Method : ComparableMethodDefinitionHandle
+        Variant : MethodVariant
     }
 
     override this.ToString () : string =
-        $"%s{this.AssemblyFullName}/%O{this.Method.Get}"
+        match this.Variant with
+        | MethodVariant.Ordinary -> $"%s{this.AssemblyFullName}/%O{this.Method.Get}"
+        | MethodVariant.AsyncVariant -> $"%s{this.AssemblyFullName}/%O{this.Method.Get} (async variant)"
 
 [<RequireQualifiedAccess>]
 module MethodKey =
+    /// The ordinary variant of `method`, a MethodDef row of `assembly`: the method its token binds.
     let make (assembly : DumpedAssembly) (method : MethodDefinitionHandle) : MethodKey =
         {
             AssemblyFullName = assembly.DefinitionFullName
             Method = ComparableMethodDefinitionHandle.Make method
+            Variant = MethodVariant.ordinary
         }
+
+    /// The method `method` is, which `assembly` declares on a MethodDef row: its ordinary variant, or
+    /// the async variant `RuntimeAsyncMethod.asyncVariantOf` made of it.
+    let ofMethod
+        (assembly : DumpedAssembly)
+        (method : MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
+        : MethodKey
+        =
+        match method with
+        | MethodInfo.Metadata (_, facts, variant) ->
+            if method.DeclaringAssemblyFullName <> assembly.DefinitionFullName then
+                invalidArg
+                    (nameof assembly)
+                    $"%O{method} is declared by %s{method.DeclaringAssemblyFullName}, not %s{assembly.DefinitionFullName}"
+
+            {
+                AssemblyFullName = assembly.DefinitionFullName
+                Method = ComparableMethodDefinitionHandle.Make facts.Handle
+                Variant = variant
+            }
+        | MethodInfo.Synthesised _ -> invalidArg (nameof method) $"%O{method} is synthesised, and has no MethodDef row"
 
 /// The type of an exception that may escape.
 ///

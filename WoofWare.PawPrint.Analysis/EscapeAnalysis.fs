@@ -77,6 +77,10 @@ type Opacity =
     /// call binds: CoreCLR runs the task-returning thunk its VM emits in its place, which no IL here
     /// describes.
     | TaskReturningThunk
+    /// The async variant of a method with IL for the ordinary calling convention, which runs that IL
+    /// as an async version: each <c>ret</c> awaits the promise it returns, and a call in one of the
+    /// tail shapes calls its callee's async variant. The analysis does not follow an async version.
+    | AsyncVersion
     /// The method is IL, but its row names no body. CoreCLR raises <c>BadImageFormatException</c>
     /// when it is invoked, before any of it runs; the analysis does not model that verdict.
     | MissingBody
@@ -115,7 +119,7 @@ type OpaqueSite =
         /// The offset of the instruction in the IL CoreCLR runs for the method: its own, or what the
         /// VM substitutes for it. <c>None</c> where the place is no instruction: the method has no IL
         /// the analysis follows (<c>NativeBody</c>, <c>AbstractBody</c>, <c>MissingBody</c>,
-        /// <c>IntrinsicExpansion</c>),
+        /// <c>IntrinsicExpansion</c>, <c>AsyncVersion</c>),
         /// or binding what its body names fails in a way the analysis cannot follow, or the JIT may
         /// refuse to compile it, before any of it runs (<c>DependsOnInstantiation</c>,
         /// <c>UnresolvedAssembly</c>, <c>BoxedByRefLikeReceiver</c>, <c>NewobjOfNonConstructor</c>,
@@ -1879,7 +1883,24 @@ module EscapeAnalysis =
         : DumpedAssembly * MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
         =
         let assembly = assemblyOf state key.AssemblyFullName
-        assembly, assembly.Methods.[key.Method.Get]
+        let ordinary = assembly.Methods.[key.Method.Get]
+
+        match key.Variant with
+        | MethodVariant.Ordinary -> assembly, ordinary
+        | MethodVariant.AsyncVariant ->
+            // A key names an async variant only once `asyncVariantOf` has made it, loading whatever
+            // classifying the row's return type loads, so asking again loads nothing.
+            match
+                RuntimeAsyncMethod.asyncVariantOf
+                    state.LoggerFactory
+                    state.RuntimeDirs
+                    state.BaseTypes.Corelib
+                    assembly
+                    ordinary
+                    state.TypeSystem._LoadedAssemblies
+            with
+            | _, Ok variant -> assembly, variant
+            | _, Error refusal -> failwith $"BUG: %O{key} names the async variant of a method with none: %A{refusal}"
 
     let private declaringTypeOf (state : EscapeAnalysisState) (key : MethodKey) : ResolvedTypeIdentity =
         let _, method = methodOf state key
@@ -4186,6 +4207,29 @@ module EscapeAnalysis =
         =
         let assumptions = state.Assumptions
         let method = assembly.Methods.[key.Method.Get]
+
+        match key.Variant with
+        | MethodVariant.AsyncVariant ->
+            if
+                IntrinsicBody.isIntrinsic assembly key.Method.Get
+                || (Assumption.summarises assembly key.Method.Get).IsSome
+                || ResourceLookup.isLookup assembly key.Method.Get
+                || ObjectGetType.isGetType assembly key.Method.Get
+            then
+                failwith
+                    $"TODO: %O{key} is the async variant of a method the analysis runs something other than its IL for; the analysis does not say what runs for its async variant"
+
+            // The variant runs the row's own body (`RuntimeAsyncMethod.asyncVariantOf`).
+            match method.Body with
+            | MethodBody.AsyncIl body -> state, Runs.Il (body, None)
+            | MethodBody.Il _ -> state, Runs.Opaque Opacity.AsyncVersion
+            | MethodBody.Abstract -> state, Runs.Opaque Opacity.AbstractBody
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _
+            | MethodBody.MissingIl ->
+                failwith $"BUG: %O{key} names an async variant of a body %O{method.Body}, which has none"
+        | MethodVariant.Ordinary ->
 
         let intrinsic =
             if IntrinsicBody.isIntrinsic assembly key.Method.Get then
@@ -6927,9 +6971,9 @@ module EscapeAnalysis =
         | Some (VirtualImplementation.Found runs) ->
             match runs.Definition.TryMetadata with
             | None -> state, DispatchOutcome.Undecided
-            | Some facts ->
+            | Some _ ->
                 let key =
-                    MethodKey.make (assemblyOf state runs.Definition.DeclaringAssemblyFullName) facts.Handle
+                    MethodKey.ofMethod (assemblyOf state runs.Definition.DeclaringAssemblyFullName) runs.Definition
 
                 state,
                 DispatchOutcome.Reaches (
@@ -7076,9 +7120,8 @@ module EscapeAnalysis =
         | ClassMethodOnValueType.Resolves runs ->
             match runs.TryMetadata with
             | None -> state, DispatchOutcome.Undecided
-            | Some facts ->
-                let key =
-                    MethodKey.make (assemblyOf state runs.DeclaringAssemblyFullName) facts.Handle
+            | Some _ ->
+                let key = MethodKey.ofMethod (assemblyOf state runs.DeclaringAssemblyFullName) runs
 
                 if key = callee.Callee then
                     // The method named is a value type's, which is the receiver's only if the
@@ -8562,7 +8605,36 @@ module EscapeAnalysis =
     /// The full name of a method the analysis has loaded, `Type::Method`, for reporting.
     let methodName (state : EscapeAnalysisState) (key : MethodKey) : string =
         let _, method = methodOf state key
-        typeName state (declaringTypeOf state key) + "::" + method.Name
+        let name = typeName state (declaringTypeOf state key) + "::" + method.Name
+
+        match key.Variant with
+        | MethodVariant.Ordinary -> name
+        | MethodVariant.AsyncVariant -> name + " (async variant)"
+
+    /// The async variant of `method`, an ordinary variant, which an await of it binds: the method's
+    /// own body, with its promise type unwrapped (`RuntimeAsyncMethod.asyncVariantOf`). An error
+    /// says why CoreCLR's VM makes none of it.
+    let asyncVariant
+        (state : EscapeAnalysisState)
+        (method : MethodKey)
+        : EscapeAnalysisState * Result<MethodKey, AsyncVariantRefusal>
+        =
+        match method.Variant with
+        | MethodVariant.AsyncVariant -> invalidArg (nameof method) $"%O{method} is an async variant already"
+        | MethodVariant.Ordinary ->
+
+        let assembly, ordinary = methodOf state method
+
+        match
+            RuntimeAsyncMethod.asyncVariantOf
+                state.LoggerFactory
+                state.RuntimeDirs
+                state.BaseTypes.Corelib
+                assembly
+                ordinary
+                state.TypeSystem._LoadedAssemblies
+        with
+        | assemblies, variant -> withAssemblies state assemblies, variant |> Result.map (MethodKey.ofMethod assembly)
 
     /// The instance `escapes` summarises for `method`: a generic definition is asked about for every
     /// instantiation at once.
