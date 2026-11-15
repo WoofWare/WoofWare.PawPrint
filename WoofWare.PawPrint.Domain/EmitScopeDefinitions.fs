@@ -3,6 +3,7 @@ namespace WoofWare.PawPrint
 open System
 open System.Collections.Immutable
 open System.Reflection
+open System.Reflection.Metadata.Ecma335
 
 /// <summary>
 /// The outcome of asking CoreCLR's emitter to define a type in a dynamic module's scope
@@ -110,7 +111,7 @@ type ValidatedPseudoAttribute =
         /// The tables of owner the emitter accepts the attribute on (<c>KnownCaProp.rTypes</c>), but for
         /// <c>mdtTypeRef</c>, which no builder passes.
         /// </summary>
-        Targets : Set<System.Reflection.Metadata.Ecma335.TableIndex>
+        Targets : Set<TableIndex>
         /// The constructor arguments the emitter reads, in order.
         Arguments : KnownCustomAttributeArgument list
         /// The rule the arguments must keep.
@@ -182,14 +183,141 @@ module KnownCustomAttributeBlob =
     /// and <c>ParseKnownCaNamedArgs</c> read them (md/compiler/custattr_emit.cpp), for an attribute that declares no
     /// named arguments: the prolog <c>0x0001</c>, each argument in turn, then, if any bytes are left, a signed two-byte
     /// count of named arguments. A count that one lone byte cannot hold is 0; a count above 0 is refused; nothing after
-    /// the count is read.
+    /// the count is read. The emitter parses only the blob of an attribute that declares arguments.
     /// </summary>
     let parse
         (arguments : KnownCustomAttributeArgument list)
         (blob : ImmutableArray<byte>)
         : Result<KnownCustomAttributeValue list, KnownCustomAttributeRefusal>
         =
-        raise (NotImplementedException "type-builder stage 5z-2: KnownCustomAttributeBlob.parse")
+        let length = blob.Length
+
+        // `CPackedLen::SafeGetLength` (utilcode/stgpooli.cpp): each of the three forms is taken whatever value it
+        // holds, shortest or not, if its bytes are there; any other first byte fails. The length, and the offset after
+        // it.
+        let packedLength (offset : int) : (int * int) option =
+            let available = length - offset
+
+            if available < 1 then
+                None
+            else
+                let first = int blob.[offset]
+
+                if first &&& 0x80 = 0 then
+                    Some (first, offset + 1)
+                elif available < 2 then
+                    None
+                elif first &&& 0xC0 = 0x80 then
+                    Some (((first &&& 0x3F) <<< 8) ||| int blob.[offset + 1], offset + 2)
+                elif available < 4 then
+                    None
+                elif first &&& 0xE0 = 0xC0 then
+                    Some (
+                        ((first &&& 0x1F) <<< 24)
+                        ||| (int blob.[offset + 1] <<< 16)
+                        ||| (int blob.[offset + 2] <<< 8)
+                        ||| int blob.[offset + 3],
+                        offset + 4
+                    )
+                else
+                    None
+
+        let u2At (offset : int) : uint16 =
+            uint16 blob.[offset] ||| (uint16 blob.[offset + 1] <<< 8)
+
+        // `ParseKnownCaValue`: the argument at `offset`, and the offset after it.
+        let read (offset : int) (argument : KnownCustomAttributeArgument) : (KnownCustomAttributeValue * int) option =
+            match argument with
+            | KnownCustomAttributeArgument.U2 ->
+                if length - offset < 2 then
+                    None
+                else
+                    Some (KnownCustomAttributeValue.U2 (u2At offset), offset + 2)
+            | KnownCustomAttributeArgument.I4 ->
+                if length - offset < 4 then
+                    None
+                else
+                    let value = int (u2At offset) ||| (int (u2At (offset + 2)) <<< 16)
+                    Some (KnownCustomAttributeValue.I4 value, offset + 4)
+            | KnownCustomAttributeArgument.String ->
+                // `CustomAttributeParser::GetString`: one byte is needed for the null string's sentinel.
+                if offset >= length then
+                    None
+                elif blob.[offset] = 0xFFuy then
+                    Some (KnownCustomAttributeValue.String None, offset + 1)
+                else
+                    match packedLength offset with
+                    | Some (count, start) when count <= length - start ->
+                        let text = ImmutableArray.Create (blob, start, count)
+                        Some (KnownCustomAttributeValue.String (Some text), start + count)
+                    | Some _
+                    | None -> None
+
+        let rec readAll
+            (offset : int)
+            (arguments : KnownCustomAttributeArgument list)
+            (values : KnownCustomAttributeValue list)
+            : (KnownCustomAttributeValue list * int) option
+            =
+            match arguments with
+            | [] -> Some (List.rev values, offset)
+            | argument :: arguments ->
+                match read offset argument with
+                | Some (value, offset) -> readAll offset arguments (value :: values)
+                | None -> None
+
+        // `CustomAttributeParser::ValidateProlog`.
+        if length < 2 || u2At 0 <> 1us then
+            Error KnownCustomAttributeRefusal.MalformedBlob
+        else
+            match readAll 2 arguments [] with
+            | None -> Error KnownCustomAttributeRefusal.MalformedBlob
+            | Some (values, offset) ->
+                // `ParseKnownCaNamedArgs`, reached only while bytes are left: `INT16 cActualArgs`, 0 when it cannot be
+                // read, and each named argument fails to match, there being none to match.
+                let count = if length - offset < 2 then 0s else int16 (u2At offset)
+
+                if count > 0s then
+                    Error KnownCustomAttributeRefusal.NamedArgument
+                else
+                    Ok values
+
+    /// <summary>
+    /// Whether <paramref name="values"/>, read by <c>parse</c> for the arguments a
+    /// <see cref="ValidatedPseudoAttribute"/> declares, keep <paramref name="rule"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">The rule does not apply to arguments of these types.</exception>
+    let keeps (rule : KnownCustomAttributeValueRule) (values : KnownCustomAttributeValue list) : bool =
+        let isHexDigit (b : byte) : bool =
+            (b >= byte '0' && b <= byte '9')
+            || (b >= byte 'A' && b <= byte 'F')
+            || (b >= byte 'a' && b <= byte 'f')
+
+        match rule, values with
+        | KnownCustomAttributeValueRule.Below bound, [ KnownCustomAttributeValue.U2 value ] -> value < bound
+        // `cbStr == 36`, which the null string's 0 is not.
+        | KnownCustomAttributeValueRule.Guid, [ KnownCustomAttributeValue.String None ] -> false
+        | KnownCustomAttributeValueRule.Guid, [ KnownCustomAttributeValue.String (Some text) ] ->
+            text.Length = 36
+            && text
+               |> Seq.indexed
+               |> Seq.forall (fun (i, b) ->
+                   match i with
+                   | 8
+                   | 13
+                   | 18
+                   | 23 -> b = byte '-'
+                   | _ -> isHexDigit b
+               )
+        | KnownCustomAttributeValueRule.NonNegative, values ->
+            values
+            |> List.forall (fun value ->
+                match value with
+                | KnownCustomAttributeValue.I4 value -> value >= 0
+                | value -> invalidArg (nameof values) $"NonNegative applies to I4 arguments, not %A{value}"
+            )
+        | KnownCustomAttributeValueRule.Unchecked, _ -> true
+        | rule, values -> invalidArg (nameof values) $"%A{rule} does not apply to the arguments %A{values}"
 
 /// <summary>
 /// The pseudo-attributes of CoreCLR's emitter (<c>KnownCaList</c>, md/compiler/custattr_emit.cpp): each name the
@@ -333,18 +461,56 @@ module KnownCustomAttribute =
                 { none with
                     MethodDef = Some (MethodDefFlag.ImplFlags MethodImplAttributes.PreserveSig)
                 }
+        | KnownCustomAttribute.Guid ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.ofList [ TableIndex.TypeDef ; TableIndex.Module ; TableIndex.Assembly ]
+                    Arguments = [ KnownCustomAttributeArgument.String ]
+                    Rule = KnownCustomAttributeValueRule.Guid
+                }
+        | KnownCustomAttribute.InterfaceType ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.TypeDef
+                    Arguments = [ KnownCustomAttributeArgument.U2 ]
+                    // `ifLast` (inc/metadata.h).
+                    Rule = KnownCustomAttributeValueRule.Below 4us
+                }
+        | KnownCustomAttribute.ClassInterface ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.ofList [ TableIndex.TypeDef ; TableIndex.Assembly ]
+                    Arguments = [ KnownCustomAttributeArgument.U2 ]
+                    // `clsIfLast` (inc/metadata.h).
+                    Rule = KnownCustomAttributeValueRule.Below 3us
+                }
+        | KnownCustomAttribute.TypeLibVersion ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.Assembly
+                    Arguments = [ KnownCustomAttributeArgument.I4 ; KnownCustomAttributeArgument.I4 ]
+                    Rule = KnownCustomAttributeValueRule.NonNegative
+                }
+        | KnownCustomAttribute.ComCompatibleVersion ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.Assembly
+                    Arguments = List.replicate 4 KnownCustomAttributeArgument.I4
+                    Rule = KnownCustomAttributeValueRule.NonNegative
+                }
+        | KnownCustomAttribute.AllowPartiallyTrustedCallers ->
+            KnownCustomAttributeEffect.ValidatesAndKeeps
+                {
+                    Targets = Set.singleton TableIndex.Assembly
+                    Arguments = []
+                    Rule = KnownCustomAttributeValueRule.Unchecked
+                }
         | KnownCustomAttribute.DllImport
-        | KnownCustomAttribute.Guid
         | KnownCustomAttribute.ComImport
-        | KnownCustomAttribute.InterfaceType
-        | KnownCustomAttribute.ClassInterface
         | KnownCustomAttribute.MethodImpl
         | KnownCustomAttribute.MarshalAs
         | KnownCustomAttribute.StructLayout
         | KnownCustomAttribute.FieldOffset
-        | KnownCustomAttribute.TypeLibVersion
-        | KnownCustomAttribute.ComCompatibleVersion
-        | KnownCustomAttribute.AllowPartiallyTrustedCallers
         | KnownCustomAttribute.WindowsRuntimeImport -> KnownCustomAttributeEffect.Unmodelled
 
     /// The bits of each flags column that <c>effect</c> gives some attribute.
@@ -1127,12 +1293,68 @@ module EmitScopeDefinitions =
         | HasCustomAttribute.Module
         | HasCustomAttribute.GenericParam _ -> None
 
+    // A new row at the next RID, its blob interned as given, with no search for an equal row.
+    let private storeAsGiven
+        (owner : HasCustomAttribute)
+        (constructor : MethodDefOrRef)
+        (value : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : CustomAttributeDefinition
+        =
+        let blob, scope = EmitScope.internBlob value scope
+
+        let rid, scope =
+            EmitScope.addCustomAttribute
+                {
+                    Parent = owner
+                    Constructor = constructor
+                    Value = blob
+                }
+                scope
+
+        CustomAttributeDefinition.Defined (rid, scope)
+
+    // `RegMeta::_HandleKnownCustomAttribute` for an attribute it keeps: the owner's table among the targets, then the
+    // blob parsed only if the attribute declares arguments (`props->cArgs || props->cNamedArgs`), then the rule. Why it
+    // refuses, if it does.
+    let private validatePseudoAttribute
+        (validated : ValidatedPseudoAttribute)
+        (owner : HasCustomAttribute)
+        (value : ImmutableArray<byte>)
+        : KnownCustomAttributeRefusal option
+        =
+        let table =
+            match owner with
+            | HasCustomAttribute.Assembly -> TableIndex.Assembly
+            | HasCustomAttribute.Module -> TableIndex.Module
+            | HasCustomAttribute.TypeDef _ -> TableIndex.TypeDef
+            | HasCustomAttribute.MethodDef _ -> TableIndex.MethodDef
+            | HasCustomAttribute.Field _ -> TableIndex.Field
+            | HasCustomAttribute.Param _ -> TableIndex.Param
+            | HasCustomAttribute.Property _ -> TableIndex.Property
+            | HasCustomAttribute.Event _ -> TableIndex.Event
+            | HasCustomAttribute.GenericParam _ -> TableIndex.GenericParam
+
+        if not (validated.Targets.Contains table) then
+            Some KnownCustomAttributeRefusal.WrongTarget
+        elif validated.Arguments.IsEmpty then
+            None
+        else
+            match KnownCustomAttributeBlob.parse validated.Arguments value with
+            | Error refusal -> Some refusal
+            | Ok values ->
+                if KnownCustomAttributeBlob.keeps validated.Rule values then
+                    None
+                else
+                    Some KnownCustomAttributeRefusal.InvalidValue
+
     /// <summary>
     /// Define a custom attribute of <paramref name="owner"/>, as <c>RegMeta::DefineCustomAttribute</c> does for
     /// <c>TypeBuilder_DefineCustomAttribute</c>: unless <c>classifyCustomAttribute</c> says that the emitter does
     /// something else with it, a new row at the next RID, its blob interned as given, with no search for an equal row.
-    /// A pseudo-attribute whose <c>KnownCustomAttribute.effect</c> is modelled sets its flag or is refused, and its blob
-    /// is not read; any other is <c>NotStoredAsGiven</c>.
+    /// A pseudo-attribute whose <c>KnownCustomAttribute.effect</c> sets a flag sets it or is refused, and its blob is not
+    /// read; one the emitter validates and keeps is stored as an ordinary attribute is, or refused; any other is
+    /// <c>NotStoredAsGiven</c>.
     /// </summary>
     /// <exception cref="ArgumentException">The scope lacks the owner or the constructor.</exception>
     let defineCustomAttribute
@@ -1143,26 +1365,16 @@ module EmitScopeDefinitions =
         : CustomAttributeDefinition
         =
         match classifyCustomAttribute owner constructor scope with
-        | CustomAttributeEmitKind.Ordinary ->
-            let blob, scope = EmitScope.internBlob value scope
-
-            let rid, scope =
-                EmitScope.addCustomAttribute
-                    {
-                        Parent = owner
-                        Constructor = constructor
-                        Value = blob
-                    }
-                    scope
-
-            CustomAttributeDefinition.Defined (rid, scope)
+        | CustomAttributeEmitKind.Ordinary -> storeAsGiven owner constructor value scope
         | CustomAttributeEmitKind.Known known as kind ->
             match KnownCustomAttribute.effect known with
             | KnownCustomAttributeEffect.SetsFlag flags ->
                 match addPseudoAttributeFlag flags owner scope with
                 | Some scope -> CustomAttributeDefinition.FlagSet scope
                 | None -> CustomAttributeDefinition.Refused KnownCustomAttributeRefusal.WrongTarget
-            | KnownCustomAttributeEffect.ValidatesAndKeeps _ ->
-                raise (NotImplementedException "type-builder stage 5z-2: a validated pseudo-attribute")
+            | KnownCustomAttributeEffect.ValidatesAndKeeps validated ->
+                match validatePseudoAttribute validated owner value with
+                | Some refusal -> CustomAttributeDefinition.Refused refusal
+                | None -> storeAsGiven owner constructor value scope
             | KnownCustomAttributeEffect.Unmodelled -> CustomAttributeDefinition.NotStoredAsGiven kind
         | kind -> CustomAttributeDefinition.NotStoredAsGiven kind

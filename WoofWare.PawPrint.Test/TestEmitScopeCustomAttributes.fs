@@ -596,13 +596,12 @@ module TestEmitScopeCustomAttributes =
         let i4 : Gen<byte list * Set<string>> =
             Gen.frequency
                 [
-                    6,
-                    Gen.oneof
-                        [
-                            Gen.elements [ 0 ; 1 ; 2 ; -1 ; Int32.MinValue ; Int32.MaxValue ]
-                            Gen.choose (Int32.MinValue, Int32.MaxValue)
-                        ]
-                    |> Gen.map (fun v -> int32Bytes v, (if v < 0 then Set.singleton "I4 negative" else Set.empty))
+                    5,
+                    Gen.oneof [ Gen.elements [ 0 ; 1 ; 2 ; Int32.MaxValue ] ; Gen.choose (0, Int32.MaxValue) ]
+                    |> Gen.map (fun v -> int32Bytes v, Set.empty)
+                    2,
+                    Gen.oneof [ Gen.elements [ -1 ; Int32.MinValue ] ; Gen.choose (Int32.MinValue, -1) ]
+                    |> Gen.map (fun v -> int32Bytes v, Set.singleton "I4 negative")
                     1,
                     gen {
                         let! n = Gen.choose (0, 3)
@@ -1153,15 +1152,25 @@ module TestEmitScopeCustomAttributes =
 
     [<Test>]
     let ``the validated pseudo-attributes are kept or refused as the model says`` () : unit =
+        let ownerKindsInOrder = withOwners () |> snd |> List.map ownerKind
+
         let genCase =
             gen {
                 let! name, rule = Gen.elements keptTable
-                let _, arguments, _ = rule
+                let targets, arguments, _ = rule
                 let! impostor = Gen.frequency [ 3, Gen.constant false ; 1, Gen.constant true ]
                 let! count = Gen.choose (1, 12)
 
-                let! calls =
-                    Gen.listOfLength count (Gen.zip (Gen.choose (0, 9)) (genGrammarBlob arguments |> Gen.map fst))
+                // Half the owners are among the name's targets.
+                let onTarget =
+                    ownerKindsInOrder
+                    |> List.indexed
+                    |> List.filter (fun (_, kind) -> List.contains kind targets)
+                    |> List.map fst
+
+                let owner = Gen.frequency [ 1, Gen.elements onTarget ; 1, Gen.choose (0, 9) ]
+
+                let! calls = Gen.listOfLength count (Gen.zip owner (genGrammarBlob arguments |> Gen.map fst))
 
                 return name, rule, impostor, List.ofSeq calls
             }
@@ -3352,9 +3361,16 @@ module TestEmitScopeCustomAttributes =
         let genCall : Gen<KeptCall> =
             gen {
                 let! constructor = Gen.choose (0, keptConstructors.Length - 1)
-                let! owner = Gen.choose (0, keptOwnerKinds.Length - 1)
                 let known = keptConstructors.[constructor].Known
-                let _, (_, own, _) = keptTable |> List.find (fun (k, _) -> k = known)
+                let _, (targets, own, _) = keptTable |> List.find (fun (k, _) -> k = known)
+
+                let onTarget =
+                    keptOwnerKinds
+                    |> List.indexed
+                    |> List.filter (fun (_, kind) -> List.contains kind targets)
+                    |> List.map fst
+
+                let! owner = Gen.frequency [ 1, Gen.elements onTarget ; 1, Gen.choose (0, keptOwnerKinds.Length - 1) ]
                 let! _, (_, other, _) = Gen.elements keptTable
                 let! arguments = Gen.frequency [ 3, Gen.constant own ; 1, Gen.constant other ]
                 let! blob, features = genGrammarBlob arguments

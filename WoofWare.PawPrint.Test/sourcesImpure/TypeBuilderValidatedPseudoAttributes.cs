@@ -129,7 +129,9 @@ public static class Program
 
     /// A blob of the `Values` and `Assembly{n}` modules: its constructor, its blob, whether the emitter keeps it, and
     /// what `GetCustomAttributesData` and `GetCustomAttributes` show of the owner holding it alone: a description, or
-    /// "CustomAttributeFormatException", or null where the read is not made.
+    /// "CustomAttributeFormatException", or null where the read is not made. `GetCustomAttributes` is not made where
+    /// real .NET throws from a reader path at which PawPrint stops instead; the parked
+    /// `TypeBuilderValidatedPseudoAttributeUnreadable.cs` makes those reads.
     sealed class Row
     {
         public int Constructor;
@@ -183,14 +185,14 @@ public static class Program
         // count of 0 or below is accepted with whatever follows it.
         new Row (CiEnum, B (1, 0, 1, 0, 0xFF, 0xFF), true, Cafe, "ClassInterfaceAttribute(-65535)"),
         new Row (CiEnum, B (1, 0, 1, 0, 0, 0x80), true, Cafe, "ClassInterfaceAttribute(-2147483647)"),
-        new Row (CiEnum, B (1, 0, 1, 0, 0xFF, 0xFF, 0xDE, 0xAD), true, "ClassInterfaceAttribute(-65535)", Cafe),
+        new Row (CiEnum, B (1, 0, 1, 0, 0xFF, 0xFF, 0xDE, 0xAD), true, "ClassInterfaceAttribute(-65535)", null),
         new Row (CiEnum, B (1, 0, 1, 0, 0xFF, 0x7F), false),
-        new Row (CiEnum, B (1, 0, 1, 0, 0), true, Cafe, Cafe),
-        new Row (CiEnum, B (1, 0, 1, 0, 0xFF), true, Cafe, Cafe),
+        new Row (CiEnum, B (1, 0, 1, 0, 0), true, Cafe, null),
+        new Row (CiEnum, B (1, 0, 1, 0, 0xFF), true, Cafe, null),
         new Row (CiEnum, B (1, 0, 1, 0, 1, 0, 0x54, 0x08, 3, 0x46, 0x6F, 0x6F, 1, 0, 0, 0), false),
         new Row (CiEnum, B (1, 0, 1, 0, 1, 0, 0x53, 0x08, 3, 0x46, 0x6F, 0x6F, 1, 0, 0, 0), false),
         new Row (CiEnum, B (1, 0, 1, 0, 1, 0), false),
-        new Row (CiEnum, B (1, 0, 1, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF), true, "ClassInterfaceAttribute(1)", Cafe),
+        new Row (CiEnum, B (1, 0, 1, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF), true, "ClassInterfaceAttribute(1)", null),
         new Row (CiEnum, B (1, 1, 1, 0, 0, 0), false),
         new Row (CiEnum, B (2, 0, 1, 0, 0, 0), false),
         new Row (CiShort, B (1, 0, 1, 0), true, Cafe, "ClassInterfaceAttribute(1)"),
@@ -201,11 +203,9 @@ public static class Program
         new Row (GuidCtor, Guid ("01234567-89AB-cdef-0123-456789ABcdef"), true, "GuidAttribute(01234567-89AB-cdef-0123-456789ABcdef)", "GuidAttribute(01234567-89AB-cdef-0123-456789ABcdef)"),
         new Row (GuidCtor, Str (B (0x80, 36), Ascii (GuidText), B (0, 0)), true, "GuidAttribute(" + GuidText + ")", "GuidAttribute(" + GuidText + ")"),
         new Row (GuidCtor, Str (B (0xC0, 0, 0, 36), Ascii (GuidText), B (0, 0)), true, "GuidAttribute(" + GuidText + ")", "GuidAttribute(" + GuidText + ")"),
-        // `GetCustomAttributes` throws for this row on real .NET; under PawPrint it stops (the parked
-        // `TypeBuilderValidatedPseudoAttributeUnreadable.cs`), so only the data is read.
         new Row (GuidCtor, Str (B (36), Ascii (GuidText), B (0xFF, 0xFF)), true, "GuidAttribute(" + GuidText + ")", null),
         new Row (GuidCtor, Str (B (36), Ascii (GuidText), B (1, 0)), false),
-        new Row (GuidCtor, Str (B (36), Ascii (GuidText), B (7)), true, Cafe, Cafe),
+        new Row (GuidCtor, Str (B (36), Ascii (GuidText), B (7)), true, Cafe, null),
         new Row (GuidCtor, GuidWith (5, 0), false),
         new Row (GuidCtor, GuidWith (5, 0xC3), false),
         new Row (GuidCtor, Str (B (37), Ascii (GuidText), new byte[0]), false),
