@@ -1248,6 +1248,38 @@ Each stage is one pull request, with its tests first.
     fresh one, which nothing managed can tell apart, and `AsyncSuspension.takeException` clears the
     exception slot a reused one would carry.
 
+    As built:
+    * No change to the interpreter. Each guest's frames, dumped on real .NET 11 RC3 and under
+      PawPrint, have the same methods in the same order but for one thing: PawPrint has one more
+      `RuntimeAsyncTaskContinuation.GetResult` at each resumption from a task (the instance method,
+      which calls the static one through a function pointer), and, in
+      `RuntimeAsyncSynchronizedAsyncVersion.cs`, a frame of `StreamWriter.Flush()`, which calls
+      `Flush(bool, bool)` last. With `DOTNET_ReadyToRun=0` real .NET 11 has both, and its frames'
+      methods are PawPrint's exactly: the framework's precompiled code inlines or tail-calls
+      them. The guests' own frames have the same IL offsets on both. Each guest's formatted trace is
+      real .NET 11's exactly.
+    * Each guest now compares every frame's method with real .NET 11's, less the awaiter's frames:
+      those of `TaskAwaiter` and of `RuntimeAsyncTaskContinuation`, whatever their method. It keeps
+      its earlier checks, among them that an awaiter's `GetResult` comes where an unbound await
+      would put one, which the comparison less the awaiter's frames cannot see. The guests that
+      compared the formatted trace in part (`RuntimeAsyncAsyncVersionSuspends.cs`,
+      `RuntimeAsyncAsyncVersionWrappedReturn.cs`, `RuntimeAsyncAwaitsAsyncMethodByCallvirt.cs`,
+      and the parked `RuntimeAsyncAsyncVersionAsTask.cs`) compare it whole.
+    * The frames do not compare IL offsets of framework frames. Real .NET reports a frame a raise
+      passes through, in a method whose module allows optimisation, where its statement begins,
+      even when the JIT's first tier compiled it (`Debugger::getBoundaries` asks for stack-empty
+      and call-site boundaries only). A precompiled frame resumed from a continuation can be
+      reported earlier than its `call Await`, as decision 20 says; with `DOTNET_ReadyToRun=0` it is
+      reported at the `call Await`, so precompilation is why.
+    * `docs/divergences.md` records both, the frames optimised code leaves out with decision 20's
+      other two cases among them, and decision 19's slot numbers.
+    * A mutant that appends a continuation's frame before the frame of the dispatcher that caught
+      the exception, rather than after it, passes every earlier check of
+      `RuntimeAsyncAsyncVersionWrappedReturn.cs`, `RuntimeAsyncFinallyAfterSuspension.cs` and
+      `RuntimeAsyncConstrainedStaticAwait.cs`, and fails each one's new comparison. The now-whole
+      formatted traces of `RuntimeAsyncAsyncVersionSuspends.cs` and
+      `RuntimeAsyncAwaitsAsyncMethodByCallvirt.cs` catch it too.
+
 15. **(4h) The escape analysis reads await sites.** `EscapeAnalysis` asks decision 13's
     classification what a call in a runtime-async body runs: at a bound site the variant's body,
     whose exceptions escape at the site, rather than the opaque thunk. Depends on stage 4a alone
