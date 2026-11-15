@@ -287,6 +287,28 @@ type HasCustomAttribute =
         | HasCustomAttribute.Event rid -> 0x14000000 ||| rid.Rid
         | HasCustomAttribute.GenericParam rid -> 0x2A000000 ||| rid.Rid
 
+/// ECMA-335 II.24.2.6's `HasConstant` coded index: the owner of a `Constant` row.
+[<RequireQualifiedAccess>]
+type HasConstant =
+    | Field of FieldRid
+    | Param of ParamRid
+    | Property of PropertyRid
+
+    /// The coded index: the RID shifted left two bits, tagged 0 for a Field, 1 for a Param and 2 for a Property.
+    /// ECMA-335 II.22.9 sorts the `Constant` table by it.
+    member this.CodedIndex : int =
+        match this with
+        | HasConstant.Field rid -> (rid.Rid <<< 2) ||| 0
+        | HasConstant.Param rid -> (rid.Rid <<< 2) ||| 1
+        | HasConstant.Property rid -> (rid.Rid <<< 2) ||| 2
+
+    /// The owner's metadata token.
+    member this.Token : int =
+        match this with
+        | HasConstant.Field rid -> 0x04000000 ||| rid.Rid
+        | HasConstant.Param rid -> 0x08000000 ||| rid.Rid
+        | HasConstant.Property rid -> 0x17000000 ||| rid.Rid
+
 /// A version as the `Assembly` and `AssemblyRef` tables store it: four 16-bit components.
 type MetadataVersion =
     {
@@ -477,6 +499,18 @@ type CustomAttributeRow =
         Value : BlobOffset
     }
 
+/// <summary>
+/// A <c>Constant</c> row (ECMA-335 II.22.9): its owner, the element type of its value, and its value blob. The type and
+/// the blob are independent columns: CoreCLR's emitter keeps a row's old blob when it is given an empty string, so a
+/// row may hold a blob that no value of its type has.
+/// </summary>
+type ConstantRow =
+    {
+        Parent : HasConstant
+        Type : System.Reflection.Metadata.ConstantTypeCode
+        Value : BlobOffset
+    }
+
 type private ByteContentComparer () =
     interface IEqualityComparer<ImmutableArray<byte>> with
         member _.Equals (x : ImmutableArray<byte>, y : ImmutableArray<byte>) : bool =
@@ -488,10 +522,11 @@ type private ByteContentComparer () =
             hash.ToHashCode ()
 
 /// The metadata of one dynamic module as it is being defined: what CoreCLR's read-write metadata
-/// (`CMiniMdRW`) holds for a module that `Reflection.Emit` is building. Every table only grows, and each
-/// row gets the RID it will keep, in definition order, so a field's, method's or parameter's RID is the
-/// token CoreCLR hands out for it. Each heap only grows too, so an offset handed out once means the same
-/// thing in every later state of the scope.
+/// (`CMiniMdRW`) holds for a module that `Reflection.Emit` is building. Every table but `Constant` only grows,
+/// and each row gets the RID it will keep, in definition order, so a field's, method's or parameter's RID is
+/// the token CoreCLR hands out for it. `Constant` holds at most one row per owner, in the order of each
+/// owner's first constant, and a later constant replaces the owner's row in place. Each heap only grows, so
+/// an offset handed out once means the same thing in every later state of the scope.
 ///
 /// Every reference a row holds is checked against the scope when the row is added, so a scope never
 /// refers to a row or heap entry it lacks.
@@ -530,6 +565,7 @@ type EmitScope =
             MethodSemantics : ImmutableList<MethodSemanticsRow>
             Events : ImmutableList<EventRow>
             CustomAttributes : ImmutableList<CustomAttributeRow>
+            Constants : ImmutableList<ConstantRow>
         }
 
 /// Building an `EmitScope` by appending rows, and reading it back.
@@ -841,6 +877,7 @@ module EmitScope =
                 MethodSemantics = ImmutableList.Empty
                 Events = ImmutableList.Empty
                 CustomAttributes = ImmutableList.Empty
+                Constants = ImmutableList.Empty
             }
 
         let name, scope = internString moduleName empty
@@ -1413,6 +1450,47 @@ module EmitScope =
             | TypeOrMethodDef.TypeDef typeDef -> Some typeDef
             | TypeOrMethodDef.MethodDef method -> Some (methodOwner method)
 
+    let private requireConstantOwner (operation : string) (scope : EmitScope) (owner : HasConstant) : unit =
+        match owner with
+        | HasConstant.Field rid -> requireRid operation "Field" scope.Fields.Count rid.Rid
+        | HasConstant.Param rid -> requireRid operation "Param" scope.Params.Count rid.Rid
+        | HasConstant.Property rid -> requireRid operation "Property" scope.Properties.Count rid.Rid
+
+    /// <summary>
+    /// Set the <c>Constant</c> row of <paramref name="row"/>'s owner: replace the owner's row in place if the scope has
+    /// one, and otherwise add it after the others. This does not model <c>RegMeta::_DefineSetConstant</c>, nor set the
+    /// owner's <c>HasDefault</c> flag; <c>EmitScopeDefinitions.defineConstant</c> does both. Every other row, and every
+    /// heap, is unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner or the blob.</exception>
+    let setConstant (row : ConstantRow) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.setConstant"
+        requireConstantOwner operation scope row.Parent
+        requireBlob operation scope row.Value
+
+        match Seq.tryFindIndex (fun (existing : ConstantRow) -> existing.Parent = row.Parent) scope.Constants with
+        | Some index ->
+            { scope with
+                Constants = scope.Constants.SetItem (index, row)
+            }
+        | None ->
+            { scope with
+                Constants = scope.Constants.Add row
+            }
+
+    /// <summary>
+    /// The type a <c>Constant</c> row's owner belongs to: the type that declares a field or property, or the type of a
+    /// parameter's method.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner.</exception>
+    let typeOfConstantOwner (owner : HasConstant) (scope : EmitScope) : TypeDefRid =
+        requireConstantOwner "EmitScope.typeOfConstantOwner" scope owner
+
+        match owner with
+        | HasConstant.Field rid -> scope.Fields.[rid.Rid - 1].Owner
+        | HasConstant.Param rid -> scope.MethodDefs.[scope.Params.[rid.Rid - 1].Owner.Rid - 1].Owner
+        | HasConstant.Property rid -> scope.Properties.[rid.Rid - 1].Owner
+
     let addMethodSpec (row : MethodSpecRow) (scope : EmitScope) : MethodSpecRid * EmitScope =
         let operation = "EmitScope.addMethodSpec"
         requireMethodDefOrRef operation scope row.Method
@@ -1475,6 +1553,10 @@ module EmitScope =
     /// In RID order, which is the order they were defined, whatever their owners.
     let customAttributes (scope : EmitScope) : ImmutableList<CustomAttributeRow> = scope.CustomAttributes
 
+    /// At most one per owner, in the order of each owner's first constant, which is not the image's: the image sorts
+    /// them by owner.
+    let constants (scope : EmitScope) : ImmutableList<ConstantRow> = scope.Constants
+
     /// In RID order, which is definition order across the module; the image lists each type's events
     /// through an `EventPtr` when they are not already grouped.
     let events (scope : EmitScope) : ImmutableList<EventRow> = scope.Events
@@ -1506,4 +1588,20 @@ module HasCustomAttribute =
         | 0x2A ->
             EmitScope.tryGenericParamRid rid scope
             |> Option.map HasCustomAttribute.GenericParam
+        | _ -> None
+
+/// Reading a `HasConstant` from the token a managed caller passes.
+[<RequireQualifiedAccess>]
+module HasConstant =
+    /// <summary>
+    /// The owner this token names in <paramref name="scope"/>: a <c>Field</c>, <c>Param</c> or <c>Property</c> row.
+    /// <c>None</c> for a token of any other table, and for a RID that names no row of the scope.
+    /// </summary>
+    let tryOfToken (token : int) (scope : EmitScope) : HasConstant option =
+        let rid = token &&& 0x00FFFFFF
+
+        match token >>> 24 &&& 0xFF with
+        | 0x04 -> EmitScope.tryFieldRid rid scope |> Option.map HasConstant.Field
+        | 0x08 -> EmitScope.tryParamRid rid scope |> Option.map HasConstant.Param
+        | 0x17 -> EmitScope.tryPropertyRid rid scope |> Option.map HasConstant.Property
         | _ -> None

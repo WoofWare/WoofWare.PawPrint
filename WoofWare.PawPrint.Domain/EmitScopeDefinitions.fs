@@ -657,6 +657,84 @@ type ExceptionClause =
     }
 
 /// <summary>
+/// A value <c>TypeBuilder_SetConstantValue</c> is given: one case for each of the fourteen element types its managed
+/// caller (<c>RuntimeTypeBuilder.SetConstantValue</c>) passes. A fixed-width case holds the value's raw bits.
+/// </summary>
+[<RequireQualifiedAccess>]
+type ConstantValue =
+    /// The boxed <c>bool</c>'s byte, as the managed caller copies it.
+    | Boolean of byte
+    | Char of char
+    | SByte of sbyte
+    | Byte of byte
+    | Int16 of int16
+    | UInt16 of uint16
+    | Int32 of int32
+    | UInt32 of uint32
+    | Int64 of int64
+    | UInt64 of uint64
+    /// The <c>float</c>'s bits, so that every NaN payload and <c>-0.0</c> are kept.
+    | Single of bits : int32
+    /// The <c>double</c>'s bits, so that every NaN payload and <c>-0.0</c> are kept.
+    | Double of bits : int64
+    /// UTF-16 code units, lone surrogates and NULs included.
+    | String of string
+    /// A null reference, of any type: <c>ELEMENT_TYPE_CLASS</c>.
+    | NullReference
+
+/// <summary>
+/// The element type and the value blob of a <c>ConstantValue</c>, as CoreCLR's emitter stores them
+/// (<c>_GetSizeOfConstantBlob</c>, md/compiler/mdutil.cpp).
+/// </summary>
+[<RequireQualifiedAccess>]
+module ConstantValue =
+    /// The element type the row holds for the value.
+    let typeCode (value : ConstantValue) : System.Reflection.Metadata.ConstantTypeCode =
+        failwith "stub: ConstantValue.typeCode"
+
+    /// <summary>
+    /// The value blob: a fixed-width value's little-endian bytes, two bytes per code unit for a string, and four zero
+    /// bytes for <c>NullReference</c>.
+    /// </summary>
+    let blob (value : ConstantValue) : ImmutableArray<byte> = failwith "stub: ConstantValue.blob"
+
+    /// <summary>
+    /// The size of a fixed-width element type's value: 1, 2, 4 or 8 for each of the twelve primitive element types, and
+    /// <c>None</c> for <c>String</c>, <c>NullReference</c> and any other.
+    /// </summary>
+    let fixedWidthSize (code : System.Reflection.Metadata.ConstantTypeCode) : int option =
+        failwith "stub: ConstantValue.fixedWidthSize"
+
+    /// <summary>
+    /// The value of fixed-width element type <paramref name="code"/> whose little-endian bytes are
+    /// <paramref name="bytes"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="code"/> is not fixed-width, or <paramref name="bytes"/> is not its <c>fixedWidthSize</c>.
+    /// </exception>
+    let ofFixedWidth
+        (code : System.Reflection.Metadata.ConstantTypeCode)
+        (bytes : ImmutableArray<byte>)
+        : ConstantValue
+        =
+        failwith "stub: ConstantValue.ofFixedWidth"
+
+/// <summary>
+/// The outcome of asking CoreCLR's emitter to set an owner's constant in a dynamic module's scope
+/// (<c>RegMeta::SetFieldProps</c>, <c>SetParamProps</c> or <c>SetPropertyProps</c>).
+/// </summary>
+[<RequireQualifiedAccess>]
+type ConstantDefinition =
+    /// The owner's <c>Constant</c> row set and its <c>HasDefault</c> flag ORed in, and the scope that holds them.
+    | Defined of EmitScope
+    /// <summary>
+    /// The owner is a property with a <c>MethodSemantics</c> row whose semantics is exactly <c>Getter</c> or exactly
+    /// <c>Setter</c>. CoreCLR's <c>_SetPropertyProps</c> detaches each such row from the property, which a scope does
+    /// not model, so nothing is changed.
+    /// </summary>
+    | DetachesAccessors
+
+/// <summary>
 /// The definitions CoreCLR's emitter adds to a dynamic module's scope: types, each checked for a
 /// duplicate first (<c>MDDupTypeDef</c>), and methods, which are not (<c>MDDupMethodDef</c> is not set).
 /// </summary>
@@ -1393,3 +1471,15 @@ module EmitScopeDefinitions =
                 | None -> storeAsGiven owner constructor value scope
             | KnownCustomAttributeEffect.Unmodelled -> CustomAttributeDefinition.NotStoredAsGiven kind
         | kind -> CustomAttributeDefinition.NotStoredAsGiven kind
+
+    /// <summary>
+    /// Set <paramref name="owner"/>'s constant, as <c>TypeBuilder_SetConstantValue</c> does through
+    /// <c>RegMeta::_DefineSetConstant</c>: the owner's <c>Constant</c> row, replaced in place if it has one and added
+    /// otherwise, takes the value's element type, and takes its blob unless the blob is empty (an empty string), in
+    /// which case the row keeps its old blob, whatever its old type, or a new row the empty blob; and the owner's
+    /// <c>HasDefault</c> flag is ORed in. A string is stored whole: the managed caller's string is cut at its first NUL
+    /// before it reaches here. A property with an accessor row is <c>DetachesAccessors</c>.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner.</exception>
+    let defineConstant (owner : HasConstant) (value : ConstantValue) (scope : EmitScope) : ConstantDefinition =
+        failwith "stub: EmitScopeDefinitions.defineConstant"

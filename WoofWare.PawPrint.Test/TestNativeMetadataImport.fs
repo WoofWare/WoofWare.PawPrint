@@ -3167,6 +3167,92 @@ public interface IEventInterface
         readsPastTheEnd |> shouldBeGreaterThan 0
 
     [<Test>]
+    let ``MetadataImport GetDefaultValue's string pointer into a dynamic module keeps its characters when the image is replaced``
+        ()
+        : unit
+        =
+        // CoreCLR's pointer is into its blob heap, which only grows: measured on .NET 10.0.14 and 11.0.0-rc.3
+        // (`setconstant-decide/probe2`, scenario `pointer`), it still reads the old value after the owner's constant
+        // changes and an earlier owner gains one. A dynamic module's image is replaced on each such call, and the
+        // Constant table is re-sorted, so only a heap offset names the same bytes in the new image.
+        let fixture = makeFixture ()
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let parts : DynamicAssemblyName =
+            {
+                SimpleName = "ConstantPointer"
+                Version = System.Version (0, 0, 0, 0)
+                Culture = ""
+                PublicKey = ImmutableArray<byte>.Empty
+                Flags = enum<System.Reflection.AssemblyFlags> 0
+                HashAlgorithm = System.Reflection.AssemblyHashAlgorithm.Sha1
+            }
+
+        let scope = DynamicAssemblyImage.scope parts System.Guid.Empty
+
+        let t, scope =
+            match
+                EmitScopeDefinitions.defineTopLevelTypeDef "T" System.Reflection.TypeAttributes.Public None [] scope
+            with
+            | TypeDefDefinition.Defined (rid, scope) -> rid, scope
+            | TypeDefDefinition.Duplicate _ -> failwith "T is defined once"
+
+        let m, scope =
+            EmitScopeDefinitions.defineMethod
+                t
+                "M"
+                (ImmutableArray.Create<byte> [| 0x00uy ; 0x02uy ; 0x01uy ; 0x0Euy ; 0x0Euy |])
+                (System.Reflection.MethodAttributes.Public
+                 ||| System.Reflection.MethodAttributes.Static)
+                scope
+
+        let param (sequence : int) (name : string) (scope : EmitScope) : HasConstant * EmitScope =
+            match EmitScopeDefinitions.defineParam m sequence name 0 scope with
+            | ParamDefinition.Defined (rid, scope) -> HasConstant.Param rid, scope
+            | ParamDefinition.StrandsLaterMethods _ -> failwith "parameters in order strand nothing"
+
+        let a, scope = param 1 "a" scope
+        let b, scope = param 2 "b" scope
+
+        let defined (owner : HasConstant) (value : string) (scope : EmitScope) : EmitScope =
+            match EmitScopeDefinitions.defineConstant owner (ConstantValue.String value) scope with
+            | ConstantDefinition.Defined scope -> scope
+            | ConstantDefinition.DetachesAccessors -> failwith "a parameter has no accessors"
+
+        let first = defined b "first-value" scope
+
+        let state, assembly =
+            match fixture.State.WithDynamicAssembly loggerFactory first with
+            | Ok registered -> registered
+            | Error existing -> failwith $"unexpected collision with %s{existing.DefinitionFullName}"
+
+        let _, out, state =
+            invokeGetDefaultValueIn fixture assembly.Name.FullName b.Token state
+
+        out.CorElementType |> shouldEqual 0x0E
+        out.Length |> shouldEqual "first-value".Length
+
+        // `a` gains a constant, whose row sorts before `b`'s, and `b`'s changes.
+        let second = first |> defined a "zz" |> defined b "second-value-longer"
+
+        let state, replaced =
+            state.WithEmitScope loggerFactory assembly.Name.FullName second
+
+        let mr = replaced.PeReader.GetMetadataReader ()
+
+        MetadataTokens.GetRowNumber (
+            ConstantHandle.op_Implicit (
+                (mr.GetParameter (MetadataTokens.ParameterHandle (b.Token &&& 0xFFFFFF))).GetDefaultValue ()
+            )
+            : EntityHandle
+        )
+        |> shouldEqual 2
+
+        Array.init out.Length (fun i -> readCharThrough fixture state out.StringPointer (2 * i))
+        |> System.String
+        |> shouldEqual "first-value"
+
+    [<Test>]
     let ``MetadataImport GetDefaultValue reports a null constant as ELEMENT_TYPE_CLASS`` () : unit =
         // A null reference constant is its own element type, distinct from "no Constant row at
         // all", and ECMA-335 II.22.9 fixes its blob at four zero bytes.
