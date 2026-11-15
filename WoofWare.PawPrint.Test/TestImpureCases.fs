@@ -761,6 +761,38 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """PawPrint does not verify a dynamic type's MethodImpl rows at `CreateType`. Two `DefineMethodOverride` rows name one instance interface method, with different bodies; on real .NET 10 and 11, `CreateType` throws `TypeLoadException` ("Method 'B2' on type 'C' ... is overriding a method that has been overridden"), and the guest exits 0 (measured; a control with the second row removed exits 1). PawPrint creates the type and the guest exits 1, "CreateType threw nothing" (measured, on both runtimes). Un-parked by verifying the rows at `CreateType`."""
+            {
+                FileName = "DynamicMethodCompileFailureTiming.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Where an instruction operand the JIT refuses is raised for a restricted-skip-visibility `DynamicMethod`: from its `CreateDelegate` on real .NET, which compiles it there, and from its first invocation under PawPrint, which binds each operand when its instruction executes (docs/divergences.md, "What a restricted-skip-visibility method's `CreateDelegate` compiles"). Measured to exit 0 on real .NET 10 and 11, and a control expecting the restricted method to hear a rewritten literal exits 7 on both. Today it stops at "Unimplemented native method (PInvokeImpl QCall!ReflectionInvocation_CompileMethod)" (measured). The checks are ordered by the stage of docs/plans/2026-10-24-jit-import-at-method-entry.md that would retire each."""
+            {
+                FileName = "DynamicMethodInvalidIlAtCreateDelegate.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """Invalid IL is never an `InvalidProgramException` under PawPrint (#2278): where the JIT refuses a body (a `pop` of an empty stack, a branch past the end or into an instruction), PawPrint stops the run when the offset executes, for a metadata method and a dynamic one alike, and a restricted-skip-visibility method's `CreateDelegate` returns where real .NET raises. Measured to exit 0 on real .NET 10 and 11, and a control expecting another HResult exits 1 on both. Each check exercises the unrestricted control first, so the run stops at its first invocation: "stack shape: Invalid (Dynamic { RegistryId = 1L }) is executing offset 0, which is invalid IL: StackUnderflow (0, Nullary Pop, 0)" (measured). Un-parked by raising invalid IL as the JIT does, at `CreateDelegate` for the restricted method; no stage of docs/plans/2026-10-24-jit-import-at-method-entry.md does that."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
@@ -6379,6 +6411,45 @@ module TestImpureCases =
                 // lazily during dispatch, which would let the quiet case run.
                 FileName = "DynamicMethodInvalidCatchClause.cs"
                 ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `RuntimeHelpers.CompileMethod`, which `CreateDelegate` calls for an ownerless
+                // method built with `restrictedSkipVisibility: true`: the method's `catch` clause
+                // types and `InitLocals` are latched there, and a clause the JIT refuses is raised
+                // from `CreateDelegate`, each check paired with the unrestricted control. Measured to
+                // exit 0 on real .NET 10 and 11, with controls exiting 7, 13 and 15 on both.
+                FileName = "DynamicMethodCompiledAtCreateDelegate.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // `Expression.Compile()` with dynamic code supported, which emits the lambda as a
+                // restricted-skip-visibility `DynamicMethod` and so reaches
+                // `RuntimeHelpers.CompileMethod`. Measured to exit 3 on real .NET 10 and 11, and a
+                // control compiling a lambda that returns 4 exits 4 on both.
+                FileName = "ExpressionLambdaCompileEmitted.cs"
+                ExpectedReturnCode = 3
                 KernelConfig = KernelConfig.Default
                 AppContext =
                     AppContextProperties.ofMap (
