@@ -5872,21 +5872,22 @@ module EscapeAnalysis =
             let indexAt =
                 ops |> Array.mapi (fun index (_, offset) -> offset, index) |> Map.ofArray
 
-            // Whether the token of the instruction at `offset` binds a method of CoreLib's that
+            // Whether the token of the instruction at `offset` binds one of CoreLib's intrinsics that
             // `names` admits, by its type's namespace and name and its own name.
             let namesIntrinsic (names : string -> string -> string -> bool) (offset : int) : bool =
                 match
                     Map.tryFind offset indexAt
                     |> Option.bind (fun index -> Map.tryFind index targets)
                 with
-                | Some (CallTarget.Method named) ->
+                | Some (CallTarget.Method named) when
+                    named.Callee.AssemblyFullName = state.BaseTypes.Corelib.DefinitionFullName
+                    ->
                     let _, method = methodOf state named.Callee
                     let declaring = declaringTypeOf state named.Callee
-
-                    let typeDef =
-                        (assemblyOf state declaring.AssemblyFullName).TypeDefs.[declaring.TypeDefinition.Get]
+                    let typeDef = state.BaseTypes.Corelib.TypeDefs.[declaring.TypeDefinition.Get]
 
                     names typeDef.Namespace typeDef.Name method.Name
+                    && IntrinsicBody.isIntrinsic state.BaseTypes.Corelib named.Callee.Method.Get
                 | _ -> false
 
             // The await the call at `index` begins, where its operands name the methods the JIT
@@ -5903,9 +5904,12 @@ module EscapeAnalysis =
                         Some AwaitedCall.Callvirt
                     | _ -> None
 
+                // The JIT matches the pattern as it imports the call, so only where it compiles it.
                 match opcode, Map.tryFind index targets with
                 | Some opcode, Some (CallTarget.Method callee) when
-                    not (unbound.Contains index) && not (abstractCallees.Contains index)
+                    compiled.Contains offset
+                    && not (unbound.Contains index)
+                    && not (abstractCallees.Contains index)
                     ->
                     AwaitPattern.awaitAfter body offset
                     |> Option.filter (fun follower ->
