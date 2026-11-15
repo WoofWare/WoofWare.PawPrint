@@ -27,18 +27,6 @@ type PeByteRangePointerSource =
     /// type, then one type per index parameter. Same storage story as
     /// `FieldSignatureBlob`.
     | PropertySignatureBlob of property : ComparablePropertyDefinitionHandle
-    /// A Constant table row's value blob (ECMA II.22.9): a compile-time constant, in
-    /// the encoding its `ConstantTypeCode` names. For a string constant those bytes
-    /// are UTF-16LE characters, which is what `MetadataImport.GetDefaultValue` hands
-    /// back as a `char*`. Same storage story as `FieldSignatureBlob` — it lives in
-    /// the `#Blob` heap, so the RVA has no PE-section meaning and is fixed at 0.
-    ///
-    /// Keyed on the Constant row rather than on whichever field, parameter or
-    /// property owns it: the row is what holds the bytes, and its HasConstant parent
-    /// is a property of the row (`Constant.Parent`) rather than something a reader of
-    /// the blob needs. One row per parent, so this is no coarser than keying on the
-    /// parent would be.
-    | ConstantBlob of constant : ComparableConstantHandle
     /// The whole of the metadata's `#Blob` heap (ECMA II.24.2.4), rather than one blob in it.
     /// `PeByteRangePointer.Size` is the heap's length and the RVA is fixed at 0, as for the other
     /// `#Blob` variants. A pointer at one blob's contents carries that blob's heap offset as a byte
@@ -46,8 +34,10 @@ type PeByteRangePointerSource =
     /// next — as it does over CoreCLR's mapped metadata — and only the end of the heap bounds it.
     ///
     /// That is the point of the variant: it is for blobs CoreCLR hands out as a pointer into its
-    /// mapped metadata (`MetadataImport.GetFieldMarshal`'s MarshalSpec), so that a consumer reading
-    /// past such a blob's end sees what it would see over CoreCLR's.
+    /// mapped metadata (`MetadataImport.GetFieldMarshal`'s MarshalSpec, `MetadataImport.GetDefaultValue`'s
+    /// string constant), so that a consumer reading past such a blob's end sees what it would see
+    /// over CoreCLR's. A heap offset also names the same bytes in every later image of a dynamic
+    /// module, whose heaps only grow, so such a pointer survives the image being replaced.
     | BlobHeap
 
 type PeByteRangePointer =
@@ -66,7 +56,6 @@ type PeByteRangePointer =
             | PeByteRangePointerSource.FieldSignatureBlob field -> $"field signature blob for %O{field.Get}"
             | PeByteRangePointerSource.MethodSignatureBlob method -> $"method signature blob for %O{method.Get}"
             | PeByteRangePointerSource.PropertySignatureBlob property -> $"property signature blob for %O{property.Get}"
-            | PeByteRangePointerSource.ConstantBlob constant -> $"constant blob for %O{constant}"
             | PeByteRangePointerSource.BlobHeap -> "#Blob heap"
 
         $"<PE data %s{this.AssemblyFullName} %s{source} at %d{this.RelativeVirtualAddress} size %d{this.Size}>"
@@ -1219,7 +1208,6 @@ module ManagedPointerSource =
             | PeByteRangePointerSource.FieldSignatureBlob _
             | PeByteRangePointerSource.MethodSignatureBlob _
             | PeByteRangePointerSource.PropertySignatureBlob _
-            | PeByteRangePointerSource.ConstantBlob _
             | PeByteRangePointerSource.BlobHeap -> None
         // Object fields, static fields, stack slots and the synthetic roots have no
         // stable in-container offset either (see `tryStableAddressBits` and

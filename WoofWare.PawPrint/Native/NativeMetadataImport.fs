@@ -1830,10 +1830,18 @@ module NativeMetadataImport =
                         state, 0L, ManagedPointerSource.Null, 0, elementType
                     else
 
-                    let peByteRange = IlMachineState.peByteRangeForConstantBlob assembly constantHandle
-
+                    // A pointer into the `#Blob` heap, as CoreCLR's is into its blob heap. A heap
+                    // offset names the same bytes in every later image of a dynamic module, whose
+                    // heaps only grow, whereas the Constant row may be re-sorted or rewritten
+                    // before the managed caller reads through the pointer. A read past the blob's
+                    // end sees the heap, as on CoreCLR.
                     let state, pointer =
-                        IlMachineState.peByteRangeCharPointer ctx.LoggerFactory ctx.BaseClassTypes peByteRange state
+                        IlMachineState.blobHeapContentCharPointer
+                            ctx.LoggerFactory
+                            ctx.BaseClassTypes
+                            assembly
+                            constant.Value
+                            state
 
                     // Length is in characters here and in bytes everywhere else — the FCall divides
                     // by sizeof(WCHAR) only on this branch.
