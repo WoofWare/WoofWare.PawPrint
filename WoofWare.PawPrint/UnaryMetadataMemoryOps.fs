@@ -235,10 +235,12 @@ module internal UnaryMetadataMemoryOps =
 
         // `ldobj T` loads a `T`, and the address it loads from need not be the address *of* a `T`:
         // `(Narrow*)&wide` names the first byte of an eight-byte slot, and `ldobj Narrow` reads
-        // four of them. So a value-type load takes its width from the token via
-        // `readManagedByrefAs`, rather than accepting whatever the pointer's own type view or root
-        // happens to be and coercing that. A reference-typed token has nothing to narrow — the
-        // load is a pointer copy — so it keeps the pointer-shaped read.
+        // four of them. So the load takes its width from the token via `readManagedByrefAs`,
+        // rather than accepting whatever the pointer's own type view or root happens to be and
+        // coercing that. A reference-typed token loads one object reference (III.4.13), so its
+        // template is an object reference whatever `T` is: CoreLib's `RefArgs` invoke stub loads a
+        // reference-typed argument through the `ref byte` that `ByReference.Create` made of it,
+        // whose own view is one byte.
         let readThrough (ptr : ManagedPointerSource) (state : IlMachineState) : CliType * IlMachineState =
             if isValueType then
                 let zero, state = IlMachineState.cliTypeZeroOfHandle state baseClassTypes typeHandle
@@ -252,9 +254,12 @@ module internal UnaryMetadataMemoryOps =
 
                 EvalStackValue.ofCliType loaded |> EvalStackValue.toCliTypeCoerced zero, state
             else
-                // III.4.13: reference types are just copied as pointers.
-                // We should have received a pointer, so let's just pass it back.
-                IlMachineState.readManagedByref baseClassTypes state (ManagedPointerSource.requireAddressed ptr), state
+                IlMachineState.readManagedByrefAs
+                    baseClassTypes
+                    state
+                    (CliType.ObjectRef None)
+                    (ManagedPointerSource.requireAddressed ptr),
+                state
 
         let toPush, state =
             match addr with

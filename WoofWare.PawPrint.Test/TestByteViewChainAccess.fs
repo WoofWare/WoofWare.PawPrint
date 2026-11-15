@@ -433,6 +433,62 @@ module TestByteViewChainAccess =
 
         Check.One (config, Prop.forAll (Arb.fromGen caseGen) property)
 
+    /// `ldfld E::f` through a pointer whose referent is not an `E`: the bare address of the buffer,
+    /// which views the whole buffer, or a `System.Byte` cursor to a slot, which is what
+    /// `(byte*)&buffer + offset` and `(IntPtr*)&buffer + i` both produce. The field's declaring
+    /// type says what the bytes at the address are read as, whatever the pointer views them as,
+    /// so the read is of field `f` of the `E` in the slot the address falls on.
+    [<Test>]
+    let ``reading a field through a pointer that does not view its declaring type reads that field at the address``
+        ()
+        : unit
+        =
+        let gen =
+            gen {
+                let! element = Gen.elements elements
+                let! values = Gen.listOfLength elementCount (valueLike element.Zero)
+                let storage = storageOf element values
+                let! slot = Gen.choose (0, elementCount - 1)
+                let! byteViewAtZero = Gen.elements [ false ; true ]
+                let! field = Gen.elements (fieldsOf element.Zero)
+                return element, storage, slot, byteViewAtZero, field
+            }
+
+        let property
+            (element : Element, storage : CliValueType, slot : int, byteViewAtZero : bool, field : CliField)
+            : bool
+            =
+            let addr, state =
+                IlMachineState.allocateManagedObject storageDeclared storage preparedState
+
+            let slotOffset = CliValueType.GetFieldLayoutById (slotId slot) storage |> fst
+
+            let byteType =
+                AllConcreteTypes.getRequiredNonGenericHandle state.TypeSystem.ConcreteTypes bct.Byte
+
+            let projections =
+                match slotOffset, byteViewAtZero with
+                | 0, false -> []
+                | 0, true -> [ ByrefProjection.ReinterpretAs byteType ]
+                | offset, _ -> [ ByrefProjection.ReinterpretAs byteType ; ByrefProjection.ByteOffset offset ]
+
+            let src : AddressedByref =
+                {
+                    Root = ByrefRoot.HeapValue addr
+                    Projections = projections
+                }
+
+            let read = IlMachineState.readManagedByrefField bct state src field.Id
+
+            let expected =
+                CliType.getCellAtPath [ slotId slot ; field.Id ] (CliType.ValueType storage)
+
+            // The premise: the pointer really does not view an `E`, so this is not the identity
+            // read the other properties already cover.
+            storageDeclared <> element.Handle && leaves [] read = leaves [] expected
+
+        Check.One (config, Prop.forAll (Arb.fromGen gen) property)
+
     /// `stfld` through the chain changes that field of the cell the chain names, and nothing else.
     [<Test>]
     let ``writing a field through a chain writes that field of the cell it names and nothing else`` () : unit =

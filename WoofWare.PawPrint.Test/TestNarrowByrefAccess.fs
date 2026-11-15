@@ -330,6 +330,50 @@ module TestNarrowByrefAccess =
         readPointer cursor |> shouldEqual second
         readPointer namedCell |> shouldEqual second
 
+    /// `System.ByReference::Value`, keyed as `ldfld` keys it: on its concretized declaring type.
+    let private byReferenceValue : FieldId =
+        match baseClassTypes.ByReference with
+        | None -> failwith "this corelib has no System.ByReference; these tests have no subject"
+        | Some ty ->
+            let value =
+                ty.Fields
+                |> List.filter (fun f -> f.Name = "Value" && not f.IsStatic)
+                |> List.exactlyOne
+
+            FieldId.metadata byReferenceHandle value.Handle value.Name
+
+    /// `ldfld ByReference::Value` through `(IntPtr*)&byrefs + i`, which is how CoreLib's emitted
+    /// `RefArgs` invoke stub reads argument `i` (`InvokerEmitUtil.CreateInvokeDelegate_RefArgs`).
+    /// The pointer's referent is not a `ByReference`: it is the whole buffer for `i = 0`, whose
+    /// spelling carries no projections at all, and a `System.Byte` cursor for every later `i`. The
+    /// field's declaring type, not the pointer, says what the bytes there are read as, so each
+    /// spelling must read slot `i`'s pointer and no other.
+    [<Test>]
+    let ``ldfld of ByReference.Value through a pointer into pointer slots reads that slot`` () : unit =
+        let property (slotCount : int) (index : int) (byteViewAtZero : bool) : bool =
+            let slotCount = 1 + abs (slotCount % 6)
+            let index = abs (index % slotCount)
+            let targets = [ for i in 0 .. slotCount - 1 -> somewhere (100 + i) ]
+            let state, addr = storageAt (pointerSlots targets)
+
+            let projections =
+                match index, byteViewAtZero with
+                | 0, false -> []
+                | 0, true -> [ ByrefProjection.ReinterpretAs byteType ]
+                | i, _ -> [ ByrefProjection.ReinterpretAs byteType ; ByrefProjection.ByteOffset (8 * i) ]
+
+            let src : AddressedByref =
+                {
+                    Root = ByrefRoot.HeapValue addr
+                    Projections = projections
+                }
+
+            match IlMachineState.readManagedByrefField baseClassTypes state src byReferenceValue with
+            | CliType.RuntimePointer (CliRuntimePointer.Managed p) -> p = targets.[index]
+            | other -> failwith $"ldfld ByReference::Value through %O{src} read %O{other}, not a managed pointer"
+
+        Check.QuickThrowOnFailure property
+
     /// The narrow route must not swallow the whole-slot one. A same-size store through a bare byref
     /// replaces the slot outright, including its declared type — `stobj IntPtr` over a bare
     /// `NativeInt` cell relies on exactly that restamp (IlMachineManagedByref.fs:415-429).
