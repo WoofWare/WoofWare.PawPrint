@@ -21,6 +21,9 @@ using System.Xml.Linq;
 //
 // .NET 10 compiles the same methods as state machines, so there the guest checks the results alone.
 //
+// On .NET 11 the guest also compares every frame of the trace with real .NET 11's, less the
+// awaiter's frames, which depend on what the JIT inlined into them.
+//
 // The exit code is the index of the first check that failed; 0 means all passed.
 public class Program
 {
@@ -114,6 +117,37 @@ public class Program
         + "   at System.Xml.Linq.XContainer.ReadContentFromAsync(XmlReader r, LoadOptions o, CancellationToken cancellationToken)\n"
         + "   at System.Xml.Linq.XDocument.LoadAsyncInternal(XmlReader reader, LoadOptions options, CancellationToken cancellationToken)\n";
 
+    // Whether `frame` is one of the awaiter's, between its throw and the dispatcher's frames. Which
+    // of these a trace has depends on what the JIT inlined into them.
+    private static bool IsAwaiters (StackFrame frame)
+    {
+        string type = frame.GetMethod ().DeclaringType.FullName;
+        return type == "System.Runtime.CompilerServices.TaskAwaiter"
+            || type == "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation";
+    }
+
+    // The method of every frame but the awaiter's, as `Type::Method` lines.
+    private static string DescribeWhole (StackFrame[] frames)
+    {
+        var text = new StringBuilder ();
+        foreach (StackFrame frame in frames)
+        {
+            if (IsAwaiters (frame)) continue;
+            var method = frame.GetMethod ();
+            text.Append (method.DeclaringType).Append ("::").Append (method.Name).Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private const string WholeNet11 =
+        "System.Runtime.ExceptionServices.ExceptionDispatchInfo::Throw\n"
+        + "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume::ResumeTaskContinuation\n"
+        + "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[T]::DispatchContinuations\n"
+        + "System.Xml.Linq.XContainer::ReadContentFromAsync\n"
+        + "System.Xml.Linq.XContainer::ReadContentFromAsync\n"
+        + "System.Xml.Linq.XDocument::LoadAsyncInternal\n";
+
     public static int Main (string[] args)
     {
         bool net11 = Environment.Version.Major >= 11;
@@ -147,7 +181,9 @@ public class Program
             if (frames[loadFrame].GetILOffset () != 0x54) return 8;
 
             string formatted = new StackTrace (failure, false).ToString ().TrimEnd () + Environment.NewLine;
-            if (formatted.IndexOf (FormattedNet11.Replace ("\n", Environment.NewLine), StringComparison.Ordinal) < 0) return 9;
+            if (formatted != FormattedNet11.Replace ("\n", Environment.NewLine)) return 9;
+
+            if (DescribeWhole (frames) != WholeNet11) return 10;
         }
 
         return 0;

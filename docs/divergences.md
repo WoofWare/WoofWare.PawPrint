@@ -1288,6 +1288,107 @@ current-thread capture is the P/Invoke stub of this very QCall.
 **Where this lives in code**: `NativeStackTrace.tryExecuteQCall`, the `rgiOffset` and `rgiILOffset`
 arrays.
 
+## A trace has a frame for every call that optimised code inlines or tail-calls
+
+**CoreCLR**: the framework's methods run as ReadyToRun code compiled with optimisation, which
+inlines some callees and turns some calls in tail position into tail calls. Either leaves the callee
+with no frame of its own, so a trace through such code has fewer frames than the IL calls. Measured
+on .NET 11 RC3, with the guests of stage 4 of `docs/plans/2026-11-11-runtime-async.md`:
+
+* An exception resumed from a task has one frame of `RuntimeAsyncTaskContinuation.GetResult`, the
+  static one, where the instance `GetResult` that calls it through a function pointer has none.
+* An exception through `SyncTextWriter.Flush` has no frame of `StreamWriter.Flush()`, which calls
+  `Flush(bool, bool)` last.
+
+With `DOTNET_ReadyToRun=0`, so that the JIT's first tier compiles these methods, both frames are
+there, and the guests' frames name PawPrint's methods, one for one. Decision 20 of the plan names two more
+cases, both of runtime async. An async version that does not tail-await is inlined into its caller
+by the optimising tier (measured). The wrapped `ret`'s call of `TransparentAwait` is a real tail call
+when the JIT optimises fully, so an exception from a task already faulted is thrown with no frame of
+the async version beneath it (read, not measured).
+
+**PawPrint**: every call has a frame, as the JIT's first tier gives it.
+
+**Spec status**: Outside ECMA-335, which says nothing about stack-trace contents.
+
+**Why we chose this**: which calls optimised code inlines or tail-calls is the JIT's decision,
+made from heuristics, from the version bubble the precompiler saw, and from the tier a method has
+reached, none of which PawPrint models. The first tier's answer is the one CoreCLR gives for code it
+has not optimised, and it is the same on every run.
+
+**Observable example**: the frames of `new StackTrace(e, false)` for an exception that resumed a
+runtime-async method from a faulted task have one more `RuntimeAsyncTaskContinuation.GetResult` than
+real .NET's. The formatted trace is the same on both, since `[StackTraceHidden]` hides both
+`GetResult`s.
+
+**Where this lives in code**: nowhere in particular: PawPrint does not inline or tail-call.
+`sourcesPure/RuntimeAsync*.cs` compare their traces with real .NET 11's less the awaiter's frames,
+and `RuntimeAsyncSynchronizedAsyncVersion.cs` less `StreamWriter.Flush()`'s.
+
+## A frame of an optimisable method is reported at its instruction, not where its statement begins
+
+**CoreCLR**: a frame's IL offset is read back from the debug information the JIT records, which
+maps native code to the IL offsets at a set of boundaries. For a method whose module allows JIT
+optimisation, which is every framework assembly and every assembly built in Release, the VM asks
+for stack-empty and call-site boundaries only (`Debugger::getBoundaries`, `debugger.cpp:3199-3207`),
+and the JIT marks a call-site boundary after a call that returns nothing, not at the call itself
+(`importer.cpp:6648-6670`). So a frame is reported at the last of those at or before the instruction
+it was at: usually where its statement begins. Measured on .NET 11 RC3, both precompiled and with
+`DOTNET_ReadyToRun=0`:
+
+| Frame | Instruction | CoreCLR reports |
+|---|---|---|
+| `ExceptionDispatchInfo.Throw()` | `throw` at IL_0017 | IL_0011 |
+| `TaskAwaiter.ThrowForNonSuccess` | `callvirt Throw` at IL_003E | IL_0037 |
+| `TaskAwaiter.ValidateEnd` | `call HandleNonSuccessAndDebuggerNotification` at IL_000A | IL_0008 |
+
+A frame resumed from a continuation is reported at its `call Await` when the JIT's first tier
+compiled it. Precompiled, some are reported earlier: `XmlTextReaderImpl.ParseXmlDeclarationAsync`,
+suspended at its `call Await` at IL_026F, is reported at IL_024F. A method whose assembly disables
+optimisation, as a Debug build's `DebuggableAttribute` does, is reported at the instruction, as
+PawPrint reports it.
+
+**PawPrint**: the innermost frame is reported at the instruction it was executing, and each other
+frame at its call.
+
+**Spec status**: Outside ECMA-335, which says nothing about stack-trace contents.
+
+**Why we chose this**: deferred work. The stack-empty boundaries are a property of the IL, which
+PawPrint could compute; doing so needs the rest of the JIT's rule (which other places it marks, and
+how a module's optimisation setting is decided) established first, and the precompiled resumption
+offsets are a property of the precompiler's code that PawPrint does not have.
+
+**Observable example**: `new StackTrace(e, false).GetFrame(i).GetILOffset()` for a framework frame
+the exception passed through. Formatted traces show no IL offsets without source information.
+
+**Where this lives in code**: `StackFrameCapture.ofThread`, and the frames `ExceptionDispatching`
+accumulates.
+
+## A runtime-async method's async variant has no virtual slot of its own
+
+**CoreCLR**: on .NET 11 a virtual method that returns a `Task` or a `ValueTask` has two slots, the
+second for its async variant, straight after the first. Measured on .NET 11 RC1:
+`abstract Task<int> V(); virtual Task W(); void N()` in a class take slots 4, 6 and 9, and
+`GetNumVirtuals` is 8.
+
+**PawPrint**: a variant has no slot. Dispatch finds the implementation of a variant as the variant
+of the implementation of its ordinary sibling, so the slot numbers on .NET 11 are those of a table
+without variants, as on .NET 10.
+
+**Spec status**: Outside ECMA-335, which has no notion of slot numbers or of async variants.
+
+**Why we chose this**: decision 19 of `docs/plans/2026-11-11-runtime-async.md`. Reflection cannot
+name a variant's slot (`RuntimeTypeHandle.GetMethodAt` answers null for it), and every managed
+reader of a slot number uses it only to index the same table, so a table of variants would change
+nothing a program does except through these numbers.
+
+**Observable example**: `RuntimeMethodHandle.GetSlot` and `RuntimeTypeHandle.GetNumVirtuals`,
+reached by reflecting over CoreLib's internals.
+
+**Where this lives in code**: `ConcreteVirtualDispatch` and `StaticVirtualDispatch` take the step
+from a variant to its ordinary sibling (`AsyncVariantDispatch`); `MethodTableLayout` lays out
+ordinary methods alone.
+
 ## An unhandled exception is reported after its cleanup runs, not before
 
 **CoreCLR**: when the first pass of exception dispatch finds no handler on the thread, the runtime
