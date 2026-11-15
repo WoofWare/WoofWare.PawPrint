@@ -7300,14 +7300,17 @@ Scratchpad paths below are under the scratchpad named in "5y: what it is". Two p
 ### 5y: as built
 
 Built 2026-11-14 as the decisions say, in eight commits after the two records: the tests that compile today
-(`7d6caeb12`); the Domain surface failing by name with its tests (`e00abd376`); the rows, the classifier and the
-writer (`1f69edddc`); the index and the RID-order function (`a1025931e`); the extension rule (`11cd2f2c9`); the handler
-(`0e62c5644`); a fix that kept `checkRoundTrip`'s docstring on it (`bfa118949`); and the classifier's tests
-strengthened after a mutant survived them (`e64c2d2d1`). The branch was then rebased onto `main` at `689822905`, which
+(`24c2b49ad`); the Domain surface failing by name with its tests (`01f6a6247`); the rows, the classifier and the
+writer (`009149667`); the index and the RID-order function (`3229ace54`); the extension rule (`08d5679ec`); the handler
+(`fc5d20c15`); a fix that kept `checkRoundTrip`'s docstring on it (`571a79086`); and the classifier's tests
+strengthened after a mutant survived them (`28c1bccdf`). The branch was then rebased onto `main` at `689822905`, which
 holds PR 0 (`MetadataImport.GetFieldOffset`, #2262), `MetadataImport.GetClassLayout` (#2261) and the construction of an
-attribute whose constructor takes `object` arguments (#2259); after the record of this section (`9be7b4e10`),
-`07851fdcc` registers the tagged-object guest as passing, and this section was updated. SHAs here are the rebased ones;
-the first mutant run and the first suites ran on the same tree before the rebase. Scratchpad paths are under
+attribute whose constructor takes `object` arguments (#2259); after the record of this section (`fc2c52f86`),
+`0d345e300` registers the tagged-object guest as passing, and this section was updated. The branch was rebased again
+onto `36af1eeb2`, which holds the instantiation of generic attributes (#2260), and `8aeaab8e4` registers the
+generic-instance guest as passing. SHAs here are from that second rebase. A mutant run or suite named at a commit ran on
+that commit's content as it stood before the second rebase, and the first mutant run and the first suites ran before
+the first. Scratchpad paths are under
 `5y-impl/` in the scratchpad named in "5y: what it is". The wrong `IsDefined` is PawPrint issue #2257 and the 25-row
 rule #2258.
 
@@ -7324,7 +7327,7 @@ CoreLib and `Net11` the run with `PAWPRINT_TEST_RUNTIME=Net11`.
 | `TypeBuilderCustomAttributeAfterCreate.cs` (parked) | the type's two rows swapped: 1 | the created-owner TODO | not run |
 | `TypeBuilderAssemblyRuntimeAttributes.cs` (parked) | the empty name's exception types swapped: 6 | the friend TODO at the first malformed friend attribute | not run |
 | `TypeBuilderDuplicateRuntimeAttributes.cs` (parked) | the first added expected at 25 rows: 1 | exits 1: the first added, a wrong answer (#2258) | not run |
-| `TypeBuilderCustomAttributeTaggedObject.cs` (registered by `07851fdcc`) | 6 expected: 1 | 0 since #2259; before it, "primitive type obj is not yet supported as a CustomAttrib Elem" | 0 |
+| `TypeBuilderCustomAttributeTaggedObject.cs` (registered by `0d345e300`) | 6 expected: 1 | 0 since #2259; before it, "primitive type obj is not yet supported as a CustomAttrib Elem" | 0 |
 | `TypeBuilderCustomAttributeGenericInstance.cs` (registered after rebasing onto #2260) | 5 expected: 1 | 0 since #2260; before it, "RuntimeConstructorInfo does not declare expected instance field 'm_value'" | 0 |
 | `TypeBuilderCustomAttributeEmptyBlobInstance.cs` (parked) | `ArgumentException` expected: 2 | "*ppBlob (start) pointer is null" | not run |
 | `TypeBuilderCustomAttributeOpenGenericIsDefined.cs` (parked) | no exception expected: 1 | exits 1: `IsDefined` answers false, a wrong answer (#2257) | not run |
@@ -7341,14 +7344,14 @@ The four guests of `TestTypeBuilderCustomAttributeRefusals` were run on real .NE
 runtimes (the malformed friend attribute's guest catches the `BadImageFormatException` that real .NET throws).
 
 **Red, as recorded.**
-* At `7d6caeb12`: all ten registered and parked guests stopped at "Unimplemented native method (PInvokeImpl
+* At `24c2b49ad`: all ten registered and parked guests stopped at "Unimplemented native method (PInvokeImpl
   QCall!TypeBuilder_DefineCustomAttribute)"; the four refusal tests failed on that message, which lacks the TODO; the
   two index tests passed.
-* At `e00abd376`: of the 70 tests of `TestEmitScopeCustomAttributes`, `TestEmitScopeImage` and
+* At `01f6a6247`: of the 70 tests of `TestEmitScopeCustomAttributes`, `TestEmitScopeImage` and
   `TestEmitScopeExtension`, 42 failed, each at a "TODO: ... is not implemented yet" (`EmitScope.addCustomAttribute` 31
   times, through the generator), and 28 passed.
-* At `1f69edddc`: the rows' differential property failed on an owner's rows in SRM's order; the round trip and the
-  extension property failed at the RID-order function's TODO. At `a1025931e` only the extension tests were red.
+* At `009149667`: the rows' differential property failed on an owner's rows in SRM's order; the round trip and the
+  extension property failed at the RID-order function's TODO. At `3229ace54` only the extension tests were red.
 
 **What was built.**
 * Domain. `HasCustomAttribute` (nine cases, `CodedIndex`, `Token`, `tryOfToken`), `CustomAttributeRid`,
@@ -7374,7 +7377,7 @@ assembly 59, the module 61, a type 105, a method 96, a field 72, a parameter 70,
 parameter 81 (20 each); an empty blob 140 (70); two equal rows 130 (60); SRM's own order of an owner's rows not RID
 order 88 (40).
 
-**Mutants.** Each was built fresh in a detached worktree at `bfa118949` (`5y-impl/mutate.py`, `5y-impl/mut`), with the
+**Mutants.** Each was built fresh in a detached worktree at `571a79086` (`5y-impl/mutate.py`, `5y-impl/mut`), with the
 main guest's field reads left out there so that it exits 0 unmutated; the baseline passed every fixture and guest
 named below. "RoundTrip" is `every row reads back at the RID the scope gave it`, "Sample" the fixed sample, "Widths"
 the two width cases, "Model" the `defineCustomAttribute` model, "RowsDiff" and "ClassDiff" the two differential
@@ -7421,17 +7424,17 @@ properties, "Table" the classifier's fixed table and "NearMiss" its near misses,
 
 "Matching through a TypeSpec" first survived both named killers: their TypeSpec instantiated a type with an ordinary
 name, so a classifier that read the name through it still answered `Ordinary`. The fixed table and the differential's
-mirror now instantiate a TypeRef with the known name, as the host's instantiation does (`e64c2d2d1`), and both kill
+mirror now instantiate a TypeRef with the known name, as the host's instantiation does (`28c1bccdf`), and both kill
 it. The first build of "the constructor's table fault removed" still called `methodDefOrRef` and was not a mutant; it
 was rebuilt as one.
 
 **Mutants after the rebase.** With the field reads in place, five mutants whose killers include the main guest were
-built again at `07851fdcc` (`5y-impl/mut2`): the index through `metadataReader.CustomAttributes` (main 80), the RID-order
+built again at `0d345e300` (`5y-impl/mut2`): the index through `metadataReader.CustomAttributes` (main 80), the RID-order
 function without its sort (main 91), the writer sorting by owner (main, at the terminal-state check), the Assembly and
 Module tags swapped (main 39, proxy 4), and the Property and Event tags swapped (main 75). Each is killed as before, and
 by the same Domain tests.
 
-**Suites**, at `07851fdcc`, after the reference assemblies were deleted and the whole solution built (0 warnings),
+**Suites**, at `0d345e300`, after the reference assemblies were deleted and the whole solution built (0 warnings),
 each its own invocation under a lock slot (`5y-impl/r2`).
 
 | Suite | Passed | Failed | Skipped | Total | Duration |
@@ -7443,7 +7446,12 @@ each its own invocation under a lock slot (`5y-impl/r2`).
 | `GuestImpure` | 291 | 0 | 0 | 291 | 5 m 5 s |
 | the main and proxy guests, `Net11` | 2 | 0 | 0 | 2 | 46 s |
 
-Before the rebase, at `bfa118949`, the same suites gave 5682/0/37 of 5719, 234, 2, 1187, and 289 of 290 for
+**Suites after the rebase onto #2260**, at `8aeaab8e4`, the whole solution built, each its own invocation under a lock
+slot (`5y-r3-*.log` in the scratchpad): default 5712 passed, 37 skipped, of 5749; `Guest` 234; `GuestSolo` 2;
+`GuestPure` 1194; `GuestImpure` 292. None failed. The generic-instance guest passes on the host CoreLib and under
+`Net11`.
+
+Before the first rebase, at `571a79086`, the same suites gave 5682/0/37 of 5719, 234, 2, 1187, and 289 of 290 for
 `GuestImpure`, whose one failure was the main guest at `GetFieldOffset`.
 
 **Corrections to the 5y sections.**
