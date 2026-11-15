@@ -8426,3 +8426,434 @@ passed; `GuestSolo` 2 passed; `GuestPure` 1195 passed; `GuestImpure` 296 passed.
 After the fusion, the solution rebuilt from scratch after the same `rm -rf`, on the build box, then each its own
 `--no-build` invocation there (`5z-2/remote-build1.log`, `5z-2/remote-suites.out`): default 5794 tests, 5757 passed, 37
 skipped; `GuestImpure` 296 passed. No failures.
+
+## Constants: `TypeBuilder_SetConstantValue`
+
+### The Constant stage: what it is
+
+**Which stage.** The Constant stage is `TypeBuilder_SetConstantValue`, the one QCall behind `FieldBuilder.SetConstant`,
+`ParameterBuilder.SetConstant`, `PropertyBuilder.SetConstant` and `EnumBuilder.DefineLiteral`. It writes the Constant
+table and sets its owner's `HasDefault` flag. The plan has called it "the Constant stage" since 5t ("left to later
+stages") and listed it in 5s's survey as `Constants: TypeBuilder_SetConstantValue`; 5z's letters ran out at `z`, so this
+stage takes the name the plan already uses, as the `newobj` stage did. Measured on `main` at 005169cfa (5z-1 and 5z-2
+merged), it is the first stop for Castle DynamicProxy 5.1.1 and NSubstitute 5.1.0 on any member with a default-valued
+parameter, and nothing else stops them once it is answered (below).
+
+Scratchpad paths below are under
+`/private/tmp/claude-501/-Users-patrick-Documents-GitHub-WoofWare-PawPrint--claude-worktrees-test-pipeline-performance-724897/ba89fbb1-81d8-460f-a9be-c4df3a5bd899/scratchpad/setconstant/`.
+Every probe was built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148
+(`run-real.sh`: `DOTNET_ROLL_FORWARD=LatestMajor`, `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`). PawPrint runs used the
+Release App built from `main` at 005169cfa (`build-app.sh`, `run-pawprint.sh`), each taking 9 to 68 s.
+
+**The consumers, measured.** `consumers/Program.cs` references Castle.Core 5.1.1, NSubstitute 5.1.0 and FakeItEasy
+8.0.0 from the local NuGet cache and runs one scenario per argument. Each calls the proxy and prints each proxy
+parameter's name, flags, `HasDefaultValue`, `DefaultValue` and `RawDefaultValue`. On .NET 10 and 11 every scenario
+exits 0 with identical output (`consumers/all-net10.out`, `all-net11.out`; `all-diff-net10-net11.txt` is empty).
+
+| Scenario | Real .NET (proxy parameter) | PawPrint on `main` (`consumers/main-*.log`) | PawPrint with `throwaway1.diff` (`consumers/t1-*.log`) |
+|---|---|---|---|
+| Castle interface proxy over `int Mul(int x, int factor = 3)` | `factor` `0x1010`, default 3 | `Unimplemented native method (PInvokeImpl QCall!TypeBuilder_SetConstantValue)` | exit 0; flags `0x1010`; `HasDefaultValue` false, `DefaultValue` and `RawDefaultValue` `Missing` |
+| the same over `string name = "world"`, `CancellationToken cancellationToken = default`, `Colour c = Colour.Green`, `int? x = null` | `0x1010`; `"world"`, null, `Green` (raw 1), null | the same stop | exit 0; the same flags, the same `Missing` |
+| the same over eight defaults (`int`, `long`, `string`, `bool`, `double`, `char`, `object = null`, an enum) | each `0x1010` with its value | the same stop | exit 0, the same `Missing` |
+| Castle class proxy over an abstract `int Add(int x, int y = 10)` | `y` `0x1010`, 10 | the same stop | exit 0, the same `Missing` |
+| Castle over `decimal p = 1.5m` | `0x0010`, 1.5 (from `DecimalConstantAttribute`: no constant) | exit 0, identical | (not rerun) |
+| NSubstitute `Substitute.For<ICalc>()` over `int Add(int a, int b = 7)`, with `Returns` | `b` `0x1010`, 7; `Add(1)` 42, `Add(1, 7)` 42, `Add(1, 8)` 0 | the same stop | exit 0, the same values; `b` `Missing` |
+| FakeItEasy `A.Fake<ICalc>()` | `b` `0x1010`, 7 | `AssemblyNative_GetExportedTypes` (#2269), before any emit | (not rerun) |
+
+`throwaway1.diff` (applied to `main`, reverted) answered the QCall by ORing `HasDefault` into the owner's row and
+writing no Constant row, and widened the extension rule's masks by that bit. It also printed each call: the managed
+caller passes the element types and bytes of the measured table below (`I4` `03 00 00 00`, `STRING` `"world"`, `CLASS`
+with a null pointer for `CancellationToken` and `int?`, `I8`, `BOOLEAN` `01`, `R8`, `CHAR` `63 00`, and `I4` for the
+enum). So once the Constant row is written, these consumers need nothing more from this plan: the only difference left
+is the default value itself, which is what the row holds.
+
+**What CoreCLR does: the managed side.** Read from `$DOTNET_RUNTIME_SRC_NET10`; every file named here is identical in
+`_NET11` but for unrelated lines (`RuntimeTypeBuilder.cs` loses a layout check in `DefineType`; `comdynamic.cpp` loses an
+unused local in another QCall). Everything in this paragraph is managed CoreLib code, which PawPrint already runs.
+
+* `RuntimeParameterBuilder.SetConstant` (`System/Reflection/Emit/RuntimeParameterBuilder.cs:11`) passes the method's
+  return type for position 0, else its parameter type. It does not check that the type is not created, and it has no
+  null check.
+* `RuntimeFieldBuilder.SetConstantCore` (`RuntimeFieldBuilder.cs:139`) calls `ThrowIfCreated`, then refuses null for a
+  value type that is not `Nullable<>` (`Argument_ConstantNull`).
+* `RuntimePropertyBuilder.SetConstantCore` (`RuntimePropertyBuilder.cs:51`) calls `ThrowIfCreated` and passes the
+  property's type. No null check.
+* `RuntimeEnumBuilder.DefineLiteralCore` (`RuntimeEnumBuilder.cs:30`) defines a `Public | Static | Literal` field of the
+  enum's own type, then calls `SetConstant`. A refusal therefore leaves the field defined without a constant.
+* `RuntimeTypeBuilder.SetConstantValue` (`RuntimeTypeBuilder.cs:181`) does every check and conversion:
+  * A null value goes to the QCall as `ELEMENT_TYPE_CLASS` with a null pointer, whatever the destination type.
+  * Otherwise a by-ref destination is replaced by its element type, a `Nullable<T>` by `T`, and then:
+    * for an enum destination, the value's type must be the enum (or its baked type) or its underlying type, else
+      `Argument_ConstantDoesntMatch`; the value is then sent as the underlying type. For a `TypeBuilder` enum the
+      underlying type is its `value__` field's, null until that field is defined;
+    * for any other destination, `destType.IsAssignableFrom(valueType)` must hold, else `Argument_ConstantDoesntMatch`.
+  * The element type is that of the value's own type (`GetCorElementType`). The twelve primitive types, `I1` to `R8`
+    with `BOOLEAN` and `CHAR`, are passed as a pointer to the boxed value's raw bytes; `string` as a pointer to its
+    characters, NUL-terminated; `DateTime` as `I8` of its `Ticks`. Anything else is `Argument_ConstantNotSupported`
+    (`"{0} is not a supported constant type."`), so `decimal`, `IntPtr`, `Guid` and an enum whose destination is not an
+    enum are refused.
+  * So the QCall sees exactly fourteen element types: the twelve primitives, `STRING`, and `CLASS` with a null pointer.
+    A `STRING` pointer and every primitive pointer are never null.
+* Reading back: `MdConstant.GetValue` (`System/Reflection/MdConstant.cs`) turns the raw row into a value by the owner's
+  declared type: `Enum.ToObject` for an enum (but not for `Nullable<TEnum>`), a `DateTime` from `I8` only when the type
+  is exactly `DateTime`, `""` for a `STRING` row whose pointer is null, null for `CLASS`. `RuntimeParameterInfo`
+  caches "no default value" (`m_noDefaultValue`), and `RuntimeMethodInfo` caches its parameters.
+
+**What CoreCLR does: the native side.** `TypeBuilder_SetConstantValue` (`vm/comdynamic.cpp:739`) dispatches on the
+token's table: a FieldDef to `SetFieldProps(tk, UINT32_MAX, type, pValue, -1)`, a Property to `SetPropertyProps(tk,
+UINT32_MAX, type, pValue, -1, mdMethodDefNil, mdMethodDefNil, NULL)`, anything else to `SetParamProps`. A failed HRESULT
+throws `ArgumentException` "Bad default value." (`Argument_BadConstantValue`); no managed call reaches it.
+
+* `_SetFieldProps`, `_SetPropertyProps`, `_SetParamProps` (`md/compiler/regmeta_emit.cpp:1565`, `:1629`, `:1727`): the
+  flags argument is `UINT32_MAX`, so each reads the row's own flags and ORs in `fdHasDefault` `0x8000`,
+  `prHasDefault` `0x1000` or `pdHasDefault` `0x1000` (`inc/corhdr.h:469`, `:527`, `:504`). Nothing else in the row
+  changes.
+* `_SetPropertyProps` also calls `_DefineMethodSemantics(msGetter, mdMethodDefNil, pr, bClear)` and the same for
+  `msSetter` (`:1679`, `:1686`), with `bClear = IsCallerExternal() || ...`. A call through `SetPropertyProps` is external
+  (`m_SetAPICaller` starts as `EXTERNAL_CALLER`, regmeta.cpp:57, and only the emitter's own `Define*` calls set it to
+  `DEFINE_API`). `_DefineMethodSemantics` (`:975`) finds the property's MethodSemantics rows and, for each whose
+  semantics is the one given, sets its association to `mdPropertyNil`; with a nil method it adds nothing. The rows stay
+  in the table. The other-methods array is NULL, so `msOther` rows are untouched.
+* `_DefineSetConstant` (`:1463`) is called with `bSearch = IsCallerExternal() || ...`, so true. It finds the owner's
+  Constant row (`FindConstantHelper`, md/enc/metamodelrw.cpp:4959: by sort if sorted, else by hash or scan) and reuses
+  it; only if there is none does it add a row and hash it. It then sets the row's type, and writes the value blob
+  **only if its size is above 0** (`:1503`). The size (`_GetSizeOfConstantBlob`, md/compiler/mdutil.cpp:281) is 1, 2, 4 or 8 by
+  type; for `STRING`, two bytes per character up to the first NUL (`u16_strlen`, since the length passed is -1); for
+  `CLASS`, 4 (the null is written as four zero bytes). So an empty string writes no blob: a new row keeps the empty
+  blob, and a reused row keeps its old one.
+* The emitter's own `DefineField`, `DefineProperty` and `DefineParam` calls pass `ELEMENT_TYPE_VOID`
+  (`comdynamic.cpp:243`, `:561`, `:722`), so no other QCall writes a Constant row, and every Constant row is written
+  with the search on. A dynamic module therefore holds at most one Constant row per owner.
+* No API hands out a Constant row's token. `IMDInternalImport::IsValidToken` does not accept Constant tokens (measured:
+  every RID reads invalid), so even the row count is not observable from managed code.
+
+**Measured on .NET 10.0.14 and 11.0.0-rc.3** with `probe/Program.cs`, which reads the live module's rows raw through
+CoreLib's internal `MetadataImport` (`GetDefaultValue`, `GetParamDefProps`, `GetFieldDefProps`, `GetPropertyProps`
+through a skip-visibility `DynamicMethod`, and `Enum(MethodDef, property)` for a property's MethodSemantics rows), then
+creates each type and reads it through public reflection. Each case is its own module. The outputs are identical but
+for the version line and the `nilProperty` column described below (`probe/all-net10.out`, `all-net11.out`,
+`all-diff-net10-net11.txt`). "AE(m)" is `ArgumentException` with message m, `ParamName` null, HResult `0x80070057`.
+
+| Emitted | Observed |
+|---|---|
+| `values`: a parameter (defined with `None`), a static literal field and an accessor-less property, each of the declared type, given `true`, `'x'`, `(sbyte)-5`, `(byte)200`, `(short)-300`, `(ushort)60000`, 5, `0xFFFFFFFEu`, `0x0123456789ABCDEF`, `ulong.MaxValue`, `1.5f`, `float.NaN`, `-0.0`, the double NaN `0x7ff4000000000001`, `'￿'`, `false` on `object` | element types `0x02` to `0x0d` by the value's own type, blob the value's little-endian bytes (NaN payloads and `-0.0` kept bit for bit); parameter `0x0000` to `0x1000`, field `0x0056` to `0x8056`, property `0x0000` to `0x1000`; reflection reads each value back from all three owners |
+| `"abc"`; `""`; `"a\0b"`; `"\uD800x"` | `STRING`, 3 characters; `STRING` with an empty blob (raw pointer null), read back as `""`; `STRING` `"a"` (truncated at the NUL); `STRING` 2 characters, the lone surrogate kept |
+| null on `string`, `object`, `int` (parameter and property), `int?` | `CLASS`, blob of four zero bytes, read back as null; on an `int` field, AE("Null is not a valid constant value for this type."), no row, no flag |
+| `int? = 5`; `Colour.Green` and `1` on `Colour`; `Colour.Blue` on `Colour?`; `(byte)200` on a `byte` enum; `ulong.MaxValue` on a `ulong` enum | `I4` 5; `I4` 1 for both, read back as `Green` (raw 1); `I4` 2, read back as the `Int32` 2 (not the enum); `U1`; `U8` |
+| `1L` on `Colour`; `5` on `long`; `5L` on `int`; `Colour.Green` on `object`; `1.5m`; `(IntPtr)7`; `Guid.Empty` | AE("Constant does not match the defined type.") for the first three; AE("Colour is not a supported constant type."), AE("System.Decimal is not a supported constant type."), and the same for `System.IntPtr` and `System.Guid`. No row, no flag on any owner |
+| `5` on `object`, `IComparable`, `ValueType`; `"s"` on `object` | accepted: `I4` 5 and `STRING`, read back as the `Int32` and the string |
+| a `DateTime` (Utc) on `DateTime`; on `DateTime?`; on `object` | `I8` of the ticks in all three; read back as a `DateTime` of `Kind` `Unspecified` on `DateTime`, and as the `Int64` ticks on the other two |
+| `5` on a `ref int` parameter | `I4` 5 |
+| `kinds`: a return parameter given 5; a constructor parameter (`Optional`) given 9; the constructor's position 0 given 5, then null | `0x1000`, 5; `0x1010`, 9; AE (the destination is `void`), then `CLASS` |
+| an instance field and a static non-literal field given 5 and `"v"` | rows written and flags `0x8006`, `0x8016`; `GetRawConstantValue` throws `InvalidOperationException` for both (`RtFieldInfo`); the fields keep their ordinary values |
+| a property defined with `SpecialName`; a parameter defined `Out \| Optional \| HasFieldMarshal` (the builder clears the last) | `0x0200` to `0x1200`; `0x0012` to `0x1012`: only the bit is added |
+| a parameter typed by a generic parameter given null, then 5; by an `EnumBuilder` given 5, then `Colour.Green`; by a `TypeBuilder` enum with a `short` `value__` given `(short)3`, then 3; by a `TypeBuilder` enum without `value__` given 0; by a `TypeBuilder` class given null, then 5 | `CLASS`; `NotSupportedException` "Specified method is not supported." (the generic parameter's `IsAssignableFrom`); `I4`; AE; `I2`; AE; AE; `CLASS`; AE |
+| `enums`: `EnumBuilder` over `int` with `A=0`, `B=5`, `C=-1`, `Dup=5`; over `byte`, `long`, `ulong`, `char` | each literal `0x8056` with its constant; `GetNames` `A,B,Dup,C` (sorted by value as unsigned); `Dup.ToString()` `"B"`; `ELong` lists `B` before `A` (`long.MinValue` is largest unsigned); `char` enums work |
+| an `EnumBuilder` over `bool` with `A=true` | the constant is written, but `Enum.GetNames` throws `InvalidOperationException` "Unknown enum type.", and reading the field throws `FormatException` |
+| `DefineLiteral("B", 2L)` on an `int` enum, between two good ones; `DefineLiteral("B", null)` | AE(doesn't match), AE(null): the field `B` exists with flags `0x0056` and no constant. After `CreateType`, `GetNames` lists `B` with value 0 (`B,A,C`), and reading `B` throws `NotSupportedException` "Literal value was not found." |
+| a `TypeBuilder` enum: a literal of its own type given 1 before `value__` is defined, then after; another literal after | AE before (the underlying type is still null), accepted after; `GetValues` `Early(1),A(3)` |
+| `second`: on a parameter, a literal field and a property, all typed `object`: `5` then `7`; `5` then `"x"`; `"abc"` then `""`; `5` then `""`; null then `5`; `"abc"` then null; `""` then `"abc"`; `0x1122334455667788L` then `(byte)2`; `"abcdef"` then `"xy"` | the second call replaces the first: type and value of the second, except that `""` leaves the old blob: `"abc"` then `""` reads `"abc"` raw and through reflection, and `5` then `""` reads the two-character string `"\u0005\u0000"`. The same on all three owners |
+| two parameters of one method set alternately (`b=1`, `a=2`, `b=3`, `a=4`) | each owner keeps its own value: `a` 4, `b` 3 |
+| `semantics`: properties with a getter (42) and a setter, then `SetConstant(7)`, in the orders below, in a module with no other properties and in one with 30 read-write properties first (60 MethodSemantics rows, past the 25-row hash threshold) | the same in both modules: |
+| get, set, const | the property's MethodSemantics rows read empty after the call; after `CreateType` no getter, no setter, no accessors; not listed by `GetProperties(Public \| Instance)`; `GetValue` throws AE("Property Get method was not found."); constant 7, flags `0x1000` |
+| const, get, set | accessors survive: `get_` and `set_`, value 42 |
+| get, const, set | setter only |
+| get, set, other, const | only the other method survives; the property is still listed as public |
+| get, set, const, get | the getter only (re-added); the setter is gone |
+| get, get (a second getter), const | both getter rows detached |
+| the property's rows after a detach, looked up under the nil property token `0x17000000` (`nilProperty`) | below 25 rows, the detached rows (method and semantics kept) are found under the nil token, accumulating across properties: the rows stay in the table with a nil association. Past 25 rows the lookup goes through the hash, keyed by the old association, and gives different answers on .NET 10 and 11; it is not a measurement of anything but the hash |
+| `created`: `CreateType`, then a `ParameterBuilder` obtained earlier given 7 (no constant before) and 8 (1 before); a `FieldBuilder` and a `PropertyBuilder` given a value; `DefineLiteral` on a created `EnumBuilder` | both parameter calls write: raw rows show `0x1000` and 7, and 8. Reflection: a `ParameterInfo` read before the call still says DBNull and `0x0000`, and `GetParameters()` again returns the same cached object; the one that had 1 reads 8 (the value is not cached, "no default" is). A method whose parameters were never read shows 9 and `0x1000`. The field, the property and `DefineLiteral` throw `InvalidOperationException` "Unable to change after type has been created." |
+| a float NaN built with `BitConverter.Int32BitsToSingle(0x7fa00001)` | stored and read back as `0x7fe00001`. The double signalling NaN passes unchanged through the same path, so the float was quieted before the QCall (where, not measured; PawPrint does not quiet it, below); a guest uses a quiet payload such as `0x7fc00001` |
+
+**Measured under PawPrint with the throwaway.** `throwaway-probe.sh` built the App with `throwaway1.diff`, ran the
+probe's six scenarios under it (`probe/t1-*.log`, summary `probe/t1-summary.txt`), and reverted the diff.
+* `values`, `kinds` and `second` ran to the end. Every call's outcome (accepted, or the same exception type, message,
+  `ParamName` and HResult) and every raw flags value is identical to real .NET's (`probe/real-actions.txt` and
+  `pp-actions.txt` differ only in line order). So every managed check and conversion above already runs under PawPrint,
+  `DateTime` included: the handler read the eight bytes of the `&ticks` stack slot (`80 00 3b 6d 30 8f d7 08`). The
+  reads differ, as they must with no Constant row.
+* The handler saw the bytes of the measured table, with one exception: the float built from `0x7fa00001` arrived as
+  `01 00 a0 7f`, not quieted. Real .NET quieted it somewhere in the probe's own code before the QCall, and PawPrint did
+  not. That is a float divergence outside this stage, and a guest must not depend on a float signalling NaN.
+* `enums` stopped at `Enum.GetValuesAndNames: static literal enum field A had no metadata constant` (no row was
+  written), `created` at `Refusing to replace the dynamic assembly ... FilledInCreatedType (Param, 1, TypeDefRid 2)`
+  (no created-owner TODO yet), and `semantics` at the probe's raw read of the nil property token
+  (`MetadataImport.Enum: PropertyDef token 0x17000000 was not present`), where real .NET returns the detached rows.
+
+**Against what the plan predicted.**
+* Add or overwrite (5t, 5z): overwrite, as read. Not predicted: an empty string leaves the old value blob, so the row
+  then holds the old bytes under the new type.
+* `PropertyBuilder.SetConstant` after `SetGetMethod` (5z): it does detach the getter, and the setter too, and the
+  rows stay with a nil association. Not predicted: a property left with no accessors drops out of public
+  `GetProperties`.
+* `SetConstant` on a parameter after `CreateType` (5x): real .NET writes the row and the flag, and what reflection
+  shows depends on its caches.
+
+**What PawPrint holds today.** Cited at `main` 005169cfa.
+
+* `WoofWare.PawPrint/Native/NativeQCall.fs:221-238` registers no `TypeBuilder_SetConstantValue`, so the call falls to
+  `NativeCall.failUnimplemented` (`Native/NativeCall.fs:1027`).
+* `WoofWare.PawPrint.Domain/EmitScope.fs`: no Constant table; `EmitScope`'s docstring (`:491`) says every table only
+  grows. `addFieldFlags` (`:1089`), `addParamFlags` (`:1113`) and `addPropertyFlags` (`:1137`) OR any bits into the
+  flags column and fit `HasDefault` as they stand; their docstrings name pseudo-attributes. `MethodSemanticsRow`
+  (`:464`) holds a `HasSemantics` (`:238`), which has no nil case.
+* `WoofWare.PawPrint.Loader/EmitScopeExtension.fs`: Field, Param and Property rows may gain only the bits of
+  `KnownCustomAttribute.flagMask` (`:102`, `:225-236`, and the Param and Property arms), so a gained `HasDefault` is
+  `RowChanged` today. MethodSemantics rows may not change at all (`rewritten`, `:343-347`).
+* `WoofWare.PawPrint.Domain/EmitScopeImage.fs` writes no Constant table. Its sorted tables are written stably sorted
+  (`semanticsOrder`, `:152`); SRM checks the order of each table that ECMA-335 requires sorted and that the header does
+  not declare sorted (`:62-68`), and Constant (II.22.9) is one.
+* Readers, all over SRM, which the image would feed unchanged: `MetadataImport.GetDefaultValue`
+  (`Native/NativeMetadataImport.fs:1725`, through `constantRowOfHasConstantToken`, `:883`, for a field, parameter or
+  property), and `Enum_GetValuesAndNames` (`Native/NativeEnum.fs:258`).
+  * `GetDefaultValue` hands back a string constant as a pointer whose source is
+    `PeByteRangePointerSource.ConstantBlob` of the Constant row's handle (`:1833`, `ManagedPointerSource.fs:41`), and
+    the pointer is resolved against the assembly's current image when it is read (`IlMachineManagedByref.fs:1164`).
+    For a dynamic module whose image is replaced, that handle can name another row (the image sorts the table, and an
+    earlier owner's row may be added), or the same row with a new value. 3f's rule is to keep no handle into a sorted
+    table.
+  * `NativeEnum` takes only static literal fields (`:307`), insists that the row's type matches the underlying type,
+    and fails on a literal without a row (`:155`). CoreCLR's `ReflectionInvocation::GetEnumValuesAndNames`
+    (vm/reflectioninvocation.cpp:1825-1850) takes every static field, reads a missing constant as 0, and copies the
+    value by the enum's element size whatever the row's type. The measured enum with a refused literal (`B` listed as
+    0) diverges under PawPrint (expected, not run: the stage does not exist yet).
+* `WoofWare.PawPrint/Native/NativeRuntimeTypeBuilder.fs`: the created-owner TODO of `TypeBuilder_DefineCustomAttribute`
+  (`:871-876`) is the precedent for a row of a created type.
+
+### The Constant stage: the options
+
+Each option keeps the managed checks and conversions as they are (PawPrint already runs CoreLib's code) and models the
+native side only. The handler reads the module, the token, the element type and the pointer, as 5z's handlers read
+theirs. The options differ in where the Constant row lives, how the value is represented, how the flag and the
+extension rule are expressed, how far the emitter's quirks are modelled, and how the string pointer of
+`GetDefaultValue` is kept.
+
+1. **Where the Constant rows live.**
+   * (A) **A Constant table in the scope, one row per owner, replaced in place.** `HasConstant` (Field, Param,
+     Property, with ECMA-335's coded index: RID shifted two bits, tags 0, 1, 2) and `ConstantRow = { Parent :
+     HasConstant; Type : ConstantTypeCode; Value : BlobOffset }`. `EmitScope.setConstant` replaces the owner's row if it
+     has one and appends otherwise, as `_DefineSetConstant` does. The scope's order is first-set order; the writer
+     sorts by parent (stable, though no two rows share a parent), as it sorts MethodSemantics. `EmitScope`'s docstring
+     changes to say Constant rows are replaced in place.
+     * Information: exactly what `CMiniMdRW` holds (a row per owner, the flag in the owner's row).
+     * Blast radius if wrong: additive public API in Domain; one table in the writer and in the extension rule.
+     * Reversible: the table can be re-represented later without touching the handler's interface.
+   * (B) **A column of the owner's row.** `FieldRow`, `ParamRow` and `PropertyRow` gain `Constant : (ConstantTypeCode *
+     BlobOffset) option`, and the writer derives the Constant table from the owners, as it derives PropertyMap. No row
+     is ever replaced in a table; a SetConstant is one owner row changing, which the extension rule already compares.
+     * Information: the same as (A) but for the Constant rows' first-set order, which no API shows.
+     * Blast radius: a breaking change to three public records of the published Domain package; every construction of
+       those rows (the generators of `TestEmitScope*`, `defineField`, `defineParam`, `defineProperty`) gains a field.
+     * It would allow the flag to be derived from the column at write time (question 3 (c)).
+   * (C) **An append-only log of calls.** `ConstantAssignment = { Parent; Type; Value : ImmutableArray<byte> }`, every
+     call appended, the writer folding each owner's calls into one row (last type; last non-empty blob). Keeps "every
+     table only grows" literally. But the scope then holds something `CMiniMdRW` does not, the fold is a second model
+     of `_DefineSetConstant` inside the writer, and every reader of the scope's constants (tests, terminal-state checks)
+     must fold too. 5z rejected the same structure for pseudo-attributes (its option D).
+   * Recommended: (A). It is what CoreCLR keeps, it is additive, and the in-place replacement is the behaviour being
+     modelled rather than a cost of the representation. (B) is a reasonable second choice if Fable prefers a breaking
+     change to a mutable table.
+2. **How the value is represented, and where its encoding lives.**
+   * (a) **A closed union in Domain, parsed at the handler.** `ConstantValue` with one case per element type the managed
+     caller can pass: `Boolean of byte` (the raw byte, since the caller copies the box's bytes), `Char of char`,
+     `SByte`, `Byte`, `Int16`, `UInt16`, `Int32`, `UInt32`, `Int64`, `UInt64`, `Single of int32` and `Double of int64`
+     (bit patterns, so NaN payloads and `-0.0` survive and equality is total), `String of string` (UTF-16 code units,
+     lone surrogates allowed), and `NullReference`. `ConstantValue.typeCode` gives SRM's `ConstantTypeCode` (whose
+     fourteen values are exactly these), and `ConstantValue.blob` the little-endian bytes: two per code unit for a
+     string, encoded unit by unit and not through `Encoding.Unicode` (which replaces a lone surrogate), and four zero
+     bytes for `NullReference`. The handler reads the element type, then the size the case needs, or the string to its
+     first NUL (`NativeCall.readNullTerminatedUtf16`), and refuses with a host failure any element type or null
+     pointer the managed caller cannot pass.
+     * The encoding can be tested against two oracles outside PawPrint: SRM's `BlobBuilder.WriteConstant` and
+       `BlobReader.ReadConstant`.
+   * (b) **Raw bytes in Domain.** `defineConstant` takes the element type byte and the bytes; Domain checks the length
+     against a size table, and the handler reads by the same table. Fewer types, but the size table is stated twice
+     (handler and Domain), a string's encoding happens in the interpreter, and the tests can generate only bytes, not
+     values.
+   * Recommended: (a). It is "parse, don't validate" at the QCall boundary, and the cases are the managed caller's
+     contract, read from `RuntimeTypeBuilder.cs:254-298`.
+3. **How the owner's flag is set, and what the extension rule admits.**
+   * (a) **Through the existing `addFieldFlags`, `addParamFlags` and `addPropertyFlags`, inside one Domain function that
+     also sets the row.** `EmitScopeDefinitions.defineConstant owner value scope` ORs the table's `HasDefault` bit and
+     calls `setConstant`, so no scope can gain one without the other through Domain. The extension rule admits a gained
+     `HasDefault` on a Field, Param or Property row only when the later scope has a Constant row for that owner, and a
+     changed or added Constant row only for an owner whose type is not created (`FilledInCreatedType` and
+     `AddedToCreatedType` otherwise). The three docstrings stop saying "for a pseudo-attribute" alone.
+   * (b) **Widen 5z's mask by the three bits, with no coupling.** Smallest, but the rule would then admit `HasDefault`
+     on a row with no constant, which no CoreCLR call produces; that is the kind of fault the rule exists to catch (5z's
+     decisions narrowed its own mask for that reason).
+   * (c) **Derive the bit at write time** (only under 1 (B)): the scope's flags never hold `HasDefault`, and the writer
+     ORs it in for each owner with a constant. Makes the inconsistent state unrepresentable, but the scope's flags
+     column then differs from the image's and from `CMiniMdRW`'s, and a terminal-state check that reads the scope's
+     flags reads something CoreCLR never holds.
+   * Recommended: (a). The check is stronger than (b) and keeps the scope equal to `CMiniMdRW`, unlike (c). The rule's
+     docstring (`EmitScopeExtensionViolation.FilledInCreatedType`) names constants among the fills.
+4. **How much of `_DefineSetConstant` is modelled.**
+   * (a) **All of it:** one row per owner, replaced by a later call; the type always set; the blob set only when the new
+     value's blob is not empty, so an empty string keeps a reused row's old blob and gives a new row the empty blob;
+     strings cut at the first NUL. Every part is measured above.
+   * (b) The replacement, but an empty string always writes the empty blob. Simpler to state, and diverges from the
+     measured `"abc"` then `""` (real .NET reads `"abc"`) and `5` then `""`.
+   * (c) Refuse a second `SetConstant` on an owner with a TODO. Smallest; no consumer measured calls it twice. But the
+     rule is one line once (a)'s representation exists, and a refusal of a measured behaviour would need its own stage.
+   * Recommended: (a).
+5. **`PropertyBuilder.SetConstant` on a property that has a getter or setter row.**
+   * (a) **Model the detach.** `MethodSemanticsRow` gains a way to hold a nil association (for instance `Association :
+     HasSemantics option`, or a separate `Detached` case), written as the coded index 1 (Property, RID 0). The image's
+     readers then find no accessor for the property, as measured, and the rows stay in the table, as in CoreCLR (they
+     count toward the 25-row hash threshold that #2258 is about). The extension rule admits a Getter or Setter row of a
+     property of an uncreated type becoming detached. A breaking change to a public record, and a MethodSemantics
+     change inside a Constant stage.
+   * (b) **Refuse with a TODO** naming the detach, when the property has a Getter or Setter row; every other property
+     call proceeds. A stop and not a wrong answer. No measured consumer reaches it: properties have no default values
+     in C#, Castle's and `DispatchProxy`'s property emitters do not call `SetConstant` (5s read `DispatchProxy`'s IL;
+     Castle's is read from memory and not checked), and a property given its constant before its accessors (measured:
+     the accessors survive) works.
+   * (c) Delete the rows. Rejected: the extension rule compares MethodSemantics rows by position, and the row count
+     would differ from CoreCLR's.
+   * Recommended: (b), with (a) recorded as a later stage. The detach writes a different table, and nothing measured
+     needs it.
+6. **`ParameterBuilder.SetConstant` on a parameter of a created type.** (a) Refuse with a created-owner TODO before
+   anything is written, as `TypeBuilder_DefineCustomAttribute` does (recommended: real .NET writes the row, and what
+   reflection then shows depends on whether it has already read the parameter, measured above; that is a model of
+   reflection's caches). (b) Model it: a later stage with its own oracle. The field and property builders refuse in
+   managed code already.
+7. **The string pointer that `GetDefaultValue` hands back.**
+   * (a) **Point into the blob heap for every assembly.** Hand back a `PeByteRangePointerSource.BlobHeap` pointer whose
+     cursor is the value blob's contents, as `GetFieldMarshal` does, and retire `ConstantBlob`. A heap offset means the
+     same thing in every later image of a dynamic module (heaps only grow), as CoreCLR's pointer into its blob heap
+     does; a read past the blob's end sees the heap, as on CoreCLR.
+   * (b) The same for dynamic modules only, keeping `ConstantBlob` for images on disk, where the handle is stable. Two
+     paths for one FCall.
+   * (c) Leave it. A pointer read after another thread replaces the image names whatever row then has that handle.
+   * Recommended: (a), in this stage, since this stage is what puts Constant rows into images that are replaced. It is
+     small, and it removes a variant rather than adding one.
+8. **The enum reader's divergences** (a literal without a constant, a static non-literal field of an enum, a row
+   whose type differs from the underlying type). (a) Not in this stage: the guest avoids them, and a parked guest pins
+   the measured `B` listed as 0 (recommended: `NativeEnum` is a reader of every assembly, and its fix is independent
+   of emit; it can be its own PR against `main`, before or after). (b) Fix `NativeEnum` here, since `DefineLiteral`
+   with a bad value is the easiest way to reach it.
+9. **The split.**
+   * (a) One PR: the union and its encoding, the Constant table, `defineConstant`, the writer, the extension rule, the
+     handler (with question 5's and 6's refusals), the `GetDefaultValue` pointer, and the tests. None of it does
+     anything without the handler.
+   * (b) Two PRs: the `GetDefaultValue` pointer first (it is a defect on `main` only once dynamic images hold
+     constants, but it is independent and testable alone with an image replacement), then the rest.
+   * Recommended: (a), with the pointer change as its own commit; (b) if review finds the PR too large.
+10. **The guests' consumer shape.** (a) The main guest includes a Castle-shaped copy: an interface whose method has
+    eight default-valued parameters, copied onto a proxy method parameter by parameter (`DefineParameter(position,
+    p.Attributes, p.Name)`, then `SetConstant(p.DefaultValue)` when `p.HasDefaultValue`), and read back (recommended:
+    the consumers cannot be guests). (b) The guest tests the builders alone.
+
+### The Constant stage: the oracle
+
+Written first, and seen to fail before the handler exists, at the `failUnimplemented` stop.
+
+* **Domain, fixed tables against upstream**, in a new `TestEmitScopeConstants.fs` or beside `TestEmitScopeDefinitions`:
+  * Each `ConstantValue` case's `ConstantTypeCode` and blob size, against `_GetSizeOfConstantBlob` (mdutil.cpp:281)
+    with its line numbers, and the managed caller's mapping (RuntimeTypeBuilder.cs:254-298).
+  * The `HasDefault` bit per owner table (corhdr.h:469, :504, :527) and `HasConstant`'s tags (ECMA-335 II.24.2.6).
+  * The probe's measured rows as a table: each value case's element type and blob; `"a\0b"` gives `"a"`; `""` the empty
+    blob; the nine `second` sequences on each owner, with the stale blob of `"abc"` then `""` and `5` then `""`.
+* **Domain, properties.**
+  * The encoding: for every generated `ConstantValue` (strings with lone surrogates and embedded NULs cut by the
+    generator as the handler cuts them, floats from all bit patterns), `ConstantValue.blob` equals SRM's
+    `BlobBuilder.WriteConstant` of the boxed value, and SRM's `BlobReader.ReadConstant(typeCode)` reads it back to the
+    same value (by bit pattern for floats).
+  * `defineConstant` against a model: generated schedules over the fields, parameters and properties of a few types,
+    each step a value from every case, including empty strings and second calls of other types; the model is a map
+    from owner to (type, blob) with the empty-blob rule, and the owner's flags. After each step the scope's constants,
+    read as a map, equal the model, each owner's flags are its old flags with exactly the bit added, and every other
+    row and every heap entry is unchanged.
+  * The image: for the same schedules, the written image passes SRM's reader (which checks the Constant table's order),
+    and `GetDefaultValue()` on each owner's handle reads the model's type and blob; owners without a constant read nil.
+  * `TestEmitScopeExtension`: a changed or added Constant row of an uncreated type is admitted, of a created type is
+    `FilledInCreatedType` or `AddedToCreatedType`; a gained `HasDefault` with a Constant row for the owner is admitted,
+    without one is `RowChanged`; a lost `HasDefault` is `RowChanged`. `EmitScopeGen` gains a SetConstant operation so
+    that the existing extension and image properties draw constants.
+* **The differential against the host's emitter**, in process, as 5y's and 5z's are: a generated schedule of
+  `SetConstant` calls (values from every case, with second calls) on the parameters, literal fields, instance fields
+  and accessor-less properties of a host module and of its mirror scope. On the host, each owner's raw row and flags,
+  read through CoreLib's internal `MetadataImport` as `probe/Program.cs` reads them (`GetDefaultValue`, the three
+  props calls, `GetPropertyProps` through a skip-visibility `DynamicMethod`); through `defineConstant`, the same.
+  Coverage asserted: each case on each owner kind; a second call of the same type, of another type, an empty string
+  over a non-empty one, null over a value, an empty string first; a return parameter.
+* **The `GetDefaultValue` pointer** (question 7): a unit test that obtains the pointer for a dynamic module's string
+  constant, replaces the image with one in which an earlier owner gains a constant (so the rows re-sort) and the same
+  owner's constant changes, and reads the pointer: it must give the old characters, as CoreCLR's pointer into its blob
+  heap does.
+* **The guests**, in `sourcesImpure`, `IsDynamicCodeSupported` on, registered in `TestImpureCases.fs`, each returning the
+  number of its first failing check (below 256):
+  * `TypeBuilderSetConstant.cs`, the probe's scenarios without the raw reads:
+    * `Values`: each of the fourteen element types on a parameter, a return parameter, a literal field, an instance
+      field and an accessor-less property, read back through `DefaultValue`, `RawDefaultValue`, `HasDefaultValue`,
+      `Attributes`, `GetRawConstantValue` (and its `InvalidOperationException` for the instance field) and
+      `GetConstantValue`; `"a\0b"`, `""`, `"\uD800x"` (spelt `string (char 0xD800)` in any F# side, never as a literal),
+      the double NaN payload, `'￿'`, `-0.0`.
+    * `Conversions`, all managed but run under PawPrint for the first time: an enum and its underlying value on an enum,
+      `int?`, `Colour?` (read back as `Int32`), `DateTime` on `DateTime` (Kind lost), on `DateTime?` and on `object`
+      (read back as `Int64`), null on an `int` parameter and on an `int` field (AE), and each measured refusal with its
+      message.
+    * `Second`: the nine sequences on each owner.
+    * `Enums`: `EnumBuilder` over `int`, `byte`, `long`, `ulong` and `char`, with `GetNames`, `GetValues`, `ToString`,
+      `IsDefined`, `ToObject`; the `TypeBuilder` enum with its refusal before `value__`.
+    * `Order`: constants set for owners out of RID order (a parameter of a later method, then a field, then a parameter
+      of an earlier method, then a property), so that the image must sort the table.
+    * `PropertyThenAccessors`: `SetConstant` before `SetGetMethod` and `SetSetMethod` (measured: both survive).
+    * The Castle-shaped copy of question 10.
+    * Its terminal-state check reads the scope of `Values` and `Second`: every Constant row (parent, type, blob) and
+      each owner's flags. It is the only check of the `CLASS` blob's four zero bytes and of the stale blob's bytes.
+  * Built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 before it is committed, with a
+    control that must exit with its check's number on both: `"abc"` then `""` expected to read `""`. Under PawPrint it
+    runs with `PAWPRINT_TEST_RUNTIME` unset and with `Net11`.
+* **The refusal fixture** (a `TestTypeBuilderConstantRefusals.fs`, as `TestTypeBuilderCustomAttributeRefusals` is): a
+  property with a getter, then `SetConstant` (question 5 (b)); a `ParameterBuilder` given a constant after `CreateType`
+  (question 6). Each must stop with its TODO, and each guest is first run on real .NET.
+* **A parked guest** `TypeBuilderEnumLiteralWithoutConstant.cs` (question 8 (a)): an `EnumBuilder` whose second literal
+  is refused, read through `GetNames` and `GetValues` (real .NET: `B,A,C`, `B` 0). Its stop under PawPrint is measured
+  when the stage is built.
+* **Mutants**, each built fresh after the work is committed, and recorded with what killed each:
+  * a `HasDefault` bit wrong (the field's `0x8000` as `0x1000`; the parameter's as `Optional`) (the guest's flags; the
+    table; the model property; the differential);
+  * the flag set without the row, and the row without the flag (the guest; the model property; the extension rule's
+    coupling test);
+  * a second call appending a row instead of replacing (the image property, whose SRM lookup then finds either row; the
+    model property; the guest's `Second`);
+  * an empty string overwriting the blob (the guest's `Second` and its control; the measured table; the differential);
+  * a new row for an empty string given a blob other than the empty one (the measured table; the differential);
+  * the string encoded with `Encoding.Unicode` (the guest's lone surrogate; the encoding property);
+  * the string read past its first NUL (the guest's `"a\0b"`; the handler has no Domain test, so the guest alone);
+  * `NullReference` written as an empty blob (the terminal-state check; the differential; the encoding property
+    against `WriteConstant`);
+  * a float stored through `float32` rather than its bits (the guest's NaN payload; the encoding property);
+  * the Constant table written unsorted (the guest's `Order`, through SRM's refusal; the image property);
+  * the created-owner TODO removed (the refusal fixture: `WithEmitScope` then fails on another message);
+  * the property TODO removed (the refusal fixture);
+  * the extension rule admitting `HasDefault` without a row, or a constant change on a created type
+    (`TestEmitScopeExtension`);
+  * `GetDefaultValue`'s pointer keyed on the Constant handle again (the pointer test).
+* At the tip, the default suite and the four Guest suites, each as its own invocation, built from the whole solution.
+
+**What the implementer verifies first**, each with a throwaway before any Domain code:
+* That a dynamic module's image with a Constant table reads back through `GetDefaultValue`, `MdConstant` and
+  `NativeEnum` for a created type, by giving `throwaway1.diff` a Constant table. The managed side, the handler's
+  argument reads and the flags are already measured (above); the reads are not.
+* That a string constant longer than 32767 characters reaches the handler whole. `NativeCall.readNullTerminatedUtf16`
+  (`Native/NativeCall.fs:265`) refuses past that many characters, and CoreCLR's `u16_strlen` has no bound (read, not
+  measured on either side). The pointer is `fixed` on a string, so the read can be bounded by that string's length
+  instead.
+* That each guest's control exits with its check's number on .NET 10.0.14 and 11.0.0-rc.3.
+
+### The Constant stage: left to later stages
+
+* `PropertyBuilder.SetConstant` on a property with a getter or setter row (question 5 (b)): detaching both, keeping
+  other methods, and the rows staying with a nil association, all measured above.
+* `ParameterBuilder.SetConstant` on a created type's parameter (question 6), with reflection's caches as measured.
+* `NativeEnum`'s divergences (question 8): a literal without a constant read as 0, static non-literal fields of an
+  enum, and the value copied by the enum's element size whatever the row's type.
+* An `EnumBuilder` over `bool`: real .NET writes the constant and then refuses to read the enum ("Unknown enum type.");
+  not run under PawPrint.
+* A float signalling NaN: real .NET quieted `0x7fa00001` to `0x7fe00001` before the QCall, in the probe's own managed code, and PawPrint passed it unchanged. Where real .NET quiets it is not measured; it is a float divergence outside this plan.
+* The 25-row rule (#2258) for the Constant table: `_DefineSetConstant` hashes each row, but with one row per owner the
+  hash cannot change an answer, so nothing is needed unless a later stage writes Constant rows without the search.
+* 5z's list stands, less `SetConstant`.
