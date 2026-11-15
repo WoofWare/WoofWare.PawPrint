@@ -173,9 +173,72 @@ module KnownCustomAttribute =
     /// What the emitter does with the attribute, as far as PawPrint models it: for each name, its target tables and its
     /// effect in <c>RegMeta::_HandleKnownCustomAttribute</c> (md/compiler/custattr_emit.cpp).
     /// </summary>
-    let effect (_ : KnownCustomAttribute) : KnownCustomAttributeEffect =
-        // Stage 5z-1 is not implemented yet.
-        KnownCustomAttributeEffect.Unmodelled
+    let effect (known : KnownCustomAttribute) : KnownCustomAttributeEffect =
+        let none : PseudoAttributeFlags =
+            {
+                TypeDef = None
+                MethodDef = None
+                Field = None
+                Param = None
+                Property = None
+                Event = None
+            }
+
+        match known with
+        | KnownCustomAttribute.Serializable ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    // `tdSerializable`; `TypeAttributes.Serializable` is obsolete.
+                    TypeDef = Some (enum<TypeAttributes> 0x2000)
+                }
+        | KnownCustomAttribute.NonSerialized ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    // `fdNotSerialized`; `FieldAttributes.NotSerialized` is obsolete.
+                    Field = Some (enum<FieldAttributes> 0x80)
+                }
+        | KnownCustomAttribute.SpecialName ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    TypeDef = Some TypeAttributes.SpecialName
+                    MethodDef = Some (MethodDefFlag.Flags MethodAttributes.SpecialName)
+                    Field = Some FieldAttributes.SpecialName
+                    Property = Some PropertyAttributes.SpecialName
+                    Event = Some EventAttributes.SpecialName
+                }
+        | KnownCustomAttribute.In ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    Param = Some ParameterAttributes.In
+                }
+        | KnownCustomAttribute.Out ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    Param = Some ParameterAttributes.Out
+                }
+        | KnownCustomAttribute.Optional ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    Param = Some ParameterAttributes.Optional
+                }
+        | KnownCustomAttribute.PreserveSig ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    MethodDef = Some (MethodDefFlag.ImplFlags MethodImplAttributes.PreserveSig)
+                }
+        | KnownCustomAttribute.DllImport
+        | KnownCustomAttribute.Guid
+        | KnownCustomAttribute.ComImport
+        | KnownCustomAttribute.InterfaceType
+        | KnownCustomAttribute.ClassInterface
+        | KnownCustomAttribute.MethodImpl
+        | KnownCustomAttribute.MarshalAs
+        | KnownCustomAttribute.StructLayout
+        | KnownCustomAttribute.FieldOffset
+        | KnownCustomAttribute.TypeLibVersion
+        | KnownCustomAttribute.ComCompatibleVersion
+        | KnownCustomAttribute.AllowPartiallyTrustedCallers
+        | KnownCustomAttribute.WindowsRuntimeImport -> KnownCustomAttributeEffect.Unmodelled
 
     /// The bits of each flags column that <c>effect</c> gives some attribute.
     let flagMask : PseudoAttributeFlagMask =
@@ -943,8 +1006,28 @@ module EmitScopeDefinitions =
         (scope : EmitScope)
         : EmitScope option
         =
-        ignore<PseudoAttributeFlags * HasCustomAttribute * EmitScope> (flags, owner, scope)
-        failwith "TODO: EmitScopeDefinitions.addPseudoAttributeFlag: stage 5z-1 is not implemented yet"
+        // Refuses an owner the scope lacks.
+        EmitScope.typeOfCustomAttributeOwner owner scope |> ignore<TypeDefRid option>
+
+        match owner with
+        | HasCustomAttribute.TypeDef rid ->
+            flags.TypeDef |> Option.map (fun bit -> EmitScope.addTypeDefFlags rid bit scope)
+        | HasCustomAttribute.MethodDef rid ->
+            match flags.MethodDef with
+            | Some (MethodDefFlag.Flags bit) -> Some (EmitScope.addMethodDefFlags rid bit scope)
+            | Some (MethodDefFlag.ImplFlags bit) ->
+                let row = (EmitScope.methodDefs scope).[rid.Rid - 1]
+                Some (EmitScope.setMethodImplFlags rid (row.ImplFlags ||| bit) scope)
+            | None -> None
+        | HasCustomAttribute.Field rid -> flags.Field |> Option.map (fun bit -> EmitScope.addFieldFlags rid bit scope)
+        | HasCustomAttribute.Param rid -> flags.Param |> Option.map (fun bit -> EmitScope.addParamFlags rid bit scope)
+        | HasCustomAttribute.Property rid ->
+            flags.Property
+            |> Option.map (fun bit -> EmitScope.addPropertyFlags rid bit scope)
+        | HasCustomAttribute.Event rid -> flags.Event |> Option.map (fun bit -> EmitScope.addEventFlags rid bit scope)
+        | HasCustomAttribute.Assembly
+        | HasCustomAttribute.Module
+        | HasCustomAttribute.GenericParam _ -> None
 
     /// <summary>
     /// Define a custom attribute of <paramref name="owner"/>, as <c>RegMeta::DefineCustomAttribute</c> does for
@@ -975,4 +1058,11 @@ module EmitScopeDefinitions =
                     scope
 
             CustomAttributeDefinition.Defined (rid, scope)
+        | CustomAttributeEmitKind.Known known as kind ->
+            match KnownCustomAttribute.effect known with
+            | KnownCustomAttributeEffect.SetsFlag flags ->
+                match addPseudoAttributeFlag flags owner scope with
+                | Some scope -> CustomAttributeDefinition.FlagSet scope
+                | None -> CustomAttributeDefinition.Refused KnownCustomAttributeRefusal.WrongTarget
+            | KnownCustomAttributeEffect.Unmodelled -> CustomAttributeDefinition.NotStoredAsGiven kind
         | kind -> CustomAttributeDefinition.NotStoredAsGiven kind

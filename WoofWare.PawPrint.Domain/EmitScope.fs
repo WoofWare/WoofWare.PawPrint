@@ -1023,6 +1023,156 @@ module EmitScope =
                 )
         }
 
+    // The bits a pseudo-attribute ORs into a flags column, which must fit the column: four bytes for a TypeDef's,
+    // two for every other.
+    let private requireFlagBits (operation : string) (bits : int) (width : int) : unit =
+        let fits =
+            match width with
+            | 4 -> true
+            | _ -> bits >= 0 && bits <= 0xFFFF
+
+        if not fits then
+            invalidArg "flags" $"%s{operation}: the flags 0x%x{bits} do not fit the column's %d{width} bytes"
+
+    /// <summary>
+    /// OR <paramref name="flags"/> into the <c>Flags</c> column of a type already in the scope, as CoreCLR's emitter
+    /// does for a pseudo-attribute (<c>TypeDefRec::AddFlags</c>). Every other row, and every heap, is unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope has no such type.</exception>
+    let addTypeDefFlags (typeDef : TypeDefRid) (flags : TypeAttributes) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addTypeDefFlags"
+        requireRid operation "TypeDef" scope.TypeDefs.Count typeDef.Rid
+        requireFlagBits operation (int flags) 4
+        let index = typeDef.Rid - 1
+
+        { scope with
+            TypeDefs =
+                scope.TypeDefs.SetItem (
+                    index,
+                    { scope.TypeDefs.[index] with
+                        Flags = scope.TypeDefs.[index].Flags ||| flags
+                    }
+                )
+        }
+
+    /// <summary>
+    /// OR <paramref name="flags"/> into the <c>Flags</c> column of a method already in the scope, as CoreCLR's
+    /// emitter does for a pseudo-attribute (<c>MethodRec::AddFlags</c>). Every other row, and every heap, is
+    /// unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope has no such method, or <paramref name="flags"/> does not fit the column's two bytes.
+    /// </exception>
+    let addMethodDefFlags (method : MethodDefRid) (flags : MethodAttributes) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addMethodDefFlags"
+        requireRid operation "MethodDef" scope.MethodDefs.Count method.Rid
+        requireFlagBits operation (int flags) 2
+        let index = method.Rid - 1
+
+        { scope with
+            MethodDefs =
+                scope.MethodDefs.SetItem (
+                    index,
+                    { scope.MethodDefs.[index] with
+                        Flags = scope.MethodDefs.[index].Flags ||| flags
+                    }
+                )
+        }
+
+    /// <summary>
+    /// OR <paramref name="flags"/> into the <c>Flags</c> column of a field already in the scope, as CoreCLR's emitter
+    /// does for a pseudo-attribute (<c>FieldRec::AddFlags</c>). Every other row, and every heap, is unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope has no such field, or <paramref name="flags"/> does not fit the column's two bytes.
+    /// </exception>
+    let addFieldFlags (field : FieldRid) (flags : FieldAttributes) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addFieldFlags"
+        requireRid operation "Field" scope.Fields.Count field.Rid
+        requireFlagBits operation (int flags) 2
+        let index = field.Rid - 1
+
+        { scope with
+            Fields =
+                scope.Fields.SetItem (
+                    index,
+                    { scope.Fields.[index] with
+                        Flags = scope.Fields.[index].Flags ||| flags
+                    }
+                )
+        }
+
+    /// <summary>
+    /// OR <paramref name="flags"/> into the <c>Flags</c> column of a parameter already in the scope, as CoreCLR's
+    /// emitter does for a pseudo-attribute (<c>ParamRec::AddFlags</c>). Every other row, and every heap, is
+    /// unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope has no such parameter, or <paramref name="flags"/> does not fit the column's two bytes.
+    /// </exception>
+    let addParamFlags (param : ParamRid) (flags : ParameterAttributes) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addParamFlags"
+        requireRid operation "Param" scope.Params.Count param.Rid
+        requireFlagBits operation (int flags) 2
+        let index = param.Rid - 1
+
+        { scope with
+            Params =
+                scope.Params.SetItem (
+                    index,
+                    { scope.Params.[index] with
+                        Flags = scope.Params.[index].Flags ||| flags
+                    }
+                )
+        }
+
+    /// <summary>
+    /// OR <paramref name="flags"/> into the <c>Flags</c> column of a property already in the scope, as CoreCLR's
+    /// emitter does for a pseudo-attribute (<c>PropertyRec::AddPropFlags</c>). Every other row, and every heap, is
+    /// unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope has no such property, or <paramref name="flags"/> does not fit the column's two bytes.
+    /// </exception>
+    let addPropertyFlags (property : PropertyRid) (flags : PropertyAttributes) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addPropertyFlags"
+        requireRid operation "Property" scope.Properties.Count property.Rid
+        requireFlagBits operation (int flags) 2
+        let index = property.Rid - 1
+
+        { scope with
+            Properties =
+                scope.Properties.SetItem (
+                    index,
+                    { scope.Properties.[index] with
+                        Flags = scope.Properties.[index].Flags ||| flags
+                    }
+                )
+        }
+
+    /// <summary>
+    /// OR <paramref name="flags"/> into the <c>Flags</c> column of an event already in the scope, as CoreCLR's emitter
+    /// does for a pseudo-attribute (<c>EventRec::AddEventFlags</c>). Every other row, and every heap, is unchanged.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The scope has no such event, or <paramref name="flags"/> does not fit the column's two bytes.
+    /// </exception>
+    let addEventFlags (event : EventRid) (flags : EventAttributes) (scope : EmitScope) : EmitScope =
+        let operation = "EmitScope.addEventFlags"
+        requireRid operation "Event" scope.Events.Count event.Rid
+        requireFlagBits operation (int flags) 2
+        let index = event.Rid - 1
+
+        { scope with
+            Events =
+                scope.Events.SetItem (
+                    index,
+                    { scope.Events.[index] with
+                        Flags = scope.Events.[index].Flags ||| flags
+                    }
+                )
+        }
+
     /// <summary>
     /// Add a <c>Param</c> row, at the next RID, whatever rows its method already has. This does not model
     /// <c>RegMeta::DefineParam</c>; <c>EmitScopeDefinitions.defineParam</c> does.
