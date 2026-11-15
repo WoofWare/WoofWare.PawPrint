@@ -2372,6 +2372,59 @@ module IlMachineManagedByref =
                 (AddressedByref.appendProjection (ByrefProjection.Field field) src)
                 fieldTemplate
 
+    /// `src` viewed as the value type `D` that declares `field`, when what `src` addresses is not a
+    /// `D`: an access to `field` through `src` reads `D`'s layout at the address, whatever the
+    /// pointer views the memory there as. `ValueNone` when `src` already addresses a `D`, when
+    /// `field` has no declaring type, and when its declaring type is a reference type or one of
+    /// CoreLib's primitives.
+    ///
+    /// This is the rule `tryAnchorRawRootFieldPrefix` applies to a leading `Field` step off a raw
+    /// byte root, for the pointers that rule does not anchor. CoreLib's emitted
+    /// `RefArgs` reflection invoke stub reads argument `i` as `ldfld ByReference::Value` through
+    /// `(IntPtr*)&byrefs + i` (`InvokerEmitUtil.CreateInvokeDelegate_RefArgs`), where `byrefs` is
+    /// a `StackAllocatedByRefs`: that pointer addresses the whole buffer for `i = 0`, and is a
+    /// `System.Byte` cursor beyond.
+    ///
+    /// What `src` addresses is the type its byte view ends on, or, for a chain with no byte view,
+    /// the value its `Field` steps reach. When that is a `D` the field is resolved in it by
+    /// identity, which also tells apart two fields that explicit layout places at one offset.
+    let private tryViewAsFieldDeclaringType
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (src : AddressedByref)
+        (field : FieldId)
+        : AddressedByref voption
+        =
+        match FieldId.tryDeclaringType field with
+        | None -> ValueNone
+        | Some declaringType ->
+
+        // Only a value type's zero has a layout that a `ReinterpretAs` can view memory as. A
+        // reference type's zero is an object reference; a CoreLib primitive's is a bare cell, whose
+        // own field `ldfld` resolves before reaching here (`classifyFieldThroughByref`). Either
+        // keeps the identity lookup below, which names what the pointer does address.
+        match zeroOfHandleWithoutLoading baseClassTypes state declaringType with
+        | CliType.Numeric _
+        | CliType.Bool _
+        | CliType.Char _
+        | CliType.ObjectRef _
+        | CliType.RuntimePointer _ -> ValueNone
+        | CliType.ValueType _ ->
+
+        let addressed =
+            match peelByteView (Some baseClassTypes) state src.Projections with
+            | ValueSome view -> view.ViewTemplate ()
+            | ValueNone ->
+                requireNoUnanchoredByteOffset src src.Projections
+                readProjectedValue state (readRootValueFor state src.Root src.Projections) src.Projections
+
+        // A value type has no subtypes, so storage that holds `D`'s field by identity is a `D`.
+        match addressed with
+        | CliType.ValueType addressedValue when addressedValue.Declared = declaringType -> ValueNone
+        | _ ->
+            AddressedByref.appendProjection (ByrefProjection.ReinterpretAs declaringType) src
+            |> ValueSome
+
     let readManagedByrefField
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : IlMachineState)
@@ -2390,6 +2443,13 @@ module IlMachineManagedByref =
             // `field` of a raw byte root, directly or after further `Field` steps, is an
             // address like any other `Field` step off that root, and is read at it.
             readManagedByref baseClassTypes state anchored
+        | ValueNone ->
+
+        match tryViewAsFieldDeclaringType baseClassTypes state src field with
+        | ValueSome viewed ->
+            // The field's address under its declaring type's layout, read there as any access
+            // through a byte view is: from the one cell it names, or from bytes.
+            readManagedByref baseClassTypes state (AddressedByref.appendProjection (ByrefProjection.Field field) viewed)
         | ValueNone ->
 
         match peelByteView (Some baseClassTypes) state projs with
