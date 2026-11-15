@@ -15316,6 +15316,10 @@ public static class Runners
 
         awaiting "AwaitsTailLeaf" (fun il -> il.Emit (Emit.OpCodes.Call, tailLeaf))
 
+        // A `jmp` in an async version goes to its target's async variant.
+        define "JumpsToLeaf" false taskOfInt (fun il -> il.Emit (Emit.OpCodes.Jmp, leaf))
+        |> ignore<Emit.MethodBuilder>
+
         // An ordinary method that does nothing, against which the folded intrinsics are compared:
         // a folded call is no instruction at all, as a folded `typeof` is not.
         define "Nothing" false typeof<Void> (fun il -> il.Emit Emit.OpCodes.Ret)
@@ -15544,9 +15548,16 @@ public static class Runners
         |> shouldEqual (true, false)
 
         // Each tail shape calls the variant of `Leaf` or `LeafValueTask`, which throw what the control
-        // does; so too an await of an async version ending in one.
+        // does; so too an await of an async version ending in one, and a `jmp` to `Leaf`.
         let analysis =
-            (analysis, [ "TailLeaf" ; "TailLeafValueTask" ; "TailLeafAsTask" ; "AwaitsTailLeaf" ])
+            (analysis,
+             [
+                 "TailLeaf"
+                 "TailLeafValueTask"
+                 "TailLeafAsTask"
+                 "AwaitsTailLeaf"
+                 "JumpsToLeaf"
+             ])
             ||> List.fold (fun analysis name ->
                 let analysis, variant = variantOf analysis name
                 let analysis, escapes = EscapeAnalysis.escapes analysis variant
