@@ -881,7 +881,7 @@ module NativeRuntimeTypeBuilder =
                     match kind with
                     | CustomAttributeEmitKind.Known known ->
                         KnownCustomAttribute.name known,
-                        "is a pseudo-attribute (KnownCaList), which CoreCLR's _HandleKnownCustomAttribute checks against its targets, parses by its own grammar and turns into flags or rows of other tables, keeping a row only for the six it validates and keeps"
+                        "is a pseudo-attribute (KnownCaList) whose effect PawPrint does not model, which CoreCLR's _HandleKnownCustomAttribute checks against its targets, parses by its own grammar and turns into flags or rows of other tables, keeping a row only for the six it validates and keeps"
                     | CustomAttributeEmitKind.SuppressUnmanagedCodeSecurity ->
                         ("System.Security", "SuppressUnmanagedCodeSecurityAttribute"),
                         "sets the owner's HasSecurity flag, as well as storing the row"
@@ -894,6 +894,17 @@ module NativeRuntimeTypeBuilder =
 
                 failwith
                     $"TODO: %s{operation}: %s{ns}.%s{name} on 0x%08x{ownerToken} %s{instead}; PawPrint does not model that"
+            | CustomAttributeDefinition.Refused _ ->
+                // `TypeBuilder_DefineCustomAttribute` throws `IDS_EE_INVALID_CA` for every failed HRESULT, with no
+                // parameter name.
+                state
+                |> NativeHandlerResult.raiseExceptionWithMessage
+                    ctx.BaseClassTypes.ArgumentException
+                    (Some "Invalid custom attribute provided.")
+                |> Some
+            | CustomAttributeDefinition.FlagSet extended ->
+                let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+                NativeHandlerResult.completed state |> Some
             | CustomAttributeDefinition.Defined (rid, extended) ->
                 let state, assembly = state.WithEmitScope ctx.LoggerFactory moduleName extended
 

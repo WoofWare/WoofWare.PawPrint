@@ -34,9 +34,10 @@ type EmitScopeExtensionViolation =
     /// assembly or the module is no type's.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
-    /// A row of the earlier scope differs in the later one only in a column the emitter fills in after
-    /// adding the row (a method's implementation flags or body, a type's parent), and the row is a type
-    /// already created or a member of one.
+    /// A row of the earlier scope differs in the later one only in what the emitter fills in after adding
+    /// the row (a method's implementation flags or body, a type's parent, or a bit of a flags column that a
+    /// pseudo-attribute sets, <c>KnownCustomAttribute.flagMask</c>), and the row is a type already created or
+    /// a member of one.
     | FilledInCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
 /// Whether one emit scope extends another, given which of its types the runtime has already created.
@@ -48,8 +49,9 @@ module EmitScopeExtension =
     /// </summary>
     /// <remarks>
     /// Empty when <paramref name="after"/> was built from <paramref name="before"/> by appending rows,
-    /// interning entries, and filling in the implementation flags and bodies of methods and the parents
-    /// of types, none of them for a created type. Then an image of <paramref name="after"/> reads back every heap
+    /// interning entries, filling in the implementation flags and bodies of methods and the parents of
+    /// types, and setting the bits of flags columns that pseudo-attributes set, none of them for a created
+    /// type. A flags column that loses a bit, or gains one that no pseudo-attribute sets, is a changed row. Then an image of <paramref name="after"/> reads back every heap
     /// entry and created type of <paramref name="before"/>'s as <paramref name="before"/>'s image does,
     /// and every row but for those columns, at the same RID except in the tables the image sorts. A history that was
     /// otherwise rewritten, rather than appended to, is refused even where the image happens to read
@@ -97,10 +99,45 @@ module EmitScopeExtension =
                         yield EmitScopeExtensionViolation.AddedToCreatedType (table, i + 1, owner)
             ]
 
+        let mask = KnownCustomAttribute.flagMask
+
+        // Whether a flags column changed only by gaining bits of `mask`, which pseudo-attributes set.
+        let gainedPseudoAttributeBits (mask : int) (was : int) (now : int) : bool =
+            was &&& ~~~now = 0 && (now &&& ~~~was) &&& ~~~mask = 0
+
+        // Each row of `before` at the same position of `after`, where `filled` says whether `after`'s row
+        // differs from `before`'s only in what the emitter fills in. A fill is refused only for a created type,
+        // which `owner` names.
+        let filledOrRewritten
+            (table : TableIndex)
+            (beforeRows : ImmutableList<'row>)
+            (afterRows : ImmutableList<'row>)
+            (filled : 'row -> 'row -> bool)
+            (owner : 'row -> TypeDefRid)
+            =
+            [
+                for i in 0 .. beforeRows.Count - 1 do
+                    if i >= afterRows.Count then
+                        yield EmitScopeExtensionViolation.RowChanged (table, i + 1)
+                    else
+                        let was = beforeRows.[i]
+                        let row = afterRows.[i]
+
+                        if was = row then
+                            ()
+                        elif filled was row then
+                            let owner = owner was
+
+                            if created.Contains owner then
+                                yield EmitScopeExtensionViolation.FilledInCreatedType (table, i + 1, owner)
+                        else
+                            yield EmitScopeExtensionViolation.RowChanged (table, i + 1)
+            ]
+
         // Each method of `before` at the same position of `after`. The emitter fills in a method's
-        // implementation flags and body after adding its row, and fills in the body again when
-        // `CreateType` is retried, so a change to those columns alone is a fill, refused only for a
-        // created type.
+        // implementation flags and body after adding its row, the body again when `CreateType` is retried,
+        // and the bits of its flags that pseudo-attributes set, so a change to those alone is a fill,
+        // refused only for a created type.
         let methodsRewritten (beforeRows : ImmutableList<MethodDefRow>) (afterRows : ImmutableList<MethodDefRow>) =
             [
                 for i in 0 .. beforeRows.Count - 1 do
@@ -116,7 +153,9 @@ module EmitScopeExtension =
                             { was with
                                 ImplFlags = row.ImplFlags
                                 Body = row.Body
+                                Flags = row.Flags
                             } = row
+                            && gainedPseudoAttributeBits (int mask.MethodDef) (int was.Flags) (int row.Flags)
                         then
                             if created.Contains was.Owner then
                                 yield
@@ -130,8 +169,8 @@ module EmitScopeExtension =
             ]
 
         // Each type of `before` at the same position of `after`. The emitter fills in a type's parent
-        // after adding its row, so a change to that column alone is a fill, refused only for a created
-        // type.
+        // after adding its row, and the bits of its flags that pseudo-attributes set, so a change to those
+        // alone is a fill, refused only for a created type.
         let typeDefsRewritten (beforeRows : ImmutableList<TypeDefRow>) (afterRows : ImmutableList<TypeDefRow>) =
             [
                 for i in 0 .. beforeRows.Count - 1 do
@@ -146,7 +185,9 @@ module EmitScopeExtension =
                         elif
                             { was with
                                 Extends = row.Extends
+                                Flags = row.Flags
                             } = row
+                            && gainedPseudoAttributeBits (int mask.TypeDef) (int was.Flags) (int row.Flags)
                         then
                             match EmitScope.tryTypeDefRid (i + 1) after with
                             | Some typeDef when created.Contains typeDef ->
@@ -182,7 +223,18 @@ module EmitScopeExtension =
             yield! rewritten TableIndex.TypeRef (EmitScope.typeRefs before) (EmitScope.typeRefs after)
             yield! typeDefsRewritten (EmitScope.typeDefs before) (EmitScope.typeDefs after)
 
-            yield! rewritten TableIndex.Field (EmitScope.fields before) (EmitScope.fields after)
+            yield!
+                filledOrRewritten
+                    TableIndex.Field
+                    (EmitScope.fields before)
+                    (EmitScope.fields after)
+                    (fun was row ->
+                        { was with
+                            Flags = row.Flags
+                        } = row
+                        && gainedPseudoAttributeBits (int mask.Field) (int was.Flags) (int row.Flags)
+                    )
+                    (fun row -> row.Owner)
 
             yield!
                 addedToCreated
@@ -200,7 +252,18 @@ module EmitScopeExtension =
                     (EmitScope.methodDefs after)
                     (fun row -> row.Owner)
 
-            yield! rewritten TableIndex.Param (EmitScope.parameters before) (EmitScope.parameters after)
+            yield!
+                filledOrRewritten
+                    TableIndex.Param
+                    (EmitScope.parameters before)
+                    (EmitScope.parameters after)
+                    (fun was row ->
+                        { was with
+                            Flags = row.Flags
+                        } = row
+                        && gainedPseudoAttributeBits (int mask.Param) (int was.Flags) (int row.Flags)
+                    )
+                    (fun row -> methodOwner row.Owner)
 
             yield!
                 addedToCreated
@@ -238,7 +301,18 @@ module EmitScopeExtension =
             yield! rewritten TableIndex.MemberRef (EmitScope.memberRefs before) (EmitScope.memberRefs after)
             yield! rewritten TableIndex.StandAloneSig (EmitScope.standAloneSigs before) (EmitScope.standAloneSigs after)
 
-            yield! rewritten TableIndex.Event (EmitScope.events before) (EmitScope.events after)
+            yield!
+                filledOrRewritten
+                    TableIndex.Event
+                    (EmitScope.events before)
+                    (EmitScope.events after)
+                    (fun was row ->
+                        { was with
+                            Flags = row.Flags
+                        } = row
+                        && gainedPseudoAttributeBits (int mask.Event) (int was.Flags) (int row.Flags)
+                    )
+                    (fun row -> row.Owner)
 
             yield!
                 addedToCreated
@@ -247,7 +321,18 @@ module EmitScopeExtension =
                     (EmitScope.events after)
                     (fun row -> row.Owner)
 
-            yield! rewritten TableIndex.Property (EmitScope.properties before) (EmitScope.properties after)
+            yield!
+                filledOrRewritten
+                    TableIndex.Property
+                    (EmitScope.properties before)
+                    (EmitScope.properties after)
+                    (fun was row ->
+                        { was with
+                            Flags = row.Flags
+                        } = row
+                        && gainedPseudoAttributeBits (int mask.Property) (int was.Flags) (int row.Flags)
+                    )
+                    (fun row -> row.Owner)
 
             yield!
                 addedToCreated

@@ -81,6 +81,10 @@ module EmitScopeGen =
         /// run of two or more holds equal rows. A run is long enough, sometimes, for one owner to hold more than
         /// 16 rows, and for a module to hold 25 or more.
         | CustomAttributeRun of owner : int * constructor : int * blob : int * count : int
+        /// The flag of one of the pseudo-attributes that set a flag, ORed into the row of an owner of any of the
+        /// nine kinds a builder hands out, as `EmitScopeDefinitions.addPseudoAttributeFlag` sets it; nothing when the
+        /// owner is not among the attribute's targets.
+        | SetPseudoAttributeFlag of owner : int * attribute : int
 
     /// What happened to one `Op.Param`, in the replay of CoreCLR's tables beside the scope.
     type ParamEvent =
@@ -342,6 +346,7 @@ module EmitScopeGen =
                     let! count = Gen.choose (2, 30)
                     return Op.MethodSemanticsRun (association, semantics, method, count)
                 }
+                3, Gen.map2 (fun o a -> Op.SetPseudoAttributeFlag (o, a)) choice choice
             ]
 
     /// Every owner of `scope` a custom attribute may have, as `HasCustomAttribute`: the assembly if the scope has
@@ -924,6 +929,23 @@ module EmitScopeGen =
 
                     withScope (EmitScope.addCustomAttribute row applied.Scope |> snd) applied
                 )
+        | Op.SetPseudoAttributeFlag (ownerChoice, attributeChoice) ->
+            let flags =
+                KnownCustomAttribute.all
+                |> List.choose (fun known ->
+                    match KnownCustomAttribute.effect known with
+                    | KnownCustomAttributeEffect.SetsFlag flags -> Some flags
+                    | KnownCustomAttributeEffect.Unmodelled -> None
+                )
+
+            let owner = (pick ownerChoice (customAttributeOwners scope)).Value
+
+            match pick attributeChoice flags with
+            | None -> applied
+            | Some flags ->
+                match EmitScopeDefinitions.addPseudoAttributeFlag flags owner scope with
+                | Some scope -> withScope scope applied
+                | None -> applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
@@ -1124,23 +1146,53 @@ module EmitScopeGen =
         ]
         |> Map.ofList
 
-    /// `describeRows` without the columns the emitter fills in after adding a row (a method's
-    /// implementation flags, a type's parent), which an extension of a scope may change while the
-    /// row's type is not created.
-    let withoutFilledColumns (rows : Map<TableIndex * int, obj>) : Map<TableIndex * int, obj> =
-        rows
-        |> Map.map (fun (table, _) row ->
-            if table = TableIndex.MethodDef then
-                let attributes, _, name, signature, owner =
-                    unbox<MethodAttributes * MethodImplAttributes * int * int * int> row
+    /// <summary>
+    /// Whether <c>after</c>, a row of <c>describeRows</c>, differs from <c>before</c> at most in what the emitter fills
+    /// in after adding a row, which an extension of a scope may change while the row's type is not created: a method's
+    /// implementation flags, a type's parent, and bits that a pseudo-attribute sets gained by a flags column. The
+    /// masks are spelled out here, not taken from <c>KnownCustomAttribute.flagMask</c>, so that a test reading back an
+    /// image does not take the rule it checks from the code it checks.
+    /// </summary>
+    let filledIn (table : TableIndex) (before : obj) (after : obj) : bool =
+        let gained (mask : int) (was : int) (now : int) : bool =
+            was &&& ~~~now = 0 && (now &&& ~~~was) &&& ~~~mask = 0
 
-                box (attributes, name, signature, owner)
-            elif table = TableIndex.TypeDef then
-                let attributes, name, ns, _ = unbox<TypeAttributes * int * int * int> row
-                box (attributes, name, ns)
-            else
-                row
-        )
+        if table = TableIndex.MethodDef then
+            let attributes, _, name, signature, owner =
+                unbox<MethodAttributes * MethodImplAttributes * int * int * int> before
+
+            let attributes', _, name', signature', owner' =
+                unbox<MethodAttributes * MethodImplAttributes * int * int * int> after
+
+            (name, signature, owner) = (name', signature', owner')
+            && gained 0x0800 (int attributes) (int attributes')
+        elif table = TableIndex.TypeDef then
+            let attributes, name, ns, _ = unbox<TypeAttributes * int * int * int> before
+            let attributes', name', ns', _ = unbox<TypeAttributes * int * int * int> after
+            (name, ns) = (name', ns') && gained 0x2400 (int attributes) (int attributes')
+        elif table = TableIndex.Field then
+            let attributes, name, signature, owner =
+                unbox<FieldAttributes * int * int * int> before
+
+            let attributes', name', signature', owner' =
+                unbox<FieldAttributes * int * int * int> after
+
+            (name, signature, owner) = (name', signature', owner')
+            && gained 0x0280 (int attributes) (int attributes')
+        elif table = TableIndex.Param then
+            let attributes, sequence, name = unbox<ParameterAttributes * int * int> before
+            let attributes', sequence', name' = unbox<ParameterAttributes * int * int> after
+
+            (sequence, name) = (sequence', name')
+            && gained 0x0013 (int attributes) (int attributes')
+        elif table = TableIndex.Event then
+            let attributes, name, eventType = unbox<EventAttributes * int * int> before
+            let attributes', name', eventType' = unbox<EventAttributes * int * int> after
+
+            (name, eventType) = (name', eventType')
+            && gained 0x0200 (int attributes) (int attributes')
+        else
+            before = after
 
     /// <summary>
     /// The map rows (each parent's TypeDef RID and its list's start) and the pointer table's contents that

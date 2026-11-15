@@ -35,6 +35,55 @@ type ParamDefinition =
     /// </summary>
     | StrandsLaterMethods of slid : MethodDefRid * last : MethodDefRid
 
+/// The bit a pseudo-attribute sets in a method's row: in its <c>Flags</c> column, or in its <c>ImplFlags</c>.
+[<RequireQualifiedAccess>]
+type MethodDefFlag =
+    | Flags of MethodAttributes
+    | ImplFlags of MethodImplAttributes
+
+/// <summary>
+/// The bit a pseudo-attribute sets in its owner's row, for each table of owner the emitter accepts it on, and
+/// <c>None</c> for each table the emitter refuses it on (<c>KnownCaProp.rTypes</c>, and the <c>AddFlags</c> calls of
+/// <c>RegMeta::_HandleKnownCustomAttribute</c>, md/compiler/custattr_emit.cpp). The assembly, the module and a generic
+/// parameter have no flags column, and no such attribute accepts them.
+/// </summary>
+type PseudoAttributeFlags =
+    {
+        TypeDef : TypeAttributes option
+        MethodDef : MethodDefFlag option
+        Field : FieldAttributes option
+        /// A parameter's, the return parameter's included.
+        Param : ParameterAttributes option
+        Property : PropertyAttributes option
+        Event : EventAttributes option
+    }
+
+/// What CoreCLR's emitter does with a pseudo-attribute, as far as PawPrint models it.
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeEffect =
+    /// <summary>
+    /// The attribute takes no arguments, so its blob is never read. On an owner whose table has a bit, the emitter ORs
+    /// the bit into the owner's row and stores no row; on any other owner, it refuses the attribute.
+    /// </summary>
+    | SetsFlag of PseudoAttributeFlags
+    /// PawPrint does not model what the emitter does with the attribute, on any owner.
+    | Unmodelled
+
+/// <summary>
+/// The bits of each flags column that some pseudo-attribute sets: for each table, the union of the bits that every
+/// <c>SetsFlag</c> effect gives it. A method's <c>ImplFlags</c> are not among them: the emitter overwrites that column
+/// whatever it holds (<c>RegMeta::SetMethodImplFlags</c>).
+/// </summary>
+type PseudoAttributeFlagMask =
+    {
+        TypeDef : TypeAttributes
+        MethodDef : MethodAttributes
+        Field : FieldAttributes
+        Param : ParameterAttributes
+        Property : PropertyAttributes
+        Event : EventAttributes
+    }
+
 /// <summary>
 /// The pseudo-attributes of CoreCLR's emitter (<c>KnownCaList</c>, md/compiler/custattr_emit.cpp): each name the
 /// emitter recognises, by namespace and name alone, as an attribute it turns into flags or rows of other tables, or
@@ -120,6 +169,115 @@ module KnownCustomAttribute =
         | KnownCustomAttribute.WindowsRuntimeImport ->
             "System.Runtime.InteropServices.WindowsRuntime", "WindowsRuntimeImportAttribute"
 
+    /// <summary>
+    /// What the emitter does with the attribute, as far as PawPrint models it: for each name, its target tables and its
+    /// effect in <c>RegMeta::_HandleKnownCustomAttribute</c> (md/compiler/custattr_emit.cpp).
+    /// </summary>
+    let effect (known : KnownCustomAttribute) : KnownCustomAttributeEffect =
+        let none : PseudoAttributeFlags =
+            {
+                TypeDef = None
+                MethodDef = None
+                Field = None
+                Param = None
+                Property = None
+                Event = None
+            }
+
+        match known with
+        | KnownCustomAttribute.Serializable ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    // `tdSerializable`; `TypeAttributes.Serializable` is obsolete.
+                    TypeDef = Some (enum<TypeAttributes> 0x2000)
+                }
+        | KnownCustomAttribute.NonSerialized ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    // `fdNotSerialized`; `FieldAttributes.NotSerialized` is obsolete.
+                    Field = Some (enum<FieldAttributes> 0x80)
+                }
+        | KnownCustomAttribute.SpecialName ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    TypeDef = Some TypeAttributes.SpecialName
+                    MethodDef = Some (MethodDefFlag.Flags MethodAttributes.SpecialName)
+                    Field = Some FieldAttributes.SpecialName
+                    Property = Some PropertyAttributes.SpecialName
+                    Event = Some EventAttributes.SpecialName
+                }
+        | KnownCustomAttribute.In ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    Param = Some ParameterAttributes.In
+                }
+        | KnownCustomAttribute.Out ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    Param = Some ParameterAttributes.Out
+                }
+        | KnownCustomAttribute.Optional ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    Param = Some ParameterAttributes.Optional
+                }
+        | KnownCustomAttribute.PreserveSig ->
+            KnownCustomAttributeEffect.SetsFlag
+                { none with
+                    MethodDef = Some (MethodDefFlag.ImplFlags MethodImplAttributes.PreserveSig)
+                }
+        | KnownCustomAttribute.DllImport
+        | KnownCustomAttribute.Guid
+        | KnownCustomAttribute.ComImport
+        | KnownCustomAttribute.InterfaceType
+        | KnownCustomAttribute.ClassInterface
+        | KnownCustomAttribute.MethodImpl
+        | KnownCustomAttribute.MarshalAs
+        | KnownCustomAttribute.StructLayout
+        | KnownCustomAttribute.FieldOffset
+        | KnownCustomAttribute.TypeLibVersion
+        | KnownCustomAttribute.ComCompatibleVersion
+        | KnownCustomAttribute.AllowPartiallyTrustedCallers
+        | KnownCustomAttribute.WindowsRuntimeImport -> KnownCustomAttributeEffect.Unmodelled
+
+    /// The bits of each flags column that <c>effect</c> gives some attribute.
+    let flagMask : PseudoAttributeFlagMask =
+        let orSome (bit : 'a option) (mask : 'a) (combine : 'a -> 'a -> 'a) : 'a =
+            match bit with
+            | Some bit -> combine mask bit
+            | None -> mask
+
+        let empty : PseudoAttributeFlagMask =
+            {
+                TypeDef = enum<TypeAttributes> 0
+                MethodDef = enum<MethodAttributes> 0
+                Field = enum<FieldAttributes> 0
+                Param = enum<ParameterAttributes> 0
+                Property = enum<PropertyAttributes> 0
+                Event = enum<EventAttributes> 0
+            }
+
+        (empty, all)
+        ||> List.fold (fun mask known ->
+            match effect known with
+            | KnownCustomAttributeEffect.Unmodelled -> mask
+            | KnownCustomAttributeEffect.SetsFlag flags ->
+                let methodFlags =
+                    match flags.MethodDef with
+                    | Some (MethodDefFlag.Flags bit) -> Some bit
+                    | Some (MethodDefFlag.ImplFlags _)
+                    | None -> None
+
+                {
+                    TypeDef = orSome flags.TypeDef mask.TypeDef (|||)
+                    MethodDef = orSome methodFlags mask.MethodDef (|||)
+                    Field = orSome flags.Field mask.Field (|||)
+                    Param = orSome flags.Param mask.Param (|||)
+                    Property = orSome flags.Property mask.Property (|||)
+                    Event = orSome flags.Event mask.Event (|||)
+                }
+        )
+
 /// <summary>
 /// What CoreCLR's emitter does with an attribute, by its constructor's declaring type and the owner
 /// (<c>RegMeta::DefineCustomAttribute</c>).
@@ -142,6 +300,16 @@ type CustomAttributeEmitKind =
     | DynamicSecurityMethod
 
 /// <summary>
+/// Why CoreCLR's emitter refuses a pseudo-attribute (<c>RegMeta::_HandleKnownCustomAttribute</c>). For each,
+/// <c>TypeBuilder_DefineCustomAttribute</c> throws <c>ArgumentException</c> "Invalid custom attribute provided.", and
+/// the scope is unchanged.
+/// </summary>
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeRefusal =
+    /// <summary>The owner's table is not among the attribute's targets (<c>META_E_CA_INVALID_TARGET</c>).</summary>
+    | WrongTarget
+
+/// <summary>
 /// The outcome of asking CoreCLR's emitter to define a custom attribute in a dynamic module's scope
 /// (<c>RegMeta::DefineCustomAttribute</c>).
 /// </summary>
@@ -149,6 +317,10 @@ type CustomAttributeEmitKind =
 type CustomAttributeDefinition =
     /// A new <c>CustomAttribute</c> row, and the scope that holds it.
     | Defined of CustomAttributeRid * EmitScope
+    /// A pseudo-attribute's flag ORed into its owner's row, and the scope that holds it. No row is stored.
+    | FlagSet of EmitScope
+    /// A pseudo-attribute the emitter refuses. Nothing is added.
+    | Refused of KnownCustomAttributeRefusal
     /// <summary>
     /// CoreCLR would not store the row as given, but would do what this kind says instead, which a scope does not
     /// model, so nothing is added.
@@ -823,9 +995,46 @@ module EmitScopeDefinitions =
             | _ -> CustomAttributeEmitKind.Ordinary
 
     /// <summary>
+    /// The scope with the bit that <paramref name="flags"/> gives <paramref name="owner"/>'s table ORed into the owner's
+    /// row, as <c>RegMeta::_HandleKnownCustomAttribute</c> does; <c>None</c> when that table has no bit, which is a
+    /// wrong target.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner.</exception>
+    let addPseudoAttributeFlag
+        (flags : PseudoAttributeFlags)
+        (owner : HasCustomAttribute)
+        (scope : EmitScope)
+        : EmitScope option
+        =
+        // Refuses an owner the scope lacks.
+        EmitScope.typeOfCustomAttributeOwner owner scope |> ignore<TypeDefRid option>
+
+        match owner with
+        | HasCustomAttribute.TypeDef rid ->
+            flags.TypeDef |> Option.map (fun bit -> EmitScope.addTypeDefFlags rid bit scope)
+        | HasCustomAttribute.MethodDef rid ->
+            match flags.MethodDef with
+            | Some (MethodDefFlag.Flags bit) -> Some (EmitScope.addMethodDefFlags rid bit scope)
+            | Some (MethodDefFlag.ImplFlags bit) ->
+                let row = (EmitScope.methodDefs scope).[rid.Rid - 1]
+                Some (EmitScope.setMethodImplFlags rid (row.ImplFlags ||| bit) scope)
+            | None -> None
+        | HasCustomAttribute.Field rid -> flags.Field |> Option.map (fun bit -> EmitScope.addFieldFlags rid bit scope)
+        | HasCustomAttribute.Param rid -> flags.Param |> Option.map (fun bit -> EmitScope.addParamFlags rid bit scope)
+        | HasCustomAttribute.Property rid ->
+            flags.Property
+            |> Option.map (fun bit -> EmitScope.addPropertyFlags rid bit scope)
+        | HasCustomAttribute.Event rid -> flags.Event |> Option.map (fun bit -> EmitScope.addEventFlags rid bit scope)
+        | HasCustomAttribute.Assembly
+        | HasCustomAttribute.Module
+        | HasCustomAttribute.GenericParam _ -> None
+
+    /// <summary>
     /// Define a custom attribute of <paramref name="owner"/>, as <c>RegMeta::DefineCustomAttribute</c> does for
     /// <c>TypeBuilder_DefineCustomAttribute</c>: unless <c>classifyCustomAttribute</c> says that the emitter does
     /// something else with it, a new row at the next RID, its blob interned as given, with no search for an equal row.
+    /// A pseudo-attribute whose <c>KnownCustomAttribute.effect</c> is modelled sets its flag or is refused, and its blob
+    /// is not read; any other is <c>NotStoredAsGiven</c>.
     /// </summary>
     /// <exception cref="ArgumentException">The scope lacks the owner or the constructor.</exception>
     let defineCustomAttribute
@@ -849,4 +1058,11 @@ module EmitScopeDefinitions =
                     scope
 
             CustomAttributeDefinition.Defined (rid, scope)
+        | CustomAttributeEmitKind.Known known as kind ->
+            match KnownCustomAttribute.effect known with
+            | KnownCustomAttributeEffect.SetsFlag flags ->
+                match addPseudoAttributeFlag flags owner scope with
+                | Some scope -> CustomAttributeDefinition.FlagSet scope
+                | None -> CustomAttributeDefinition.Refused KnownCustomAttributeRefusal.WrongTarget
+            | KnownCustomAttributeEffect.Unmodelled -> CustomAttributeDefinition.NotStoredAsGiven kind
         | kind -> CustomAttributeDefinition.NotStoredAsGiven kind
