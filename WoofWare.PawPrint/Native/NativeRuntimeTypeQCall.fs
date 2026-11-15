@@ -1671,73 +1671,93 @@ module NativeRuntimeTypeQCall =
                 |> Some
             else
 
+            let answer (state : IlMachineState, target : RuntimeTypeHandleTarget) : NativeHandlerResult option =
+                let runtimeTypeAddr, state =
+                    IlMachineState.getOrAllocateType ctx.LoggerFactory ctx.BaseClassTypes target state
+
+                let state =
+                    IlMachineState.writeManagedByrefWithBase
+                        ctx.BaseClassTypes
+                        state
+                        (ManagedPointerSource.requireAddressed retType)
+                        (CliType.ObjectRef (Some runtimeTypeAddr))
+
+                NativeHandlerResult.completed state |> Some
+
             // The C# wrapper validates the token kind (TypeDef/TypeSpec/TypeRef, and not the
             // global TypeDef token) before reaching this QCall, so any other kind here is a
             // contract violation rather than user error.
-            let state, target =
-                match MetadataToken.ofInt typeToken with
-                | MetadataToken.TypeDefinition h ->
-                    let state, typeDefn =
-                        IlMachineState.lookupTypeDefn ctx.LoggerFactory ctx.BaseClassTypes state assembly h
+            match MetadataToken.ofInt typeToken with
+            | MetadataToken.TypeDefinition h ->
+                let state, typeDefn =
+                    IlMachineState.lookupTypeDefn ctx.LoggerFactory ctx.BaseClassTypes state assembly h
 
-                    let typeDefn =
-                        TokenBindingStop.typeToken assembly (MetadataToken.TypeDefinition h) typeDefn
+                let typeDefn =
+                    TokenBindingStop.typeToken assembly (MetadataToken.TypeDefinition h) typeDefn
 
-                    IlMachineState.runtimeTypeHandleTargetForTypeToken
-                        ctx.LoggerFactory
-                        ctx.BaseClassTypes
-                        assembly
-                        true
-                        ImmutableArray.Empty
-                        ImmutableArray.Empty
-                        typeDefn
-                        state
-                | MetadataToken.TypeReference h ->
-                    let state, typeDefnResult =
-                        IlMachineState.lookupTypeRef ctx.LoggerFactory ctx.BaseClassTypes state assembly h
-
-                    let typeDefn, declaringAssembly =
-                        TokenBindingStop.typeToken assembly (MetadataToken.TypeReference h) typeDefnResult
-
-                    IlMachineState.runtimeTypeHandleTargetForTypeToken
-                        ctx.LoggerFactory
-                        ctx.BaseClassTypes
-                        declaringAssembly
-                        true
-                        ImmutableArray.Empty
-                        ImmutableArray.Empty
-                        typeDefn
-                        state
-                | MetadataToken.TypeSpecification h ->
-                    // Mirror executeLdtoken: feed the raw signature directly with
-                    // allowOpenGenericDefinition=false. TypeSpecs already encode their
-                    // structure, including any generic instantiations.
-                    let typeDefn = assembly.TypeSpecs.[h].Signature
-
-                    IlMachineState.runtimeTypeHandleTargetForTypeToken
-                        ctx.LoggerFactory
-                        ctx.BaseClassTypes
-                        assembly
-                        false
-                        (decodeInstantiation typeInstArgsPtr typeInstCount)
-                        (decodeInstantiation methodInstArgsPtr methodInstCount)
-                        typeDefn
-                        state
-                | other ->
-                    failwith
-                        $"%s{operation}: unexpected metadata token kind %O{other} from token 0x%08x{typeToken}; the managed wrapper should only forward TypeDef/TypeSpec/TypeRef"
-
-            let runtimeTypeAddr, state =
-                IlMachineState.getOrAllocateType ctx.LoggerFactory ctx.BaseClassTypes target state
-
-            let state =
-                IlMachineState.writeManagedByrefWithBase
+                IlMachineState.runtimeTypeHandleTargetForTypeToken
+                    ctx.LoggerFactory
                     ctx.BaseClassTypes
+                    assembly
+                    true
+                    ImmutableArray.Empty
+                    ImmutableArray.Empty
+                    typeDefn
                     state
-                    (ManagedPointerSource.requireAddressed retType)
-                    (CliType.ObjectRef (Some runtimeTypeAddr))
+                |> answer
+            | MetadataToken.TypeReference h ->
+                let state, typeDefnResult =
+                    IlMachineState.lookupTypeRef ctx.LoggerFactory ctx.BaseClassTypes state assembly h
 
-            NativeHandlerResult.completed state |> Some
+                let typeDefn, declaringAssembly =
+                    TokenBindingStop.typeToken assembly (MetadataToken.TypeReference h) typeDefnResult
+
+                IlMachineState.runtimeTypeHandleTargetForTypeToken
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    declaringAssembly
+                    true
+                    ImmutableArray.Empty
+                    ImmutableArray.Empty
+                    typeDefn
+                    state
+                |> answer
+            | MetadataToken.TypeSpecification h ->
+                // Mirror executeLdtoken: feed the raw signature directly with
+                // allowOpenGenericDefinition=false. TypeSpecs already encode their
+                // structure, including any generic instantiations.
+                let typeDefn = assembly.TypeSpecs.[h].Signature
+                let typeInstantiation = decodeInstantiation typeInstArgsPtr typeInstCount
+                let methodInstantiation = decodeInstantiation methodInstArgsPtr methodInstCount
+
+                // CoreCLR's signature walk (`SigPointer::GetTypeVariableThrowing`) raises
+                // `BadImageFormatException` for a generic parameter the caller's context does not
+                // supply, and `RuntimeModule.ResolveType` wraps it in `ArgumentException`. Measured,
+                // the inner exception carries the message its HResult gives. That includes a
+                // TypeSpec instantiating a generic definition over its own parameters, such as the
+                // parent of a constructor of an open generic attribute type: only a TypeDef or a
+                // TypeRef names the definition itself.
+                if IlMachineState.containsUnboundGenericParameter typeInstantiation methodInstantiation typeDefn then
+                    NativeHandlerResult.raiseExceptionWithMessage
+                        ctx.BaseClassTypes.BadImageFormatException
+                        (Some BadImageFormatMessages.ofHResult)
+                        state
+                    |> Some
+                else
+
+                IlMachineState.runtimeTypeHandleTargetForTypeToken
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    assembly
+                    false
+                    typeInstantiation
+                    methodInstantiation
+                    typeDefn
+                    state
+                |> answer
+            | other ->
+                failwith
+                    $"%s{operation}: unexpected metadata token kind %O{other} from token 0x%08x{typeToken}; the managed wrapper should only forward TypeDef/TypeSpec/TypeRef"
         | "ModuleHandle_ResolveMethod",
           "System.Private.CoreLib",
           "System",

@@ -191,6 +191,7 @@
     <Compile Include="TestModuleResolveMethodMemberRef.fs" />
     <Compile Include="TestModuleResolveMethodDef.fs" />
     <Compile Include="TestModuleResolveMethodSpec.fs" />
+    <Compile Include="TestModuleResolveTypeSpec.fs" />
     <Compile Include="TestMethodSpecHeader.fs" />
     <Compile Include="TestMethodTableProjection.fs" />
     <Compile Include="TestTypeDescProjection.fs" />

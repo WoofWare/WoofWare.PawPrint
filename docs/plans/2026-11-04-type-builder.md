@@ -7508,3 +7508,70 @@ CustomAttribute row, which it neither sorts nor remaps.
   `CustomAttributeFormatException` and PawPrint fails the run on (`TypeBuilderCustomAttributeMalformedInstance.cs`).
 * Named arguments of type `Type`, an array or an enum at instantiation (`TypeBuilderCustomAttributeNamedArguments.cs`).
 * The main guest's `Args` instantiates no `object`-typed value; since #2259 it could.
+
+### #2257: as built
+
+Built 2026-11-15 on `bf44ca2b5` (5y, PR #2265, not yet in `main`), in two commits: the tests (`12f6e7563`) and the fix
+(`923fbe095`). Scratchpad paths are under `probe2257/` in the scratchpad of that session.
+
+**Where real .NET throws.** Measured with a probe on .NET 10.0.14 and 11.0.0-rc.3, identically (`probe2257/Program.cs`,
+`net10.out`, `net11.out`). The emitter writes the constructor of `GenAttribute<>` as MemberRef `0x0A000001` under the
+TypeSpec `0x1B000001`, `GenAttribute<!0>`. `CustomAttribute.FilterCustomAttributeRecord` resolves the row's type with
+`RuntimeModule.ResolveType(parent, null, null)`. That reaches the QCall `ModuleHandle_ResolveType`, whose signature walk
+meets `!0` with an empty `SigTypeContext`. `SigPointer::GetTypeVariableThrowing` then throws `BadImageFormatException`
+with HResult `0x8007000B` and the message "An attempt was made to load a program with an incorrect format.\n
+(0x8007000B)". `ModuleHandle.ResolveTypeHandle` finds the token valid and rethrows it. `RuntimeModule.ResolveType` wraps
+it in `ArgumentException` ("A BadImageFormatException has been thrown while parsing the signature. This is likely due
+to lack of a generic context. ..."). It is thrown before the type filter is consulted, so the attribute type asked
+about makes no difference. `IsDefined` (with and without inherit, of `Tag`, `GenAttribute<>`, `GenAttribute<int>`,
+`Attribute` and `object`), `GetCustomAttributes` (with and without a type), `Attribute.GetCustomAttribute`,
+`Attribute.GetCustomAttributes` and `Attribute.IsDefined` each throw that `ArgumentException`. `GetCustomAttributesData`
+and `CustomAttributes` resolve the constructor through `RuntimeType.GetMethodBase` instead, and the
+`BadImageFormatException` of `ModuleHandle_ResolveMethod` reaches the caller unwrapped. `Attributes` and
+`IsSerializable` do not read the row. `ResolveType(0x1B000001, [int])` gives `GenAttribute<int>`.
+
+**Where PawPrint diverged.** `ModuleHandle_ResolveType`'s TypeSpec arm passed the signature to
+`runtimeTypeHandleTargetForTypeToken`. Under an empty context, that function answers an instantiation over the
+definition's own parameters (`GenAttribute<!0>`) with the open definition, and it refuses a bare `!0` or `!0[]` with a
+TODO. `MatchesTypeFilter` rejected the open definition for every filter, so `IsDefined` answered false.
+`ModuleHandle_ResolveMethod` already raised the right exception, for a MethodSpec as well as for a MemberRef.
+
+**The fix.** It is in the QCall: a TypeSpec whose signature names a generic parameter that the caller's context does
+not supply (`containsUnboundGenericParameter`) raises `BadImageFormatException`, with the message its HResult gives.
+This is the rule and the message `ModuleHandle_ResolveMethod` already uses. `runtimeTypeHandleTargetForTypeToken` is
+unchanged. Its open-definition answer is still reached by `ldtoken` of a TypeSpec under an unbound context, which only
+invalid IL produces. CoreCLR's JIT reads that signature in the method's context too, and would throw there (read, not
+measured). This fix leaves that case alone.
+
+**Tests.**
+* `TestModuleResolveTypeSpec` resolves sixteen pairs of TypeSpec and context (`Holder<!0>`, `Holder<!!0>`,
+  `Holder<int>`, `!0`, `!0[]` and `!!0`, under no context, a type context, a method context and both) on the real
+  runtime and under PawPrint. Every missing-context case checks the exception types, the HResult and the inner message.
+* The guest `TypeBuilderCustomAttributeOpenGenericIsDefined.cs` was extended to eight checks, every query listed above
+  apart from `Attribute.GetCustomAttributes` and `CustomAttributes`, and un-parked. It exits 0 on both runtimes.
+  Controls expecting the first check's exception unwrapped, and the last's wrapped, exit 1 and 8 on both.
+* Red at `12f6e7563`: "Holder`1.Self in context none: the real runtime classifies it 128; PawPrint does not", and the
+  guest exits 1. Green at `923fbe095` on the host CoreLib and under `Net11`.
+
+**Mutants** (`mutate.py`; each applied to `923fbe095` and rebuilt):
+
+| Mutant | Unit test | Guest |
+|---|---|---|
+| no check | red: `Self`, none | red: 1 |
+| the exception without its message | red: `Self`, none (129) | green |
+| `TypeLoadException` instead | red: unhandled in the guest | red: 1 |
+| the method context ignored | red: `HolderOfV`, `m=int` | green |
+| the type context ignored | red: `Self`, `t=long` | green |
+| checked only for a generic instantiation | red: the `!0` TODO | green |
+
+**Suites** at `923fbe095`, with the whole solution built, each run as its own invocation under lock slot 2:
+
+| Suite | Passed | Failed | Skipped | Total | Duration |
+|---|---|---|---|---|---|
+| default | 5714 | 0 | 37 | 5751 | 14 m 58 s |
+| `Guest` | 234 | 0 | 0 | 234 | 13 m 3 s |
+| `GuestSolo` | 2 | 0 | 0 | 2 | 4 m 47 s |
+| `GuestPure` | 1194 | 0 | 0 | 1194 | 8 m 58 s |
+| `GuestImpure` | 293 | 0 | 0 | 293 | 6 m 20 s |
+
+`fantomas`, the docstring-attachment check and `footprint.py generate` changed nothing.
