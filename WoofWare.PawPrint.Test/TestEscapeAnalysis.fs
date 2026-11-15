@@ -15006,8 +15006,42 @@ public static class Runners
         throwing (answersM.GetILGenerator ()) other
         let answers = answersBuilder.CreateType ()
 
+        // A type of the fixture's own with the name and namespace of CoreLib's, whose `Await` throws
+        // an `Other`: it is no intrinsic, so the JIT matches no await through it.
+        let lookalikeBuilder =
+            modul.DefineType (
+                "System.Runtime.CompilerServices.AsyncHelpers",
+                TypeAttributes.Public ||| TypeAttributes.Abstract ||| TypeAttributes.Sealed
+            )
+
+        let lookalikeAwait =
+            lookalikeBuilder.DefineMethod (
+                "Await",
+                MethodAttributes.Public ||| MethodAttributes.Static,
+                typeof<int>,
+                [| typeof<Threading.Tasks.Task<int>> |]
+            )
+
+        throwing (lookalikeAwait.GetILGenerator ()) other
+        lookalikeBuilder.CreateType () |> ignore<Type>
+
         let awaits =
             modul.DefineType ("Awaits", TypeAttributes.Public ||| TypeAttributes.Abstract ||| TypeAttributes.Sealed)
+
+        // A P/Invoke returning a promise type, whose async variant the analysis does not model.
+        let native =
+            awaits.DefinePInvokeMethod (
+                "Native",
+                "native",
+                MethodAttributes.Public
+                ||| MethodAttributes.Static
+                ||| MethodAttributes.PinvokeImpl,
+                CallingConventions.Standard,
+                typeof<Threading.Tasks.Task<int>>,
+                Type.EmptyTypes,
+                Runtime.InteropServices.CallingConvention.Winapi,
+                Runtime.InteropServices.CharSet.Auto
+            )
 
         let define
             (name : string)
@@ -15054,6 +15088,32 @@ public static class Runners
             |> ignore<Emit.MethodBuilder>
 
         awaiting "AwaitsLeaf" (fun il -> il.Emit (Emit.OpCodes.Call, leaf))
+
+        define
+            "AwaitsLookalike"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit (Emit.OpCodes.Call, lookalikeAwait)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // An await the JIT never compiles, after the method has returned.
+        define
+            "ReturnsBeforeAwait"
+            true
+            typeof<Threading.Tasks.Task<int>>
+            (fun il ->
+                il.Emit Emit.OpCodes.Ldc_I4_0
+                il.Emit Emit.OpCodes.Ret
+                il.Emit (Emit.OpCodes.Call, native)
+                il.Emit (Emit.OpCodes.Call, awaitTask)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
         awaiting "AwaitsVersion" (fun il -> il.Emit (Emit.OpCodes.Call, version))
 
         awaiting
@@ -15208,6 +15268,19 @@ public static class Runners
 
         (shown.Contains "=Other", shown.Contains "=Thrown", constrained.Unknown)
         |> shouldEqual (true, false, false)
+
+        // Only CoreLib's intrinsic `Await` ends a pattern, so the lookalike runs, after `Leaf`'s
+        // thunk.
+        let analysis, lookalike = variantOf analysis "AwaitsLookalike"
+        let analysis, lookedAlike = EscapeAnalysis.escapes analysis lookalike
+
+        (render analysis lookedAlike |> Set.contains "=Other", lookedAlike.Unknown)
+        |> shouldEqual (true, true)
+
+        // The await after the `ret` is never compiled, so the P/Invoke's variant is never bound.
+        let analysis, returns = variantOf analysis "ReturnsBeforeAwait"
+        let analysis, returned = EscapeAnalysis.escapes analysis returns
+        returned.Unknown |> shouldEqual false
 
         let analysis, versionAwait = variantOf analysis "AwaitsVersion"
         let analysis, versionSources = sourcesOf analysis versionAwait
