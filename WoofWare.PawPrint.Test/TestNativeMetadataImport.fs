@@ -3140,23 +3140,29 @@ public interface IEventInterface
 
             state <- nextState
 
+            let heapBytesAt (cursor : int) : char =
+                let bytes =
+                    assembly.PeReader
+                        .GetMetadata()
+                        .GetContent (mr.GetHeapMetadataOffset HeapIndex.Blob + contentOffset + cursor, 2)
+
+                char (int bytes.[0] ||| (int bytes.[1] <<< 8))
+
             if contentOffset + blobLength + 2 <= heapSize then
                 readsPastTheEnd <- readsPastTheEnd + 1
 
-                let heapBytes =
-                    assembly.PeReader
-                        .GetMetadata()
-                        .GetContent (mr.GetHeapMetadataOffset HeapIndex.Blob + contentOffset + blobLength, 2)
-
                 readCharThrough fixture state out.StringPointer blobLength
-                |> shouldEqual (char (int heapBytes.[0] ||| (int heapBytes.[1] <<< 8)))
-            else
-                // The last blob in the heap: a read past the heap's end is refused, not invented.
-                Assert.Throws (fun () ->
-                    readCharThrough fixture state out.StringPointer (heapSize - contentOffset)
-                    |> ignore
-                )
-                |> ignore
+                |> shouldEqual (heapBytesAt blobLength)
+
+            // The heap's last two bytes are in reach, and a read straddling its end is refused
+            // rather than invented.
+            let lastChar = heapSize - contentOffset - 2
+
+            readCharThrough fixture state out.StringPointer lastChar
+            |> shouldEqual (heapBytesAt lastChar)
+
+            Assert.Throws (fun () -> readCharThrough fixture state out.StringPointer (lastChar + 1) |> ignore)
+            |> ignore
 
         readsPastTheEnd |> shouldBeGreaterThan 0
 
