@@ -7977,3 +7977,156 @@ Written first, and seen to fail before the handler changes, at the pseudo-attrib
   `DispatchProxy`, `DynamicInterfaceCastableImplementationAttribute`, and 5x's list (`XmlSerializer`, nested dynamic
   types, `TypeInfo.Events`, `<Module>` and `CreateGlobalFunctions`, the step budget for
   `TypeBuilderDefineParameterWide.cs`).
+
+### 5z: the decisions
+
+Taken 2026-11-15.
+
+Scratchpad paths below are under the scratchpad named in "5z: what it is". Two things were run for these decisions, each on .NET 10.0.14 and 11.0.0-rc.3 with identical output (`5z-decide/probe3/diff-net10-net11.txt` is empty):
+
+* `5z-decide/probe3` (`Program.cs` is the planner's probe plus the scenarios `kept2`, `unmodelled` and `genmeth`; outputs `net10.out`, `net11.out`, `marshal-net10.err`).
+* The planner's own probe under the Release App on `main` with the raw reader left on (`5z-decide/pawprint-raw-matrix.log`).
+
+Upstream source was read in `$DOTNET_RUNTIME_SRC_NET10` and compared with `_NET11`. Nothing in the repository was built or edited, so no decision below was tried under PawPrint beyond that one run.
+
+* **The emitter's rule, checked against the pinned source and not taken from the planner.**
+  * `RegMeta::DefineCustomAttribute` (md/compiler/custattr_emit.cpp:693) returns before `AddCustomAttributeRecord` when `_HandleKnownCustomAttribute` fails, or succeeds with `bKeep` false. So a flag and a refusal each consume no token. A kept attribute falls through to the ordinary row path.
+  * `_HandleKnownCustomAttribute` (:1004) checks the target first, parses only when `cArgs || cNamedArgs`, and only then acts. No refusal follows an effect, so a refused call changes nothing.
+  * `TypeBuilder_DefineCustomAttribute` (vm/comdynamic.cpp:915) turns every failed HRESULT into `COMPlusThrow(kArgumentException, IDS_EE_INVALID_CA)`, and the message is "Invalid custom attribute provided." (dlls/mscorrc/mscorrc.rc:463).
+  * `custattr_emit.cpp` differs in `_NET11` only in `StructLayout`'s new case. `LPCSTRToGuid` and `CPackedLen::SafeGetLength` are identical, though the latter moved from `utilcode/stgpooli.cpp` to `md/runtime/stgpooli.cpp`.
+  * The target lists of `Guid`, `ClassInterface`, `TypeLibVersion`, `ComCompatibleVersion` and `AllowPartiallyTrustedCallers` also name `mdtTypeRef` (:101-119). No builder passes a TypeRef owner and `HasCustomAttribute.tryOfToken` has no such case, so it is not modelled.
+* **Question 1, the names: (B), split over two PRs (question 12).**
+  * 5z-1, the seven that set a flag: `Serializable`, `NonSerialized`, `SpecialName`, `In`, `Out`, `Optional`, `PreserveSig`.
+  * 5z-2, the six that are validated and kept: `ClassInterface`, `InterfaceType`, `Guid`, `TypeLibVersion`, `ComCompatibleVersion`, `AllowPartiallyTrustedCallers`.
+  * The reason for (B) over (A): with question 5's table, a name is a row whose every cell is measured, and (A) would leave the TODO on names that the same code decides.
+  * Castle can reach more than the five measured. It replicates every public non-inheritable attribute except `ComImport`, `MarshalAs`, `TypeIdentifier` and `SecurityAttribute` (`AttributesToAvoidReplicating..cctor`, `5z/ildump-castle-all.txt:5612-5629`). So `Guid`, `InterfaceType` and `PreserveSig` arrive from a proxied COM-style interface. Read, not measured.
+  * (C) is rejected: its three names each need an oracle beyond metadata.
+  * `PreserveSig` "touches no execution semantics" holds only for an IL method. PawPrint reads the bit for a P/Invoke (`Semantics/UnmanagedTransition.fs:174`, `Semantics/NativeMethod.fs:199`). A dynamic module's P/Invoke is refused when defined (`NativeRuntimeTypeBuilder.fs:271-275`), so no row that 5z changes is read that way. The stage that admits `TypeBuilder_SetPInvokeData` inherits the bit with nothing to add.
+  * No reader in the interpreter consults `SpecialName`, `Serializable`, `NotSerialized` or a parameter's `In`, `Out`, `Optional` (grep over `WoofWare.PawPrint`, `Loader`, `TypeSystem` and `Semantics` at 3c8287d77).
+* **Question 2, `SetConstant`: (a), not in 5z.** It shares no code with the pseudo-attributes.
+* **Question 3, where a flag lives: (A), in the owner's row.**
+  * It is what CoreCLR keeps (`AddFlags`, no record of the attribute).
+  * (D) is rejected: the scope would hold a table that `CMiniMdRW` lacks, and every reader of a flags column would consult two tables.
+  * (E) is rejected: the classifier's answer would depend on the row, and the measured `Dup` and `Blobs` rows would be refused.
+* **Question 4, the extension rule: (a), narrowed. This differs from the planner.**
+  * A flags column of a TypeDef, MethodDef, Field, Param, Property or Event row may gain bits only inside the mask that question 5's table can set for that table. The masks are TypeDef `0x2400`, MethodDef `0x0800`, Field `0x0280`, Param `0x0013`, Property `0x0200`, Event `0x0200`.
+  * The mask is computed from the table and is not written a second time. A later stage that adds `tdImport` then widens the rule by adding its row.
+  * A gained bit outside the mask, or a lost bit, is `RowChanged`. A gained bit inside it on a created type's row is `FilledInCreatedType`.
+  * The reason: "the old value is a subset of the new" admits any fault that sets a bit, such as `Abstract` or `Interface`, on an uncreated type. The rule exists to catch that.
+  * `MethodDefRow.ImplFlags` needs nothing: `methodsRewritten` already admits any change to it for a type not created (`Loader/EmitScopeExtension.fs:104-133`).
+  * (b) is rejected for the planner's reason.
+* **Question 5, how the rules are stated: (A), data in Domain, with two changes.**
+  * An unmodelled name carries no data. This reverses the planner's "the target tables of the seven unmodelled names are data too". Nothing would read those tables in 5z and no behavioural test could check them. Each later stage adds its row with its oracle.
+  * A flag name's target set is derived from its effect and is not stated beside it. The effect gives, for each owner table that it accepts, the bit in that table's own flags enum (`TypeAttributes`, `MethodAttributes` or `MethodImplAttributes`, `FieldAttributes`, `ParameterAttributes`, `PropertyAttributes`, `EventAttributes`). An accepted target with no bit, or a bit on a refused target, cannot then be written. CoreCLR states the two separately (`rTypes` and the `switch`), and the fixed test below checks the derived set against `rTypes`.
+  * A kept name's descriptor holds its targets, its declared arguments (`U2`, `I4` or `String`, since the six need no other) and its value rule as a closed union: below a bound, a GUID, all non-negative, or none.
+  * `CustomAttributeDefinition` gains `FlagSet of EmitScope` and `Refused of KnownCustomAttributeRefusal`. The refusal is `WrongTarget`, `MalformedBlob`, `NamedArgument` or `InvalidValue`. CoreCLR collapses them into one exception and the handler does too; the cases exist so that a test can assert that each was reached.
+  * A kept attribute answers `Defined`, so that 5y's two checks on an `Assembly` owner run for it unchanged.
+  * (B) is rejected: thirteen arms would each restate the target check, and a test could enumerate nothing.
+  * These are public additions to a published package. The PR bodies say so.
+* **Question 6, the blob grammar: (a), CoreCLR's parser, with a correction to the planner's reading.**
+  * The named-argument count is a signed 16-bit value (`INT16 cActualArgs`, custattr_emit.cpp:568), and the loop runs while `ixArg < cActualArgs`. A negative count is therefore no named arguments, and nothing after it is read.
+  * Measured (`5z-decide/probe3`, `kept2`): `ClassInterface` with `01 00 01 00 FF FF`, with `01 00 01 00 00 80` and with `01 00 01 00 FF FF DE AD` each writes a row; so do `Guid` and `TypeLibVersion` followed by `FF FF`. A count of `0x7FFF` is refused.
+  * The planner's "for an attribute with none, any named argument fails" is true only of a positive count. A parser that refused every non-zero count would diverge.
+  * A positive count always refuses for these six, on every path of `ParseKnownCaNamedArgs`: a tag that cannot be read, a tag that is neither field nor property, a type or a name that cannot be read, or no declared argument to match. Measured for a well-formed `Property I4 "Foo"` and `Field I4 "Foo"`. So the parser states "count above 0 refuses" and does not model `ParseEncodedType`.
+  * The count is read only if bytes remain after the declared arguments. One trailing byte is a count that cannot be read, which is 0 (measured: `01 00 01 00 00` and `01 00 01 00 FF` each write a row). Bytes after a count of 0 or below are never read.
+  * The prolog is the first two bytes and must equal `0x0001`. Measured: `01 01` and `02 00` are refused.
+  * A string is `FF` for null, or a packed length and that many bytes.
+    * The length is read by `CPackedLen::SafeGetLength`. Its one-, two- and four-byte forms are accepted even when not the shortest (measured: `80 24` and `C0 00 00 24` for 36). A first byte from `E0` to `FE` fails (read).
+    * A length past the end of the blob fails (measured).
+  * The GUID rule: exactly 36 bytes, with `-` at offsets 8, 13, 18 and 23, and every other byte in `[0-9A-Fa-f]` (`LPCSTRToGuid`, utilcode/util.cpp:141). Measured: upper and mixed case accepted; an embedded NUL, a byte `C3`, a leading `+` or space, a moved dash, and lengths 35 and 0 refused.
+  * `ClassInterface` and `InterfaceType` each have one entry in `KnownCaList` with one `U2`, which serves both constructors. Measured: the `short` constructor's exact four-byte blob writes a row, and `0x8000` and `0xFFFF` are refused.
+  * (b) is rejected: measured divergent.
+* **Question 7, a refusal: (a), for the modelled names only.**
+  * The handler returns `NativeHandlerResult.RaiseException` for `System.ArgumentException` with `RuntimeExceptionField.Message "Invalid custom attribute provided."` and nothing else. `ParamName` is then null and the HResult is the constructor's `0x80070057`.
+  * An unmodelled name keeps 5y's TODO whatever its owner, a generic parameter included.
+  * Measured now for six of the seven unmodelled names (`5z-decide/probe3`, `unmodelled`): `DllImport`, `ComImport`, the three `MethodImpl` constructors, the two `StructLayout` constructors and `FieldOffset` each throw the same exception on every owner kind outside their list. So the source's rule holds for them. The TODO stays anyway: 5z has no oracle for what they do on a right target.
+  * A generic parameter. Measured for a type's and for a method's (`genmeth`):
+    * `SetCustomAttribute` returns, and `CreateType` throws when it bakes the queue.
+    * An attribute queued after the refused one is never written (no row on any GenericParam token).
+    * `IsCreated()` stays false, and a second `CreateType` throws again.
+    * Another type of the same module still creates and instantiates.
+  * The order in the handler: the arguments; the created-owner TODO; `defineCustomAttribute`; for `Refused` the raise, for `NotStoredAsGiven` the TODO, for `FlagSet` and `Defined` `WithEmitScope`; then 5y's two checks for an `Assembly` owner.
+  * A modelled name on a wrong target of a created type therefore stops with the created-owner TODO, where real .NET throws. That is a stop and not a divergence.
+* **Question 8, a pseudo-attribute on a created type or a member of one: (a).** The created-owner TODO stays ahead of everything.
+* **Question 9, the invoke-stub defect: both an issue and its own PR, and the PR goes before 5z-1.**
+  * The diagnosis is now read from source, and it corrects the planner's description.
+    * The failing stub is `InvokerEmitUtil.CreateInvokeDelegate_RefArgs` (libraries/System.Private.CoreLib/src/System/Reflection/InvokerEmitUtil.cs:143-185). For each argument it emits `ldarg.2`, then `ldc.i4 i*IntPtr.Size; add` when `i` is not 0, then `ldfld ByReference::Value`.
+    * Argument 2 is an `IntPtr*` that `MethodBaseInvoker.InvokeDirectByRefWithFewArgs` (MethodBaseInvoker.cs:153-170) points at a `StackAllocatedByRefs`. `InvokeWithManyArgs` points it at a block of `ByReference` instead (:255-257).
+    * PawPrint refuses to read a field of `ByReference` through a pointer whose referent is declared `StackAllocatedByRefs`. The log's IL offset 2 is that `ldfld`.
+    * It is not "the second call of a one-argument method". The second `MethodInfo.Invoke` of a one-argument method takes the `ObjSpanArgs` stub, which has no such `ldfld`.
+    * The `RefArgs` stub with an argument is reached by: the second `InvokePropertySetter` of a setter (`PropertyInfo.SetValue`, and each named property argument of an attribute, RuntimeCustomAttributeData.cs:1588); a method with a by-ref parameter from its second call; and a method of more than four parameters from its second call. Only the first is reproduced (`5z/stubrepro`). The other two are read.
+    * The source is identical in `_NET11`.
+  * Why an issue: it is a defect on `main` in merged work (#2180), in any guest with dynamic code on, and this plan is not where `main`'s defects are tracked.
+  * Why before 5z-1: it is independent of emit, and it is NSubstitute's next stop and Castle's as soon as a method carries two replicated attributes. Castle reads each attribute type's `AttributeUsage` (`ShouldSkipAttributeReplication`), and the second `set_Inherited` is the stub. A faithful consumer-shaped guest (question 10) therefore needs it.
+  * The limit on that order. The fix may turn out to need a new representation of a by-ref view; a contained fix teaches the read of one by-ref field at offset 0, and the stride of `IntPtr.Size`, through such a pointer. If it needs the new representation, the options go into the issue for the user, 5z-1 goes first, and its consumer-shaped modules are parked with the stub's stop.
+  * 5z-1 is not stacked on the fix. It branches from `main` once the fix has merged.
+  * The fix's guest covers, under dynamic code and against real .NET: a setter invoked three times for a `bool`, an `int`, a reference type and a struct; an attribute with two named properties read twice; a method with a `ref` and an `out` parameter invoked twice; a method of five parameters invoked twice; and a constructor with a by-ref parameter.
+* **Question 9, the other stops: each is recorded as an issue now, and none orders 5z.** No 5z guest reaches any of them.
+  * `ReflectionInvocation_CompileMethod`.
+    * It is the only answer the passing Moq `Setup` and `Verify` run used: `5z/consumers/t3-moq.log` and `t3i-moq.log` each hold two `CompileMethod` lines of the throwaway and no pseudo-attribute line. So Moq depends on neither 5z nor the stub fix. 5w recorded the same stop for `Expression.Compile`.
+    * Its PR is recommended straight after 5z-2 and before `SetConstant`.
+    * It is not the throwaway's no-op. CoreCLR runs `DoPrestub` (vm/reflectioninvocation.cpp:1198), so whatever compiling the body raises is raised at `CreateDelegate`. The implementer measures an invalid body first.
+    * The planner's "`CreateDelegate` of any skip-visibility `DynamicMethod`" is wrong. Only a `DynamicMethod` built without an owner or a module sets `_restrictedSkipVisibility` (DynamicMethod.cs:253-257), which is what `LambdaCompiler` builds. Measured: the planner's probe with its raw reader on, a `DynamicMethod` over `typeof(object).Module`, passes `CreateDelegate` on `main` and stops at the pseudo-attribute TODO (`5z-decide/pawprint-raw-matrix.log`). `--noraw` was not needed.
+  * `AssemblyNative_GetExportedTypes`, FakeItEasy's first stop on `main`, and general reflection (`Assembly.GetExportedTypes`).
+    * Its PR comes when FakeItEasy is next in line.
+    * The rule (vm/assemblynative.cpp): a TypeDef is included if it is public, or nested-public with every encloser nested-public up to a public one; then each ExportedType row implemented by a File. A forwarder to another assembly is not included.
+    * The throwaway's "top-level public TypeDefs" is not that rule.
+  * `RuntimeTypeHandle_VerifyInterfaceIsImplemented`, recorded as `Type.GetInterfaceMap`, whose first QCall it is (RuntimeType.CoreCLR.cs:2751). Its PR follows `GetExportedTypes`.
+  * `XmlSerializer`'s `AssemblyNative_InternalLoad`.
+    * The stop is the refusal of an `AssemblyName` with a processor-architecture flag (`5z/consumers/main-xml.log`: flags `0x11`).
+    * It has been carried in four "left to later" lists without an issue.
+    * It comes last: it is a binder question, and nobody has measured what `XmlSerializer` reaches after it.
+* **Question 10, the consumer shapes: (a).**
+  * 5z-1's guest has the Castle-shaped copy of an interface method's `in`, `out` and optional parameters, once with the bits already in the row and once without.
+  * 5z-2's guest has the NSubstitute-shaped proxy over `object`.
+  * Each reads `AttributeUsage` as Castle does if the stub fix has merged. Otherwise it takes the attribute list as given, and a parked module holds the faithful read.
+* **Question 11, the parked `TypeBuilderPseudoCustomAttributes.cs`: (a), it stays parked.** After 5z-1 its ending is the TODO for `SuppressUnmanagedCodeSecurity`, its third call. 5z-2 measures it again.
+* **Question 12, the split: two PRs. This reverses the planner's (a).**
+  * 5y's decisions already named "the pseudo-attributes that set flags on rows not yet created" and "those that are validated and kept" as separate later stages, and the plan's rule is one feature per PR.
+  * 5z-1 holds: the table with its `SetsFlag` and `Unmodelled` effects; the six row functions; the extension rule; `FlagSet`; `Refused` with `WrongTarget`; the raise; the flag guest; the flags differential. It reads no blob. Alone it unblocks Castle over `in` and `out`.
+  * 5z-2 holds: the validated-and-kept effect; the parser; the other three refusals; the kept guest; the validation differential. With 5z-1 it unblocks NSubstitute's and FakeItEasy's substitutes.
+  * The planner's (b), a split by layer, is rejected: Domain would ship with nothing calling it.
+  * Inside each PR the split by layer stays the cut to make if review finds it too large.
+* **Corrections to the other 5z sections.**
+  * "A count that cannot be read is 0 ... any named argument fails": the count is signed, and a negative one is accepted (question 6).
+  * "`inc/caparser.h` not at all": one `#include` differs in `_NET11`. Nothing it parses differs.
+  * "`CreateDelegate` of any skip-visibility `DynamicMethod`", and the reason given for `--noraw`: wrong (question 9).
+  * "The second reflection call of a one-argument method", and "presumably `ByReference.Value` ... not checked": it is the `RefArgs` stub with an argument, and the field is confirmed from source (question 9).
+  * "Touches no execution semantics" for `PreserveSig`: true of an IL method only (question 1).
+  * `GenParam` covered a type's generic parameter only. A method's behaves the same, and a later queued attribute is not written (question 7).
+  * The oracle's fixed table test of "each of the twenty names' targets" becomes each of the thirteen modelled names. The mutant "an unmodelled name given a target check" stays, and the refusal fixture's `MethodImpl`-on-a-field guest kills it.
+  * The oracle's terminal-state check is kept as the guests' check that no token is consumed. The raw reader is not put into a guest although it passes `CreateDelegate`: it reaches CoreLib's internals by reflection, and the in-process differential already reads raw on the host.
+* **What the implementer verifies first**, each with a throwaway before any Domain code:
+  * That `RaiseException` with the message field gives a guest `ArgumentException` whose `Message` is exactly the text, whose `ParamName` is null and whose `HResult` is `0x80070057`, catchable around `SetCustomAttribute`.
+  * That the same raise out of the bake inside `CreateType` unwinds through CoreLib's `lock`, and leaves `IsCreated()` false, the module usable for another type, and the queued attribute after it unwritten.
+  * What a retried `CreateType` does under PawPrint. Real .NET defines the generic parameter again and throws again. If PawPrint does the same, the retry goes into the guest; if it stops, the retry is a parked case.
+  * That `WithEmitScope` re-reads a scope in which each of the six row types of an uncreated type has gained its bit, and that the type then creates. The throwaway tried only a TypeDef and a Param, with bits already there.
+  * That each guest's control exits with its check's number on .NET 10.0.14 and 11.0.0-rc.3.
+  * For 5z-2, that reading back the rows real .NET stores but cannot parse (`01 00 01 00 FF FF`, and the planner's two) throws `CustomAttributeFormatException` under PawPrint as on real .NET, through `GetCustomAttributesData` and through `GetCustomAttributes`. If it does not, those rows are checked by the terminal state alone and a parked case holds the read.
+* **Additions to the oracle.**
+  * The flags differential draws owners with arbitrary initial flags. It asserts as coverage: each of the seven names on each target of its list and on one outside; a constructor and a return parameter; a bit already set and a bit not set; an impostor of the name defined in the module.
+  * The validation differential's generator also draws:
+    * counts of -1, -32768, 0, 1 and `0x7FFF`;
+    * a well-formed named argument;
+    * one trailing byte;
+    * packed lengths in each of the three forms, and a first byte from `E0` to `FE`;
+    * the null string;
+    * GUID strings with either case, an embedded NUL, a non-ASCII byte and each dash moved.
+  * `5z-decide/probe3`'s `kept2` rows are that property's fixed table, beside the planner's.
+  * Mutants added:
+    * the count read as unsigned (the fixed table's `FF FF` row; the differential);
+    * every non-zero count refused (the same);
+    * the packed length accepted only in its shortest form (the `80 24` row);
+    * the GUID's hex digits accepted in lower case only;
+    * the extension rule admitting a gained bit outside the mask (`TestEmitScopeExtension`);
+    * the mask written by hand and missing one table (`TestEmitScopeExtension`, which draws every table).
+* **PR titles.**
+  * The fix: "Read by-reference arguments in an emitted reflection invoke stub".
+  * 5z-1: "Pseudo-attributes that set a flag in their owner's row (type-builder stage 5z-1)".
+  * 5z-2: "Pseudo-attributes that the emitter validates and keeps (type-builder stage 5z-2)".
+* **Additions to "left to later stages".**
+  * `MarshalAs(short)` with a well-formed blob on a property does not return on .NET 10.0.14: the process sat idle until killed after 40 s (`5z-decide/probe3/marshal-net10.err` ends at "MarshalAs(short) property good"). No other owner and no .NET 11 run was tried. The stage that models `MarshalAs` measures this first.
+  * The measured refusals of the unmodelled names on wrong targets (`5z-decide/probe3`, `unmodelled`), for the stages that model them. `WindowsRuntimeImport` and `MarshalAs` are not in that measurement.
+  * `PreserveSig` on a dynamic module's P/Invoke, with the stage that admits `TypeBuilder_SetPInvokeData`.
+  * A modelled name on a wrong target of a created owner, which stops where real .NET throws.
+  * The five issues of question 9: the invoke stub #2267, `ReflectionInvocation_CompileMethod` #2268, `AssemblyNative_GetExportedTypes` #2269, `RuntimeTypeHandle_VerifyInterfaceIsImplemented` #2270, and `XmlSerializer`'s `AssemblyNative_InternalLoad` #2271.
