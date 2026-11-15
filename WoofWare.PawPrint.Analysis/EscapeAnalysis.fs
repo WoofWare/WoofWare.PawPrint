@@ -77,10 +77,11 @@ type Opacity =
     /// call binds: CoreCLR runs the task-returning thunk its VM emits in its place, which no IL here
     /// describes.
     | TaskReturningThunk
-    /// The async variant of a method with IL for the ordinary calling convention, which runs that IL
-    /// as an async version: each <c>ret</c> awaits the promise it returns, and a call in one of the
-    /// tail shapes calls its callee's async variant. The analysis does not follow an async version.
-    | AsyncVersion
+    /// A <c>ret</c> of an async version, the async variant of a method with IL for the ordinary
+    /// calling convention, that ends none of its tail shapes: CoreCLR awaits the promise it returns
+    /// (<c>AsyncHelpers.TransparentAwait</c>), which raises whatever the promise holds. The analysis
+    /// does not follow what a promise holds.
+    | AwaitedPromise
     /// The method is IL, but its row names no body. CoreCLR raises <c>BadImageFormatException</c>
     /// when it is invoked, before any of it runs; the analysis does not model that verdict.
     | MissingBody
@@ -119,7 +120,7 @@ type OpaqueSite =
         /// The offset of the instruction in the IL CoreCLR runs for the method: its own, or what the
         /// VM substitutes for it. <c>None</c> where the place is no instruction: the method has no IL
         /// the analysis follows (<c>NativeBody</c>, <c>AbstractBody</c>, <c>MissingBody</c>,
-        /// <c>IntrinsicExpansion</c>, <c>AsyncVersion</c>),
+        /// <c>IntrinsicExpansion</c>),
         /// or binding what its body names fails in a way the analysis cannot follow, or the JIT may
         /// refuse to compile it, before any of it runs (<c>DependsOnInstantiation</c>,
         /// <c>UnresolvedAssembly</c>, <c>BoxedByRefLikeReceiver</c>, <c>NewobjOfNonConstructor</c>,
@@ -4219,10 +4220,11 @@ module EscapeAnalysis =
                 failwith
                     $"TODO: %O{key} is the async variant of a method the analysis runs something other than its IL for; the analysis does not say what runs for its async variant"
 
-            // The variant runs the row's own body (`RuntimeAsyncMethod.asyncVariantOf`).
+            // The variant runs the row's own body (`RuntimeAsyncMethod.asyncVariantOf`): runtime-async
+            // IL, or the IL of an async version.
             match method.Body with
-            | MethodBody.AsyncIl body -> state, Runs.Il (body, None)
-            | MethodBody.Il _ -> state, Runs.Opaque Opacity.AsyncVersion
+            | MethodBody.AsyncIl body
+            | MethodBody.Il body -> state, Runs.Il (body, None)
             | MethodBody.Abstract -> state, Runs.Opaque Opacity.AbstractBody
             | MethodBody.InternalCall
             | MethodBody.PInvoke
@@ -4965,6 +4967,7 @@ module EscapeAnalysis =
         let folder
             (targets : Map<int, CallTarget>)
             (awaitSites : Map<int, Callee>)
+            (wrapsReturns : bool)
             (unbound : Set<int>)
             (spellings : SpelledType[])
             (objectsAt : int -> int -> SpelledObject list option)
@@ -4981,7 +4984,7 @@ module EscapeAnalysis =
             =
             let op, offset = ops.[index]
 
-            // A matched await calls the async variant of the method its token names.
+            // A matched await or tail shape calls the async variant of the method its token names.
             let methodTarget =
                 match Map.tryFind index awaitSites with
                 | Some variant -> Some (CallTarget.Method variant)
@@ -5270,6 +5273,13 @@ module EscapeAnalysis =
                         failwith
                             $"A call in %s{assembly.DefinitionFullName} names %O{token.Token}, which is not a method"
                 | _ -> state, raises, opaque, calls
+
+            // 4. What a `ret` awaits: in an async version, the promise it returns, whose exception the
+            // analysis does not follow. A `ret` ending a tail shape never runs.
+            let opaque =
+                match op with
+                | IlOp.Nullary NullaryIlOp.Ret when wrapsReturns -> (offset, Opacity.AwaitedPromise, None) :: opaque
+                | _ -> opaque
 
             state, raises, opaque, calls
 
@@ -5861,24 +5871,27 @@ module EscapeAnalysis =
             )
             |> Set.ofList
 
-        // Each await the JIT matches (`impMatchTaskAwaitPattern`, importer.cpp) in a body with
-        // runtime async's calling convention that saves contexts, by the index of its call, that
-        // binds the async variant of the method the call names (decision 13 of
-        // `docs/plans/2026-11-11-runtime-async.md`), with the variant called. The call's step is the
-        // whole pattern, so the instructions after the call up to and including the await's call
-        // never run (`swallowed`). A site that binds no variant calls the method named, and awaits
-        // the promise it returns, as any other call does.
+        // Each call whose step is a longer pattern the JIT reads, by its index, that binds the async
+        // variant of the method the call names (decision 13 of
+        // `docs/plans/2026-11-11-runtime-async.md`), with the variant called: an await
+        // (`impMatchTaskAwaitPattern`, importer.cpp) in a body with runtime async's calling
+        // convention that saves contexts, or a tail shape (`impMatchAsyncVersionTailCall`) in an
+        // async version. The call's step is the whole pattern, so the instructions after the call up
+        // to and including the pattern's last never run (`swallowed`). A site that binds no variant
+        // calls the method named, as any other call does.
         let state, awaitSites, swallowed =
             let indexAt =
                 ops |> Array.mapi (fun index (_, offset) -> offset, index) |> Map.ofArray
 
-            // Whether the token of the instruction at `offset` binds one of CoreLib's intrinsics that
-            // `names` admits, by its type's namespace and name and its own name.
-            let namesIntrinsic (names : string -> string -> string -> bool) (offset : int) : bool =
-                match
-                    Map.tryFind offset indexAt
-                    |> Option.bind (fun index -> Map.tryFind index targets)
-                with
+            // Whether the token of the instruction at `index` binds one of CoreLib's intrinsics that
+            // `names` admits, by its type's namespace and name and the method.
+            let namesIntrinsic
+                (names :
+                    string -> string -> MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> -> bool)
+                (index : int)
+                : bool
+                =
+                match Map.tryFind index targets with
                 | Some (CallTarget.Method named) when
                     named.Callee.AssemblyFullName = state.BaseTypes.Corelib.DefinitionFullName
                     ->
@@ -5886,14 +5899,13 @@ module EscapeAnalysis =
                     let declaring = declaringTypeOf state named.Callee
                     let typeDef = state.BaseTypes.Corelib.TypeDefs.[declaring.TypeDefinition.Get]
 
-                    names typeDef.Namespace typeDef.Name method.Name
+                    names typeDef.Namespace typeDef.Name method
                     && IntrinsicBody.isIntrinsic state.BaseTypes.Corelib named.Callee.Method.Get
                 | _ -> false
 
-            // The await the call at `index` begins, where its operands name the methods the JIT
-            // tests for; where one names something else, nothing shorter the JIT would read can
-            // match.
-            let matchedAt (index : int) : (AwaitedCall * Callee * AwaitFollower<MetadataOperand>) option =
+            // The call at `index`, where it is a `call` or `callvirt` that the JIT compiles, which is
+            // where it reads the patterns, and whose token binds a method that runs.
+            let compiledCallAt (index : int) : (AwaitedCall * Callee) option =
                 let op, offset = ops.[index]
 
                 let opcode =
@@ -5904,122 +5916,220 @@ module EscapeAnalysis =
                         Some AwaitedCall.Callvirt
                     | _ -> None
 
-                // The JIT matches the pattern as it imports the call, so only where it compiles it.
                 match opcode, Map.tryFind index targets with
                 | Some opcode, Some (CallTarget.Method callee) when
                     compiled.Contains offset
                     && not (unbound.Contains index)
                     && not (abstractCallees.Contains index)
                     ->
-                    AwaitPattern.awaitAfter body offset
+                    Some (opcode, callee)
+                | _ -> None
+
+            // The await the call at `index` begins, where its operands name the methods the JIT
+            // tests for; where one names something else, nothing shorter the JIT would read can
+            // match.
+            let awaitAt (index : int) : (AwaitedCall * Callee * AwaitFollower<MetadataOperand>) option =
+                compiledCallAt index
+                |> Option.bind (fun (opcode, callee) ->
+                    AwaitPattern.awaitAfter body (snd ops.[index])
                     |> Option.filter (fun follower ->
+                        let awaitIndex = Map.find follower.AwaitOffset indexAt
+
                         namesIntrinsic
-                            (fun ns typeName name ->
+                            (fun ns typeName method ->
                                 ns = "System.Runtime.CompilerServices"
                                 && typeName = "AsyncHelpers"
-                                && name = "Await"
+                                && method.Name = "Await"
                             )
-                            follower.AwaitOffset
+                            awaitIndex
                         && (
                             match follower.ConfigureAwait with
                             | None -> true
-                            | Some configureAwait ->
-                                // Its offset is the instruction after the constant.
-                                let configureOffset = ops.[Map.find follower.AwaitOffset indexAt - 1] |> snd
-
+                            | Some _ ->
+                                // Its call is the instruction after the constant.
                                 namesIntrinsic
-                                    (fun ns typeName name ->
+                                    (fun ns typeName method ->
                                         ns = "System.Threading.Tasks"
                                         && (typeName = "Task"
                                             || typeName = "Task`1"
                                             || typeName = "ValueTask"
                                             || typeName = "ValueTask`1")
-                                        && name = "ConfigureAwait"
+                                        && method.Name = "ConfigureAwait"
                                     )
-                                    configureOffset
+                                    (awaitIndex - 1)
                         )
                     )
                     |> Option.map (fun follower -> opcode, callee, follower)
-                | _ -> None
+                )
+
+            // The tail shape the call at `index` begins, with the index of the `ret` that ends it,
+            // where the operand of its `newobj` or `AsTask` names the intrinsic the JIT tests for;
+            // where it names something else, nothing shorter the JIT would read can match. A shape's
+            // instructions are consecutive: `call; ret`, `call; newobj; ret`, or
+            // `call; stloc; ldloca; call AsTask; ret`.
+            let tailShapeAt (index : int) : (AwaitedCall * Callee * int) option =
+                compiledCallAt index
+                |> Option.bind (fun (opcode, callee) ->
+                    let valueTask (ns : string) (typeName : string) : bool =
+                        ns = "System.Threading.Tasks"
+                        && (typeName = "ValueTask" || typeName = "ValueTask`1")
+
+                    match AwaitPattern.tailShapeAfter body (snd ops.[index]) with
+                    | None -> None
+                    | Some TailShape.Return -> Some (opcode, callee, index + 1)
+                    | Some (TailShape.NewValueTask _) ->
+                        let confirmed =
+                            namesIntrinsic
+                                (fun ns typeName method ->
+                                    valueTask ns typeName
+                                    && method.Name = ".ctor"
+                                    // One argument, and not the `T` of `ValueTask<T>(T)`, which
+                                    // `impFoldAwaitedTopOfStack` folds instead.
+                                    && (
+                                        match method.Signature.ParameterTypes with
+                                        | [ TypeDefn.GenericTypeParameter 0 ] -> false
+                                        | [ _ ] -> true
+                                        | _ -> false
+                                    )
+                                )
+                                (index + 1)
+
+                        if confirmed then Some (opcode, callee, index + 2) else None
+                    | Some (TailShape.AsTask _) ->
+                        let confirmed =
+                            namesIntrinsic
+                                (fun ns typeName method -> valueTask ns typeName && method.Name = "AsTask")
+                                (index + 3)
+
+                        if confirmed then Some (opcode, callee, index + 4) else None
+                )
+
+            // The async variant the call at `index` of `callee` binds where it begins `pattern`, as
+            // `site` describes it; `None` where it binds none, and the call runs `callee`.
+            let bindsVariant
+                (state : EscapeAnalysisState)
+                (pattern : MatchedPattern)
+                (opcode : AwaitedCall)
+                (index : int)
+                (callee : Callee)
+                (site : string)
+                : EscapeAnalysisState * Callee option
+                =
+                let calleeAssembly, named = methodOf state callee.Callee
+
+                let state, variant =
+                    match
+                        RuntimeAsyncMethod.asyncVariantOf
+                            state.LoggerFactory
+                            state.RuntimeDirs
+                            state.BaseTypes.Corelib
+                            calleeAssembly
+                            named
+                            state.TypeSystem._LoadedAssemblies
+                    with
+                    | assemblies, variant -> withAssemblies state assemblies, variant
+
+                let classified =
+                    AwaitSiteBinding.classify
+                        {
+                            Pattern = pattern
+                            Opcode = opcode
+                            Constrained = (constrainedPrefix index).IsSome
+                            NamedDispatchesVirtually = named.DispatchesVirtually
+                            NamedVariant =
+                                variant
+                                |> Result.map (fun variant ->
+                                    match variant.Body with
+                                    | MethodBody.AsyncIl _ -> AsyncVariantBody.RuntimeAsyncIl
+                                    | MethodBody.Il _ -> AsyncVariantBody.AsyncVersion
+                                    | MethodBody.Abstract -> AsyncVariantBody.Abstract
+                                    | other ->
+                                        failwith
+                                            $"BUG: RuntimeAsyncMethod.asyncVariantOf gave %O{variant} the body %O{other}, which it refuses"
+                                )
+                        }
+
+                match classified, variant with
+                | AwaitSiteBinding.BindsVariant _, Ok variant ->
+                    state,
+                    Some
+                        { callee with
+                            Callee = MethodKey.ofMethod calleeAssembly variant
+                        }
+                | AwaitSiteBinding.BindsVariant _, Error refusal ->
+                    failwith $"BUG: %s{site} binds the async variant of %O{callee.Callee}, which has none: %A{refusal}"
+                // CoreCLR classified the method's return type as it loaded the method's declaring
+                // type, which binding the call's token did.
+                | AwaitSiteBinding.NoVariant (AsyncVariantRefusal.ReturnTypeUnbound failure), _
+                | AwaitSiteBinding.NoVariant (AsyncVariantRefusal.BaseTypeUnbound failure), _ ->
+                    failwith
+                        $"%s{site}: deciding whether %O{callee.Callee} has an async variant needs a type the analysis cannot bind, though the call's token bound: %s{TypeBindingFailure.describe failure}"
+                | AwaitSiteBinding.Unmodelled variantBody, _ ->
+                    failwith
+                        $"TODO: %s{site} binds the async variant of %O{callee.Callee}, whose body is %A{variantBody}; CoreCLR runs that variant, which the analysis does not model (decision 16 of docs/plans/2026-11-11-runtime-async.md)"
+                | AwaitSiteBinding.NoVariant _, _ -> state, None
+
+            // Each site that `siteAt` finds, as a pattern ending at the index it gives, bound as
+            // `bindsVariant` binds it.
+            let bindSites
+                (siteAt : int -> (AwaitedCall * Callee * MatchedPattern * int * string) option)
+                : EscapeAnalysisState * Map<int, Callee> * Set<int>
+                =
+                ((state, Map.empty, Set.empty), [ 0 .. ops.Length - 1 ])
+                ||> List.fold (fun (state, awaitSites, swallowed) index ->
+                    match siteAt index with
+                    | None -> state, awaitSites, swallowed
+                    | Some (opcode, callee, pattern, lastIndex, site) ->
+
+                    match bindsVariant state pattern opcode index callee site with
+                    | state, Some variant ->
+                        state,
+                        Map.add index variant awaitSites,
+                        Set.union swallowed (Set.ofList [ index + 1 .. lastIndex ])
+                    | state, None -> state, awaitSites, swallowed
+                )
+
+            let synchronized =
+                match method with
+                | MethodInfo.Metadata (_, facts, _) -> facts.ImplAttributes.HasFlag MethodImplAttributes.Synchronized
+                | MethodInfo.Synthesised _ -> false
 
             match key.Variant, method.Body with
             // A runtime-async method's own body, which saves contexts.
             | MethodVariant.AsyncVariant, MethodBody.AsyncIl _ ->
-                ((state, Map.empty, Set.empty), [ 0 .. ops.Length - 1 ])
-                ||> List.fold (fun (state, awaitSites, swallowed) index ->
-                    match matchedAt index with
-                    | None -> state, awaitSites, swallowed
-                    | Some (opcode, callee, follower) ->
+                bindSites (fun index ->
+                    awaitAt index
+                    |> Option.map (fun (opcode, callee, follower) ->
+                        let pattern =
+                            follower.ConfigureAwait
+                            |> Option.forall (fun configureAwait -> configureAwait.ContinueOnCapturedContext)
+                            |> MatchedPattern.Await
 
-                    let calleeAssembly, named = methodOf state callee.Callee
-
-                    let state, variant =
-                        match
-                            RuntimeAsyncMethod.asyncVariantOf
-                                state.LoggerFactory
-                                state.RuntimeDirs
-                                state.BaseTypes.Corelib
-                                calleeAssembly
-                                named
-                                state.TypeSystem._LoadedAssemblies
-                        with
-                        | assemblies, variant -> withAssemblies state assemblies, variant
-
-                    let classified =
-                        AwaitSiteBinding.classify
-                            {
-                                Pattern =
-                                    follower.ConfigureAwait
-                                    |> Option.forall (fun configureAwait -> configureAwait.ContinueOnCapturedContext)
-                                    |> MatchedPattern.Await
-                                Opcode = opcode
-                                Constrained = (constrainedPrefix index).IsSome
-                                NamedDispatchesVirtually = named.DispatchesVirtually
-                                NamedVariant =
-                                    variant
-                                    |> Result.map (fun variant ->
-                                        match variant.Body with
-                                        | MethodBody.AsyncIl _ -> AsyncVariantBody.RuntimeAsyncIl
-                                        | MethodBody.Il _ -> AsyncVariantBody.AsyncVersion
-                                        | MethodBody.Abstract -> AsyncVariantBody.Abstract
-                                        | other ->
-                                            failwith
-                                                $"BUG: RuntimeAsyncMethod.asyncVariantOf gave %O{variant} the body %O{other}, which it refuses"
-                                    )
-                            }
-
-                    let site = $"awaiting at IL_%04X{follower.AwaitOffset} of %O{key}"
-
-                    match classified, variant with
-                    | AwaitSiteBinding.BindsVariant _, Ok variant ->
-                        let swallowed =
-                            Set.union swallowed (Set.ofList [ index + 1 .. Map.find follower.AwaitOffset indexAt ])
-
-                        let variant =
-                            { callee with
-                                Callee = MethodKey.ofMethod calleeAssembly variant
-                            }
-
-                        state, Map.add index variant awaitSites, swallowed
-                    | AwaitSiteBinding.BindsVariant _, Error refusal ->
-                        failwith
-                            $"BUG: %s{site} binds the async variant of %O{callee.Callee}, which has none: %A{refusal}"
-                    // CoreCLR classified the method's return type as it loaded the method's
-                    // declaring type, which binding the call's token did.
-                    | AwaitSiteBinding.NoVariant (AsyncVariantRefusal.ReturnTypeUnbound failure), _
-                    | AwaitSiteBinding.NoVariant (AsyncVariantRefusal.BaseTypeUnbound failure), _ ->
-                        failwith
-                            $"%s{site}: deciding whether %O{callee.Callee} has an async variant needs a type the analysis cannot bind, though the call's token bound: %s{TypeBindingFailure.describe failure}"
-                    | AwaitSiteBinding.Unmodelled variantBody, _ ->
-                        failwith
-                            $"TODO: %s{site} binds the async variant of %O{callee.Callee}, whose body is %A{variantBody}; CoreCLR runs that variant, which the analysis does not model (decision 16 of docs/plans/2026-11-11-runtime-async.md)"
-                    | AwaitSiteBinding.NoVariant _, _ -> state, awaitSites, swallowed
+                        opcode,
+                        callee,
+                        pattern,
+                        Map.find follower.AwaitOffset indexAt,
+                        $"awaiting at IL_%04X{follower.AwaitOffset} of %O{key}"
+                    )
+                )
+            // An async version. The JIT reads no tail shape in the async version of a synchronized
+            // method (`CORINFO_FLG_SYNCH`), whose every `ret` awaits.
+            | MethodVariant.AsyncVariant, MethodBody.Il _ when not synchronized ->
+                bindSites (fun index ->
+                    tailShapeAt index
+                    |> Option.map (fun (opcode, callee, returnAt) ->
+                        opcode,
+                        callee,
+                        MatchedPattern.TailShape,
+                        returnAt,
+                        $"the tail shape at IL_%04X{snd ops.[index]} of %O{key}"
+                    )
                 )
             // A method of runtime async's own machinery, with its calling convention and no promise
             // to return.
             | MethodVariant.Ordinary, MethodBody.AsyncIl _ ->
                 for index in 0 .. ops.Length - 1 do
-                    match matchedAt index with
+                    match awaitAt index with
                     | None -> ()
                     | Some (_, _, follower) ->
                         failwith
@@ -6027,6 +6137,13 @@ module EscapeAnalysis =
 
                 state, Map.empty, Set.empty
             | _ -> state, Map.empty, Set.empty
+
+        // Whether each `ret` that ends no tail shape awaits the promise it returns: in an async
+        // version (`impWrapTopOfStackInAwait`, importer.cpp).
+        let wrapsReturns =
+            match key.Variant, method.Body with
+            | MethodVariant.AsyncVariant, MethodBody.Il _ -> true
+            | _ -> false
 
         let outsideBody =
             if abstractCallees.IsEmpty then
@@ -6169,7 +6286,18 @@ module EscapeAnalysis =
                     && not (refusedCompilations.ContainsKey index)
                     && not (swallowed.Contains index)
                 then
-                    folder targets awaitSites unbound spellings objectsAt integersAt calleeArguments passedAt acc index
+                    folder
+                        targets
+                        awaitSites
+                        wrapsReturns
+                        unbound
+                        spellings
+                        objectsAt
+                        integersAt
+                        calleeArguments
+                        passedAt
+                        acc
+                        index
                 else
                     acc
             )
