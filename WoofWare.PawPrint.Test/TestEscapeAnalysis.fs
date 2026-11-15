@@ -15316,6 +15316,80 @@ public static class Runners
 
         awaiting "AwaitsTailLeaf" (fun il -> il.Emit (Emit.OpCodes.Call, tailLeaf))
 
+        // An ordinary method calling one that does nothing, against which the folded intrinsics are
+        // compared: as at any call the JIT expands, the instruction's own faults stand.
+        let nothing =
+            define "Nothing" false typeof<Void> (fun il -> il.Emit Emit.OpCodes.Ret)
+
+        define
+            "CallsNothing"
+            false
+            typeof<Void>
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, nothing)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // Tail shapes of the intrinsics whose async variant's call the JIT replaces with its value.
+        let taskFromResult =
+            typeof<Threading.Tasks.Task>.GetMethod("FromResult").MakeGenericMethod typeof<int>
+
+        let valueTaskFromResult =
+            typeof<Threading.Tasks.ValueTask>.GetMethod("FromResult").MakeGenericMethod typeof<int>
+
+        let tailOf (name : string) (returns : Type) (loads : Emit.ILGenerator -> unit) (callee : MethodInfo) =
+            define
+                name
+                false
+                returns
+                (fun il ->
+                    loads il
+                    il.Emit (Emit.OpCodes.Call, callee)
+                    il.Emit Emit.OpCodes.Ret
+                )
+            |> ignore<Emit.MethodBuilder>
+
+        let loadsOne (il : Emit.ILGenerator) = il.Emit Emit.OpCodes.Ldc_I4_1
+        let loadsNothing (_ : Emit.ILGenerator) = ()
+
+        tailOf "TailFromResult" taskOfInt loadsOne taskFromResult
+        tailOf "TailValueTaskFromResult" valueTaskOfInt loadsOne valueTaskFromResult
+
+        tailOf
+            "TailCompletedTask"
+            typeof<Threading.Tasks.Task>
+            loadsNothing
+            (typeof<Threading.Tasks.Task>.GetProperty("CompletedTask").GetGetMethod ())
+
+        tailOf
+            "TailValueTaskCompletedTask"
+            typeof<Threading.Tasks.ValueTask>
+            loadsNothing
+            (typeof<Threading.Tasks.ValueTask>.GetProperty("CompletedTask").GetGetMethod ())
+
+        awaiting
+            "AwaitsFromResult"
+            (fun il ->
+                il.Emit Emit.OpCodes.Ldc_I4_1
+                il.Emit (Emit.OpCodes.Call, taskFromResult)
+            )
+
+        // `AsTask` is an intrinsic whose IL is its semantics, which its async variant runs as an async
+        // version.
+        let tailAsTask =
+            awaits.DefineMethod (
+                "TailAsTaskOfArgument",
+                MethodAttributes.Public ||| MethodAttributes.Static,
+                taskOfInt,
+                [| valueTaskOfInt.MakeByRefType () |]
+            )
+
+        let il = tailAsTask.GetILGenerator ()
+        il.Emit Emit.OpCodes.Ldarg_0
+        il.Emit (Emit.OpCodes.Call, valueTaskOfInt.GetMethod ("AsTask", Type.EmptyTypes))
+        il.Emit Emit.OpCodes.Ret
+
         awaits.CreateType () |> ignore<Type>
 
         use stream = new MemoryStream ()
@@ -15427,7 +15501,9 @@ public static class Runners
     /// returns what that returns, so what the variant throws escapes at the call and nothing after
     /// the call runs. Every other `ret` awaits the promise it returns, which the analysis does not
     /// follow (`Opacity.AwaitedPromise`). The async version of a synchronized method reads no tail
-    /// shape, and the ordinary variant runs the IL as written.
+    /// shape, and the ordinary variant runs the IL as written. The variant of an intrinsic whose IL is
+    /// its semantics runs that IL too, except where the JIT replaces the variant's call with its value
+    /// (`IntrinsicBody.foldsAsyncVariantCall`), where nothing runs.
     [<Test>]
     let ``an async version's tail shapes call the callee's async variant`` () : unit =
         match FrameworkUnderTest.runtime () with
@@ -15511,6 +15587,35 @@ public static class Runners
 
         (render analysis wrapped |> Set.contains "=Thrown", wrappedSources)
         |> shouldEqual (true, Set.singleton (awaited "WrapsAfterThrow"))
+
+        // The JIT replaces the call of each of these intrinsics' async variant with its value, so
+        // nothing runs; so too where an await binds one.
+        let analysis, nothing =
+            EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "CallsNothing")
+
+        let analysis =
+            (analysis,
+             [
+                 "TailFromResult"
+                 "TailValueTaskFromResult"
+                 "TailCompletedTask"
+                 "TailValueTaskCompletedTask"
+                 "AwaitsFromResult"
+             ])
+            ||> List.fold (fun analysis name ->
+                let analysis, variant = variantOf analysis name
+                let analysis, escapes = EscapeAnalysis.escapes analysis variant
+                (name, escapes) |> shouldEqual (name, nothing)
+                analysis
+            )
+
+        // The variant of `ValueTask<int>.AsTask` runs its IL as an async version, whose `ret` awaits.
+        let analysis, asTask = variantOf analysis "TailAsTaskOfArgument"
+        let analysis, asTaskSources = sourcesOf analysis asTask
+
+        asTaskSources
+        |> Set.contains "System.Threading.Tasks.ValueTask`1::AsTask (async variant) IL AwaitedPromise"
+        |> shouldEqual true
 
         // The ordinary variant calls `Leaf`'s thunk and returns the promise, awaiting nothing.
         let _, ordinarySources =
