@@ -11,6 +11,7 @@ open WoofWare.PawPrint
 /// arithmetic where CoreCLR uses `ClrSafeInt<UINT32>`. The boundary points are the ones measured on
 /// real .NET 10 and 11 in `TestFabricatedFieldLayoutOffset`.
 [<TestFixture>]
+[<Parallelizable(ParallelScope.All)>]
 module TestExplicitFieldOffsets =
 
     /// CoreCLR's algorithm, step for step: a pass over the rows, adding the parent's size and
