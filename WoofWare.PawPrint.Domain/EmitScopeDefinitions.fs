@@ -58,6 +58,90 @@ type PseudoAttributeFlags =
         Event : EventAttributes option
     }
 
+/// <summary>
+/// The serialisation type of a constructor argument that a pseudo-attribute declares (<c>KnownCaProp.pArgs</c>,
+/// md/compiler/custattr_emit.cpp). The emitter reads the argument by this type, whatever the constructor's signature
+/// says: an enum-typed constructor whose entry declares a <c>U2</c> has two bytes of its four read as the argument.
+/// </summary>
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeArgument =
+    /// <c>SERIALIZATION_TYPE_U2</c>: two bytes, little-endian.
+    | U2
+    /// <c>SERIALIZATION_TYPE_I4</c>: four bytes, little-endian.
+    | I4
+    /// <summary>
+    /// <c>SERIALIZATION_TYPE_STRING</c>: <c>FF</c> for the null string, or a packed length and that many bytes.
+    /// </summary>
+    | String
+
+/// An argument as CoreCLR's emitter reads it from a pseudo-attribute's blob (<c>ParseKnownCaValue</c>).
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeValue =
+    | U2 of uint16
+    | I4 of int
+    /// The string's bytes as the blob holds them, not decoded; <c>None</c> for the null string.
+    | String of ImmutableArray<byte> option
+
+/// <summary>
+/// The rule a validated pseudo-attribute's arguments must keep, as <c>RegMeta::_HandleKnownCustomAttribute</c> checks it
+/// once the blob has parsed.
+/// </summary>
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeValueRule =
+    /// The attribute's one argument, a <c>U2</c>, is below the bound.
+    | Below of bound : uint16
+    /// <summary>
+    /// The attribute's one argument, a <c>String</c>, is a GUID as <c>LPCSTRToGuid</c> reads it inside braces: exactly 36
+    /// bytes, <c>-</c> at offsets 8, 13, 18 and 23, and a hexadecimal digit of either case at every other.
+    /// </summary>
+    | Guid
+    /// Each of the attribute's arguments, every one an <c>I4</c>, is 0 or more.
+    | NonNegative
+    /// No rule: every blob that parses is kept.
+    | Unchecked
+
+/// <summary>
+/// What CoreCLR's emitter checks of a pseudo-attribute that it validates and then keeps as an ordinary row
+/// (<c>bKEEPCA</c> in <c>KnownCaList</c>).
+/// </summary>
+type ValidatedPseudoAttribute =
+    {
+        /// <summary>
+        /// The tables of owner the emitter accepts the attribute on (<c>KnownCaProp.rTypes</c>), but for
+        /// <c>mdtTypeRef</c>, which no builder passes.
+        /// </summary>
+        Targets : Set<System.Reflection.Metadata.Ecma335.TableIndex>
+        /// The constructor arguments the emitter reads, in order.
+        Arguments : KnownCustomAttributeArgument list
+        /// The rule the arguments must keep.
+        Rule : KnownCustomAttributeValueRule
+    }
+
+/// <summary>
+/// Why CoreCLR's emitter refuses a pseudo-attribute (<c>RegMeta::_HandleKnownCustomAttribute</c>). For each,
+/// <c>TypeBuilder_DefineCustomAttribute</c> throws <c>ArgumentException</c> "Invalid custom attribute provided.", and
+/// the scope is unchanged.
+/// </summary>
+[<RequireQualifiedAccess>]
+type KnownCustomAttributeRefusal =
+    /// <summary>The owner's table is not among the attribute's targets (<c>META_E_CA_INVALID_TARGET</c>).</summary>
+    | WrongTarget
+    /// <summary>
+    /// The blob does not parse by the attribute's declared arguments: its first two bytes are not the prolog
+    /// <c>0x0001</c>, or an argument cannot be read from the bytes left.
+    /// </summary>
+    | MalformedBlob
+    /// <summary>
+    /// The blob declares a positive count of named arguments, which none of these attributes accepts
+    /// (<c>ParseKnownCaNamedArgs</c>).
+    /// </summary>
+    | NamedArgument
+    /// <summary>
+    /// The arguments break the attribute's <see cref="KnownCustomAttributeValueRule"/> (<c>META_E_CA_INVALID_VALUE</c>,
+    /// <c>META_E_CA_INVALID_UUID</c>).
+    /// </summary>
+    | InvalidValue
+
 /// What CoreCLR's emitter does with a pseudo-attribute, as far as PawPrint models it.
 [<RequireQualifiedAccess>]
 type KnownCustomAttributeEffect =
@@ -66,6 +150,12 @@ type KnownCustomAttributeEffect =
     /// the bit into the owner's row and stores no row; on any other owner, it refuses the attribute.
     /// </summary>
     | SetsFlag of PseudoAttributeFlags
+    /// <summary>
+    /// On an owner among the targets, the emitter parses the blob by the declared arguments (when there are any) and
+    /// checks the rule, then stores the row as it would an ordinary attribute's, its blob as given; it refuses the
+    /// attribute on any other owner, or for a blob that fails either step.
+    /// </summary>
+    | ValidatesAndKeeps of ValidatedPseudoAttribute
     /// PawPrint does not model what the emitter does with the attribute, on any owner.
     | Unmodelled
 
@@ -83,6 +173,23 @@ type PseudoAttributeFlagMask =
         Property : PropertyAttributes
         Event : EventAttributes
     }
+
+/// How CoreCLR's emitter reads the blob of a pseudo-attribute that declares arguments.
+[<RequireQualifiedAccess>]
+module KnownCustomAttributeBlob =
+    /// <summary>
+    /// The arguments <paramref name="arguments"/> declares, read from <paramref name="blob"/> as <c>ParseKnownCaArgs</c>
+    /// and <c>ParseKnownCaNamedArgs</c> read them (md/compiler/custattr_emit.cpp), for an attribute that declares no
+    /// named arguments: the prolog <c>0x0001</c>, each argument in turn, then, if any bytes are left, a signed two-byte
+    /// count of named arguments. A count that one lone byte cannot hold is 0; a count above 0 is refused; nothing after
+    /// the count is read.
+    /// </summary>
+    let parse
+        (arguments : KnownCustomAttributeArgument list)
+        (blob : ImmutableArray<byte>)
+        : Result<KnownCustomAttributeValue list, KnownCustomAttributeRefusal>
+        =
+        raise (NotImplementedException "type-builder stage 5z-2: KnownCustomAttributeBlob.parse")
 
 /// <summary>
 /// The pseudo-attributes of CoreCLR's emitter (<c>KnownCaList</c>, md/compiler/custattr_emit.cpp): each name the
@@ -260,6 +367,7 @@ module KnownCustomAttribute =
         (empty, all)
         ||> List.fold (fun mask known ->
             match effect known with
+            | KnownCustomAttributeEffect.ValidatesAndKeeps _
             | KnownCustomAttributeEffect.Unmodelled -> mask
             | KnownCustomAttributeEffect.SetsFlag flags ->
                 let methodFlags =
@@ -298,16 +406,6 @@ type CustomAttributeEmitKind =
     /// <c>RequireSecObject</c> flag and stores no row.
     /// </summary>
     | DynamicSecurityMethod
-
-/// <summary>
-/// Why CoreCLR's emitter refuses a pseudo-attribute (<c>RegMeta::_HandleKnownCustomAttribute</c>). For each,
-/// <c>TypeBuilder_DefineCustomAttribute</c> throws <c>ArgumentException</c> "Invalid custom attribute provided.", and
-/// the scope is unchanged.
-/// </summary>
-[<RequireQualifiedAccess>]
-type KnownCustomAttributeRefusal =
-    /// <summary>The owner's table is not among the attribute's targets (<c>META_E_CA_INVALID_TARGET</c>).</summary>
-    | WrongTarget
 
 /// <summary>
 /// The outcome of asking CoreCLR's emitter to define a custom attribute in a dynamic module's scope
@@ -1064,5 +1162,7 @@ module EmitScopeDefinitions =
                 match addPseudoAttributeFlag flags owner scope with
                 | Some scope -> CustomAttributeDefinition.FlagSet scope
                 | None -> CustomAttributeDefinition.Refused KnownCustomAttributeRefusal.WrongTarget
+            | KnownCustomAttributeEffect.ValidatesAndKeeps _ ->
+                raise (NotImplementedException "type-builder stage 5z-2: a validated pseudo-attribute")
             | KnownCustomAttributeEffect.Unmodelled -> CustomAttributeDefinition.NotStoredAsGiven kind
         | kind -> CustomAttributeDefinition.NotStoredAsGiven kind

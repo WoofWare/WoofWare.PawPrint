@@ -369,6 +369,419 @@ module TestEmitScopeCustomAttributes =
             KnownCustomAttribute.PreserveSig, [ "method implementation", 0x0080 ]
         ]
 
+    /// <summary>
+    /// The pseudo-attributes that CoreCLR's emitter validates and then keeps as a row, each with the owners it accepts
+    /// (named as <c>ownerKind</c> names them), the arguments it reads and the rule they must keep, transcribed from
+    /// md/compiler/custattr_emit.cpp at the pinned .NET 10 source: the target list (<c>rTypes</c>, without
+    /// <c>mdtTypeRef</c>), the declared arguments (<c>DEFINE_CA_CTOR_ARGS</c>) and the checks of
+    /// <c>RegMeta::_HandleKnownCustomAttribute</c>, with the two bounds from inc/metadata.h.
+    /// </summary>
+    let private keptTable
+        : (KnownCustomAttribute * (string list * KnownCustomAttributeArgument list * KnownCustomAttributeValueRule)) list =
+        [
+            // GuidTargets :102 (mdtTypeDef, mdtTypeRef, mdtModule, mdtAssembly); GuidAttribute args :205 (STRING);
+            // 36 characters that LPCSTRToGuid reads inside braces :1203.
+            KnownCustomAttribute.Guid,
+            ([ "type" ; "module" ; "assembly" ],
+             [ KnownCustomAttributeArgument.String ],
+             KnownCustomAttributeValueRule.Guid)
+            // InterfaceTypeTargets :104 (mdtTypeDef); args :218 (U2); `u2 >= ifLast` refused :1231, ifLast = 4
+            // (metadata.h:45).
+            KnownCustomAttribute.InterfaceType,
+            ([ "type" ], [ KnownCustomAttributeArgument.U2 ], KnownCustomAttributeValueRule.Below 4us)
+            // ClassInterfaceTargets :105 (mdtTypeDef, mdtAssembly, mdtTypeRef); args :227 (U2); `u2 >= clsIfLast` refused
+            // :1239, clsIfLast = 3 (metadata.h:58).
+            KnownCustomAttribute.ClassInterface,
+            ([ "type" ; "assembly" ], [ KnownCustomAttributeArgument.U2 ], KnownCustomAttributeValueRule.Below 3us)
+            // TypeLibVersionTargets :115 (mdtAssembly, mdtTypeRef); args :394 (I4, I4); either negative refused :1416.
+            KnownCustomAttribute.TypeLibVersion,
+            ([ "assembly" ],
+             [ KnownCustomAttributeArgument.I4 ; KnownCustomAttributeArgument.I4 ],
+             KnownCustomAttributeValueRule.NonNegative)
+            // ComCompatibleVersionTargets :116 (mdtAssembly, mdtTypeRef); args :403 (four I4); any negative refused
+            // :1421.
+            KnownCustomAttribute.ComCompatibleVersion,
+            ([ "assembly" ], List.replicate 4 KnownCustomAttributeArgument.I4, KnownCustomAttributeValueRule.NonNegative)
+            // AllowPartiallyTrustedCallersTargets :118 (mdtAssembly, mdtTypeRef); no arguments :416, so the blob is never
+            // parsed (:1044); no check :1426.
+            KnownCustomAttribute.AllowPartiallyTrustedCallers,
+            ([ "assembly" ], [], KnownCustomAttributeValueRule.Unchecked)
+        ]
+
+    /// An argument as the model of the emitter's blob parser reads it.
+    [<RequireQualifiedAccess>]
+    type private ModelValue =
+        | U2 of int
+        | I4 of int
+        | String of byte list option
+
+    let private ofValue (value : KnownCustomAttributeValue) : ModelValue =
+        match value with
+        | KnownCustomAttributeValue.U2 v -> ModelValue.U2 (int v)
+        | KnownCustomAttributeValue.I4 v -> ModelValue.I4 v
+        | KnownCustomAttributeValue.String s -> ModelValue.String (s |> Option.map List.ofSeq)
+
+    /// <summary>
+    /// A model of CoreCLR's <c>CustomAttributeParser</c> as <c>ParseKnownCaArgs</c> and <c>ParseKnownCaNamedArgs</c> use
+    /// it for an attribute without named arguments (md/compiler/custattr_emit.cpp, inc/caparser.h, and
+    /// <c>CPackedLen::SafeGetLength</c> in utilcode/stgpooli.cpp), over a list of bytes.
+    /// </summary>
+    let private modelParse
+        (arguments : KnownCustomAttributeArgument list)
+        (blob : byte list)
+        : Result<ModelValue list, KnownCustomAttributeRefusal>
+        =
+        // A packed length's three forms, each taken whatever value it holds; any other first byte fails.
+        let packedLength (bytes : byte list) : (int * byte list) option =
+            match bytes with
+            | b :: rest when b &&& 0x80uy = 0uy -> Some (int b, rest)
+            | b :: c :: rest when b &&& 0xC0uy = 0x80uy -> Some (int (b &&& 0x3Fuy) * 0x100 + int c, rest)
+            | b :: c :: d :: e :: rest when b &&& 0xE0uy = 0xC0uy ->
+                Some (int (b &&& 0x1Fuy) * 0x1000000 + int c * 0x10000 + int d * 0x100 + int e, rest)
+            | _ -> None
+
+        let readOne (argument : KnownCustomAttributeArgument) (bytes : byte list) : (ModelValue * byte list) option =
+            match argument, bytes with
+            | KnownCustomAttributeArgument.U2, lo :: hi :: rest -> Some (ModelValue.U2 (int lo + 0x100 * int hi), rest)
+            | KnownCustomAttributeArgument.I4, a :: b :: c :: d :: rest ->
+                Some (ModelValue.I4 (BitConverter.ToInt32 ([| a ; b ; c ; d |], 0)), rest)
+            | KnownCustomAttributeArgument.String, 0xFFuy :: rest -> Some (ModelValue.String None, rest)
+            | KnownCustomAttributeArgument.String, _ ->
+                match packedLength bytes with
+                | Some (count, rest) when List.length rest >= count ->
+                    Some (ModelValue.String (Some (List.take count rest)), List.skip count rest)
+                | _ -> None
+            | _ -> None
+
+        let rec readAll
+            (arguments : KnownCustomAttributeArgument list)
+            (bytes : byte list)
+            (read : ModelValue list)
+            : (ModelValue list * byte list) option
+            =
+            match arguments with
+            | [] -> Some (List.rev read, bytes)
+            | argument :: arguments ->
+                readOne argument bytes
+                |> Option.bind (fun (value, bytes) -> readAll arguments bytes (value :: read))
+
+        match blob with
+        | 0x01uy :: 0x00uy :: rest ->
+            match readAll arguments rest [] with
+            | None -> Error KnownCustomAttributeRefusal.MalformedBlob
+            | Some (values, tail) ->
+                match tail with
+                | lo :: hi :: _ when BitConverter.ToInt16 ([| lo ; hi |], 0) > 0s ->
+                    Error KnownCustomAttributeRefusal.NamedArgument
+                | _ -> Ok values
+        | _ -> Error KnownCustomAttributeRefusal.MalformedBlob
+
+    /// Whether `values` keep `rule`, as a model of the checks of `RegMeta::_HandleKnownCustomAttribute`.
+    let private modelKeeps (rule : KnownCustomAttributeValueRule) (values : ModelValue list) : bool =
+        match rule, values with
+        | KnownCustomAttributeValueRule.Below bound, [ ModelValue.U2 v ] -> v < int bound
+        | KnownCustomAttributeValueRule.Guid, [ ModelValue.String None ] -> false
+        | KnownCustomAttributeValueRule.Guid, [ ModelValue.String (Some bytes) ] ->
+            Text.RegularExpressions.Regex.IsMatch (
+                System.String (bytes |> List.map char |> Array.ofList),
+                "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\\z"
+            )
+        | KnownCustomAttributeValueRule.NonNegative, values ->
+            values
+            |> List.forall (fun value ->
+                match value with
+                | ModelValue.I4 v -> v >= 0
+                | other -> failwith $"NonNegative applies to I4 arguments only, not %A{other}"
+            )
+        | KnownCustomAttributeValueRule.Unchecked, _ -> true
+        | rule, values -> failwith $"the table pairs %A{rule} with arguments that read as %A{values}"
+
+    /// What the emitter does with a validated pseudo-attribute of `keptTable` on an owner of kind `owner`: the target
+    /// checked first, then the blob parsed only if the attribute declares arguments, then the rule.
+    let private modelKept
+        (targets : string list, arguments : KnownCustomAttributeArgument list, rule : KnownCustomAttributeValueRule)
+        (owner : string)
+        (blob : byte list)
+        : Result<unit, KnownCustomAttributeRefusal>
+        =
+        if not (List.contains owner targets) then
+            Error KnownCustomAttributeRefusal.WrongTarget
+        elif arguments.IsEmpty then
+            Ok ()
+        else
+            modelParse arguments blob
+            |> Result.bind (fun values ->
+                if modelKeeps rule values then
+                    Ok ()
+                else
+                    Error KnownCustomAttributeRefusal.InvalidValue
+            )
+
+    /// A GUID's 36 characters, as the emitter accepts them.
+    let private guidText : string = "01234567-89ab-cdef-0123-456789abcdef"
+
+    let private bytesOf (text : string) : byte list =
+        text |> Seq.map (fun c -> byte c) |> List.ofSeq
+
+    let private int16Bytes (value : int) : byte list =
+        [ byte (value &&& 0xFF) ; byte ((value >>> 8) &&& 0xFF) ]
+
+    let private int32Bytes (value : int) : byte list =
+        List.ofArray (BitConverter.GetBytes value)
+
+    /// A well-formed named argument, a property or field `int Foo = 1` (`SERIALIZATION_TYPE_PROPERTY` or `_FIELD`,
+    /// `ELEMENT_TYPE_I4`).
+    let private namedArgument (property : bool) : byte list =
+        [ (if property then 0x54uy else 0x53uy) ; 0x08uy ; 3uy ]
+        @ bytesOf "Foo"
+        @ int32Bytes 1
+
+    /// <summary>
+    /// A generator of blobs around the grammar of the emitter's parser, for an attribute declaring
+    /// <paramref name="arguments"/>, each with the features it was built with: a prolog right or wrong, each argument
+    /// whole, truncated or, for a <c>U2</c>, written as a four-byte enum; a string null, as a GUID with its variants or
+    /// otherwise, with its length in each packed form, past the end or with a first byte that no form allows; then
+    /// nothing, one byte, or a named-argument count followed by nothing, junk or a well-formed named argument. One in
+    /// ten is random bytes.
+    /// </summary>
+    let private genGrammarBlob (arguments : KnownCustomAttributeArgument list) : Gen<byte list * Set<string>> =
+        let tagged (feature : string) (g : Gen<byte list>) : Gen<byte list * Set<string>> =
+            g |> Gen.map (fun bytes -> bytes, Set.singleton feature)
+
+        let anyByte : Gen<byte> = Gen.choose (0, 255) |> Gen.map byte
+
+        let prolog : Gen<byte list * Set<string>> =
+            Gen.frequency
+                [
+                    17, Gen.constant ([ 1uy ; 0uy ], Set.empty)
+                    3,
+                    Gen.elements
+                        [
+                            []
+                            [ 1uy ]
+                            [ 1uy ; 1uy ]
+                            [ 2uy ; 0uy ]
+                            [ 0xFFuy ; 0xFFuy ]
+                            [ 0uy ; 1uy ]
+                        ]
+                    |> tagged "prolog wrong"
+                ]
+
+        let u2 : Gen<byte list * Set<string>> =
+            Gen.frequency
+                [
+                    6,
+                    Gen.oneof
+                        [
+                            Gen.elements [ 0 ; 1 ; 2 ; 3 ; 4 ; 5 ; 0x7FFF ; 0x8000 ; 0xFFFF ]
+                            Gen.choose (0, 0xFFFF)
+                        ]
+                    |> Gen.map (fun v -> int16Bytes v, Set.empty)
+                    3,
+                    gen {
+                        let! low = Gen.choose (0, 4)
+                        let! high = Gen.frequency [ 2, Gen.constant 0 ; 1, Gen.constant 1 ; 1, Gen.choose (2, 0xFFFF) ]
+
+                        let feature =
+                            match high with
+                            | 0 -> "enum high half 0"
+                            | 1 -> "enum high half 1"
+                            | _ -> "enum high half other"
+
+                        return int16Bytes low @ int16Bytes high, Set.singleton feature
+                    }
+                    1, Gen.elements [ [] ; [ 1uy ] ] |> tagged "argument truncated"
+                ]
+
+        let i4 : Gen<byte list * Set<string>> =
+            Gen.frequency
+                [
+                    6,
+                    Gen.oneof
+                        [
+                            Gen.elements [ 0 ; 1 ; 2 ; -1 ; Int32.MinValue ; Int32.MaxValue ]
+                            Gen.choose (Int32.MinValue, Int32.MaxValue)
+                        ]
+                    |> Gen.map (fun v -> int32Bytes v, (if v < 0 then Set.singleton "I4 negative" else Set.empty))
+                    1,
+                    gen {
+                        let! n = Gen.choose (0, 3)
+                        let! bytes = Gen.listOfLength n anyByte
+                        return List.ofSeq bytes, Set.singleton "argument truncated"
+                    }
+                ]
+
+        let payload : Gen<byte list * Set<string>> =
+            let guid = bytesOf guidText
+
+            let replaceAt (i : int) (b : byte) (bytes : byte list) =
+                bytes |> List.mapi (fun j x -> if i = j then b else x)
+
+            Gen.frequency
+                [
+                    3, Gen.constant guid |> tagged "guid lower"
+                    2, Gen.constant (bytesOf (guidText.ToUpperInvariant ())) |> tagged "guid upper"
+                    2,
+                    Gen.constant (bytesOf "01234567-89AB-cdef-0123-456789ABcdef")
+                    |> tagged "guid mixed"
+                    1,
+                    Gen.choose (0, 35)
+                    |> Gen.map (fun i -> replaceAt i 0uy guid)
+                    |> tagged "guid NUL"
+                    1,
+                    Gen.choose (0, 35)
+                    |> Gen.map (fun i -> replaceAt i 0xC3uy guid)
+                    |> tagged "guid non-ASCII"
+                    1,
+                    Gen.elements [ 8 ; 13 ; 18 ; 23 ]
+                    |> Gen.map (fun d -> guid |> replaceAt d (byte 'a') |> replaceAt (d + 1) (byte '-'))
+                    |> tagged "guid dash moved"
+                    1,
+                    Gen.elements
+                        [
+                            List.take 35 guid
+                            guid @ [ byte 'a' ]
+                            bytesOf ("{" + guidText + "}")
+                            []
+                        ]
+                    |> tagged "guid wrong length"
+                    1,
+                    gen {
+                        let! n = Gen.choose (0, 300)
+                        let! bytes = Gen.listOfLength n (Gen.choose (0x20, 0x7E) |> Gen.map byte)
+                        return List.ofSeq bytes, Set.empty
+                    }
+                ]
+
+        let str : Gen<byte list * Set<string>> =
+            Gen.frequency
+                [
+                    1, Gen.constant ([ 0xFFuy ], Set.singleton "null string")
+                    1,
+                    gen {
+                        let! first = Gen.choose (0xE0, 0xFE)
+                        let! rest = Gen.listOfLength 3 anyByte
+                        let! text, features = payload
+                        return (byte first :: List.ofSeq rest) @ text, Set.add "length E0-FE" features
+                    }
+                    8,
+                    gen {
+                        let! text, features = payload
+                        let n = text.Length
+                        let! over = Gen.frequency [ 7, Gen.constant 0 ; 1, Gen.choose (1, 3) ]
+
+                        let! form =
+                            Gen.elements (
+                                [ "length two-byte" ; "length four-byte" ]
+                                @ (if n + over < 0x80 then [ "length one-byte" ] else [])
+                            )
+
+                        let length = n + over
+
+                        let encoded =
+                            match form with
+                            | "length one-byte" -> [ byte length ]
+                            | "length two-byte" -> [ byte (0x80 ||| (length >>> 8)) ; byte (length &&& 0xFF) ]
+                            | _ -> [ 0xC0uy ; 0uy ; byte (length >>> 8) ; byte (length &&& 0xFF) ]
+
+                        let features = Set.add form features
+
+                        return
+                            encoded @ text,
+                            (if over > 0 then
+                                 Set.add "length past end" features
+                             else
+                                 features)
+                    }
+                ]
+
+        let argument (argument : KnownCustomAttributeArgument) : Gen<byte list * Set<string>> =
+            match argument with
+            | KnownCustomAttributeArgument.U2 -> u2
+            | KnownCustomAttributeArgument.I4 -> i4
+            | KnownCustomAttributeArgument.String -> str
+
+        let tail : Gen<byte list * Set<string>> =
+            Gen.frequency
+                [
+                    4, Gen.constant ([], Set.empty)
+                    1, anyByte |> Gen.map (fun b -> [ b ], Set.singleton "one trailing byte")
+                    6,
+                    gen {
+                        let! count =
+                            Gen.oneof
+                                [
+                                    Gen.elements [ -1 ; -32768 ; 0 ; 1 ; 0x7FFF ]
+                                    Gen.choose (int Int16.MinValue, int Int16.MaxValue)
+                                ]
+
+                        let feature =
+                            match count with
+                            | -1
+                            | -32768
+                            | 0
+                            | 1
+                            | 0x7FFF -> $"count %d{count}"
+                            | c when c < 0 -> "count other negative"
+                            | _ -> "count other positive"
+
+                        let! after =
+                            Gen.frequency
+                                [
+                                    3, Gen.constant ([], Set.empty)
+                                    2,
+                                    gen {
+                                        let! n = Gen.choose (1, 4)
+                                        let! bytes = Gen.listOfLength n anyByte
+                                        return List.ofSeq bytes, Set.singleton "junk after count"
+                                    }
+                                    2,
+                                    Gen.elements [ true ; false ]
+                                    |> Gen.map (fun p -> namedArgument p, Set.singleton "named argument")
+                                ]
+
+                        return int16Bytes count @ fst after, Set.add feature (snd after)
+                    }
+                ]
+
+        let rec all (arguments : KnownCustomAttributeArgument list) : Gen<byte list * Set<string>> =
+            match arguments with
+            | [] -> Gen.constant ([], Set.empty)
+            | a :: rest ->
+                gen {
+                    let! b, f = argument a
+                    let! bs, fs = all rest
+                    return b @ bs, Set.union f fs
+                }
+
+        let structured : Gen<byte list * Set<string>> =
+            gen {
+                let! p, pf = prolog
+                let! a, af = all arguments
+                let! t, tf = tail
+                let bytes = p @ a @ t
+                let features = Set.unionMany [ pf ; af ; tf ]
+
+                return bytes, (if bytes.IsEmpty then Set.add "empty" features else features)
+            }
+
+        Gen.frequency
+            [
+                9, structured
+                1,
+                gen {
+                    let! n = Gen.frequency [ 1, Gen.constant 0 ; 4, Gen.choose (1, 12) ]
+                    let! bytes = Gen.listOfLength n anyByte
+
+                    return
+                        List.ofSeq bytes,
+                        (if n = 0 then
+                             Set.ofList [ "random" ; "empty" ]
+                         else
+                             Set.singleton "random")
+                }
+            ]
+
     /// What one generated call to `defineCustomAttribute` reached.
     [<RequireQualifiedAccess>]
     type private DefineReach =
@@ -378,6 +791,7 @@ module TestEmitScopeCustomAttributes =
         | EmptyBlob
         | Owner of string
         | FlagSet of KnownCustomAttribute
+        | KeptAny
         | Refused of KnownCustomAttribute
         | BitAlreadySet
         | BitNotSet
@@ -556,11 +970,38 @@ module TestEmitScopeCustomAttributes =
 
         flags &&& bit <> 0
 
+    /// Blobs that a validated pseudo-attribute keeps on a right target, beside `customAttributeBlobs`, and some it
+    /// refuses: a `U2` of 1 with a count of 0, a `U2` above both bounds, two `I4`s, four `I4`s with a negative one and
+    /// without, a GUID, and a GUID followed by a named-argument count of 1.
+    let private keptBlobs : ImmutableArray<byte> list =
+        [
+            [ 1uy ; 0uy ] @ int16Bytes 1 @ int16Bytes 0
+            [ 1uy ; 0uy ] @ int16Bytes 5 @ int16Bytes 0
+            [ 1uy ; 0uy ] @ int32Bytes 1 @ int32Bytes 2
+            [ 1uy ; 0uy ]
+            @ int32Bytes 1
+            @ int32Bytes 2
+            @ int32Bytes 3
+            @ int32Bytes -4
+            @ int16Bytes 0
+            [ 1uy ; 0uy ]
+            @ int32Bytes 1
+            @ int32Bytes 2
+            @ int32Bytes 3
+            @ int32Bytes 4
+            @ int16Bytes 0
+            [ 1uy ; 0uy ; 36uy ] @ bytesOf guidText @ int16Bytes 0
+            [ 1uy ; 0uy ; 36uy ] @ bytesOf guidText @ int16Bytes 1
+        ]
+        |> List.map ImmutableArray.CreateRange
+
     [<Test>]
     let ``an attribute stored as given is a new row, a flag pseudo-attribute sets its bit, and any other adds nothing``
         ()
         : unit
         =
+        let blobs = customAttributeBlobs @ keptBlobs
+
         let property (cover : DefineReach -> unit) (scope : EmitScope) (calls : (int * int * int * bool) list) : unit =
             let scope = withNamedConstructors scope
             let owners = customAttributeOwners scope
@@ -577,7 +1018,7 @@ module TestEmitScopeCustomAttributes =
                     | _ ->
                         (pick ownerChoice owners).Value,
                         (pick constructorChoice constructors).Value,
-                        (pick blobChoice customAttributeBlobs).Value
+                        (pick blobChoice blobs).Value
 
                 let kind = EmitScopeDefinitions.classifyCustomAttribute owner constructor scope
                 let before = EmitScope.customAttributes scope
@@ -599,9 +1040,23 @@ module TestEmitScopeCustomAttributes =
                         )
                     | _ -> None
 
+                // The model: a name of `keptTable` is kept or refused as `modelKept` says.
+                let kept =
+                    match kind with
+                    | CustomAttributeEmitKind.Known known ->
+                        keptTable
+                        |> List.tryFind (fun (k, _) -> k = known)
+                        |> Option.map (fun (_, rule) -> known, modelKept rule (ownerKind owner) (List.ofSeq value))
+                    | _ -> None
+
                 match EmitScopeDefinitions.defineCustomAttribute owner constructor value scope with
                 | CustomAttributeDefinition.Defined (rid, after) ->
-                    kind |> shouldEqual CustomAttributeEmitKind.Ordinary
+                    match kept with
+                    | Some (_, Ok ()) -> cover DefineReach.KeptAny
+                    | Some (_, Error refusal) ->
+                        failwith $"%A{kind} on %A{owner} was kept, but the model refuses it: %A{refusal}"
+                    | None -> kind |> shouldEqual CustomAttributeEmitKind.Ordinary
+
                     rid.Rid |> shouldEqual (before.Count + 1)
                     let rows = EmitScope.customAttributes after
                     List.ofSeq (rows.RemoveAt before.Count) |> shouldEqual (List.ofSeq before)
@@ -643,15 +1098,19 @@ module TestEmitScopeCustomAttributes =
                         scope <- after
                     | _ -> failwith $"%A{kind} on %A{owner} set a flag, but the model expects %A{flag}"
                 | CustomAttributeDefinition.Refused refusal ->
-                    match flag with
-                    | Some (known, None) ->
+                    match flag, kept with
+                    | Some (known, None), None ->
                         refusal |> shouldEqual KnownCustomAttributeRefusal.WrongTarget
                         cover (DefineReach.Refused known)
-                    | _ -> failwith $"%A{kind} on %A{owner} was refused, but the model expects %A{flag}"
+                    | None, Some (known, Error expected) ->
+                        refusal |> shouldEqual expected
+                        cover (DefineReach.Refused known)
+                    | _ -> failwith $"%A{kind} on %A{owner} was refused, but the model expects %A{flag} or %A{kept}"
                 | CustomAttributeDefinition.NotStoredAsGiven reported ->
                     reported |> shouldEqual kind
                     kind |> shouldNotEqual CustomAttributeEmitKind.Ordinary
                     flag |> shouldEqual None
+                    kept |> shouldEqual None
                     cover DefineReach.NotStored
 
                 previous <- Some (owner, constructor, value)
@@ -679,17 +1138,150 @@ module TestEmitScopeCustomAttributes =
             coverage.Count (DefineReach.FlagSet known) |> shouldBeGreaterThan 5
             coverage.Count (DefineReach.Refused known) |> shouldBeGreaterThan 5
 
+        // `the validated pseudo-attributes are kept or refused as the model says` covers each of the six names; here
+        // they are drawn among every other call.
+        coverage.Count DefineReach.KeptAny |> shouldBeGreaterThan 5
+
         for kind in ownerKinds do
             coverage.Count (DefineReach.Owner kind) |> shouldBeGreaterThan 20
 
+    [<RequireQualifiedAccess>]
+    type private KeptReach =
+        | Kept of KnownCustomAttribute
+        | Refused of KnownCustomAttribute * KnownCustomAttributeRefusal
+        | Impostor
+
     [<Test>]
-    let ``each pseudo-attribute that sets a flag accepts exactly CoreCLR's targets, and every other is unmodelled``
+    let ``the validated pseudo-attributes are kept or refused as the model says`` () : unit =
+        let genCase =
+            gen {
+                let! name, rule = Gen.elements keptTable
+                let _, arguments, _ = rule
+                let! impostor = Gen.frequency [ 3, Gen.constant false ; 1, Gen.constant true ]
+                let! count = Gen.choose (1, 12)
+
+                let! calls =
+                    Gen.listOfLength count (Gen.zip (Gen.choose (0, 9)) (genGrammarBlob arguments |> Gen.map fst))
+
+                return name, rule, impostor, List.ofSeq calls
+            }
+
+        let property
+            (cover : KeptReach -> unit)
+            (name : KnownCustomAttribute, rule, impostor : bool, calls : (int * byte list) list)
+            : unit
+            =
+            let scope, owners = withOwners ()
+
+            let parent =
+                if impostor then
+                    Parent.MethodOfDefinition (KnownCustomAttribute.name name)
+                else
+                    Parent.ReferenceInAssembly (KnownCustomAttribute.name name)
+
+            let constructor, scope = constructorOf parent scope
+            let mutable scope = scope
+
+            for ownerIndex, blob in calls do
+                let owner = owners.[ownerIndex]
+                let value = ImmutableArray.CreateRange blob
+                let before = EmitScope.customAttributes scope
+
+                match
+                    EmitScopeDefinitions.defineCustomAttribute owner constructor value scope,
+                    modelKept rule (ownerKind owner) blob
+                with
+                | CustomAttributeDefinition.Defined (rid, after), Ok () ->
+                    rid.Rid |> shouldEqual (before.Count + 1)
+                    let rows = EmitScope.customAttributes after
+                    List.ofSeq (rows.RemoveAt before.Count) |> shouldEqual (List.ofSeq before)
+                    let row = rows.[before.Count]
+                    row.Parent |> shouldEqual owner
+                    row.Constructor |> shouldEqual constructor
+                    List.ofSeq (EmitScope.blobAt row.Value after) |> shouldEqual blob
+
+                    EmitScopeExtension.violations ImmutableHashSet.Empty scope after
+                    |> shouldEqual []
+
+                    cover (KeptReach.Kept name)
+
+                    if impostor then
+                        cover KeptReach.Impostor
+
+                    scope <- after
+                | CustomAttributeDefinition.Refused refusal, Error expected ->
+                    refusal |> shouldEqual expected
+                    cover (KeptReach.Refused (name, refusal))
+                | outcome, expected ->
+                    failwith $"%A{name} on %A{owner} with %A{blob}: %A{outcome}, but the model expects %A{expected}"
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 1500)
+                (Arb.fromGen genCase)
+                (fun cover case -> property cover case)
+
+        coverage.Count KeptReach.Impostor |> shouldBeGreaterThan 20
+
+        for name, (_, arguments, rule) in keptTable do
+            coverage.Count (KeptReach.Kept name) |> shouldBeGreaterThan 20
+
+            coverage.Count (KeptReach.Refused (name, KnownCustomAttributeRefusal.WrongTarget))
+            |> shouldBeGreaterThan 20
+
+            if not arguments.IsEmpty then
+                coverage.Count (KeptReach.Refused (name, KnownCustomAttributeRefusal.MalformedBlob))
+                |> shouldBeGreaterThan 20
+
+                coverage.Count (KeptReach.Refused (name, KnownCustomAttributeRefusal.NamedArgument))
+                |> shouldBeGreaterThan 20
+
+            if rule <> KnownCustomAttributeValueRule.Unchecked then
+                coverage.Count (KeptReach.Refused (name, KnownCustomAttributeRefusal.InvalidValue))
+                |> shouldBeGreaterThan 20
+
+    [<Test>]
+    let ``each pseudo-attribute that is validated and kept has CoreCLR's targets, arguments and rule, and only those six are``
+        ()
+        : unit
+        =
+        let tableOf (table : System.Reflection.Metadata.Ecma335.TableIndex) : string =
+            match table with
+            | System.Reflection.Metadata.Ecma335.TableIndex.Assembly -> "assembly"
+            | System.Reflection.Metadata.Ecma335.TableIndex.Module -> "module"
+            | System.Reflection.Metadata.Ecma335.TableIndex.TypeDef -> "type"
+            | System.Reflection.Metadata.Ecma335.TableIndex.MethodDef -> "method"
+            | System.Reflection.Metadata.Ecma335.TableIndex.Field -> "field"
+            | System.Reflection.Metadata.Ecma335.TableIndex.Param -> "parameter"
+            | System.Reflection.Metadata.Ecma335.TableIndex.Property -> "property"
+            | System.Reflection.Metadata.Ecma335.TableIndex.Event -> "event"
+            | System.Reflection.Metadata.Ecma335.TableIndex.GenericParam -> "generic parameter"
+            | other -> $"%O{other}"
+
+        KnownCustomAttribute.all
+        |> List.choose (fun known ->
+            match KnownCustomAttribute.effect known with
+            | KnownCustomAttributeEffect.ValidatesAndKeeps validated ->
+                Some (known, (validated.Targets |> Seq.map tableOf |> Set.ofSeq, validated.Arguments, validated.Rule))
+            | KnownCustomAttributeEffect.SetsFlag _
+            | KnownCustomAttributeEffect.Unmodelled -> None
+        )
+        |> Map.ofList
+        |> shouldEqual (
+            keptTable
+            |> List.map (fun (known, (targets, arguments, rule)) -> known, (Set.ofList targets, arguments, rule))
+            |> Map.ofList
+        )
+
+    [<Test>]
+    let ``each pseudo-attribute that sets a flag accepts exactly CoreCLR's targets, and the rest are kept or unmodelled``
         ()
         : unit
         =
         let observed (known : KnownCustomAttribute) : (string * int) list option =
             match KnownCustomAttribute.effect known with
-            | KnownCustomAttributeEffect.Unmodelled -> None
+            | KnownCustomAttributeEffect.Unmodelled
+            | KnownCustomAttributeEffect.ValidatesAndKeeps _ -> None
             | KnownCustomAttributeEffect.SetsFlag flags ->
                 Some
                     [
@@ -732,6 +1324,111 @@ module TestEmitScopeCustomAttributes =
             int mask.Event
         ]
         |> shouldEqual [ 0x2400 ; 0x0800 ; 0x0280 ; 0x0013 ; 0x0200 ; 0x0200 ]
+
+    [<RequireQualifiedAccess>]
+    type private ParseReach =
+        | Feature of string
+        | Parsed
+        | Refused of KnownCustomAttributeRefusal
+
+    [<Test>]
+    let ``the blob parser reads what the model of CoreCLR's parser reads`` () : unit =
+        let genArguments : Gen<KnownCustomAttributeArgument list> =
+            Gen.frequency
+                [
+                    3, Gen.elements (keptTable |> List.map (fun (_, (_, arguments, _)) -> arguments))
+                    1,
+                    Gen.choose (0, 4)
+                    |> Gen.bind (fun n ->
+                        Gen.listOfLength
+                            n
+                            (Gen.elements
+                                [
+                                    KnownCustomAttributeArgument.U2
+                                    KnownCustomAttributeArgument.I4
+                                    KnownCustomAttributeArgument.String
+                                ])
+                    )
+                    |> Gen.map List.ofSeq
+                ]
+
+        // The blob is built for one list of arguments and, one time in four, parsed by another.
+        let genCase =
+            gen {
+                let! arguments = genArguments
+                let! other = genArguments
+                let! mismatched = Gen.frequency [ 3, Gen.constant false ; 1, Gen.constant true ]
+                let! blob, features = genGrammarBlob (if mismatched then other else arguments)
+                return arguments, blob, features
+            }
+
+        let property
+            (cover : ParseReach -> unit)
+            (arguments : KnownCustomAttributeArgument list, blob : byte list, features : Set<string>)
+            : unit
+            =
+            for feature in features do
+                cover (ParseReach.Feature feature)
+
+            let actual =
+                KnownCustomAttributeBlob.parse arguments (ImmutableArray.CreateRange blob)
+                |> Result.map (List.map ofValue)
+
+            actual |> shouldEqual (modelParse arguments blob)
+
+            match actual with
+            | Ok _ -> cover ParseReach.Parsed
+            | Error refusal -> cover (ParseReach.Refused refusal)
+
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 3000)
+                (Arb.fromGen genCase)
+                (fun cover case -> property cover case)
+
+        coverage.Count ParseReach.Parsed |> shouldBeGreaterThan 500
+
+        coverage.Count (ParseReach.Refused KnownCustomAttributeRefusal.MalformedBlob)
+        |> shouldBeGreaterThan 300
+
+        coverage.Count (ParseReach.Refused KnownCustomAttributeRefusal.NamedArgument)
+        |> shouldBeGreaterThan 300
+
+        for feature in
+            [
+                "prolog wrong"
+                "empty"
+                "random"
+                "enum high half 0"
+                "enum high half 1"
+                "enum high half other"
+                "argument truncated"
+                "I4 negative"
+                "null string"
+                "length one-byte"
+                "length two-byte"
+                "length four-byte"
+                "length E0-FE"
+                "length past end"
+                "guid lower"
+                "guid upper"
+                "guid mixed"
+                "guid NUL"
+                "guid non-ASCII"
+                "guid dash moved"
+                "guid wrong length"
+                "one trailing byte"
+                "count -1"
+                "count -32768"
+                "count 0"
+                "count 1"
+                "count 32767"
+                "count other negative"
+                "count other positive"
+                "junk after count"
+                "named argument"
+            ] do
+            coverage.Count (ParseReach.Feature feature) |> shouldBeGreaterThan 20
 
     [<Test>]
     let ``a token names an owner exactly when it is a row of one of the nine tables`` () : unit =
@@ -2258,3 +2955,477 @@ module TestEmitScopeCustomAttributes =
         coverage.Count FlagsReach.BitAlreadySet |> shouldBeGreaterThan 20
         coverage.Count FlagsReach.BitNotSet |> shouldBeGreaterThan 20
         coverage.Count FlagsReach.Impostor |> shouldBeGreaterThan 20
+
+    /// One constructor of a validated pseudo-attribute, as the host's emitter and the mirror each see it.
+    type private KeptConstructor =
+        {
+            Label : string
+            Known : KnownCustomAttribute
+            Constructor : ConstructorInfo
+        }
+
+    /// CoreLib's constructors of the six validated pseudo-attributes, both of `ClassInterface`'s and of
+    /// `InterfaceType`'s.
+    let private keptConstructors : KeptConstructor list =
+        let ctor (label : string) (known : KnownCustomAttribute) (t : Type) (parameters : Type[]) =
+            {
+                Label = label
+                Known = known
+                Constructor = requireMember (t.GetConstructor parameters) $"%s{t.Name}(%A{parameters})"
+            }
+
+        [
+            ctor
+                "ClassInterface(short)"
+                KnownCustomAttribute.ClassInterface
+                typeof<ClassInterfaceAttribute>
+                [| typeof<int16> |]
+            ctor
+                "ClassInterface(ClassInterfaceType)"
+                KnownCustomAttribute.ClassInterface
+                typeof<ClassInterfaceAttribute>
+                [| typeof<ClassInterfaceType> |]
+            ctor
+                "InterfaceType(short)"
+                KnownCustomAttribute.InterfaceType
+                typeof<InterfaceTypeAttribute>
+                [| typeof<int16> |]
+            ctor
+                "InterfaceType(ComInterfaceType)"
+                KnownCustomAttribute.InterfaceType
+                typeof<InterfaceTypeAttribute>
+                [| typeof<ComInterfaceType> |]
+            ctor "Guid" KnownCustomAttribute.Guid typeof<GuidAttribute> [| typeof<string> |]
+            ctor
+                "TypeLibVersion"
+                KnownCustomAttribute.TypeLibVersion
+                typeof<TypeLibVersionAttribute>
+                [| typeof<int> ; typeof<int> |]
+            ctor
+                "ComCompatibleVersion"
+                KnownCustomAttribute.ComCompatibleVersion
+                typeof<ComCompatibleVersionAttribute>
+                (Array.replicate 4 typeof<int>)
+            ctor
+                "AllowPartiallyTrustedCallers"
+                KnownCustomAttribute.AllowPartiallyTrustedCallers
+                typeof<System.Security.AllowPartiallyTrustedCallersAttribute>
+                [||]
+        ]
+
+    let private keptConstructor (label : string) : KeptConstructor =
+        keptConstructors |> List.find (fun c -> c.Label = label)
+
+    /// The eight owner kinds of the validated pseudo-attributes' differential tests, in the order of `withOwners`.
+    let private keptOwnerKinds : string list =
+        [
+            "assembly"
+            "module"
+            "type"
+            "method"
+            "field"
+            "parameter"
+            "property"
+            "event"
+        ]
+
+    /// A fresh dynamic module's owners of each of `keptOwnerKinds`, each as how to apply an attribute to it and its
+    /// token.
+    let private hostKeptOwners
+        (name : string)
+        : ModuleBuilder * (string * (ConstructorInfo -> byte[] -> unit) * int) list
+        =
+        let assembly, host = newModule name
+        let t = host.DefineType ("T", TypeAttributes.Public)
+
+        let m =
+            t.DefineMethod ("M", MethodAttributes.Public ||| MethodAttributes.Static, typeof<Void>, [| typeof<int> |])
+
+        m.GetILGenerator().Emit OpCodes.Ret
+        let x = m.DefineParameter (1, ParameterAttributes.None, "x")
+        let f = t.DefineField ("F", typeof<int>, FieldAttributes.Public)
+
+        let p =
+            t.DefineProperty ("P", PropertyAttributes.None, typeof<int>, Type.EmptyTypes)
+
+        let e = t.DefineEvent ("E", EventAttributes.None, typeof<Action>)
+
+        let token (builder : obj) (field : string) : int =
+            builder.GetType().GetField(field, instance).GetValue builder |> unbox<int>
+
+        host,
+        [
+            "assembly", (fun c b -> assembly.SetCustomAttribute (c, b)), 0x20000001
+            "module", (fun c b -> host.SetCustomAttribute (c, b)), 0x00000001
+            "type", (fun c b -> t.SetCustomAttribute (c, b)), t.MetadataToken
+            "method", (fun c b -> m.SetCustomAttribute (c, b)), m.MetadataToken
+            "field", (fun c b -> f.SetCustomAttribute (c, b)), f.MetadataToken
+            "parameter", (fun c b -> x.SetCustomAttribute (c, b)), token x "_token"
+            "property", (fun c b -> p.SetCustomAttribute (c, b)), token p "m_tkProperty"
+            "event", (fun c b -> e.SetCustomAttribute (c, b)), token e "m_evToken"
+        ]
+
+    let private hex (text : string) : byte list =
+        text.Split (' ', StringSplitOptions.RemoveEmptyEntries)
+        |> Seq.map (fun b -> Convert.ToByte (b, 16))
+        |> List.ofSeq
+
+    /// <summary>
+    /// The blobs of the validated pseudo-attributes measured on .NET 10.0.14 and 11.0.0-rc.3: the planner's probe
+    /// (<c>5z/probe</c>, scenario <c>kept</c>) and the decisions' (<c>5z-decide/probe3</c>, scenario <c>kept2</c>),
+    /// each with its constructor, its owner, and whether real .NET wrote the row. A refusal is given with the reason
+    /// CoreCLR's source gives for it, which real .NET does not report.
+    /// </summary>
+    let private measuredKeptBlobs : (string * string * byte list * Result<unit, KnownCustomAttributeRefusal>) list =
+        let ok = Ok ()
+        let malformed = Error KnownCustomAttributeRefusal.MalformedBlob
+        let named = Error KnownCustomAttributeRefusal.NamedArgument
+        let invalid = Error KnownCustomAttributeRefusal.InvalidValue
+        let wrong = Error KnownCustomAttributeRefusal.WrongTarget
+        let ciEnum = "ClassInterface(ClassInterfaceType)"
+        let ciShort = "ClassInterface(short)"
+        let itEnum = "InterfaceType(ComInterfaceType)"
+        let itShort = "InterfaceType(short)"
+        let guid = bytesOf guidText
+        // A GUID string blob: the prolog, the length as given, the characters, then the tail as given.
+        let str (length : byte list) (text : byte list) (tail : byte list) = [ 1uy ; 0uy ] @ length @ text @ tail
+
+        let at (i : int) (b : byte) =
+            guid |> List.mapi (fun j x -> if i = j then b else x)
+
+        let ciEnumBlobs =
+            [
+                "01 00 00 00 00 00 00 00", ok
+                "01 00 01 00 00 00 00 00", ok
+                "01 00 02 00 00 00 00 00", ok
+                "01 00 03 00 00 00 00 00", invalid
+                "01 00 01 00 01 00 00 00", named
+                "01 00 FF FF FF FF 00 00", invalid
+                "", malformed
+                "FF FF 01 00 00 00 00 00", malformed
+                "01 00", malformed
+                "01 00 01", malformed
+                "01 00 01 00 00 00", ok
+                "01 00 01 00 00 00 01 00 54 08 03 46 6F 6F 01 00 00 00", ok
+            ]
+
+        let guidBlobs =
+            [
+                str [ 36uy ] guid [ 0uy ; 0uy ], ok
+                str [ 38uy ] (bytesOf ("{" + guidText + "}")) [ 0uy ; 0uy ], invalid
+                str [ 4uy ] (bytesOf "0123") [ 0uy ; 0uy ], invalid
+                str [ 36uy ] (bytesOf "0123456z-89ab-cdef-0123-456789abcdef") [ 0uy ; 0uy ], invalid
+                str [ 36uy ] (bytesOf "0123456789abcdef0123456789abcdef0000") [ 0uy ; 0uy ], invalid
+                hex "01 00 FF 00 00", invalid
+                [], malformed
+            ]
+
+        let tlv = "01 00 01 00 00 00 02 00 00 00 00 00"
+        let tlvNegative = "01 00 FF FF FF FF 00 00 00 00 00 00"
+        let ccv = "01 00 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 00 00"
+        let ccvNegative = "01 00 00 00 00 00 00 00 00 00 00 00 00 00 FF FF FF FF 00 00"
+
+        [
+            // The planner's `kept`.
+            for owner in [ "type" ; "assembly" ] do
+                for blob, outcome in ciEnumBlobs do
+                    yield ciEnum, owner, hex blob, outcome
+            for owner in [ "method" ; "parameter" ; "field" ; "module" ] do
+                for blob, _ in ciEnumBlobs do
+                    yield ciEnum, owner, hex blob, wrong
+            yield ciShort, "type", hex "01 00 01 00 00 00", ok
+            yield ciShort, "type", hex "01 00 03 00 00 00", invalid
+            yield ciShort, "type", hex "01 00 FF 7F 00 00", invalid
+            yield itEnum, "type", hex "01 00 00 00 00 00 00 00", ok
+            yield itEnum, "type", hex "01 00 03 00 00 00 00 00", ok
+            yield itEnum, "type", hex "01 00 04 00 00 00 00 00", invalid
+            yield itEnum, "type", hex "01 00 02 00 01 00 00 00", named
+            for blob in
+                [
+                    "01 00 00 00 00 00 00 00"
+                    "01 00 03 00 00 00 00 00"
+                    "01 00 04 00 00 00 00 00"
+                ] do
+                yield itEnum, "assembly", hex blob, wrong
+            yield itShort, "type", hex "01 00 01 00 00 00", ok
+            yield itShort, "type", hex "01 00 04 00 00 00", invalid
+            for owner in [ "type" ; "assembly" ; "module" ] do
+                for blob, outcome in guidBlobs do
+                    yield "Guid", owner, blob, outcome
+            for owner in [ "method" ; "parameter" ] do
+                for blob, _ in guidBlobs do
+                    yield "Guid", owner, blob, wrong
+            yield "TypeLibVersion", "assembly", hex tlv, ok
+            yield "TypeLibVersion", "assembly", hex tlvNegative, invalid
+            yield "TypeLibVersion", "assembly", hex "01 00 01 00 00 00", malformed
+            for blob in [ tlv ; tlvNegative ; "01 00 01 00 00 00" ] do
+                yield "TypeLibVersion", "type", hex blob, wrong
+            yield "ComCompatibleVersion", "assembly", hex ccv, ok
+            yield "ComCompatibleVersion", "assembly", hex ccvNegative, invalid
+            yield "ComCompatibleVersion", "type", hex ccv, wrong
+            yield "ComCompatibleVersion", "type", hex ccvNegative, wrong
+            for blob in [ "01 00 00 00" ; "FF FF" ; "" ] do
+                yield "AllowPartiallyTrustedCallers", "assembly", hex blob, ok
+                yield "AllowPartiallyTrustedCallers", "type", hex blob, wrong
+                yield "AllowPartiallyTrustedCallers", "module", hex blob, wrong
+
+            // The decisions' `kept2`.
+            yield ciEnum, "type", hex "01 00 01 00 FF FF", ok
+            yield ciEnum, "type", hex "01 00 01 00 00 80", ok
+            yield ciEnum, "type", hex "01 00 01 00 FF FF DE AD", ok
+            yield ciEnum, "type", hex "01 00 01 00 FF 7F", named
+            yield ciEnum, "type", hex "01 00 01 00 00", ok
+            yield ciEnum, "type", hex "01 00 01 00 FF", ok
+            yield ciEnum, "type", hex "01 00 01 00 01 00 54 08 03 46 6F 6F 01 00 00 00", named
+            yield ciEnum, "type", hex "01 00 01 00 01 00 53 08 03 46 6F 6F 01 00 00 00", named
+            yield ciEnum, "type", hex "01 00 01 00 01 00", named
+            yield ciEnum, "type", hex "01 00 01 00 00 00 DE AD BE EF", ok
+            yield ciEnum, "type", hex "01 01 01 00 00 00", malformed
+            yield ciEnum, "type", hex "02 00 01 00 00 00", malformed
+            yield ciShort, "type", hex "01 00 01 00", ok
+            yield ciShort, "type", hex "01 00 00 80 00 00", invalid
+            yield ciShort, "type", hex "01 00 FF FF 00 00", invalid
+            yield "Guid", "type", str [ 36uy ] guid [], ok
+            yield "Guid", "type", str [ 36uy ] (bytesOf (guidText.ToUpperInvariant ())) [ 0uy ; 0uy ], ok
+            yield "Guid", "type", str [ 36uy ] (bytesOf "01234567-89AB-cdef-0123-456789ABcdef") [ 0uy ; 0uy ], ok
+            yield "Guid", "type", str [ 0x80uy ; 36uy ] guid [ 0uy ; 0uy ], ok
+            yield "Guid", "type", str [ 0xC0uy ; 0uy ; 0uy ; 36uy ] guid [ 0uy ; 0uy ], ok
+            yield "Guid", "type", str [ 36uy ] guid [ 0xFFuy ; 0xFFuy ], ok
+            yield "Guid", "type", str [ 36uy ] guid [ 1uy ; 0uy ], named
+            yield "Guid", "type", str [ 36uy ] guid [ 7uy ], ok
+            yield "Guid", "type", str [ 36uy ] (at 5 0uy) [ 0uy ; 0uy ], invalid
+            yield "Guid", "type", str [ 36uy ] (at 5 0xC3uy) [ 0uy ; 0uy ], invalid
+            yield "Guid", "type", str [ 37uy ] guid [], malformed
+            yield "Guid", "type", str [ 35uy ] (List.take 35 guid) [ 0uy ; 0uy ], invalid
+            yield "Guid", "type", hex "01 00 00 00 00", invalid
+            yield "Guid", "type", str [ 36uy ] (bytesOf "012345678-9ab-cdef-0123-456789abcdef") [ 0uy ; 0uy ], invalid
+            yield "Guid", "type", str [ 36uy ] (bytesOf "+1234567-89ab-cdef-0123-456789abcdef") [ 0uy ; 0uy ], invalid
+            yield "Guid", "type", str [ 36uy ] (bytesOf " 1234567-89ab-cdef-0123-456789abcdef") [ 0uy ; 0uy ], invalid
+            yield "TypeLibVersion", "assembly", hex "01 00 01 00 00 00 02 00 00 00", ok
+            yield "TypeLibVersion", "assembly", hex "01 00 01 00 00 00 02 00 00 00 FF FF", ok
+            yield "TypeLibVersion", "assembly", hex "01 00 01 00 00 00 02 00 00 00 01 00", named
+            yield "TypeLibVersion", "assembly", hex "01 00 00 00 00 00 00 00 00 00", ok
+            yield "TypeLibVersion", "assembly", hex "01 00 00 00 00 00 00 00 00 80", invalid
+            yield "TypeLibVersion", "assembly", hex "01 00 01 00 00 00 02 00 00", malformed
+        ]
+
+    [<Test>]
+    let ``the measured blobs of the validated pseudo-attributes are kept or refused as on real .NET`` () : unit =
+        for label, owner, blob, expected in measuredKeptBlobs do
+            let entry = keptConstructor label
+            let describe = $"%s{label} on a %s{owner} with %A{blob}"
+
+            // The host's emitter, whose answer the measurement recorded.
+            let host, hostOwners = hostKeptOwners "Measured"
+            let _, apply, token = hostOwners |> List.find (fun (k, _, _) -> k = owner)
+
+            let threw =
+                try
+                    apply entry.Constructor (Array.ofList blob)
+                    false
+                with :? ArgumentException ->
+                    true
+
+            if threw <> Result.isError expected then
+                failwith $"%s{describe}: the host threw %b{threw}, but the measurement says %A{expected}"
+
+            hostRows host token
+            |> List.map (fun (_, _, b) -> b)
+            |> shouldEqual (if threw then [] else [ blob ])
+
+            // The emitter's rule in Domain, which also gives the reason.
+            let scope, owners = withOwners ()
+
+            let constructor, scope =
+                constructorOf (Parent.ReferenceInAssembly (KnownCustomAttribute.name entry.Known)) scope
+
+            let mirror = owners.[List.findIndex ((=) owner) keptOwnerKinds]
+
+            match
+                EmitScopeDefinitions.defineCustomAttribute mirror constructor (ImmutableArray.CreateRange blob) scope,
+                expected
+            with
+            | CustomAttributeDefinition.Defined (_, after), Ok () ->
+                EmitScope.customAttributes after
+                |> Seq.map (fun row -> row.Parent, List.ofSeq (EmitScope.blobAt row.Value after))
+                |> List.ofSeq
+                |> shouldEqual [ mirror, blob ]
+            | CustomAttributeDefinition.Refused refusal, Error reason when refusal = reason -> ()
+            | outcome, _ -> failwith $"%s{describe}: Domain answered %A{outcome}, but the measurement says %A{expected}"
+
+    /// One generated `SetCustomAttribute` call of the validation differential: a constructor, an owner kind and a
+    /// blob, with the features the blob was generated with.
+    type private KeptCall =
+        {
+            Constructor : int
+            Owner : int
+            Blob : byte list
+            Features : Set<string>
+        }
+
+    [<RequireQualifiedAccess>]
+    type private ValidationReach =
+        | Kept of KnownCustomAttribute
+        | Refused of KnownCustomAttribute
+        | Feature of string * kept : bool
+
+    [<Test>]
+    let ``the rows the validated pseudo-attributes leave are what the host's emitter writes`` () : unit =
+        let property (cover : ValidationReach -> unit) (calls : KeptCall list) : unit =
+            let host, hostOwners = hostKeptOwners "ValidationOracle"
+
+            let hostTokens =
+                keptConstructors
+                |> List.map (fun c -> host.GetMethodMetadataToken c.Constructor)
+
+            let scope, owners = withOwners ()
+            let mutable scope = scope
+
+            let mirrors =
+                [
+                    for entry in keptConstructors do
+                        let mirror, s =
+                            constructorOf (Parent.ReferenceInAssembly (KnownCustomAttribute.name entry.Known)) scope
+
+                        scope <- s
+                        yield mirror
+                ]
+
+            for call in calls do
+                let entry = keptConstructors.[call.Constructor]
+                let ownerKind = keptOwnerKinds.[call.Owner]
+                let _, apply, _ = hostOwners.[call.Owner]
+
+                let threw =
+                    try
+                        apply entry.Constructor (Array.ofList call.Blob)
+                        false
+                    with :? ArgumentException as e ->
+                        e.Message |> shouldEqual "Invalid custom attribute provided."
+                        true
+
+                let kept =
+                    match
+                        EmitScopeDefinitions.defineCustomAttribute
+                            owners.[call.Owner]
+                            mirrors.[call.Constructor]
+                            (ImmutableArray.CreateRange call.Blob)
+                            scope
+                    with
+                    | CustomAttributeDefinition.Defined (_, after) ->
+                        scope <- after
+                        true
+                    | CustomAttributeDefinition.Refused _ -> false
+                    | outcome -> failwith $"%s{entry.Label} on a %s{ownerKind}: %A{outcome}"
+
+                if kept = threw then
+                    failwith
+                        $"%s{entry.Label} on a %s{ownerKind} with %A{call.Blob}: the host threw %b{threw}, and Domain kept it %b{kept}"
+
+                cover (
+                    if kept then
+                        ValidationReach.Kept entry.Known
+                    else
+                        ValidationReach.Refused entry.Known
+                )
+
+                for feature in call.Features do
+                    cover (ValidationReach.Feature (feature, kept))
+
+            // Each owner's rows, in order: the row's RID, its constructor and its blob.
+            let mirrorRows (owner : HasCustomAttribute) =
+                EmitScope.customAttributes scope
+                |> Seq.indexed
+                |> Seq.filter (fun (_, row) -> row.Parent = owner)
+                |> Seq.map (fun (i, row) ->
+                    i + 1, List.findIndex ((=) row.Constructor) mirrors, List.ofSeq (EmitScope.blobAt row.Value scope)
+                )
+                |> List.ofSeq
+
+            for (_, _, token), owner in List.zip hostOwners (List.take keptOwnerKinds.Length owners) do
+                hostRows host token
+                |> List.map (fun (row, constructor, blob) ->
+                    row &&& 0xFFFFFF, List.findIndex ((=) constructor) hostTokens, blob
+                )
+                |> shouldEqual (mirrorRows owner)
+
+        let genCall : Gen<KeptCall> =
+            gen {
+                let! constructor = Gen.choose (0, keptConstructors.Length - 1)
+                let! owner = Gen.choose (0, keptOwnerKinds.Length - 1)
+                let known = keptConstructors.[constructor].Known
+                let _, (_, own, _) = keptTable |> List.find (fun (k, _) -> k = known)
+                let! _, (_, other, _) = Gen.elements keptTable
+                let! arguments = Gen.frequency [ 3, Gen.constant own ; 1, Gen.constant other ]
+                let! blob, features = genGrammarBlob arguments
+
+                return
+                    {
+                        Constructor = constructor
+                        Owner = owner
+                        Blob = blob
+                        Features = features
+                    }
+            }
+
+        let genCalls : Gen<KeptCall list> =
+            gen {
+                let! count = Gen.choose (0, 40)
+                let! calls = Gen.listOfLength count genCall
+                return List.ofSeq calls
+            }
+
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 150) (Arb.fromGen genCalls) property
+
+        for known, _ in keptTable do
+            coverage.Count (ValidationReach.Kept known) |> shouldBeGreaterThan 10
+            coverage.Count (ValidationReach.Refused known) |> shouldBeGreaterThan 10
+
+        // The four-byte enum's high half read as a named-argument count: 0 keeps the row, 1 refuses it.
+        coverage.Count (ValidationReach.Feature ("enum high half 0", true))
+        |> shouldBeGreaterThan 10
+
+        coverage.Count (ValidationReach.Feature ("enum high half 1", false))
+        |> shouldBeGreaterThan 10
+
+        for feature in
+            [
+                "prolog wrong"
+                "empty"
+                "count -1"
+                "count -32768"
+                "count 0"
+                "count 1"
+                "count 32767"
+                "named argument"
+                "one trailing byte"
+                "length one-byte"
+                "length two-byte"
+                "length four-byte"
+                "length E0-FE"
+                "length past end"
+                "null string"
+                "guid upper"
+                "guid mixed"
+                "guid NUL"
+                "guid non-ASCII"
+                "guid dash moved"
+            ] do
+            coverage.Count (ValidationReach.Feature (feature, false))
+            |> shouldBeGreaterThan 3
+
+        for feature in
+            [
+                "count -1"
+                "count -32768"
+                "count 0"
+                "one trailing byte"
+                "length one-byte"
+                "length two-byte"
+                "length four-byte"
+                "guid upper"
+                "guid mixed"
+            ] do
+            coverage.Count (ValidationReach.Feature (feature, true))
+            |> shouldBeGreaterThan 3
