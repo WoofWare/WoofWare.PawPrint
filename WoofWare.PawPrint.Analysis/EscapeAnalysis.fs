@@ -6130,17 +6130,57 @@ module EscapeAnalysis =
                 )
             // An async version. The JIT reads no tail shape in the async version of a synchronized
             // method (`CORINFO_FLG_SYNCH`), whose every `ret` awaits.
-            | MethodVariant.AsyncVariant, MethodBody.Il _ when not synchronized ->
-                bindSites (fun index ->
-                    tailShapeAt index
-                    |> Option.map (fun (opcode, callee, returnAt) ->
-                        opcode,
-                        callee,
-                        MatchedPattern.TailShape,
-                        returnAt,
-                        $"the tail shape at IL_%04X{snd ops.[index]} of %O{key}"
-                    )
+            | MethodVariant.AsyncVariant, MethodBody.Il _ ->
+                let state, awaitSites, swallowed =
+                    if synchronized then
+                        state, Map.empty, Set.empty
+                    else
+                        bindSites (fun index ->
+                            tailShapeAt index
+                            |> Option.map (fun (opcode, callee, returnAt) ->
+                                opcode,
+                                callee,
+                                MatchedPattern.TailShape,
+                                returnAt,
+                                $"the tail shape at IL_%04X{snd ops.[index]} of %O{key}"
+                            )
+                        )
+
+                // The JIT resolves a `jmp`'s token as an await's (`CORINFO_TOKENKIND_Await`,
+                // importer.cpp), so it goes to its target's async variant, and rejects the body
+                // where the target has none.
+                ((state, awaitSites), [ 0 .. ops.Length - 1 ])
+                ||> List.fold (fun (state, awaitSites) index ->
+                    let op, offset = ops.[index]
+
+                    match op, Map.tryFind index targets with
+                    | IlOp.UnaryMetadataToken (UnaryMetadataTokenIlOp.Jmp, MetadataOperand.FromMetadata _),
+                      Some (CallTarget.Method callee) when compiled.Contains offset && not (unbound.Contains index) ->
+                        let calleeAssembly, named = methodOf state callee.Callee
+
+                        match
+                            RuntimeAsyncMethod.asyncVariantOf
+                                state.LoggerFactory
+                                state.RuntimeDirs
+                                state.BaseTypes.Corelib
+                                calleeAssembly
+                                named
+                                state.TypeSystem._LoadedAssemblies
+                        with
+                        | assemblies, Ok variant ->
+                            withAssemblies state assemblies,
+                            Map.add
+                                index
+                                { callee with
+                                    Callee = MethodKey.ofMethod calleeAssembly variant
+                                }
+                                awaitSites
+                        | _, Error refusal ->
+                            failwith
+                                $"TODO: the jmp at IL_%04X{offset} of %O{key}, an async version, goes to the async variant of %O{callee.Callee}, which %A{refusal}; the JIT rejects the body where the target has no variant (InvalidProgramException), and the analysis does not model either"
+                    | _ -> state, awaitSites
                 )
+                |> fun (state, awaitSites) -> state, awaitSites, swallowed
             // A method of runtime async's own machinery, with its calling convention and no promise
             // to return.
             | MethodVariant.Ordinary, MethodBody.AsyncIl _ ->
@@ -6160,9 +6200,13 @@ module EscapeAnalysis =
         let foldedCalls =
             if optimised then
                 awaitSites
-                |> Map.filter (fun _ variant ->
-                    let variantAssembly, _ = methodOf state variant.Callee
-                    IntrinsicBody.foldsAsyncVariantCall variantAssembly variant.Callee.Method.Get
+                |> Map.filter (fun index variant ->
+                    // A `jmp` is no call the JIT folds.
+                    match fst ops.[index] with
+                    | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt), _) ->
+                        let variantAssembly, _ = methodOf state variant.Callee
+                        IntrinsicBody.foldsAsyncVariantCall variantAssembly variant.Callee.Method.Get
+                    | _ -> false
                 )
                 |> Map.keys
                 |> Set.ofSeq

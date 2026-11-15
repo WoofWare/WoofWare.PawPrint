@@ -1340,6 +1340,9 @@ Each stage is one pull request, with its tests first.
         The return-type pairing the interpreter refuses for unverifiable IL is not checked: it does
         not change what escapes.
       * Every other `ret` the async version runs is an `AwaitedPromise` site at its offset.
+      * A `jmp` in an async version goes to its target's async variant, as the JIT resolves its
+        token as an await's (`CORINFO_TOKENKIND_Await`); a target with none, whose body the JIT
+        rejects, is refused by name. The interpreter refuses every `jmp`.
       * `IntrinsicBody.foldsAsyncVariantCall` (`Semantics`) says which intrinsics' async variant the
         JIT replaces at a call with its value: `Task.FromResult`, `ValueTask.FromResult` and the
         two `CompletedTask` getters (`impIntrinsic`, importercalls.cpp). It does so only where it
