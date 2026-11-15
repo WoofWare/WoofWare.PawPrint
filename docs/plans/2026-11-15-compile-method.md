@@ -232,3 +232,124 @@ Every expectation below was measured on real .NET 10.0.14 and 11.0.0-rc.3 by the
 4. **The divergence entry under B**: a new entry ("a restricted-skip-visibility `DynamicMethod`'s body is compiled at `CreateDelegate` only as far as its `catch` clauses and `initLocals`"), or a sentence added to each of the four "fails when it is reached" entries?
 5. **Should guest 1 pin the exception's stack trace** (first frame `DynamicMethod.CreateDelegate`, no `RuntimeHelpers.CompileMethod`)? That needs a measurement of what PawPrint's trace shows for a QCall's `RaiseException`, and perhaps work on it.
 6. **The two separate gaps** this probe found: a callee whose return type fails to load (an overlapping explicit layout) runs under PawPrint, and the `newarr` of a byref-like element gives the default message. File them as issues of their own?
+
+### Decisions
+
+Decided 2026-11-15, against `0d02a1738`. I checked the plan's claims against the source and the logs, and ran a throwaway version of option B under PawPrint. The build box was unreachable (ssh timed out), so that run was local, after 17:00 GMT. Nothing in any repository worktree was edited; the scratch worktree is removed.
+
+The throwaway handler (20 lines) called `DynamicMethodExecution.concretize` from the QCall. The results, for nine of the probe's cases:
+
+| case | restricted, PawPrint with B | real .NET R |
+|---|---|---|
+| `catchOpenGeneric` | IPE `0x8013153A` at `CreateDelegate`, and again at the second | same |
+| `catchRewriteAfterCreate` | `ArgumentException` escapes, twice | same |
+| `initLocalsClearedAfterCreate` | 0, 0 | same |
+| `valid`, `staticFieldBfiR` | 42, 42; initialiser runs at first invoke | same |
+| `ldstrRewriteAfterCreate` | 8, 8 | 6, 6 |
+| `badTypeToken` | IPE at invoke | IPE at `CreateDelegate` |
+| `stackUnderflow` | host stop at invoke | IPE at `CreateDelegate` |
+
+`staticFieldPreciseR` was built but not re-run. The unrestricted controls were unchanged from the plan's table.
+
+**1. Option B.**
+
+- B is chosen: the QCall prepares the method (latches `initLocals` and the `catch` clause types) and raises a preparation failure in the guest.
+- Preparation needs no frame of the dynamic method. `concretize` takes a handle and a state and no thread, and reads only the registry and the heap (`DynamicMethodExecution.fs:61-181`, `DynamicScopeOperand.entryObject`). The throwaway run confirms it.
+- Preparation raises three guest exceptions, all from a `catch` clause's scope entry.
+  - `InvalidProgramException`: a null slot, a type that is not closed, or a byref or `System.Void` (`TypeOperand.refusal`).
+  - `BadImageFormatException` "Bad class token.": an entry that is not a `RuntimeTypeHandle`, or one whose `m_type` is null.
+  - `ArgumentOutOfRangeException`: an index exactly at the list's length.
+- Its host failures are all broken interpreter invariants, none reachable by a guest: an unregistered handle, a missing resolver, a scope entry off the heap, a malformed `m_type`, `_size` or `_initLocals`.
+- A is rejected: it answers wrongly on three measured rows where B answers rightly.
+- C is rejected: it is Stage 3 and Stage 8 of the 2026-10-24 plan built in a QCall handler, and it would latch bindings that instructions do not yet read.
+- D is rejected, for three reasons.
+  - It needs to know what the JIT surely compiles in a dynamic body, or it refuses valid bodies that have a dead arm. That is Stage 3's compile step without the latch.
+  - The cheap form, running `analyseDynamic` at the QCall, memoises a stack shape at `CreateDelegate` while instructions still read the live scope. A rewrite between the two would leave them disagreeing.
+  - It would hold restricted dynamic methods to a stricter rule than metadata methods, which keep the documented "fails when it is reached" timing.
+- Split `DynamicMethodExecution.concretize` into `prepare` (returns the `PreparedDynamicMethod` or the failure, and latches) and `concretize` (calls `prepare`, then `concretizeDynamicMethod`). `prepare` keeps the "already latched" test inside it.
+- The handler calls `prepare` unconditionally. It has no "already prepared" test of its own; `prepare` being idempotent is the `IsPointingToPrestub` check.
+- The handler logs the diagnostic at Warning, as the two existing callers do. The throwaway did not, and the refusal was then silent in the log.
+- The fields of the raise (`clrMessageFor … BadTokenKind.Class`) are written twice today (`UnaryMetadataCallOps.fs:834`, `AbstractMachine.fs:415`). Put them in one function in `DynamicMethodExecution` and have all three callers use it.
+- A null handle or a handle that is not dynamic is a `failwith` naming the argument. `CreateDelegate` is the only caller in CoreLib on both runtimes, and `GetMethodDescriptor` runs first.
+- The handler goes in `NativeRuntimeHelpers.tryExecuteQCall`, matched on `RuntimeHelpers.CompileMethod(RuntimeMethodHandleInternal) : void`, and is registered in `NativeQCall.handlers`. `DynamicMethodExecution.fs` compiles before it.
+- Update the remark at `DynamicMethodExecution.fs:30-37`: `CompileMethod` is now a route to a first JIT that latches, and `PrepareMethod` is still not.
+- Add a note to the 2026-10-24 plan's "Where it runs" with three points.
+  - The compile step must be a function of a method and a state that pushes no frame, so that the prologue and this QCall both call it.
+  - At this QCall the trace has no frame of the dynamic method (measured, `real-trace.log`), where the prologue's has one.
+  - A dynamic method's failed compilation is not memoised: a second `CreateDelegate` compiles again.
+
+**2. The QCall does not concretise.**
+
+- The signature is already concretised during `CreateDelegate`: `Delegate_BindToMethodInfo` does it for a dynamic target (`NativeDelegate.fs:1279-1283`), straight after `CompileMethod` returns. Moving it gains nothing.
+- Locals are not concretised by `concretizeDynamicMethod` at all. `ExecutionConcretization.concretizeLocals` does it when the frame is created (`IlMachineStateExecution.fs:1433`), and stops the run where a local does not bind.
+- Moving that stop to `CreateDelegate` would only move a host stop. It stays where it is until it can be a raise, which is the JIT-import plan's work.
+
+**3. `ldstr` is not latched at preparation.**
+
+- Latching one operand family leaves the scope half latched: strings read at `CreateDelegate`, every other entry read at execution. That is harder to state than "instruction operands are read when they execute".
+- Stage 8 latches the whole scope in one place. The measured row (8, 8 against 6, 6) goes in the divergence entry.
+
+**4. One new paragraph, and no edits to the "fails when it is reached" entries.**
+
+- Add a fourth paragraph to the `DynamicMethod` list in `docs/divergences.md` (beside "When a scope entry is read"), titled for what a restricted-skip-visibility method's `CreateDelegate` compiles.
+- It says: PawPrint prepares the `catch` clause types and `initLocals` there. Everything else the JIT would refuse is still raised, or stops the run, at the first invocation. An instruction's scope operand rewritten after `CreateDelegate` is still heard.
+- It points at the "fails when it is reached" entries by name and does not repeat them. There are six, not four (lines 826, 862, 916, 961, 1001, 1057).
+- It says plainly that invalid IL (`BADCODE`) is not retired by any stage of the 2026-10-24 plan, whose "Not in scope" excludes it. Only the token failures shrink as Stages 3 to 8 land.
+- Amend "When a scope entry is read" in the same list: for a restricted method, real .NET stops hearing rewrites at `CreateDelegate`, not at the first invocation.
+- Re-measure the regression table's `ReflectionInvocation_CompileMethod` row (line 556) with the switch on, and update or delete it. Remove the sentence "`Expression.Compile()` stops before the code it compiles runs" if it is no longer true.
+
+**5. The guest pins what both runtimes agree on about the trace, and not the first frame.**
+
+- Measured with the throwaway: PawPrint's trace is `RuntimeHelpers.CompileMethod(RuntimeMethodHandleInternal)`, `DynamicMethod.CreateDelegate(Type, Object)`, `DynamicMethod.CreateDelegate(Type)`, then the caller.
+- Real .NET's is `DynamicMethod.CreateDelegate(Type, Object)`, then the caller.
+- Both extra frames are calls that optimised CoreLib leaves without a frame. That is the existing entry "A trace has a frame for every call that optimised code inlines or tail-calls". Add this pair to that entry as a second observable example.
+- The guest asserts two things: the trace contains `DynamicMethod.CreateDelegate`, and it contains no frame naming the dynamic method. Both hold on real .NET and under B.
+- The guest does not read `TargetSite`: PawPrint refuses to name the head of a runtime-raised trace.
+- No work on the trace in this PR.
+
+**6. File three issues, not two.**
+
+- An explicit-layout struct whose object field overlaps a non-object field loads and runs under PawPrint, where CoreCLR raises `TypeLoadException`. This is a wrong answer with no dynamic method involved, and is the most serious of the three.
+- The JIT loads a callee's return type when it compiles the caller, and PawPrint does not. Mention it in the first issue as how the probe found it; `JitTypeLoads.fs` already lists the position.
+- `newarr` of a byref-like element raises `TypeLoadException` with the parameterless constructor's message, where CoreCLR names the array type.
+- Invalid IL is never an `InvalidProgramException`: it is a host stop when the offset executes, for a metadata method and a dynamic one. For a restricted dynamic method, `CreateDelegate` returns where CoreCLR raises. No plan covers this.
+- I searched the open issues for the first two and for `PrepareMethod` and found nothing.
+
+**Tests**
+
+- Write the guests and the unit test first, in a commit of their own, and record the failing output (`Unimplemented native method … ReflectionInvocation_CompileMethod`) before the handler exists.
+- Guest 1, `sourcesImpure/DynamicMethodCompiledAtCreateDelegate.cs`, with `IsDynamicCodeSupported=true`. It holds the plan's checks, each paired with the unrestricted control, plus these:
+  - the double-`CreateDelegate` variant: rewrite the clause slot after the first `CreateDelegate`, call `CreateDelegate` again, and the rewrite is still unheard;
+  - repair after failure: `catchOpenGeneric` raises at `CreateDelegate`, the guest rewrites the slot to a legal type, and the next `CreateDelegate` succeeds and the delegate runs. This is not yet measured on real .NET for the restricted method. The real-runtime oracle decides it; if real .NET disagrees, stop and report;
+  - `InitLocals = false` set before `CreateDelegate` is heard by neither a later `InitLocals = true` nor anything else: the latch takes the value at `CreateDelegate`. Use a body that does not read unwritten bytes when the flag is false, or leave this check out;
+  - the two trace assertions of decision 5;
+  - the HResult `0x8013153A` on the `CreateDelegate` failure.
+- Guest 2, `sourcesImpure/DynamicMethodCompileFailureTiming.cs`, parked everywhere. It holds the token cases only: `bad{Method,Field,Type}Token`, `callAbstract`, `newarrByRefLike`, `boxByRefLike`, `ldstrRewriteAfterCreate`. Order them by the stage that retires each (Stage 3, 4, 5, 6, then 8), so the parked ending moves forward one check at a time. The reason names the new divergence paragraph.
+- Guest 3, `sourcesImpure/DynamicMethodInvalidIlAtCreateDelegate.cs`, parked everywhere, holding `stackUnderflow`, `branchPastEnd` and `branchMidInstruction`. It is separate because its ending is a host stop and no stage retires it. The reason names the invalid-IL issue.
+- The unit test, in the style of `TestDynamicMethodMintOutcome`: after a restricted `CreateDelegate` with no invoke, the registry's preparation for the handle is `Some`; for the unrestricted control it is `None`.
+- An `Expression.Lambda<Func<int>>(Expression.Constant(3)).Compile()` guest with the switch on, returning the delegate's result. It is the issue's motivating case, and neither it nor Moq was run under B. If it stops on something else, park it with that stop and do not fix it in this PR.
+- Run the default suite and the four Guest categories as separate invocations.
+
+**Mutants**
+
+- The handler returns without preparing (option A): guest 1's `catchRewriteAfterCreate`, `initLocalsClearedAfterCreate` and `catchOpenGeneric` checks go red, and so does the unit test.
+- The handler swallows the `Error` and completes: the `catchOpenGeneric` check goes red.
+- `prepare` latches on the `Error` path: the repair check goes red.
+- `prepare` skips its "already latched" test: the double-`CreateDelegate` check goes red. `DynamicMethodInitLocals.cs` should too; confirm it.
+- The handler raises with the wrong fields: add a `catch` clause slot holding a non-`RuntimeTypeHandle` object to guest 1 and assert "Bad class token.", so that this mutant has a killer. Measure it on real .NET first.
+
+**Parked or left alone**
+
+- `calleeReturnFailsToLoad` and the `newarr` message: not in any guest of this PR; the issues carry them.
+- `ExpressionLambdaCompile*.cs` keep running the expression interpreter by default. Do not change their registration.
+- Access checks: nothing to do. Measured, nothing raises one for these methods.
+
+### Where the decisions contradict the plan
+
+- The plan says the remaining divergence "would shrink as JIT-import Stages 3-8 land". That holds for token failures only. The 2026-10-24 plan's "Not in scope" excludes invalid IL, so the three invalid-IL rows stay as they are.
+- The plan counts four "fails when it is reached" entries. `docs/divergences.md` has six.
+- Question 2 assumes `concretizeDynamicMethod` loads the local types. It concretises the signature only; locals are concretised at frame creation. The signature is already concretised during `CreateDelegate`, at the bind.
+- The plan has the handler test "already latched" before preparing. `concretize` already makes that test, so a second one in the handler would be a duplicate.
+- The plan leaves PawPrint's trace for a QCall raise unmeasured. It is measured now: two frames more than real .NET's, `RuntimeHelpers.CompileMethod` and `CreateDelegate(Type)`.
+- The 2026-10-24 plan memoises a compilation's outcome, failures included, and establishes the frame before compiling. Neither fits this QCall: a dynamic method's failed compilation is retried, and the trace has no frame of the method.
+- The plan's B section says its effect is "predicted from the tables". It is now measured, and the prediction was right on every row I ran.
