@@ -158,7 +158,12 @@ method) may add more:
   binds one, through dispatch or a `constrained.` prefix as for any call: what escapes the variant's
   body escapes at the call, and the instructions the pattern swallows do nothing.
   `EscapeAnalysis.asyncVariant` names a method's variant, to ask about it by itself. The variant of a
-  method with ordinary IL, an async version, is opaque;
+  method with ordinary IL, an async version, runs that IL: a call in one of its tail shapes (`call;
+  ret`, `call; newobj ValueTask; ret`, or a `ValueTask`'s `AsTask` before the `ret`) calls the
+  callee's variant in the same way, except in the async version of a synchronized method, and every
+  other `ret` awaits the promise it returns, which is opaque (`Opacity.AwaitedPromise`). Where the
+  JIT makes its tier-0 optimisations, it replaces a call of the variant of `Task.FromResult` and the
+  like with its value, and the call does nothing;
 * a `catch` absorbs what derives from its type, decided on the real base chains of types in any
   assembly, which `WoofWare.PawPrint.Loader` resolves exactly as the interpreter does;
 * an object thrown that is not an exception is named as itself; a `catch` sees it as a

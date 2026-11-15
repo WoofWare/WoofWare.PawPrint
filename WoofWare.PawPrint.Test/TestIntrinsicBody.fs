@@ -477,6 +477,98 @@ module TestIntrinsicBody =
 
         failures |> shouldEqual []
 
+    /// The named intrinsics whose async variant's call the JIT replaces with the value the variant
+    /// returns, whatever it is optimising for (`impIntrinsic`'s "Lightweight runtime async
+    /// intrinsics", importercalls.cpp), by the `NI_` name the JIT gives each. Only .NET 11's JIT has
+    /// them.
+    let private foldedAsyncVariants : (string * Named) list =
+        let tasks (cls : string) (name : string) : Named =
+            {
+                Namespace = "System.Threading.Tasks"
+                Class = cls
+                Method = name
+                Parameters = None
+            }
+
+        [
+            "NI_System_Threading_Tasks_Task_FromResult", tasks "Task" "FromResult"
+            "NI_System_Threading_Tasks_Task_get_CompletedTask", tasks "Task" "get_CompletedTask"
+            "NI_System_Threading_Tasks_ValueTask_FromResult", tasks "ValueTask" "FromResult"
+            "NI_System_Threading_Tasks_ValueTask_get_CompletedTask", tasks "ValueTask" "get_CompletedTask"
+        ]
+
+    [<Test>]
+    let ``the JIT folds the async variant's call of exactly the transcribed intrinsics`` () : unit =
+        let importer =
+            File.ReadAllLines (
+                Path.Combine (
+                    FrameworkUnderTest.requireRuntimeSourceOf EmulatedRuntime.Net11,
+                    "src",
+                    "coreclr",
+                    "jit",
+                    "importercalls.cpp"
+                )
+            )
+
+        let start =
+            importer
+            |> Array.findIndex (fun line -> line.Trim () = "// Lightweight runtime async intrinsics")
+
+        let finish =
+            importer
+            |> Array.skip start
+            |> Array.findIndex (fun line ->
+                line.Trim () = "betterToExpand = (sig->callConv & CORINFO_CALLCONV_ASYNCCALL) != 0;"
+            )
+
+        importer
+        |> Array.skip start
+        |> Array.take finish
+        |> Array.collect (fun line ->
+            System.Text.RegularExpressions.Regex.Matches (line, "NI_[A-Za-z0-9_]+")
+            |> Seq.map (fun m -> m.Value)
+            |> Array.ofSeq
+        )
+        |> Set.ofArray
+        |> shouldEqual (foldedAsyncVariants |> List.map fst |> Set.ofList)
+
+    [<Test>]
+    let ``every intrinsic whose async variant's call the JIT folds is one .NET 11's CoreLib defines`` () : unit =
+        let corelib =
+            readCoreLib (FrameworkUnderTest.requireCoreLibPathOf EmulatedRuntime.Net11)
+
+        let methods = methodsOf corelib
+
+        foldedAsyncVariants
+        |> List.filter (fun (_, named) ->
+            methods
+            |> List.exists (fun m -> names named m && IntrinsicBody.isIntrinsic corelib m.Handle)
+            |> not
+        )
+        |> List.map fst
+        |> shouldEqual []
+
+    [<TestCaseSource(nameof coreLibs)>]
+    let ``foldsAsyncVariantCall is exactly the intrinsics whose async variant's call the JIT folds``
+        (which : AuditedCoreLib)
+        : unit
+        =
+        let corelib = coreLib which
+
+        let failures =
+            [
+                for m in methodsOf corelib do
+                    if IntrinsicBody.isIntrinsic corelib m.Handle then
+                        let onList = foldedAsyncVariants |> List.exists (fun (_, named) -> names named m)
+
+                        match IntrinsicBody.foldsAsyncVariantCall corelib m.Handle, onList with
+                        | true, false -> yield $"%s{describe m}: folded, but the JIT does not fold its variant's call"
+                        | false, true -> yield $"%s{describe m}: the JIT folds its variant's call, yet it is not folded"
+                        | _ -> ()
+            ]
+
+        failures |> shouldEqual []
+
     [<TestCaseSource(nameof coreLibs)>]
     let ``VmSubstitution has a stub for exactly the Unsafe methods corelib.h binds`` (which : AuditedCoreLib) : unit =
         let corelib = coreLib which

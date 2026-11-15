@@ -1321,3 +1321,49 @@ Each stage is one pull request, with its tests first.
         it is not compiled.
     * **(4h-2)** Async versions: a call in a tail shape calls its callee's variant, and any other
       `ret` awaits the promise it returns through `AsyncHelpers.TransparentAwait`.
+
+      Decided on 2026-11-15: a wrapped `ret` is an opaque site of its own,
+      `Opacity.AwaitedPromise`, rather than a call of `TransparentAwait`. Following that method's IL
+      gave every overload `Unknown` with 45 named types and about 260 sources from `Task`'s
+      machinery, which hide the reason, that the analysis does not follow what a promise holds;
+      tracking where a promise comes from was left for a stage of its own. And the async variant of
+      a CoreLib intrinsic, which a tail shape can now bind (`return Task.FromResult(x);`), is
+      handled here rather than left refused.
+
+      As built:
+      * The variant of a method with ordinary IL runs that IL. `Opacity.AsyncVersion` is deleted.
+      * In an async version that is not synchronized, a call the JIT compiles and reads as the start
+        of a tail shape (`AwaitPattern.tailShapeAfter`, the `newobj`'s or `AsTask`'s operand
+        confirmed as CoreLib's intrinsic, and not `ValueTask<T>(T)`) is classified by
+        `AwaitSiteBinding.classify` with `MatchedPattern.TailShape`. Where it binds, the call names
+        the variant and the instructions after it up to and including the `ret` contribute nothing.
+        The return-type pairing the interpreter refuses for unverifiable IL is not checked: it does
+        not change what escapes.
+      * Every other `ret` the async version runs is an `AwaitedPromise` site at its offset.
+      * A `jmp` in an async version goes to its target's async variant, as the JIT resolves its
+        token as an await's (`CORINFO_TOKENKIND_Await`); a target with none, whose body the JIT
+        rejects, is refused by name. The interpreter refuses every `jmp`.
+      * `IntrinsicBody.foldsAsyncVariantCall` (`Semantics`) says which intrinsics' async variant the
+        JIT replaces at a call with its value: `Task.FromResult`, `ValueTask.FromResult` and the
+        two `CompletedTask` getters (`impIntrinsic`, importercalls.cpp). It does so only where it
+        makes its tier-0 optimisations, the condition under which the analysis already folds a
+        `typeof` (`Assumption.JitOptimises`, no `NoOptimization` or debuggable assembly, no call of
+        `NextCallReturnAddress`); there the call is no instruction at all, as a folded `typeof` is
+        not, and the answer records that it assumes `JitOptimises` there. Elsewhere, and for any other intrinsic whose IL is its semantics
+        (`IntrinsicBody.OwnIl`, such as `ValueTask<T>.AsTask`), the variant runs its IL, as the
+        interpreter runs it; any other intrinsic's variant is refused by name. `TestIntrinsicBody`
+        checks the transcription against .NET 11's pinned `importercalls.cpp` and CoreLib. The
+        interpreter runs the folded intrinsics' IL as async versions even where the JIT folds the
+        call, which gives the same value.
+      * `TestEscapeAnalysis`'s `Awaits` gains async versions: the three tail shapes of a callee that
+        throws give the control's answer, as does an await of one; a `callvirt` on an exact
+        receiver reaches the override's variant; the async version of a synchronized method, a
+        `ValueTask<T>(T)` constructor, and a delegate's `Invoke`, which has no variant, bind no
+        variant, and their `ret` is an `AwaitedPromise`; a throw before a wrapped `ret` escapes
+        beside it; the ordinary variant awaits nothing; the folded intrinsics, in tail shapes and
+        under an await, give the answer of a method that does nothing, but in a `NoOptimization`
+        caller, or without `Assumption.JitOptimises`, `FromResult`'s variant runs its IL; and
+        `AsTask`'s variant runs its IL. Mutants fail it: a synchronized async version reading tail
+        shapes, the `ValueTask<T>(T)` constructor accepted, a swallowed range one short, a wrapped
+        `ret` not opaque, an unrecognised `AsTask`, no folding, folding every intrinsic, folding
+        in an unoptimised caller, and the variant of an `OwnIl` intrinsic refused.

@@ -15197,6 +15197,207 @@ public static class Runners
             )
         |> ignore<Emit.MethodBuilder>
 
+        // Async versions, each ending in a tail shape or a `ret` that wraps.
+        let taskOfInt = typeof<Threading.Tasks.Task<int>>
+        let valueTaskOfInt = typeof<Threading.Tasks.ValueTask<int>>
+
+        let leafValueTask =
+            define "LeafValueTask" true valueTaskOfInt (fun il -> throwing il thrown)
+
+        let tailLeaf =
+            define
+                "TailLeaf"
+                false
+                taskOfInt
+                (fun il ->
+                    il.Emit (Emit.OpCodes.Call, leaf)
+                    il.Emit Emit.OpCodes.Ret
+                )
+
+        define
+            "TailLeafValueTask"
+            false
+            valueTaskOfInt
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, leaf)
+                il.Emit (Emit.OpCodes.Newobj, valueTaskOfInt.GetConstructor [| taskOfInt |])
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        define
+            "TailLeafAsTask"
+            false
+            taskOfInt
+            (fun il ->
+                il.DeclareLocal valueTaskOfInt |> ignore<Emit.LocalBuilder>
+                il.Emit (Emit.OpCodes.Call, leafValueTask)
+                il.Emit Emit.OpCodes.Stloc_0
+                il.Emit (Emit.OpCodes.Ldloca_S, 0uy)
+                il.Emit (Emit.OpCodes.Call, valueTaskOfInt.GetMethod ("AsTask", Type.EmptyTypes))
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // The async version of a synchronized method reads no tail shape.
+        let synchronized =
+            define
+                "TailLeafSynchronized"
+                false
+                taskOfInt
+                (fun il ->
+                    il.Emit (Emit.OpCodes.Call, leaf)
+                    il.Emit Emit.OpCodes.Ret
+                )
+
+        synchronized.SetImplementationFlags (MethodImplAttributes.IL ||| MethodImplAttributes.Synchronized)
+
+        // A delegate's `Invoke`, which has no async variant: the call runs it, and the `ret` awaits
+        // what it returns.
+        let tailDelegate =
+            awaits.DefineMethod (
+                "TailDelegate",
+                MethodAttributes.Public ||| MethodAttributes.Static,
+                taskOfInt,
+                [| typeof<Func<Threading.Tasks.Task<int>>> |]
+            )
+
+        let il = tailDelegate.GetILGenerator ()
+        il.Emit Emit.OpCodes.Ldarg_0
+        il.Emit (Emit.OpCodes.Callvirt, typeof<Func<Threading.Tasks.Task<int>>>.GetMethod "Invoke")
+        il.Emit Emit.OpCodes.Ret
+
+        define
+            "TailVirtual"
+            false
+            taskOfInt
+            (fun il ->
+                il.Emit (Emit.OpCodes.Newobj, derivedCtor)
+                il.Emit (Emit.OpCodes.Callvirt, baseV)
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // `ValueTask<Task<int>>(Task<int>)` is the constructor taking the result, `ValueTask<T>(T)`,
+        // which ends no tail shape.
+        define
+            "TailLeafAsResult"
+            false
+            typeof<Threading.Tasks.ValueTask<Threading.Tasks.Task<int>>>
+            (fun il ->
+                il.Emit (Emit.OpCodes.Call, leaf)
+
+                il.Emit (
+                    Emit.OpCodes.Newobj,
+                    typeof<Threading.Tasks.ValueTask<Threading.Tasks.Task<int>>>.GetConstructor [| taskOfInt |]
+                )
+
+                il.Emit Emit.OpCodes.Ret
+            )
+        |> ignore<Emit.MethodBuilder>
+
+        // A `ret` that ends no tail shape, after a branch that throws.
+        let wrapsAfterThrow =
+            awaits.DefineMethod (
+                "WrapsAfterThrow",
+                MethodAttributes.Public ||| MethodAttributes.Static,
+                taskOfInt,
+                [| typeof<bool> |]
+            )
+
+        let il = wrapsAfterThrow.GetILGenerator ()
+        let returns = il.DefineLabel ()
+        il.Emit Emit.OpCodes.Ldarg_0
+        il.Emit (Emit.OpCodes.Brfalse_S, returns)
+        throwing il thrown
+        il.MarkLabel returns
+        il.Emit Emit.OpCodes.Ldnull
+        il.Emit Emit.OpCodes.Ret
+
+        awaiting "AwaitsTailLeaf" (fun il -> il.Emit (Emit.OpCodes.Call, tailLeaf))
+
+        // A `jmp` in an async version goes to its target's async variant.
+        define "JumpsToLeaf" false taskOfInt (fun il -> il.Emit (Emit.OpCodes.Jmp, leaf))
+        |> ignore<Emit.MethodBuilder>
+
+        // An ordinary method that does nothing, against which the folded intrinsics are compared:
+        // a folded call is no instruction at all, as a folded `typeof` is not.
+        define "Nothing" false typeof<Void> (fun il -> il.Emit Emit.OpCodes.Ret)
+        |> ignore<Emit.MethodBuilder>
+
+        // Tail shapes of the intrinsics whose async variant's call the JIT replaces with its value.
+        let taskFromResult =
+            typeof<Threading.Tasks.Task>.GetMethod("FromResult").MakeGenericMethod typeof<int>
+
+        let valueTaskFromResult =
+            typeof<Threading.Tasks.ValueTask>.GetMethod("FromResult").MakeGenericMethod typeof<int>
+
+        let tailOf (name : string) (returns : Type) (loads : Emit.ILGenerator -> unit) (callee : MethodInfo) =
+            define
+                name
+                false
+                returns
+                (fun il ->
+                    loads il
+                    il.Emit (Emit.OpCodes.Call, callee)
+                    il.Emit Emit.OpCodes.Ret
+                )
+            |> ignore<Emit.MethodBuilder>
+
+        let loadsOne (il : Emit.ILGenerator) = il.Emit Emit.OpCodes.Ldc_I4_1
+        let loadsNothing (_ : Emit.ILGenerator) = ()
+
+        tailOf "TailFromResult" taskOfInt loadsOne taskFromResult
+
+        // The JIT folds nothing in a method it does not optimise.
+        let unoptimised =
+            define
+                "TailFromResultNoOptimization"
+                false
+                taskOfInt
+                (fun il ->
+                    il.Emit Emit.OpCodes.Ldc_I4_1
+                    il.Emit (Emit.OpCodes.Call, taskFromResult)
+                    il.Emit Emit.OpCodes.Ret
+                )
+
+        unoptimised.SetImplementationFlags (MethodImplAttributes.IL ||| MethodImplAttributes.NoOptimization)
+        tailOf "TailValueTaskFromResult" valueTaskOfInt loadsOne valueTaskFromResult
+
+        tailOf
+            "TailCompletedTask"
+            typeof<Threading.Tasks.Task>
+            loadsNothing
+            (typeof<Threading.Tasks.Task>.GetProperty("CompletedTask").GetGetMethod ())
+
+        tailOf
+            "TailValueTaskCompletedTask"
+            typeof<Threading.Tasks.ValueTask>
+            loadsNothing
+            (typeof<Threading.Tasks.ValueTask>.GetProperty("CompletedTask").GetGetMethod ())
+
+        awaiting
+            "AwaitsFromResult"
+            (fun il ->
+                il.Emit Emit.OpCodes.Ldc_I4_1
+                il.Emit (Emit.OpCodes.Call, taskFromResult)
+            )
+
+        // `AsTask` is an intrinsic whose IL is its semantics, which its async variant runs as an async
+        // version.
+        let tailAsTask =
+            awaits.DefineMethod (
+                "TailAsTaskOfArgument",
+                MethodAttributes.Public ||| MethodAttributes.Static,
+                taskOfInt,
+                [| valueTaskOfInt.MakeByRefType () |]
+            )
+
+        let il = tailAsTask.GetILGenerator ()
+        il.Emit Emit.OpCodes.Ldarg_0
+        il.Emit (Emit.OpCodes.Call, valueTaskOfInt.GetMethod ("AsTask", Type.EmptyTypes))
+        il.Emit Emit.OpCodes.Ret
+
         awaits.CreateType () |> ignore<Type>
 
         use stream = new MemoryStream ()
@@ -15207,8 +15408,8 @@ public static class Runners
     /// (`AwaitSiteBinding.classify`, decision 13 of `docs/plans/2026-11-11-runtime-async.md`), which
     /// runs the method's own body in place of the thunk, so what escapes that body escapes at the
     /// call, in the call's regions; the instructions up to the await's call never run. The variant of
-    /// an async version is opaque, and a call outside a matched pattern binds the ordinary variant as
-    /// before.
+    /// an async version runs its IL too, and a call outside a matched pattern binds the ordinary
+    /// variant as before.
     [<Test>]
     let ``a matched await runs the awaited method's async variant`` () : unit =
         match FrameworkUnderTest.runtime () with
@@ -15282,11 +15483,10 @@ public static class Runners
         let analysis, returned = EscapeAnalysis.escapes analysis returns
         returned.Unknown |> shouldEqual false
 
+        // The async version throws what the control does.
         let analysis, versionAwait = variantOf analysis "AwaitsVersion"
-        let analysis, versionSources = sourcesOf analysis versionAwait
-
-        versionSources
-        |> shouldEqual (Set.singleton "Awaits::Version (async variant) entry AsyncVersion")
+        let analysis, versionAwaited = EscapeAnalysis.escapes analysis versionAwait
+        versionAwaited |> shouldEqual control
 
         // No pattern matches, so the call binds `Leaf`'s ordinary variant.
         let analysis, stored = variantOf analysis "AwaitsStored"
@@ -15302,6 +15502,176 @@ public static class Runners
         ordinarySources
         |> Set.contains "Awaits::Leaf entry TaskReturningThunk"
         |> shouldEqual true
+
+    /// The async variant of a method with IL for the ordinary calling convention runs that IL as an
+    /// async version (decision 17 of `docs/plans/2026-11-11-runtime-async.md`). A call in one of its
+    /// tail shapes calls its callee's async variant, where decision 13 binds one, and the frame
+    /// returns what that returns, so what the variant throws escapes at the call and nothing after
+    /// the call runs. Every other `ret` awaits the promise it returns, which the analysis does not
+    /// follow (`Opacity.AwaitedPromise`). The async version of a synchronized method reads no tail
+    /// shape, and the ordinary variant runs the IL as written. The variant of an intrinsic whose IL is
+    /// its semantics runs that IL too, except where the JIT replaces the variant's call with its value
+    /// (`IntrinsicBody.foldsAsyncVariantCall`), as it does where it makes its tier-0 optimisations:
+    /// then the call is no instruction at all.
+    [<Test>]
+    let ``an async version's tail shapes call the callee's async variant`` () : unit =
+        match FrameworkUnderTest.runtime () with
+        | EmulatedRuntime.Net10 -> Assert.Ignore ".NET 10's CoreCLR makes no async variant"
+        | EmulatedRuntime.Net11 -> ()
+
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let fixture =
+            Assembly.read loggerFactory (Some "Awaits.dll") (new MemoryStream (emitAwaits ()))
+
+        let analysis = analysisOver [ fixture ] id
+
+        let variantOf (analysis : EscapeAnalysisState) (name : string) : EscapeAnalysisState * MethodKey =
+            match EscapeAnalysis.asyncVariant analysis (methodNamed fixture "Awaits" name) with
+            | analysis, Ok variant -> analysis, variant
+            | _, Error refusal -> failwith $"Awaits::%s{name} has no async variant: %A{refusal}"
+
+        let sourcesOf (analysis : EscapeAnalysisState) (key : MethodKey) : EscapeAnalysisState * Set<string> =
+            let analysis, sources = EscapeAnalysis.unknownSources analysis key
+            analysis, sources |> Seq.map (renderSite analysis) |> Set.ofSeq
+
+        let awaited (name : string) : string =
+            $"Awaits::%s{name} (async variant) IL AwaitedPromise"
+
+        let thunk = "Awaits::Leaf entry TaskReturningThunk"
+
+        // The control: an ordinary method throwing what `Leaf` throws.
+        let analysis, control =
+            EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "Throws")
+
+        (render analysis control |> Set.contains "=Thrown", control.Unknown)
+        |> shouldEqual (true, false)
+
+        // Each tail shape calls the variant of `Leaf` or `LeafValueTask`, which throw what the control
+        // does; so too an await of an async version ending in one, and a `jmp` to `Leaf`.
+        let analysis =
+            (analysis,
+             [
+                 "TailLeaf"
+                 "TailLeafValueTask"
+                 "TailLeafAsTask"
+                 "AwaitsTailLeaf"
+                 "JumpsToLeaf"
+             ])
+            ||> List.fold (fun analysis name ->
+                let analysis, variant = variantOf analysis name
+                let analysis, escapes = EscapeAnalysis.escapes analysis variant
+                (name, escapes) |> shouldEqual (name, control)
+                analysis
+            )
+
+        // Dispatch on the exact receiver reaches the override's variant.
+        let analysis, dispatches = variantOf analysis "TailVirtual"
+        let analysis, dispatched = EscapeAnalysis.escapes analysis dispatches
+        let shown = render analysis dispatched
+
+        (shown.Contains "=Other", shown.Contains "=Thrown", dispatched.Unknown)
+        |> shouldEqual (true, false, false)
+
+        // No tail shape: the call runs `Leaf`'s thunk, and the `ret` awaits what it returns.
+        let analysis =
+            (analysis, [ "TailLeafSynchronized" ; "TailLeafAsResult" ])
+            ||> List.fold (fun analysis name ->
+                let analysis, variant = variantOf analysis name
+                let analysis, escapes = EscapeAnalysis.escapes analysis variant
+                let analysis, sources = sourcesOf analysis variant
+
+                (name,
+                 render analysis escapes |> Set.contains "=Thrown",
+                 sources.Contains thunk,
+                 sources.Contains (awaited name))
+                |> shouldEqual (name, false, true, true)
+
+                analysis
+            )
+
+        // A callee with no async variant runs as written, and the `ret` awaits what it returns.
+        let analysis, invokes = variantOf analysis "TailDelegate"
+        let analysis, invokeSources = sourcesOf analysis invokes
+
+        invokeSources.Contains (awaited "TailDelegate") |> shouldEqual true
+
+        // What the body throws before its `ret` escapes, beside the awaited promise.
+        let analysis, wraps = variantOf analysis "WrapsAfterThrow"
+        let analysis, wrapped = EscapeAnalysis.escapes analysis wraps
+        let analysis, wrappedSources = sourcesOf analysis wraps
+
+        (render analysis wrapped |> Set.contains "=Thrown", wrappedSources)
+        |> shouldEqual (true, Set.singleton (awaited "WrapsAfterThrow"))
+
+        // The JIT replaces the call of each of these intrinsics' async variant with its value, so
+        // nothing runs; so too where an await binds one. The answer holds where the JIT makes its
+        // tier-0 optimisations.
+        let analysis, nothing =
+            EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "Nothing")
+
+        let analysis =
+            (analysis,
+             [
+                 "TailFromResult"
+                 "TailValueTaskFromResult"
+                 "TailCompletedTask"
+                 "TailValueTaskCompletedTask"
+                 "AwaitsFromResult"
+             ])
+            ||> List.fold (fun analysis name ->
+                let analysis, variant = variantOf analysis name
+                let analysis, escapes = EscapeAnalysis.escapes analysis variant
+
+                (name, escapes)
+                |> shouldEqual (
+                    name,
+                    { nothing with
+                        Assumes = Set.add Assumption.JitOptimises nothing.Assumes
+                    }
+                )
+
+                analysis
+            )
+
+        // Where the JIT does not fold the call, the variant of `Task.FromResult` runs its IL as an
+        // async version, whose `ret` awaits.
+        let fromResultAwaits =
+            "System.Threading.Tasks.Task::FromResult (async variant) IL AwaitedPromise"
+
+        let analysis, unoptimised = variantOf analysis "TailFromResultNoOptimization"
+        let analysis, unoptimisedSources = sourcesOf analysis unoptimised
+        unoptimisedSources.Contains fromResultAwaits |> shouldEqual true
+
+        // So too where the analysis may not assume the JIT makes its tier-0 optimisations.
+        let unassumed =
+            analysisOf
+                (hostCoreLib ())
+                (FrameworkUnderTest.runtimeDirs ())
+                (hostTarget ())
+                HardwareIntrinsicsProfile.ScalarOnly
+                (Set.remove Assumption.JitOptimises Assumption.all)
+                [ fixture ]
+                id
+
+        let unassumed, unassumedVariant = variantOf unassumed "TailFromResult"
+        let _, unassumedSources = sourcesOf unassumed unassumedVariant
+        unassumedSources.Contains fromResultAwaits |> shouldEqual true
+
+        // The variant of `ValueTask<int>.AsTask` runs its IL as an async version, whose `ret` awaits.
+        let analysis, asTask = variantOf analysis "TailAsTaskOfArgument"
+        let analysis, asTaskSources = sourcesOf analysis asTask
+
+        asTaskSources
+        |> Set.contains "System.Threading.Tasks.ValueTask`1::AsTask (async variant) IL AwaitedPromise"
+        |> shouldEqual true
+
+        // The ordinary variant calls `Leaf`'s thunk and returns the promise, awaiting nothing.
+        let _, ordinarySources =
+            sourcesOf analysis (methodNamed fixture "Awaits" "TailLeaf")
+
+        (ordinarySources.Contains thunk, ordinarySources |> Set.exists (fun source -> source.EndsWith "AwaitedPromise"))
+        |> shouldEqual (true, false)
 
     /// Where the object a `throw` raises comes from, in an emitted method.
     [<RequireQualifiedAccess>]
