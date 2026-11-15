@@ -139,6 +139,24 @@ module IntrinsicBody =
         MethodInfo.isJITIntrinsic (getMemberRefParentType assembly) assembly.Methods definition
         || MethodInfo.hasIntrinsicAttribute (getMemberRefParentType assembly) assembly.Methods declaringType.Attributes
 
+    /// Whether CoreCLR's JIT replaces a call of the async variant of `method`, a CoreLib intrinsic,
+    /// with the value the variant returns, whatever it is optimising for, so that nothing of it runs:
+    /// `Task.FromResult`, `ValueTask.FromResult`, and the `CompletedTask` getters of `Task` and
+    /// `ValueTask` (`impIntrinsic`'s "Lightweight runtime async intrinsics", importercalls.cpp). A call
+    /// of the ordinary variant is not replaced.
+    let foldsAsyncVariantCall (assembly : DumpedAssembly) (method : MethodDefinitionHandle) : bool =
+        let definition = assembly.Methods.[method]
+
+        let declaringType =
+            assembly.TypeDefs.[definition.RequiredDeclaringType.Definition.Get]
+
+        assembly.ThisAssemblyDefinition.Name.Name = corelib
+        && not declaringType.IsNested
+        && declaringType.Namespace = "System.Threading.Tasks"
+        && (declaringType.Name = "Task" || declaringType.Name = "ValueTask")
+        && (definition.Name = "FromResult" || definition.Name = "get_CompletedTask")
+        && isIntrinsic assembly method
+
     /// Whether a `call` or `callvirt` token can name `method` itself: the shape CoreCLR's importer
     /// tests with `gtIsRecursiveCall`.
     ///
