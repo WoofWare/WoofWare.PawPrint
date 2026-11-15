@@ -933,6 +933,97 @@ module NativeRuntimeTypeBuilder =
                 | _ -> ()
 
                 NativeHandlerResult.completed state |> Some
+        | "TypeBuilder_SetConstantValue",
+          "System.Private.CoreLib",
+          "System.Reflection.Emit",
+          "RuntimeTypeBuilder",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices", "QCallModule", moduleGenerics)
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32
+            ConcretePointer (ConcreteVoid state.TypeSystem.ConcreteTypes) ],
+          MethodReturnType.Void when moduleGenerics.IsEmpty ->
+            let operation = "TypeBuilder_SetConstantValue"
+
+            if instruction.Arguments.Length <> 4 then
+                failwith $"%s{operation}: expected four native arguments, got %d{instruction.Arguments.Length}"
+
+            let moduleName =
+                NativeCall.qCallModuleToAssemblyFullName
+                    operation
+                    state
+                    (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
+
+            let held = dynamicScope operation moduleName state
+            let token = NativeCall.int32Argument operation instruction.Arguments.[1]
+
+            // `ParameterBuilder`, `FieldBuilder` and `PropertyBuilder` each pass their own token.
+            let owner =
+                match HasConstant.tryOfToken token held with
+                | Some owner -> owner
+                | None ->
+                    failwith
+                        $"%s{operation}: the owner 0x%08x{token} names no Field, Param or Property row of the module's scope, and the managed callers pass only a builder's own token"
+
+            let elementType = NativeCall.int32Argument operation instruction.Arguments.[2]
+
+            let pointer =
+                NativeCall.managedPointerOfPointerArgument operation "pValue" instruction.Arguments.[3]
+
+            // `RuntimeTypeBuilder.SetConstantValue` passes one of fourteen element types: `CLASS` with a null pointer for
+            // null; `STRING` with a fixed string's characters, which the QCall reads to their first NUL (its length
+            // argument is -1); and each of the twelve primitives with the boxed value's bytes. Nothing else reaches here.
+            let value =
+                match elementType, pointer with
+                | 0x12, ManagedPointerSource.Null -> ConstantValue.NullReference
+                | 0x12, _ ->
+                    failwith
+                        $"%s{operation}: ELEMENT_TYPE_CLASS for 0x%08x{token} with a pointer that is not null, which the managed caller passes only for a null value"
+                | 0x0E, ManagedPointerSource.Null ->
+                    failwith
+                        $"%s{operation}: ELEMENT_TYPE_STRING for 0x%08x{token} with a null pointer, but the managed caller passes a fixed string's characters"
+                | 0x0E, characters ->
+                    ConstantValue.String (
+                        NativeCall.readNullTerminatedUtf16 operation ctx.BaseClassTypes state characters
+                    )
+                | code, valuePointer ->
+                    let width =
+                        if code < 0 || code > 0xFF then
+                            None
+                        else
+                            ConstantValue.fixedWidthSize (
+                                LanguagePrimitives.EnumOfValue<byte, System.Reflection.Metadata.ConstantTypeCode> (
+                                    byte code
+                                )
+                            )
+
+                    match width, valuePointer with
+                    | None, _ ->
+                        failwith
+                            $"%s{operation}: the element type 0x%x{code} for 0x%08x{token} is none of the fourteen the managed caller passes"
+                    | Some _, ManagedPointerSource.Null ->
+                        failwith
+                            $"%s{operation}: the element type 0x%x{code} for 0x%08x{token} with a null pointer, but the managed caller passes the boxed value's bytes"
+                    | Some size, bytes ->
+                        ConstantValue.ofFixedWidth
+                            (LanguagePrimitives.EnumOfValue<byte, System.Reflection.Metadata.ConstantTypeCode> (
+                                byte code
+                            ))
+                            (NativeCall.readCountedBytes operation ctx.BaseClassTypes state bytes size
+                             |> ImmutableArray.CreateRange)
+
+            let typeDef = EmitScope.typeOfConstantOwner owner held
+
+            if state.TypeSystem._LoadedAssemblies.IsCreatedType moduleName typeDef then
+                failwith
+                    $"TODO: %s{operation}: the owner 0x%08x{token} belongs to TypeDef 0x%08x{(typeDefTable <<< 24) ||| typeDef.Rid}, which is created; real .NET writes the row and the flag, and what reflection then shows depends on what it has already read and cached, which PawPrint does not model"
+
+            match EmitScopeDefinitions.defineConstant owner value held with
+            | ConstantDefinition.DetachesAccessors ->
+                failwith
+                    $"TODO: %s{operation}: the property 0x%08x{token} has a Getter or Setter accessor, which CoreCLR's _SetPropertyProps detaches from it, leaving each such MethodSemantics row with a nil association, before it writes the constant; PawPrint does not model the detached rows"
+            | ConstantDefinition.Defined extended ->
+                let state, _ = state.WithEmitScope ctx.LoggerFactory moduleName extended
+                NativeHandlerResult.completed state |> Some
         | "TypeBuilder_SetParentType",
           "System.Private.CoreLib",
           "System.Reflection.Emit",

@@ -690,20 +690,68 @@ type ConstantValue =
 module ConstantValue =
     /// The element type the row holds for the value.
     let typeCode (value : ConstantValue) : System.Reflection.Metadata.ConstantTypeCode =
-        failwith "stub: ConstantValue.typeCode"
+        match value with
+        | ConstantValue.Boolean _ -> System.Reflection.Metadata.ConstantTypeCode.Boolean
+        | ConstantValue.Char _ -> System.Reflection.Metadata.ConstantTypeCode.Char
+        | ConstantValue.SByte _ -> System.Reflection.Metadata.ConstantTypeCode.SByte
+        | ConstantValue.Byte _ -> System.Reflection.Metadata.ConstantTypeCode.Byte
+        | ConstantValue.Int16 _ -> System.Reflection.Metadata.ConstantTypeCode.Int16
+        | ConstantValue.UInt16 _ -> System.Reflection.Metadata.ConstantTypeCode.UInt16
+        | ConstantValue.Int32 _ -> System.Reflection.Metadata.ConstantTypeCode.Int32
+        | ConstantValue.UInt32 _ -> System.Reflection.Metadata.ConstantTypeCode.UInt32
+        | ConstantValue.Int64 _ -> System.Reflection.Metadata.ConstantTypeCode.Int64
+        | ConstantValue.UInt64 _ -> System.Reflection.Metadata.ConstantTypeCode.UInt64
+        | ConstantValue.Single _ -> System.Reflection.Metadata.ConstantTypeCode.Single
+        | ConstantValue.Double _ -> System.Reflection.Metadata.ConstantTypeCode.Double
+        | ConstantValue.String _ -> System.Reflection.Metadata.ConstantTypeCode.String
+        | ConstantValue.NullReference -> System.Reflection.Metadata.ConstantTypeCode.NullReference
 
     /// <summary>
     /// The value blob: a fixed-width value's little-endian bytes, two bytes per code unit for a string, and four zero
     /// bytes for <c>NullReference</c>.
     /// </summary>
-    let blob (value : ConstantValue) : ImmutableArray<byte> = failwith "stub: ConstantValue.blob"
+    let blob (value : ConstantValue) : ImmutableArray<byte> =
+        // Little-endian whatever the host, as the metadata's blobs are.
+        let littleEndian (bits : uint64) (size : int) : ImmutableArray<byte> =
+            ImmutableArray.CreateRange (Seq.init size (fun i -> byte (bits >>> (8 * i))))
+
+        match value with
+        | ConstantValue.Boolean b -> ImmutableArray.Create<byte> b
+        | ConstantValue.Char c -> littleEndian (uint64 c) 2
+        | ConstantValue.SByte v -> littleEndian (uint64 (byte v)) 1
+        | ConstantValue.Byte v -> littleEndian (uint64 v) 1
+        | ConstantValue.Int16 v -> littleEndian (uint64 (uint16 v)) 2
+        | ConstantValue.UInt16 v -> littleEndian (uint64 v) 2
+        | ConstantValue.Int32 v -> littleEndian (uint64 (uint32 v)) 4
+        | ConstantValue.UInt32 v -> littleEndian (uint64 v) 4
+        | ConstantValue.Int64 v -> littleEndian (uint64 v) 8
+        | ConstantValue.UInt64 v -> littleEndian v 8
+        | ConstantValue.Single bits -> littleEndian (uint64 (uint32 bits)) 4
+        | ConstantValue.Double bits -> littleEndian (uint64 bits) 8
+        | ConstantValue.String s ->
+            // Code unit by code unit, so that a lone surrogate is kept, as `Encoding.Unicode` would not keep it.
+            ImmutableArray.CreateRange (s |> Seq.collect (fun c -> [ byte (int c &&& 0xFF) ; byte (int c >>> 8) ]))
+        | ConstantValue.NullReference -> littleEndian 0UL 4
 
     /// <summary>
     /// The size of a fixed-width element type's value: 1, 2, 4 or 8 for each of the twelve primitive element types, and
     /// <c>None</c> for <c>String</c>, <c>NullReference</c> and any other.
     /// </summary>
     let fixedWidthSize (code : System.Reflection.Metadata.ConstantTypeCode) : int option =
-        failwith "stub: ConstantValue.fixedWidthSize"
+        match code with
+        | System.Reflection.Metadata.ConstantTypeCode.Boolean
+        | System.Reflection.Metadata.ConstantTypeCode.SByte
+        | System.Reflection.Metadata.ConstantTypeCode.Byte -> Some 1
+        | System.Reflection.Metadata.ConstantTypeCode.Char
+        | System.Reflection.Metadata.ConstantTypeCode.Int16
+        | System.Reflection.Metadata.ConstantTypeCode.UInt16 -> Some 2
+        | System.Reflection.Metadata.ConstantTypeCode.Int32
+        | System.Reflection.Metadata.ConstantTypeCode.UInt32
+        | System.Reflection.Metadata.ConstantTypeCode.Single -> Some 4
+        | System.Reflection.Metadata.ConstantTypeCode.Int64
+        | System.Reflection.Metadata.ConstantTypeCode.UInt64
+        | System.Reflection.Metadata.ConstantTypeCode.Double -> Some 8
+        | _ -> None
 
     /// <summary>
     /// The value of fixed-width element type <paramref name="code"/> whose little-endian bytes are
@@ -717,7 +765,31 @@ module ConstantValue =
         (bytes : ImmutableArray<byte>)
         : ConstantValue
         =
-        failwith "stub: ConstantValue.ofFixedWidth"
+        match fixedWidthSize code with
+        | None -> invalidArg (nameof code) $"ConstantValue.ofFixedWidth: %O{code} is not a fixed-width element type"
+        | Some size when size <> bytes.Length ->
+            invalidArg
+                (nameof bytes)
+                $"ConstantValue.ofFixedWidth: %O{code} is %d{size} bytes wide, but %d{bytes.Length} bytes were given"
+        | Some _ ->
+
+        let bits =
+            Seq.foldBack (fun (b : byte) (acc : uint64) -> (acc <<< 8) ||| uint64 b) bytes 0UL
+
+        match code with
+        | System.Reflection.Metadata.ConstantTypeCode.Boolean -> ConstantValue.Boolean (byte bits)
+        | System.Reflection.Metadata.ConstantTypeCode.SByte -> ConstantValue.SByte (sbyte bits)
+        | System.Reflection.Metadata.ConstantTypeCode.Byte -> ConstantValue.Byte (byte bits)
+        | System.Reflection.Metadata.ConstantTypeCode.Char -> ConstantValue.Char (char (uint16 bits))
+        | System.Reflection.Metadata.ConstantTypeCode.Int16 -> ConstantValue.Int16 (int16 bits)
+        | System.Reflection.Metadata.ConstantTypeCode.UInt16 -> ConstantValue.UInt16 (uint16 bits)
+        | System.Reflection.Metadata.ConstantTypeCode.Int32 -> ConstantValue.Int32 (int32 bits)
+        | System.Reflection.Metadata.ConstantTypeCode.UInt32 -> ConstantValue.UInt32 (uint32 bits)
+        | System.Reflection.Metadata.ConstantTypeCode.Single -> ConstantValue.Single (int32 bits)
+        | System.Reflection.Metadata.ConstantTypeCode.Int64 -> ConstantValue.Int64 (int64 bits)
+        | System.Reflection.Metadata.ConstantTypeCode.UInt64 -> ConstantValue.UInt64 bits
+        | System.Reflection.Metadata.ConstantTypeCode.Double -> ConstantValue.Double (int64 bits)
+        | other -> failwith $"BUG: ConstantValue.ofFixedWidth: fixedWidthSize gave %O{other} a width"
 
 /// <summary>
 /// The outcome of asking CoreCLR's emitter to set an owner's constant in a dynamic module's scope
@@ -1482,4 +1554,51 @@ module EmitScopeDefinitions =
     /// </summary>
     /// <exception cref="ArgumentException">The scope lacks the owner.</exception>
     let defineConstant (owner : HasConstant) (value : ConstantValue) (scope : EmitScope) : ConstantDefinition =
-        failwith "stub: EmitScopeDefinitions.defineConstant"
+        // Refuses an owner the scope lacks.
+        EmitScope.typeOfConstantOwner owner scope |> ignore<TypeDefRid>
+
+        // `_SetPropertyProps` detaches each of the property's rows whose semantics is exactly `msGetter` or exactly
+        // `msSetter` (`_DefineMethodSemantics`, md/compiler/regmeta_emit.cpp:975); an Other method's row stays.
+        let detaches =
+            match owner with
+            | HasConstant.Property property ->
+                EmitScope.methodSemantics scope
+                |> Seq.exists (fun row ->
+                    row.Association = HasSemantics.Property property
+                    && (row.Semantics = MethodSemanticsAttributes.Getter
+                        || row.Semantics = MethodSemanticsAttributes.Setter)
+                )
+            | HasConstant.Field _
+            | HasConstant.Param _ -> false
+
+        if detaches then
+            ConstantDefinition.DetachesAccessors
+        else
+
+        let newBlob = ConstantValue.blob value
+
+        // `_DefineSetConstant` writes the blob only when its size is above 0 (md/compiler/regmeta_emit.cpp:1503).
+        let blob, scope =
+            if newBlob.Length > 0 then
+                EmitScope.internBlob newBlob scope
+            else
+                match EmitScope.constants scope |> Seq.tryFind (fun row -> row.Parent = owner) with
+                | Some existing -> existing.Value, scope
+                | None -> EmitScope.internBlob ImmutableArray.Empty scope
+
+        let scope =
+            EmitScope.setConstant
+                {
+                    Parent = owner
+                    Type = ConstantValue.typeCode value
+                    Value = blob
+                }
+                scope
+
+        let scope =
+            match owner with
+            | HasConstant.Field rid -> EmitScope.addFieldFlags rid FieldAttributes.HasDefault scope
+            | HasConstant.Param rid -> EmitScope.addParamFlags rid ParameterAttributes.HasDefault scope
+            | HasConstant.Property rid -> EmitScope.addPropertyFlags rid PropertyAttributes.HasDefault scope
+
+        ConstantDefinition.Defined scope

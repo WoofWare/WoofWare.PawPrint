@@ -385,7 +385,7 @@ module EmitScopeGen =
                     return Op.MethodSemanticsRun (association, semantics, method, count)
                 }
                 3, Gen.map2 (fun o a -> Op.SetPseudoAttributeFlag (o, a)) choice choice
-                4, Gen.map2 (fun o v -> Op.SetConstant (o, v)) choice choice
+                2, Gen.map2 (fun o v -> Op.SetConstant (o, v)) choice choice
             ]
 
     /// Every owner of `scope` a custom attribute may have, as `HasCustomAttribute`: the assembly if the scope has

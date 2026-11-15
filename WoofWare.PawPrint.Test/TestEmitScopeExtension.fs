@@ -1569,7 +1569,8 @@ module TestEmitScopeExtension =
                         |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, rid) ]
 
     /// A scope with two types, `A` (TypeDef 2) and `B` (TypeDef 3), each with a field, a method with one parameter and a
-    /// property, in that order: `A`'s are Field 1, Param 1 and Property 1, and `B`'s Field 2, Param 2 and Property 2.
+    /// property, in that order: `A`'s are Field 1, Param 1 and Property 1, and `B`'s Field 2, Param 2 and Property 2;
+    /// and the blobs of the `Int32`s 1 to 7.
     let private constantOwnersScope () : EmitScope =
         let mutable scope = apply Guid.Empty []
 
@@ -1611,6 +1612,12 @@ module TestEmitScopeExtension =
                     s
 
             scope <- s
+
+        // The blobs of the constants the tests set, so that setting one adds no heap entry.
+        for value in 1..7 do
+            scope <-
+                EmitScope.internBlob (ImmutableArray.Create<byte> (BitConverter.GetBytes value)) scope
+                |> snd
 
         scope
 

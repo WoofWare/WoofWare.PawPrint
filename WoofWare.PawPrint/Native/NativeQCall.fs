@@ -232,6 +232,7 @@ module NativeQCall =
             "TypeBuilder_DefineCustomAttribute",
             NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineCustomAttribute"
             "TypeBuilder_SetMethodIL", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetMethodIL"
+            "TypeBuilder_SetConstantValue", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_SetConstantValue"
             "TypeBuilder_DefineField", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineField"
             "TypeBuilder_DefineProperty", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineProperty"
             "TypeBuilder_DefineEvent", NativeRuntimeTypeBuilder.tryExecuteQCall "TypeBuilder_DefineEvent"

@@ -727,7 +727,7 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """An `EnumBuilder` whose second literal `DefineLiteral("B", 2L)` is refused, which leaves the field `B` without a constant, and an `EnumBuilder` over `char` (#2281). Measured on .NET 10 and 11 to exit 0: real .NET lists `B` with the value 0 (`B,A,C`) and reads the `char` enum; a control expecting `EMis`'s values to be `A:1,C:3` exits 3 on both. Under PawPrint it stops at the stage's first call, until the handler exists, and its stop beyond that is measured once it does. Un-parked by #2281: `Enum_GetValuesAndNames` reading a literal without a constant as 0, as CoreCLR's `ReflectionInvocation::GetEnumValuesAndNames` does, and a `char` underlying type."""
+            """An `EnumBuilder` whose second literal `DefineLiteral("B", 2L)` is refused, which leaves the field `B` without a constant, and an `EnumBuilder` over `char` (#2281). Measured on .NET 10 and 11 to exit 0: real .NET lists `B` with the value 0 (`B,A,C`) and reads the `char` enum; a control expecting `EMis`'s values to be `A:1,C:3` exits 3 on both. PawPrint stores each constant as real .NET does, and stops at `EMis`'s first read, in `Enum_GetValuesAndNames` (measured): "Enum.GetValuesAndNames: static literal enum field B had no metadata constant"; the `char` enum after it is not reached, and `NativeEnum` refuses its underlying type (read). Un-parked by #2281: `Enum_GetValuesAndNames` reading a literal without a constant as 0, as CoreCLR's `ReflectionInvocation::GetEnumValuesAndNames` does, and a `char` underlying type."""
             {
                 FileName = "TypeBuilderSetConstantLongString.cs"
                 ExpectedReturnCode = 0
@@ -743,7 +743,7 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """A string constant of 32768 characters, read back (#2282). Measured on .NET 10 and 11 to exit 0, and a control inverting the equality exits 2 on both. Under PawPrint it stops at the stage's first call, until the handler exists, and its stop beyond that is measured once it does. Un-parked by #2282, which removes the scan limit of `NativeCall.readNullTerminatedUtf16`; `TypeBuilderSetConstant.cs` holds a constant of 32767 characters, which passes."""
+            """A string constant of 32768 characters, read back (#2282). Measured on .NET 10 and 11 to exit 0, and a control inverting the equality exits 2 on both. PawPrint stops at the constant, in the QCall's read of the string (measured): "TypeBuilder_SetConstantValue: unterminated UTF-16 string exceeded PawPrint's 32767-char scan limit". Un-parked by #2282, which removes the scan limit of `NativeCall.readNullTerminatedUtf16`; `TypeBuilderSetConstant.cs` holds a constant of 32767 characters, which passes."""
             {
                 FileName = "TypeBuilderPseudoAttributeGenericParamRetry.cs"
                 ExpectedReturnCode = 0

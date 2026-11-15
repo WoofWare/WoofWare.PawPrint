@@ -10,11 +10,11 @@ open System.Reflection.Metadata.Ecma335
 /// </summary>
 /// <remarks>
 /// A row's <c>position</c> is its RID in the scope, which is its RID in the image, except in
-/// <c>InterfaceImpl</c>, <c>MethodImpl</c> and <c>MethodSemantics</c>: there it is the 1-based position at
-/// which the scope added the row, because the image sorts the first two by class and the third by
-/// association. A row of those tables therefore moves when a later row sorts before it, and that is not a
-/// violation: the runtime keeps no handle into them, only what each row names, and a class's or an
-/// association's rows keep their order.
+/// <c>InterfaceImpl</c>, <c>MethodImpl</c>, <c>MethodSemantics</c> and <c>Constant</c>: there it is the 1-based
+/// position at which the scope holds the row, because the image sorts the first two by class, the third by
+/// association and the fourth by parent. A row of those tables therefore moves when a later row sorts before
+/// it, and that is not a violation: the runtime keeps no handle into them, only what each row names, and a
+/// class's or an association's rows keep their order.
 /// </remarks>
 [<RequireQualifiedAccess>]
 type EmitScopeExtensionViolation =
@@ -29,15 +29,17 @@ type EmitScopeExtensionViolation =
     /// A row the later scope adds is a member of a type already created: a field, method, property or
     /// event it declares, a parameter of one of its methods, one of its interface implementations or method
     /// impls, a generic parameter of it or of one of its methods, or a constraint of one, an accessor
-    /// of one of its properties or events, whatever type the accessor's method belongs to, or a custom attribute of
-    /// it or of any of those members (<c>EmitScope.typeOfCustomAttributeOwner</c>). A custom attribute of the
+    /// of one of its properties or events, whatever type the accessor's method belongs to, a custom attribute of
+    /// it or of any of those members (<c>EmitScope.typeOfCustomAttributeOwner</c>), or a constant of one of its
+    /// fields, properties or parameters (<c>EmitScope.typeOfConstantOwner</c>). A custom attribute of the
     /// assembly or the module is no type's.
     | AddedToCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
     /// A row of the earlier scope differs in the later one only in what the emitter fills in after adding
-    /// the row (a method's implementation flags or body, a type's parent, or a bit of a flags column that a
-    /// pseudo-attribute sets, <c>KnownCustomAttribute.flagMask</c>), and the row is a type already created or
-    /// a member of one.
+    /// the row (a method's implementation flags or body, a type's parent, a bit of a flags column that a
+    /// pseudo-attribute sets, <c>KnownCustomAttribute.flagMask</c>, the <c>HasDefault</c> bit of an owner that has
+    /// a constant, or a constant's element type and value), and the row is a type already created or a member of
+    /// one.
     | FilledInCreatedType of table : TableIndex * position : int * createdType : TypeDefRid
 
 /// Whether one emit scope extends another, given which of its types the runtime has already created.
@@ -50,8 +52,11 @@ module EmitScopeExtension =
     /// <remarks>
     /// Empty when <paramref name="after"/> was built from <paramref name="before"/> by appending rows,
     /// interning entries, filling in the implementation flags and bodies of methods and the parents of
-    /// types, and setting the bits of flags columns that pseudo-attributes set, none of them for a created
-    /// type. A flags column that loses a bit, or gains one that no pseudo-attribute sets, is a changed row. Then an image of <paramref name="after"/> reads back every heap
+    /// types, setting the bits of flags columns that pseudo-attributes set, and setting constants (the owner's
+    /// <c>Constant</c> row, replaced in place or added, and its <c>HasDefault</c> bit), none of them for a created
+    /// type. A flags column that loses a bit, or gains one that no pseudo-attribute sets and that is not the
+    /// <c>HasDefault</c> of an owner with a <c>Constant</c> row in <paramref name="after"/>, is a changed row; so is
+    /// a <c>Constant</c> row whose owner differs at its position. Then an image of <paramref name="after"/> reads back every heap
     /// entry and created type of <paramref name="before"/>'s as <paramref name="before"/>'s image does,
     /// and every row but for those columns, at the same RID except in the tables the image sorts. A history that was
     /// otherwise rewritten, rather than appended to, is refused even where the image happens to read
@@ -105,14 +110,14 @@ module EmitScopeExtension =
         let gainedPseudoAttributeBits (mask : int) (was : int) (now : int) : bool =
             was &&& ~~~now = 0 && (now &&& ~~~was) &&& ~~~mask = 0
 
-        // Each row of `before` at the same position of `after`, where `filled` says whether `after`'s row
-        // differs from `before`'s only in what the emitter fills in. A fill is refused only for a created type,
+        // Each row of `before` at the same position of `after`, where `filled` says whether `after`'s row at a
+        // RID differs from `before`'s only in what the emitter fills in. A fill is refused only for a created type,
         // which `owner` names.
         let filledOrRewritten
             (table : TableIndex)
             (beforeRows : ImmutableList<'row>)
             (afterRows : ImmutableList<'row>)
-            (filled : 'row -> 'row -> bool)
+            (filled : int -> 'row -> 'row -> bool)
             (owner : 'row -> TypeDefRid)
             =
             [
@@ -125,7 +130,7 @@ module EmitScopeExtension =
 
                         if was = row then
                             ()
-                        elif filled was row then
+                        elif filled (i + 1) was row then
                             let owner = owner was
 
                             if created.Contains owner then
@@ -200,6 +205,16 @@ module EmitScopeExtension =
                             yield EmitScopeExtensionViolation.RowChanged (TableIndex.TypeDef, i + 1)
             ]
 
+        let constantsAfter = EmitScope.constants after
+
+        // The `HasDefault` bit of an owner that has a Constant row in `after`, which the emitter sets with the row,
+        // and 0 for any other owner.
+        let hasDefaultOf (owner : HasConstant) (bit : int) : int =
+            if constantsAfter |> Seq.exists (fun row -> row.Parent = owner) then
+                bit
+            else
+                0
+
         let methodOwner (method : MethodDefRid) : TypeDefRid =
             (EmitScope.methodDefs after).[method.Rid - 1].Owner
 
@@ -228,11 +243,16 @@ module EmitScopeExtension =
                     TableIndex.Field
                     (EmitScope.fields before)
                     (EmitScope.fields after)
-                    (fun was row ->
+                    (fun rid was row ->
+                        let hasDefault =
+                            hasDefaultOf
+                                (HasConstant.Field (FieldRid rid))
+                                (int System.Reflection.FieldAttributes.HasDefault)
+
                         { was with
                             Flags = row.Flags
                         } = row
-                        && gainedPseudoAttributeBits (int mask.Field) (int was.Flags) (int row.Flags)
+                        && gainedPseudoAttributeBits (int mask.Field ||| hasDefault) (int was.Flags) (int row.Flags)
                     )
                     (fun row -> row.Owner)
 
@@ -257,11 +277,16 @@ module EmitScopeExtension =
                     TableIndex.Param
                     (EmitScope.parameters before)
                     (EmitScope.parameters after)
-                    (fun was row ->
+                    (fun rid was row ->
+                        let hasDefault =
+                            hasDefaultOf
+                                (HasConstant.Param (ParamRid rid))
+                                (int System.Reflection.ParameterAttributes.HasDefault)
+
                         { was with
                             Flags = row.Flags
                         } = row
-                        && gainedPseudoAttributeBits (int mask.Param) (int was.Flags) (int row.Flags)
+                        && gainedPseudoAttributeBits (int mask.Param ||| hasDefault) (int was.Flags) (int row.Flags)
                     )
                     (fun row -> methodOwner row.Owner)
 
@@ -298,6 +323,27 @@ module EmitScopeExtension =
                 | Some _
                 | None -> ()
 
+            // A Constant row stays with its owner; its element type and value are filled in, refused for a created
+            // type. The image sorts the table by parent, so a row's position is the scope's.
+            let constantsBefore = EmitScope.constants before
+
+            for i in 0 .. constantsBefore.Count - 1 do
+                let was = constantsBefore.[i]
+
+                if i >= constantsAfter.Count || constantsAfter.[i].Parent <> was.Parent then
+                    yield EmitScopeExtensionViolation.RowChanged (TableIndex.Constant, i + 1)
+                elif constantsAfter.[i] <> was then
+                    let owner = EmitScope.typeOfConstantOwner was.Parent after
+
+                    if created.Contains owner then
+                        yield EmitScopeExtensionViolation.FilledInCreatedType (TableIndex.Constant, i + 1, owner)
+
+            for i in constantsBefore.Count .. constantsAfter.Count - 1 do
+                let owner = EmitScope.typeOfConstantOwner constantsAfter.[i].Parent after
+
+                if created.Contains owner then
+                    yield EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.Constant, i + 1, owner)
+
             yield! rewritten TableIndex.MemberRef (EmitScope.memberRefs before) (EmitScope.memberRefs after)
             yield! rewritten TableIndex.StandAloneSig (EmitScope.standAloneSigs before) (EmitScope.standAloneSigs after)
 
@@ -306,7 +352,7 @@ module EmitScopeExtension =
                     TableIndex.Event
                     (EmitScope.events before)
                     (EmitScope.events after)
-                    (fun was row ->
+                    (fun _ was row ->
                         { was with
                             Flags = row.Flags
                         } = row
@@ -326,11 +372,16 @@ module EmitScopeExtension =
                     TableIndex.Property
                     (EmitScope.properties before)
                     (EmitScope.properties after)
-                    (fun was row ->
+                    (fun rid was row ->
+                        let hasDefault =
+                            hasDefaultOf
+                                (HasConstant.Property (PropertyRid rid))
+                                (int System.Reflection.PropertyAttributes.HasDefault)
+
                         { was with
                             Flags = row.Flags
                         } = row
-                        && gainedPseudoAttributeBits (int mask.Property) (int was.Flags) (int row.Flags)
+                        && gainedPseudoAttributeBits (int mask.Property ||| hasDefault) (int was.Flags) (int row.Flags)
                     )
                     (fun row -> row.Owner)
 

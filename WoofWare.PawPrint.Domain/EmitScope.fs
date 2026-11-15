@@ -1118,7 +1118,8 @@ module EmitScope =
 
     /// <summary>
     /// OR <paramref name="flags"/> into the <c>Flags</c> column of a field already in the scope, as CoreCLR's emitter
-    /// does for a pseudo-attribute (<c>FieldRec::AddFlags</c>). Every other row, and every heap, is unchanged.
+    /// does for a pseudo-attribute (<c>FieldRec::AddFlags</c>) and for a constant's <c>HasDefault</c>
+    /// (<c>RegMeta::_SetFieldProps</c>). Every other row, and every heap, is unchanged.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The scope has no such field, or <paramref name="flags"/> does not fit the column's two bytes.
@@ -1141,8 +1142,8 @@ module EmitScope =
 
     /// <summary>
     /// OR <paramref name="flags"/> into the <c>Flags</c> column of a parameter already in the scope, as CoreCLR's
-    /// emitter does for a pseudo-attribute (<c>ParamRec::AddFlags</c>). Every other row, and every heap, is
-    /// unchanged.
+    /// emitter does for a pseudo-attribute (<c>ParamRec::AddFlags</c>) and for a constant's <c>HasDefault</c>
+    /// (<c>RegMeta::_SetParamProps</c>). Every other row, and every heap, is unchanged.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The scope has no such parameter, or <paramref name="flags"/> does not fit the column's two bytes.
@@ -1165,8 +1166,8 @@ module EmitScope =
 
     /// <summary>
     /// OR <paramref name="flags"/> into the <c>Flags</c> column of a property already in the scope, as CoreCLR's
-    /// emitter does for a pseudo-attribute (<c>PropertyRec::AddPropFlags</c>). Every other row, and every heap, is
-    /// unchanged.
+    /// emitter does for a pseudo-attribute (<c>PropertyRec::AddPropFlags</c>) and for a constant's <c>HasDefault</c>
+    /// (<c>RegMeta::_SetPropertyProps</c>). Every other row, and every heap, is unchanged.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The scope has no such property, or <paramref name="flags"/> does not fit the column's two bytes.
