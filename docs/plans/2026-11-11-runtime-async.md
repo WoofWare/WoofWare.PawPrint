@@ -1300,9 +1300,9 @@ Each stage is one pull request, with its tests first.
         caller. A variant runs its row's runtime-async IL, or is a name to dispatch on; an async
         version's is opaque (`Opacity.AsyncVersion`) until 4h-2. Dispatch keys what it reaches by
         the variant the type system resolves (decision 19), and does nothing else differently.
-      * In the variant of a runtime-async method, a call the JIT reads as the start of an await
-        (`AwaitPattern.awaitAfter`, its operands confirmed as `ConfigureAwait` and
-        `AsyncHelpers.Await`, as the interpreter confirms them) is classified by
+      * In the variant of a runtime-async method, a call the JIT compiles and reads as the start of
+        an await (`AwaitPattern.awaitAfter`, its operands confirmed as CoreLib's intrinsic
+        `ConfigureAwait` and `AsyncHelpers.Await`, as the interpreter confirms them) is classified by
         `AwaitSiteBinding.classify`. Where it binds, the call's site names the variant, and the
         instructions after it up to and including the await's call contribute nothing; their
         tokens still bind, as the JIT resolves all three. The value the pattern leaves is still
@@ -1314,8 +1314,10 @@ Each stage is one pull request, with its tests first.
         method throws gives the control's answer; one in a `try` is caught there; a `callvirt` on an
         exact receiver reaches the override's variant; a `constrained.` call on a value type
         reaches its own implementation's; an await of an async version is opaque; and a call
-        outside a pattern, or in a method without the calling convention, binds the thunk. Three
-        mutants (the swallowed instructions not skipped, a range one short, an unrecognised
-        `ConfigureAwait`) fail it.
+        outside a pattern, or in a method without the calling convention, binds the thunk. An
+        `Await` of the fixture's own, of the same namespace and names, ends no pattern, and an
+        await after a `ret` is never compiled. Mutants fail it: the swallowed instructions not
+        skipped, a range one short, an unrecognised `ConfigureAwait`, and an await matched where
+        it is not compiled.
     * **(4h-2)** Async versions: a call in a tail shape calls its callee's variant, and any other
       `ret` awaits the promise it returns through `AsyncHelpers.TransparentAwait`.
