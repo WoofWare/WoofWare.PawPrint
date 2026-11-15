@@ -69,15 +69,13 @@ module IlMachineState =
     let peByteRangeForPropertySignatureBlob =
         IlMachineTypeResolution.peByteRangeForPropertySignatureBlob
 
-    let peByteRangeForConstantBlob = IlMachineTypeResolution.peByteRangeForConstantBlob
-
     let peByteRangePointer = IlMachineTypeResolution.peByteRangePointer
-
-    let peByteRangeCharPointer = IlMachineTypeResolution.peByteRangeCharPointer
 
     let peByteRangeForBlobHeap = IlMachineTypeResolution.peByteRangeForBlobHeap
 
     let blobHeapContentPointer = IlMachineTypeResolution.blobHeapContentPointer
+
+    let blobHeapContentCharPointer = IlMachineTypeResolution.blobHeapContentCharPointer
 
     let getFrame = IlMachineThreadState.getFrame
 

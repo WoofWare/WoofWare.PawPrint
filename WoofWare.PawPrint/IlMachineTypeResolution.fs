@@ -964,18 +964,6 @@ module IlMachineTypeResolution =
                 Projections = [ ByrefProjection.ReinterpretAs byteType ]
             }
 
-    /// PE byte range pointer over a Constant table row's value blob (ECMA II.22.9).
-    let peByteRangeForConstantBlob (assembly : DumpedAssembly) (constantHandle : ConstantHandle) : PeByteRangePointer =
-        let mdReader = assembly.PeReader.GetMetadataReader ()
-        let blobReader = mdReader.GetBlobReader (mdReader.GetConstant constantHandle).Value
-
-        {
-            AssemblyFullName = assembly.DefinitionFullName
-            Source = PeByteRangePointerSource.ConstantBlob (ComparableConstantHandle.Make constantHandle)
-            RelativeVirtualAddress = 0
-            Size = blobReader.Length
-        }
-
     /// PE byte range over the assembly's whole `#Blob` heap; see `PeByteRangePointerSource.BlobHeap`.
     let peByteRangeForBlobHeap (assembly : DumpedAssembly) : PeByteRangePointer =
         let mdReader = assembly.PeReader.GetMetadataReader ()
@@ -987,19 +975,11 @@ module IlMachineTypeResolution =
             Size = Ecma335.MetadataReaderExtensions.GetHeapSize (mdReader, Ecma335.HeapIndex.Blob)
         }
 
-    /// A `byte*` at the first byte of `blob`'s contents — past its ECMA II.24.2.4 length prefix —
-    /// inside `peByteRangeForBlobHeap`, so that reading on past the blob's end reaches the heap
-    /// bytes that follow it. `blob` must be a non-nil handle into `assembly`'s `#Blob` heap.
-    let blobHeapContentPointer
-        (loggerFactory : ILoggerFactory)
-        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (assembly : DumpedAssembly)
-        (blob : BlobHandle)
-        (state : IlMachineState)
-        : IlMachineState * ManagedPointerSource
-        =
+    /// The `#Blob` heap offset of the first byte of `blob`'s contents, past its ECMA II.24.2.4
+    /// length prefix. `blob` must be a non-nil handle into `assembly`'s `#Blob` heap.
+    let private blobHeapContentOffset (assembly : DumpedAssembly) (blob : BlobHandle) : int =
         if blob.IsNil then
-            failwith $"blobHeapContentPointer: nil blob handle in %s{assembly.DefinitionFullName}"
+            failwith $"blobHeapContentOffset: nil blob handle in %s{assembly.DefinitionFullName}"
 
         let mdReader = assembly.PeReader.GetMetadataReader ()
         let heap = peByteRangeForBlobHeap assembly
@@ -1031,21 +1011,37 @@ module IlMachineTypeResolution =
                 ||| heapByte (prefixOffset + 3)
             else
                 failwith
-                    $"blobHeapContentPointer: blob at #Blob offset %d{prefixOffset} in %s{assembly.DefinitionFullName} has an invalid length-prefix byte 0x%02x{lead}"
+                    $"blobHeapContentOffset: blob at #Blob offset %d{prefixOffset} in %s{assembly.DefinitionFullName} has an invalid length-prefix byte 0x%02x{lead}"
 
         let length = (mdReader.GetBlobReader blob).Length
 
         if prefixValue <> length then
             failwith
-                $"blobHeapContentPointer: blob at #Blob offset %d{prefixOffset} in %s{assembly.DefinitionFullName} has a length prefix of %d{prefixValue}, but MetadataReader reports %d{length} bytes"
+                $"blobHeapContentOffset: blob at #Blob offset %d{prefixOffset} in %s{assembly.DefinitionFullName} has a length prefix of %d{prefixValue}, but MetadataReader reports %d{length} bytes"
 
         let contentOffset = prefixOffset + prefixWidth
 
         if contentOffset + length > heap.Size then
             failwith
-                $"blobHeapContentPointer: blob at #Blob offset %d{prefixOffset} in %s{assembly.DefinitionFullName} claims %d{length} bytes after a %d{prefixWidth}-byte prefix, which overruns the %d{heap.Size}-byte heap"
+                $"blobHeapContentOffset: blob at #Blob offset %d{prefixOffset} in %s{assembly.DefinitionFullName} claims %d{length} bytes after a %d{prefixWidth}-byte prefix, which overruns the %d{heap.Size}-byte heap"
 
-        let state, heapPointer = peByteRangePointer loggerFactory baseClassTypes heap state
+        contentOffset
+
+    /// A `byte*` at the first byte of `blob`'s contents — past its ECMA II.24.2.4 length prefix —
+    /// inside `peByteRangeForBlobHeap`, so that reading on past the blob's end reaches the heap
+    /// bytes that follow it. `blob` must be a non-nil handle into `assembly`'s `#Blob` heap.
+    let blobHeapContentPointer
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (assembly : DumpedAssembly)
+        (blob : BlobHandle)
+        (state : IlMachineState)
+        : IlMachineState * ManagedPointerSource
+        =
+        let contentOffset = blobHeapContentOffset assembly blob
+
+        let state, heapPointer =
+            peByteRangePointer loggerFactory baseClassTypes (peByteRangeForBlobHeap assembly) state
 
         state,
         ManagedPointerSource.addByteOffsetToByteView
@@ -1053,29 +1049,34 @@ module IlMachineTypeResolution =
             contentOffset
             heapPointer
 
-    /// A `char*` over a PE byte range, as opposed to `peByteRangePointer`'s `byte*`.
-    let peByteRangeCharPointer
+    /// As `blobHeapContentPointer`, but a `char*`, for a blob of UTF-16 code units such as a
+    /// string constant's.
+    let blobHeapContentCharPointer
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (peByteRange : PeByteRangePointer)
+        (assembly : DumpedAssembly)
+        (blob : BlobHandle)
         (state : IlMachineState)
         : IlMachineState * ManagedPointerSource
         =
-        // Having *a* `ReinterpretAs` projection is necessary: `ArithmeticTarget.decompose` refuses
-        // pointer arithmetic on a bare PE-byte-range root, and that refusal is reached even by
-        // `ptr + 0`, since the zero-offset shortcut sits after the decomposition. A guest doing
-        // `new string(ptr, 0, length)` offsets the pointer before reading it, so a projection-less
-        // pointer faults there rather than here.
-        //
-        // *Which* primitive the projection names doesn't matter: the offset is
-        // zero and the copy that follows is byte-wise, so a `byte` projection reaches the same answer.
-        // `char` is chosen because it is the type the API declares (`out char*`), which keeps the
-        // pointer self-describing to anything that later inspects it.
+        let contentOffset = blobHeapContentOffset assembly blob
+
+        // The copy a guest makes through this pointer is byte-wise, so a `byte` view would read the
+        // same; `char` is the type that `MetadataImport.GetDefaultValue` declares (`out char*`),
+        // which keeps the pointer self-describing to anything that later inspects it. The cursor
+        // need not be even: a blob's contents start wherever the heap puts them, and the byte-wise
+        // copy reads a `char` at any byte offset.
         let state, charType = ensureCharHandle loggerFactory baseClassTypes state
 
+        let heapPointer =
+            ManagedPointerSource.Byref
+                {
+                    Root = ByrefRoot.PeByteRange (peByteRangeForBlobHeap assembly)
+                    Projections = [ ByrefProjection.ReinterpretAs charType ]
+                }
+
         state,
-        ManagedPointerSource.Byref
-            {
-                Root = ByrefRoot.PeByteRange peByteRange
-                Projections = [ ByrefProjection.ReinterpretAs charType ]
-            }
+        ManagedPointerSource.addByteOffsetToByteView
+            ByteOffsetNormalisationContext.nonArrayRootsOnly
+            contentOffset
+            heapPointer
