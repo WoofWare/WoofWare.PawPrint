@@ -15594,7 +15594,8 @@ public static class Runners
         |> shouldEqual (true, Set.singleton (awaited "WrapsAfterThrow"))
 
         // The JIT replaces the call of each of these intrinsics' async variant with its value, so
-        // nothing runs; so too where an await binds one.
+        // nothing runs; so too where an await binds one. The answer holds where the JIT makes its
+        // tier-0 optimisations.
         let analysis, nothing =
             EscapeAnalysis.escapes analysis (methodNamed fixture "Awaits" "Nothing")
 
@@ -15610,7 +15611,15 @@ public static class Runners
             ||> List.fold (fun analysis name ->
                 let analysis, variant = variantOf analysis name
                 let analysis, escapes = EscapeAnalysis.escapes analysis variant
-                (name, escapes) |> shouldEqual (name, nothing)
+
+                (name, escapes)
+                |> shouldEqual (
+                    name,
+                    { nothing with
+                        Assumes = Set.add Assumption.JitOptimises nothing.Assumes
+                    }
+                )
+
                 analysis
             )
 
