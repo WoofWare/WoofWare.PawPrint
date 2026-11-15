@@ -8857,3 +8857,148 @@ Written first, and seen to fail before the handler exists, at the `failUnimpleme
 * The 25-row rule (#2258) for the Constant table: `_DefineSetConstant` hashes each row, but with one row per owner the
   hash cannot change an answer, so nothing is needed unless a later stage writes Constant rows without the search.
 * 5z's list stands, less `SetConstant`.
+
+### The Constant stage: the decisions
+
+Taken 2026-11-15, against `main` at 005169cfa.
+
+Scratchpad paths below are under `setconstant-decide/`, a sibling of the `setconstant/` directory named in "The Constant stage: what it is". Three things were run for these decisions, each on .NET 10.0.14 and rolled forward to 11.0.0-rc.3:
+
+* `setconstant-decide/probe2` (`Program.cs`; `Common.cs` is the planner's `Raw` and `Out` classes unchanged). Its scenarios are `odd`, `long`, `otheronly`, `nan`, `flagonly` and `pointer`. Outputs are `all-net10.out` and `all-net11.out`, and they are identical but for the version line (`all-diff-net10-net11.txt`).
+* The `nan` scenario again under `DOTNET_TieredCompilation=0`, `DOTNET_JITMinOpts=1` and `DOTNET_ReadyToRun=0` (`run-nan.sh`, output `probe2/nan-configs.out`).
+* An IL dump of Castle.Core 5.1.1, NSubstitute 5.1.0 and FakeItEasy 8.0.0 with an already-built `IlDump` (`ildump.sh`, outputs `ildump-*.txt`).
+
+Upstream source was read in `$DOTNET_RUNTIME_SRC_NET10`. Nothing in the repository was built or edited, so no decision below was tried under PawPrint.
+
+* **The emitter's rule, checked against the pinned source and not taken from the planner.**
+  * `_DefineSetConstant` (md/compiler/regmeta_emit.cpp:1463) is as the planner read it: search, reuse or add, set the type, and write the blob only when its size is above 0.
+  * `_SetFieldProps`, `_SetParamProps` and `_SetPropertyProps` clear the reserved mask from flags which a caller passes, and `RuntimeFieldBuilder`, `RuntimeMethodBuilder.DefineParameter` and `RuntimeConstructorBuilder.DefineParameter` clear it in managed code first. Measured (`flagonly`): a parameter defined with `Optional | HasDefault`, a field defined with `HasDefault` and a property defined with `HasDefault` have flags `0x0010`, `0x0056` and `0x0000`, and no Constant row. So in a dynamic module an owner has `HasDefault` exactly when it has a Constant row. `EmitScopeDefinitions.defineField`, `defineParam` and `defineProperty` already clear or refuse the bit.
+  * `_DefineMethodSemantics` (:975) detaches a row only when the row's semantics equals the one given. Measured (`otheronly`): a property whose only row is an Other method keeps it through `SetConstant`, and the constant is written.
+  * `Enum_GetValuesAndNames` (vm/reflectioninvocation.cpp:1792) takes every static field and reads a missing constant as 0, as the planner read it.
+* **Question 1, where the rows live: (A), a Constant table in the scope, one row per owner, replaced in place.**
+  * It is what `CMiniMdRW` holds, and it is an addition to the published package and not a change to it.
+  * (B) is rejected. It changes three public records to remove a state (two rows for one owner) which (A) already cannot reach: `EmitScope` is a private record, and `EmitScope.setConstant` is the only function which writes the table.
+  * (C) is rejected for the planner's reason, and for 5z's.
+  * A fourth option was considered and rejected: a map from owner to constant, with no order. It makes one row per owner true by construction. But a violation of the extension rule names a row by its position, the position must not move when another row is added, and a map has no such position. The scope's order (the order of each owner's first call) gives one, as it does for `MethodSemantics`.
+  * `EmitScope`'s docstring changes: a Constant row is replaced in place, and the image sorts the table by its parent's coded index, so the table joins `InterfaceImpl`, `MethodImpl` and `MethodSemantics` in the remarks of `EmitScopeImage` and of `EmitScopeExtensionViolation`.
+* **Question 2, the value: (a), with the row and the value kept apart.**
+  * `ConstantValue` is the closed union of fourteen cases, as the planner wrote it. It is what a caller gives. `Boolean` holds the raw byte, `Single` and `Double` hold bits, and `String` holds UTF-16 code units.
+  * A row holds `Type : ConstantTypeCode` and `Value : BlobOffset`, and not a `ConstantValue`. The planner's option list implies this; the measurement that forces it is new. Measured (`odd`): `(byte)2` then `""`, and `true` then `""`, leave a `STRING` row whose blob is one byte. The FCall then reports 0 characters with a pointer which is not null, and reflection reads `""`. No `ConstantValue` has that blob. `'x'` then `""` reads `"x"`, null then `""` reads two NUL characters, and `0x0044004300420041L` then `""` reads `"ABCD"`.
+  * `ConstantValue.String` may hold a NUL. ECMA-335 allows one in a constant, and the cut at the first NUL belongs to the QCall's pointer (its length argument is -1), so the handler makes the cut and Domain does not.
+  * The handler holds no size table. Domain gives the size of each of the twelve fixed-width codes and builds the case from that many bytes, and `ConstantValue.blob` is the inverse. The handler asks Domain for the size, reads that many bytes, and hands them back. This answers the planner's objection to (b), that the table would be stated twice, without giving up the union.
+  * The handler refuses, with a host failure, a token which is not a Field, Param or Property of the scope, an element type outside the fourteen, `CLASS` with a pointer which is not null, and any other element type with a null pointer. The managed caller passes none of these (RuntimeTypeBuilder.cs:254-298).
+  * (b) is rejected for the planner's reason.
+* **Question 3, the flag and the extension rule: (a).**
+  * `EmitScopeDefinitions.defineConstant` ORs the bit and sets the row. Nothing else in `EmitScopeDefinitions` can give a row the bit (measured above for real .NET, and read for `defineField`, `defineParam` and `defineProperty`).
+  * The extension rule:
+    * A Constant row of the earlier scope must be at the same position in the later scope with the same parent, else `RowChanged`. A changed type or value is a fill: admitted for an owner whose type is not created, `FilledInCreatedType` otherwise.
+    * An added Constant row whose owner's type is created is `AddedToCreatedType`.
+    * A Field, Param or Property row may gain `HasDefault` only when the later scope has a Constant row for it. Otherwise the gain is `RowChanged`. A lost `HasDefault` is `RowChanged`, as any lost bit is.
+    * The owner's type is found by a new `EmitScope.typeOfConstantOwner`, as `typeOfCustomAttributeOwner` does for attributes.
+  * The rule does not check the reverse (a Constant row whose owner lacks the bit). The rule compares two scopes; it does not validate one. The model property and the guest catch a row without its flag.
+  * (b) is rejected for the planner's reason. (c) falls with 1 (B).
+* **Question 4, how much of `_DefineSetConstant`: (a), all of it.** Every part is measured, and the `odd` rows above are part of it: the old blob is kept whatever the old type was.
+* **Question 5, a property with a getter or a setter: (b), a TODO, stated in Domain.**
+  * `defineConstant` returns a union: `Defined of EmitScope`, or `DetachesAccessors` when the owner is a property with a `MethodSemantics` row whose semantics is exactly `Getter` or exactly `Setter`. The handler turns `DetachesAccessors` into the TODO. So Domain never returns a scope which it knows to be wrong, and a test can assert that the case was reached. This follows `CustomAttributeDefinition.NotStoredAsGiven`.
+  * A property with only Other rows is `Defined` (measured, `otheronly`).
+  * The planner's "Castle's is read from memory and not checked" is now checked. Castle.Core 5.1.1 calls `ParameterBuilder.SetConstant` at two sites, both in `MethodEmitter.CopyDefaultValueConstant`, and nothing else in the three consumers calls any `SetConstant` or `DefineLiteral` (`ildump-Castle.Core.txt:13739`, `:13783`; no match in the other two).
+  * (a) stays a later stage. It changes a public record and writes another table.
+* **Question 6, an owner of a created type: (a), the created-owner TODO, for all three owner kinds.**
+  * The check is on the owner's type and not on the token's table. Managed code stops a field and a property first, so only a parameter reaches it; one check is simpler than three.
+  * The order in the handler: the arguments, parsed; the created-owner TODO; `defineConstant`; for `DetachesAccessors` the TODO, for `Defined` `WithEmitScope`.
+* **Question 7, the string pointer: (a), and in its own PR before the stage. This differs from the planner on the split.**
+  * The defect is real once this stage lands. `MetadataImport.GetDefaultValue` builds the string from the pointer a few instructions after the FCall returns (MdImport.cs:397). If another guest thread calls `SetConstant` on the same module between the two, the handle names whatever row the new image has at that RID, with the old size. That is a wrong string, silently, and it depends on the schedule.
+  * Measured on real .NET (`pointer`): the FCall's pointer for `b`'s constant still reads `"first-value"` after `b` is given a longer value, an earlier parameter gains a constant, and 2000 more constants are added. The second call returns a different pointer. So CoreCLR's pointer is into a heap which only grows, and a `BlobHeap` pointer is the same thing.
+  * Every heap offset of the image is the offset which the scope handed out (`EmitScopeImage`'s docstring), so the offset means the same in every later image.
+  * (b) is rejected: two paths for one FCall. (c) is rejected: it is the defect.
+  * `PeByteRangePointerSource.ConstantBlob`, `peByteRangeForConstantBlob` and `ComparableConstantHandle` then have no user and are deleted. The first is a public case of `WoofWare.PawPrint` and the last a public type of Domain; the PR body says so.
+  * An empty blob still gives a null pointer. A one-byte blob gives a pointer and 0 characters (measured, `odd`), which the code already does.
+* **Question 8, `NativeEnum`: (a), not in this stage, and an issue.**
+  * Two of its three divergences are stops. The third is a wrong answer on `main` today for any enum with a static field which is not literal: PawPrint leaves the field out and CoreCLR lists it (read on both sides, not measured). That is why it is an issue and not only a line of this plan.
+  * A fourth, which the planner's guest would have met: `NativeEnum` refuses an enum whose underlying type is `char` or `bool` (`storageElementHandle`, `Native/NativeEnum.fs:118-129`; read). Real .NET reads a `char` enum (the planner's measurement). So the main guest's `Enums` leaves `char` out, and the parked guest holds it.
+* **Question 9, the split: two PRs, the pointer first.**
+  * The pointer change is independent of emit, it is testable alone against an image on disk, and it is one feature. The stage is not correct without it. 5z's decisions set the same order for the invoke-stub fix.
+  * The stage is not stacked on it. It branches from `main` once the pointer PR has merged.
+  * The limit on that order. `new string(char*, 0, n)` must read through a `BlobHeap` pointer whose byte offset is odd, since a blob's contents start wherever the heap puts them. The code says the copy is byte-wise (`peByteRangeCharPointer`'s comment), but nobody has tried it. If it needs more than a contained change, stop and ask: there is no second representation which is right for a dynamic module, because only the heap offset survives both a re-sort and an overwrite.
+  * Inside the stage's PR the split by layer (Domain, then the handler and guests) stays the cut to make if review finds it too large.
+* **Question 10, the guest's consumer shape: (a), following `CopyDefaultValueConstant` as read.** The copy tests `(p.Attributes & HasDefault) != 0` and not `HasDefaultValue`, reads `DefaultValue`, returns on `Missing`, calls `SetConstant`, and on `ArgumentException` has a retry through `Convert.ChangeType` for some nullable parameter types (`ildump-Castle.Core.txt`, the method which ends at `:13785`). The guest copies the first call and the catch; it need not reach the retry. `DefineParameter` is given `p.Attributes` whole, so the builder clears `HasDefault` and `SetConstant` sets it again.
+* **A question which the planner missed: `Parameter.DefaultValue`.**
+  * `Parameter.readAll` (`WoofWare.PawPrint.Domain/MethodInfo.fs:47`) stores `metadata.GetConstant (param.GetDefaultValue ())` for every parameter. It is a third reader of the Constant table, beside the two which the planner named.
+  * Nothing reads the field (grep over the repository at 005169cfa: the only mention is its definition and that line). For a parameter with no default the handle is nil, and SRM's `GetConstant` does not check, so the stored `Constant` would misread if anything touched it.
+  * It is a handle into a table which the image sorts. It is bound to the reader of its own image, so it cannot name a row of a later image, and the stage is correct with it in place.
+  * Decision: it is deleted, in its own PR, tracked by an issue. It is a public field of a published record, so it does not ride in either PR above.
+* **The float signalling NaN is not a defect of this stage, and its diagnosis changes.**
+  * Measured (`nan`, `probe2/nan-configs.out`): `BitConverter.Int32BitsToSingle(0x7fa00001)` of a constant gives `0x7fe00001` under the default JIT and under `DOTNET_TieredCompilation=0`, and `0x7fa00001` under `DOTNET_JITMinOpts=1`. The same call on a value which the JIT cannot see gives `0x7fa00001` in every configuration. In every case `SetConstant` stores the bits it is given.
+  * So the JIT quiets the value when it folds the call, and `SetConstant` quiets nothing. Real .NET gives both answers, by configuration. PawPrint's answer is the `MinOpts` one.
+  * #1437 is open on the same ground (a float signalling NaN through the eval stack). The measurement goes there as a comment and no new issue is filed.
+  * The guest's rule stands: it uses a quiet payload such as `0x7fc00001`.
+* **The 32767-character limit is real, is a stop, and is not fixed here.**
+  * Measured on real .NET (`long`): string constants of 32767, 32768, 40000 and 70000 characters are stored and read back whole.
+  * Read: `NativeCall.readNullTerminatedUtf16` fails once the index passes 32767, so a string of 32768 characters or more stops with "exceeded PawPrint's 32767-char scan limit". A string of 32767 passes.
+  * The helper has about twenty callers and the bound's comment says it guards against an unterminated string; a read past the end of the object which the pointer is in should already fail (read, not tried). Its removal is its own PR, tracked by an issue. The stage uses the helper as it stands, and a parked guest holds the long constant.
+* **Issues.**
+  * #2281: question 8.
+  * #2282: the limit above.
+  * #2283: `Parameter.DefaultValue`.
+  * A comment on #1437, not a new issue.
+  * No issue for the `GetDefaultValue` pointer: it is fixed by the first PR.
+* **PR titles.**
+  * The pointer: "Hand back a string constant as a pointer into the #Blob heap".
+  * The stage: "SetConstant: a dynamic module's Constant table (type-builder Constant stage)".
+
+### Where the decisions contradict the plan
+
+* "Recommended: (a), with the pointer change as its own commit" (question 9): the pointer change is its own PR, merged first.
+* "Castle's is read from memory and not checked" (question 5): checked from IL, and true.
+* "Real .NET quieted it somewhere in the probe's own code before the QCall ... (where, not measured)", in the measured table, in "Measured under PawPrint with the throwaway" and in "left to later stages": the JIT quiets it when it folds `Int32BitsToSingle` of a constant, and only outside `MinOpts`. "PawPrint did not" is one of real .NET's two answers and not a divergence of its own.
+* "Readers, all over SRM": there is a third, `Parameter.readAll`, which nothing consumes.
+* The oracle's `Enums` guest lists `char`: `NativeEnum` refuses a `char` underlying type (read), so `char` moves to the parked guest.
+* The oracle's Castle-shaped copy calls `SetConstant` "when `p.HasDefaultValue`": Castle tests the `HasDefault` bit of `p.Attributes`, and has a retry (question 10).
+* "A string constant longer than 32767 characters reaches the handler whole" is listed as a thing to verify with a throwaway: it does not need one. The limit is read from the helper, real .NET has none (measured), and the stage does not remove it.
+* "The handler has no Domain test, so the guest alone" (the mutant "the string read past its first NUL"): still the guest alone for the cut, but the fixed-width parse is now in Domain and has the encoding property.
+* `ConstantRow`'s docstring in option 1 (A) says nothing of blobs which fit no value; the row's type and blob are independent columns, and the `odd` rows are why.
+
+### The Constant stage: additions to the oracle
+
+* **The pointer PR.**
+  * For every string constant of a fixture image on disk and of CoreLib, the FCall's pointer has the `BlobHeap` source, its cursor is the first byte of the blob's contents, and the characters read through it equal the blob's. Coverage asserted: a constant whose contents start at an odd offset and one at an even offset; an empty blob (null pointer).
+  * A read which runs past the blob's end equals the image's own heap bytes at that offset.
+  * The two existing assertions on `ConstantBlob` (`TestNativeMetadataImport.fs:2947`, `:5651`) change to the heap source. No other test changes.
+  * Verified first, with a throwaway: `new string(char*, 0, n)` in a guest through a pointer at an odd heap offset (question 9).
+  * Mutants: the cursor left at the length prefix; the size taken from the blob and not from the heap (the read past the end).
+* **The stage: fixed tables.**
+  * The `odd` rows, on each owner kind: `(byte)2`, `true`, null, `'x'`, `(short)0x4142` and `0x0044004300420041L`, each then `""`, with the row's type, blob and the string read back (`probe2/all-net10.out`).
+  * The `flagonly` rows, as `defineField`, `defineParam` and `defineProperty` already behave.
+* **The stage: properties.**
+  * The encoding property also checks the fixed-width parse: for every primitive value, parsing `blob value` under `typeCode value` gives the value back, and the blob's length is the size which Domain gives the handler.
+  * The model's schedules draw a one-byte value, a two-byte value and a null before an empty string, and assert that as coverage, beside the planner's list.
+  * The model's schedules include properties with a Getter row, with a Setter row, with only an Other row and with none. The model answers `DetachesAccessors` for the first two and leaves the scope unchanged. Coverage asserted for all four.
+  * The image property draws owners so that the order by coded index differs from the order by (table, RID): a field with RID 2 and a parameter with RID 1 both hold constants. Coverage asserted.
+  * `TestEmitScopeExtension` also draws: a Constant row whose parent changes at its position (`RowChanged`); a constant changed for an owner of an uncreated type while another type is created (admitted).
+* **The stage: the differential.** Its schedule draws the `odd` sequences, and a property with only an Other method. A property with a getter or setter is left out of the host comparison and asserted to be `DetachesAccessors` in the mirror.
+* **The stage: the guests.**
+  * `Second` gains the `odd` sequences, read through reflection (`""`, `""`, two NULs, `"x"`, `"䅂"`, `"ABCD"`).
+  * A property with only an Other method, then `SetConstant` (measured: the method stays, the constant reads 7).
+  * `SetConstant` on a field and on a property after `CreateType`, and `DefineLiteral` on a created `EnumBuilder`: each throws `InvalidOperationException` in managed code. They go in the main guest. Only the parameter is in the refusal fixture.
+  * The refusal fixture holds three property guests and not one: a getter only, a setter only, and both.
+  * `Enums` covers `int`, `byte`, `long` and `ulong`. The parked guest `TypeBuilderEnumLiteralWithoutConstant.cs` gains an `EnumBuilder` over `char`.
+  * A parked guest `TypeBuilderSetConstantLongString.cs`: a 32768-character constant, read back (real .NET: equal). The main guest holds a 32767-character one, which passes.
+  * My probe looked an accessor-less property up with `GetProperty(name)` and got null on real .NET; the planner's probe reads such a property, so the guest takes its lookup from `setconstant/probe/Program.cs` and not from `probe2`.
+* **Mutants added**, each with what kills it:
+  * the old blob kept only when the old type was `STRING` (the `odd` table; the differential);
+  * `DetachesAccessors` answered for any `MethodSemantics` row of the property (the Other-only guest; the model property);
+  * `DetachesAccessors` answered for a Getter row only (the setter-only refusal guest; the model property);
+  * the Constant table sorted by (table, RID) and not by coded index (the image property's coverage case; the guest's `Order`);
+  * a fixed-width size wrong in Domain's table (`I8` read as four bytes) (the encoding property; the guest's `Values`);
+  * the extension rule admitting a Constant row whose parent changed (`TestEmitScopeExtension`);
+  * the extension rule admitting a changed constant for a created type (`TestEmitScopeExtension`; already in the planner's list, kept).
+* **What the implementer verifies first**, beside the planner's list less its second item:
+  * That nothing reads `Parameter.DefaultValue` at the tip which the stage branches from.
+  * That a `STRING` row with a one-byte blob reads back as `""` under PawPrint, through `DefaultValue` and `GetRawConstantValue`.
+
+### The Constant stage: additions to "left to later stages"
+
+* Removing the scan limit of `readNullTerminatedUtf16` (#2282).
+* Deleting `Parameter.DefaultValue` (#2283).
+* `NativeEnum`: `char` and `bool` underlying types, beside the planner's three (#2281).
+* A `SetConstant` argument which the managed caller cannot pass (another element type, a null pointer for a primitive) is a host failure. CoreCLR would write a row or throw "Bad default value."; nothing reaches it.
