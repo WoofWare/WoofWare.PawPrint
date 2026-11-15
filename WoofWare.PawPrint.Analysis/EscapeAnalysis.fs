@@ -499,9 +499,6 @@ type internal Runs =
     /// CoreLib's `Object.GetType`, whose contract (`ObjectGetType`) the analysis takes in place of
     /// its body.
     | ObjectGetType
-    /// Nothing: the JIT replaces every call with the value the method returns
-    /// (`IntrinsicBody.foldsAsyncVariantCall`).
-    | Folded
     /// The method this assumption summarises, whose contract the analysis takes in place of its
     /// body.
     | Assumed of Assumption
@@ -4221,7 +4218,6 @@ module EscapeAnalysis =
                     None
 
             match intrinsic with
-            | Some _ when IntrinsicBody.foldsAsyncVariantCall assembly key.Method.Get -> state, Runs.Folded
             | Some (IntrinsicBody.JitExpansion _ | IntrinsicBody.VmSubstitution | IntrinsicBody.CallSiteExpansion | IntrinsicBody.StructMarshalling _ as classified) ->
                 failwith
                     $"TODO: %O{key} is the async variant of a JIT intrinsic that CoreCLR implements as %A{classified} rather than by its IL; the analysis does not say what runs for its async variant"
@@ -4370,7 +4366,6 @@ module EscapeAnalysis =
 
         match runs with
         | Runs.Opaque reason -> state, opaqueFromEntry reason
-        | Runs.Folded -> state, contracted [] [] []
         | Runs.Primitive primitive ->
             let raised = contractRaises state (IntrinsicPrimitive.contract primitive)
 
@@ -5528,6 +5523,40 @@ module EscapeAnalysis =
             )
             |> Map.ofSeq
 
+        // The method of the token the `call` or `callvirt` at `index` binds, where it binds one.
+        let calledMethod (index : int) : (DumpedAssembly * MethodKey) option =
+            match fst ops.[index], Map.tryFind index targets with
+            | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt),
+                                       MetadataOperand.FromMetadata _),
+              Some (CallTarget.Method callee) when not (unbound.Contains index) ->
+                let calleeAssembly, _ = methodOf state callee.Callee
+                Some (calleeAssembly, callee.Callee)
+            | _ -> None
+
+        // Whether the JIT makes its tier-0 optimisations in this body, where it folds the calls of
+        // some intrinsics (`impIntrinsic`, importercalls.cpp): not in a method marked
+        // `NoOptimization` or one whose assembly disables optimisation, nor in one that calls
+        // `StubHelpers.NextCallReturnAddress`, where it expands only the intrinsics it must.
+        let optimised =
+            state.Assumptions.Contains Assumption.JitOptimises
+            && Debuggable.allowsJitOptimisation assembly = Some true
+            && (
+                match method with
+                | MethodInfo.Metadata (_, facts, _) ->
+                    not (facts.ImplAttributes.HasFlag MethodImplAttributes.NoOptimization)
+                | MethodInfo.Synthesised _ -> false
+            )
+            && [ 0 .. ops.Length - 1 ]
+               |> List.forall (fun index ->
+                   match calledMethod index with
+                   | Some (_, callee) ->
+                       not (
+                           declaringTypeOf state callee = corelibType state "System.StubHelpers" "StubHelpers"
+                           && (snd (methodOf state callee)).Name = "NextCallReturnAddress"
+                       )
+                   | None -> true
+               )
+
         // Where the JIT compiles a query of `typeof`s to what their types decide
         // (`Assumption.JitOptimises`), and makes none of its calls:
         //   - `typeof(X).IsValueType`, `ldtoken X` then calls of `Type.GetTypeFromHandle` and
@@ -5552,24 +5581,12 @@ module EscapeAnalysis =
         // handle is a constant (so of a field of a type that is not generic), the field has data
         // (`IsRVA`) at least one `T` long, and `T` is a primitive type or an enum. By the index of
         // the `ldtoken`.
-        // The JIT folds them only where it makes its
-        // tier-0 optimisations: not in a method marked `NoOptimization` or one whose assembly
-        // disables optimisation, nor in one that calls `StubHelpers.NextCallReturnAddress`, where
-        // it expands only the intrinsics it must.
+        // The JIT folds them only where it makes its tier-0 optimisations (`optimised`).
         let state, typeQueries, createdSpans, referenceQueries =
             let typeType = corelibType state "System" "Type"
 
             let runtimeHelpers =
                 corelibType state "System.Runtime.CompilerServices" "RuntimeHelpers"
-
-            let calledMethod (index : int) : (DumpedAssembly * MethodKey) option =
-                match fst ops.[index], Map.tryFind index targets with
-                | IlOp.UnaryMetadataToken ((UnaryMetadataTokenIlOp.Call | UnaryMetadataTokenIlOp.Callvirt),
-                                           MetadataOperand.FromMetadata _),
-                  Some (CallTarget.Method callee) when not (unbound.Contains index) ->
-                    let calleeAssembly, _ = methodOf state callee.Callee
-                    Some (calleeAssembly, callee.Callee)
-                | _ -> None
 
             // Whether the instruction at `index` calls the intrinsic of `Type` of this name.
             let callsTypeIntrinsic (index : int) (name : string) : bool =
@@ -5579,26 +5596,6 @@ module EscapeAnalysis =
                     && (snd (methodOf state callee)).Name = name
                     && IntrinsicBody.isIntrinsic calleeAssembly callee.Method.Get
                 | None -> false
-
-            let optimised =
-                state.Assumptions.Contains Assumption.JitOptimises
-                && Debuggable.allowsJitOptimisation assembly = Some true
-                && (
-                    match method with
-                    | MethodInfo.Metadata (_, facts, _) ->
-                        not (facts.ImplAttributes.HasFlag MethodImplAttributes.NoOptimization)
-                    | MethodInfo.Synthesised _ -> false
-                )
-                && [ 0 .. ops.Length - 1 ]
-                   |> List.forall (fun index ->
-                       match calledMethod index with
-                       | Some (_, callee) ->
-                           not (
-                               declaringTypeOf state callee = corelibType state "System.StubHelpers" "StubHelpers"
-                               && (snd (methodOf state callee)).Name = "NextCallReturnAddress"
-                           )
-                       | None -> true
-                   )
 
             // The type token of a `typeof`, `ldtoken` then a call of `GetTypeFromHandle`, at `index`.
             let typeofAt (index : int) : MetadataToken option =
@@ -6156,6 +6153,22 @@ module EscapeAnalysis =
 
                 state, Map.empty, Set.empty
             | _ -> state, Map.empty, Set.empty
+
+        // Each call that binds the async variant of an intrinsic whose call the JIT folds into the
+        // value it returns (`IntrinsicBody.foldsAsyncVariantCall`), where it makes its tier-0
+        // optimisations: like a folded `typeof`, it is no instruction at all.
+        let folded =
+            if optimised then
+                awaitSites
+                |> Map.filter (fun _ variant ->
+                    let variantAssembly, _ = methodOf state variant.Callee
+                    IntrinsicBody.foldsAsyncVariantCall variantAssembly variant.Callee.Method.Get
+                )
+                |> Map.keys
+                |> Set.ofSeq
+                |> Set.union folded
+            else
+                folded
 
         // Whether each `ret` that ends no tail shape awaits the promise it returns: in an async
         // version (`impWrapTopOfStackInAwait`, importer.cpp).

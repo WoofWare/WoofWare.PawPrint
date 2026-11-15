@@ -161,9 +161,9 @@ method) may add more:
   method with ordinary IL, an async version, runs that IL: a call in one of its tail shapes (`call;
   ret`, `call; newobj ValueTask; ret`, or a `ValueTask`'s `AsTask` before the `ret`) calls the
   callee's variant in the same way, except in the async version of a synchronized method, and every
-  other `ret` awaits the promise it returns, which is opaque (`Opacity.AwaitedPromise`). The variant
-  of an intrinsic whose call the JIT replaces with its value (`Task.FromResult` and the like) runs
-  nothing;
+  other `ret` awaits the promise it returns, which is opaque (`Opacity.AwaitedPromise`). Where the
+  JIT makes its tier-0 optimisations, it replaces a call of the variant of `Task.FromResult` and the
+  like with its value, and the call does nothing;
 * a `catch` absorbs what derives from its type, decided on the real base chains of types in any
   assembly, which `WoofWare.PawPrint.Loader` resolves exactly as the interpreter does;
 * an object thrown that is not an exception is named as itself; a `catch` sees it as a

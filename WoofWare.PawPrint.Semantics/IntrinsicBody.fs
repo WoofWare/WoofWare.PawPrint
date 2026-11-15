@@ -140,10 +140,12 @@ module IntrinsicBody =
         || MethodInfo.hasIntrinsicAttribute (getMemberRefParentType assembly) assembly.Methods declaringType.Attributes
 
     /// Whether CoreCLR's JIT replaces a call of the async variant of `method`, a CoreLib intrinsic,
-    /// with the value the variant returns, whatever it is optimising for, so that nothing of it runs:
-    /// `Task.FromResult`, `ValueTask.FromResult`, and the `CompletedTask` getters of `Task` and
-    /// `ValueTask` (`impIntrinsic`'s "Lightweight runtime async intrinsics", importercalls.cpp). A call
-    /// of the ordinary variant is not replaced.
+    /// with the value the variant returns, so that nothing of it runs: `Task.FromResult`,
+    /// `ValueTask.FromResult`, and the `CompletedTask` getters of `Task` and `ValueTask`
+    /// (`impIntrinsic`'s "Lightweight runtime async intrinsics", importercalls.cpp). It does so only
+    /// in a caller where it makes its tier-0 optimisations (`Tier0OptimizationEnabled`) and expands
+    /// more than the intrinsics it must, which a caller calling `StubHelpers.NextCallReturnAddress`
+    /// does not; elsewhere the variant runs its IL. A call of the ordinary variant is not replaced.
     let foldsAsyncVariantCall (assembly : DumpedAssembly) (method : MethodDefinitionHandle) : bool =
         let definition = assembly.Methods.[method]
 
