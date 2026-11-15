@@ -78,16 +78,6 @@ type AwaitSiteFacts =
         NamedVariant : Result<AsyncVariantBody, AsyncVariantRefusal>
     }
 
-/// Why PawPrint does not yet bind the async variant at a matched await site where CoreCLR's JIT
-/// binds one (decision 13 of `docs/plans/2026-11-11-runtime-async.md`). The site calls the named
-/// method and awaits the promise it returns, as the JIT compiles a site where the VM supplies no
-/// variant (decision 6(a)).
-[<RequireQualifiedAccess>]
-type AwaitNotYetBound =
-    /// The call is a `callvirt` with a `constrained.` prefix: of an instance method, through a
-    /// receiver whose type the prefix names.
-    | ConstrainedCallvirt
-
 /// Decision 13's classification of a matched await site: an await in a user's runtime-async body,
 /// or a tail shape in an async version.
 [<RequireQualifiedAccess>]
@@ -99,8 +89,6 @@ type AwaitSiteBinding =
     /// CoreCLR's VM supplies no async variant of the named method, so the JIT calls the method and
     /// awaits the promise it returns.
     | NoVariant of AsyncVariantRefusal
-    /// CoreCLR binds the variant, and PawPrint does not yet.
-    | NotYetBound of AwaitNotYetBound
     /// CoreCLR binds the variant, whose body PawPrint does not model, so the site is refused by
     /// name where it runs.
     | Unmodelled of UnmodelledVariantBody
@@ -108,12 +96,12 @@ type AwaitSiteBinding =
 [<RequireQualifiedAccess>]
 module AwaitSiteBinding =
 
-    /// What a matched await site binds, from `facts`. An unmodelled variant is named before the
-    /// reason a site is not yet bound, a `callvirt`'s `constrained.` prefix. A site that dispatches binds the named
-    /// method's variant, whose implementation on the receiver dispatch finds through its ordinary
-    /// sibling (decision 19 of `docs/plans/2026-11-11-runtime-async.md`); so does a `call` with a
-    /// `constrained.` prefix, as of a static virtual method, whose implementation the prefix
-    /// resolves the same way.
+    /// What a matched await site binds, from `facts`: the named method's variant, wherever CoreCLR's
+    /// VM supplies one that PawPrint models. A site that dispatches binds it, and dispatch finds its
+    /// implementation on the receiver through its ordinary sibling (decision 19 of
+    /// `docs/plans/2026-11-11-runtime-async.md`); so does a site with a `constrained.` prefix,
+    /// which resolves the implementation the same way, of a static virtual method on the type it
+    /// names, or of an instance method on the receiver it transforms.
     ///
     /// The named method may be abstract only where the call dispatches, or a `constrained.` prefix
     /// resolves it; CoreCLR's JIT refuses to compile a call naming one otherwise
@@ -132,10 +120,6 @@ module AwaitSiteBinding =
         | Error (AsyncVariantRefusal.UnmodelledBody body) -> AwaitSiteBinding.Unmodelled body
         | Error refusal -> AwaitSiteBinding.NoVariant refusal
         | Ok body ->
-
-        if facts.Constrained && facts.Opcode = AwaitedCall.Callvirt then
-            AwaitSiteBinding.NotYetBound AwaitNotYetBound.ConstrainedCallvirt
-        else
 
         match body with
         | AsyncVariantBody.Abstract when not dispatches && not facts.Constrained ->
