@@ -353,6 +353,19 @@ public class Program
             {
                 return 7;
             }
+
+            // Not even when the slot now names a type the JIT would refuse: compiling again would
+            // raise `InvalidProgramException` from this `CreateDelegate`.
+            if (!Rewrite(dm, typeof(ArgumentException).TypeHandle, typeof(List<>).TypeHandle))
+            {
+                return 7;
+            }
+
+            Func<int> third = null;
+            if (Threw(() => { third = Create(dm); }) != null || !ThrowsExactly(() => third(), typeof(ArgumentException)))
+            {
+                return 7;
+            }
         }
 
         // 8. `InitLocals` cleared after `CreateDelegate` is not heard by a restricted method: it was

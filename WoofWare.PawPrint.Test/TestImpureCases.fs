@@ -6428,7 +6428,7 @@ module TestImpureCases =
                 // method built with `restrictedSkipVisibility: true`: the method's `catch` clause
                 // types and `InitLocals` are latched there, and a clause the JIT refuses is raised
                 // from `CreateDelegate`, each check paired with the unrestricted control. Measured to
-                // exit 0 on real .NET 10 and 11, with controls exiting 7, 13 and 15 on both.
+                // exit 0 on real .NET 10 and 11, with four controls exiting 7, 7, 13 and 15 on both.
                 FileName = "DynamicMethodCompiledAtCreateDelegate.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
