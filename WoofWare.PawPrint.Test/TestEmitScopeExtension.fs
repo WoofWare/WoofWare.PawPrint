@@ -28,6 +28,19 @@ module TestEmitScopeExtension =
 
     let private rowNumber (handle : EntityHandle) : int = MetadataTokens.GetRowNumber handle
 
+    /// An owner's custom attributes as the image holds them, in RID order: each row's RID, which is its token, its
+    /// constructor and its blob.
+    let private attributesView (reader : MetadataReader) (owner : EntityHandle) =
+        [
+            for handle in CustomAttribute.ofOwnerInRidOrder reader owner do
+                let row = reader.GetCustomAttribute handle
+
+                yield
+                    rowNumber (CustomAttributeHandle.op_Implicit handle),
+                    token row.Constructor,
+                    List.ofArray (reader.GetBlobBytes row.Value)
+        ]
+
     /// A type's or method's generic parameters as the image holds them: each row's RID, which is its
     /// token, its columns, and its constraints, each constraint row's RID and the type it names.
     let private genericParamsView
@@ -49,10 +62,17 @@ module TestEmitScopeExtension =
                                 token (reader.GetGenericParameterConstraint c).Type
                     ]
 
-                yield rowNumber (GenericParameterHandle.op_Implicit p), row.Index, row.Attributes, row.Name, constraints
+                yield
+                    rowNumber (GenericParameterHandle.op_Implicit p),
+                    row.Index,
+                    row.Attributes,
+                    row.Name,
+                    constraints,
+                    attributesView reader (GenericParameterHandle.op_Implicit p)
         ]
 
-    /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its
+    /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its custom
+    /// attributes and its members', its
     /// generic parameters, its methods with their implementation flags, parameters, generic parameters
     /// and bodies, and its fields, as handles into the image, and its interface
     /// implementations and method impls in table order; and its properties and events, each with its
@@ -74,7 +94,9 @@ module TestEmitScopeExtension =
                     let parameters =
                         [
                             for p in (reader.GetMethodDefinition m).GetParameters () do
-                                yield rowNumber (ParameterHandle.op_Implicit p)
+                                yield
+                                    rowNumber (ParameterHandle.op_Implicit p),
+                                    attributesView reader (ParameterHandle.op_Implicit p)
                         ]
 
                     // A body moves as bodies before it are filled in, so it is compared by content.
@@ -96,13 +118,16 @@ module TestEmitScopeExtension =
                         (reader.GetMethodDefinition m).ImplAttributes,
                         parameters,
                         genericParamsView reader genericParamOwners (GenericParamOwner.MethodDef m),
-                        body
+                        body,
+                        attributesView reader (MethodDefinitionHandle.op_Implicit m)
             ]
 
         let fields =
             [
                 for f in definition.GetFields () do
-                    yield rowNumber (FieldDefinitionHandle.op_Implicit f)
+                    yield
+                        rowNumber (FieldDefinitionHandle.op_Implicit f),
+                        attributesView reader (FieldDefinitionHandle.op_Implicit f)
             ]
 
         let interfaces =
@@ -128,6 +153,7 @@ module TestEmitScopeExtension =
 
                     yield
                         rid,
+                        attributesView reader (PropertyDefinitionHandle.op_Implicit p),
                         semantics
                         |> List.filter (fun (_, _, a) -> a = association)
                         |> List.map (fun (s, m, _) -> s, m)
@@ -141,12 +167,14 @@ module TestEmitScopeExtension =
 
                     yield
                         rid,
+                        attributesView reader (EventDefinitionHandle.op_Implicit e),
                         semantics
                         |> List.filter (fun (_, _, a) -> a = association)
                         |> List.map (fun (s, m, _) -> s, m)
             ]
 
         token definition.BaseType,
+        attributesView reader (TypeDefinitionHandle.op_Implicit handle),
         genericParamsView reader genericParamOwners (GenericParamOwner.TypeDef handle),
         methods,
         fields,
@@ -1235,3 +1263,122 @@ module TestEmitScopeExtension =
 
         changed (TypeDefOrRef.TypeDef (TypeDefRid 3)) 0
         |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Event, 3) ]
+
+    /// Types `A` (TypeDef 2) and `B` (TypeDef 3); `A` has a method `M` with a parameter and a generic parameter, a
+    /// field, a property, an event and a generic parameter of its own. Returns the scope and an owner of each of the
+    /// seven kinds that belong to `A`.
+    let private withAttributeOwners () : EmitScope * HasCustomAttribute list =
+        let scope = emptyScope Guid.Empty
+
+        let a, scope =
+            match
+                EmitScopeDefinitions.defineTopLevelTypeDef "A" System.Reflection.TypeAttributes.Public None [] scope
+            with
+            | TypeDefDefinition.Defined (rid, scope) -> rid, scope
+            | TypeDefDefinition.Duplicate _ -> failwith "A is not yet defined"
+
+        let scope =
+            match
+                EmitScopeDefinitions.defineTopLevelTypeDef "B" System.Reflection.TypeAttributes.Public None [] scope
+            with
+            | TypeDefDefinition.Defined (_, scope) -> scope
+            | TypeDefDefinition.Duplicate _ -> failwith "B is not yet defined"
+
+        let method, scope =
+            EmitScopeDefinitions.defineMethod
+                a
+                "M"
+                (ImmutableArray.Create<byte> [| 0x10uy ; 0x01uy ; 0x01uy ; 0x01uy ; 0x08uy |])
+                (System.Reflection.MethodAttributes.Public
+                 ||| System.Reflection.MethodAttributes.Static)
+                scope
+
+        let param, scope =
+            match EmitScopeDefinitions.defineParam method 1 "x" 0 scope with
+            | ParamDefinition.Defined (rid, scope) -> rid, scope
+            | ParamDefinition.StrandsLaterMethods _ -> failwith "one parameter strands nothing"
+
+        let field, scope =
+            EmitScopeDefinitions.defineField
+                a
+                "F"
+                (ImmutableArray.Create<byte> [| 0x06uy ; 0x08uy |])
+                System.Reflection.FieldAttributes.Public
+                scope
+
+        let property, scope =
+            EmitScopeDefinitions.defineProperty
+                a
+                "P"
+                (ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |])
+                0
+                scope
+
+        let event, scope =
+            EmitScopeDefinitions.defineEvent a "E" (TypeDefOrRef.TypeDef a) 0 scope
+
+        let typeParameter, scope =
+            EmitScopeDefinitions.defineGenericParam (TypeOrMethodDef.TypeDef a) 0us 0 "T" [] scope
+
+        let methodParameter, scope =
+            EmitScopeDefinitions.defineGenericParam (TypeOrMethodDef.MethodDef method) 0us 0 "U" [] scope
+
+        scope,
+        [
+            HasCustomAttribute.TypeDef a
+            HasCustomAttribute.MethodDef method
+            HasCustomAttribute.Param param
+            HasCustomAttribute.Field field
+            HasCustomAttribute.Property property
+            HasCustomAttribute.Event event
+            HasCustomAttribute.GenericParam typeParameter
+            HasCustomAttribute.GenericParam methodParameter
+        ]
+
+    let private withAttribute (owner : HasCustomAttribute) (scope : EmitScope) : EmitScope =
+        EmitScope.addCustomAttribute
+            {
+                Parent = owner
+                Constructor = MethodDefOrRef.MethodDef (EmitScope.tryMethodDefRid 1 scope).Value
+                Value = BlobOffset 0
+            }
+            scope
+        |> snd
+
+    [<Test>]
+    let ``a custom attribute of a created type or of a member of one is refused`` () : unit =
+        let scope, owners = withAttributeOwners ()
+        let a = ImmutableHashSet.Create (TypeDefRid 2)
+
+        for owner in owners do
+            EmitScopeExtension.violations a scope (withAttribute owner scope)
+            |> shouldEqual
+                [
+                    EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.CustomAttribute, 1, TypeDefRid 2)
+                ]
+
+    [<Test>]
+    let ``a custom attribute of the assembly, the module, or a type not created is an extension`` () : unit =
+        let scope, owners = withAttributeOwners ()
+        let b = ImmutableHashSet.Create (TypeDefRid 3)
+        let both = ImmutableHashSet.CreateRange [ TypeDefRid 2 ; TypeDefRid 3 ]
+
+        for owner in owners do
+            EmitScopeExtension.violations b scope (withAttribute owner scope)
+            |> shouldEqual []
+
+        for owner in [ HasCustomAttribute.Assembly ; HasCustomAttribute.Module ] do
+            EmitScopeExtension.violations both scope (withAttribute owner scope)
+            |> shouldEqual []
+
+    [<Test>]
+    let ``a changed or missing custom attribute is reported at its RID`` () : unit =
+        let scope, owners = withAttributeOwners ()
+        let onType = withAttribute owners.[0] scope
+        let onModule = withAttribute HasCustomAttribute.Module scope
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty onType onModule
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.CustomAttribute, 1) ]
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty onType scope
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.CustomAttribute, 1) ]

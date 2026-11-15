@@ -36,6 +36,126 @@ type ParamDefinition =
     | StrandsLaterMethods of slid : MethodDefRid * last : MethodDefRid
 
 /// <summary>
+/// The pseudo-attributes of CoreCLR's emitter (<c>KnownCaList</c>, md/compiler/custattr_emit.cpp): each name the
+/// emitter recognises, by namespace and name alone, as an attribute it turns into flags or rows of other tables, or
+/// validates, rather than storing a row as given.
+/// </summary>
+[<RequireQualifiedAccess>]
+type KnownCustomAttribute =
+    | DllImport
+    | Guid
+    | ComImport
+    | InterfaceType
+    | ClassInterface
+    | Serializable
+    | NonSerialized
+    | MethodImpl
+    | MarshalAs
+    | PreserveSig
+    | In
+    | Out
+    | Optional
+    | StructLayout
+    | FieldOffset
+    | TypeLibVersion
+    | ComCompatibleVersion
+    | SpecialName
+    | AllowPartiallyTrustedCallers
+    | WindowsRuntimeImport
+
+/// The names of <see cref="KnownCustomAttribute"/>'s cases.
+[<RequireQualifiedAccess>]
+module KnownCustomAttribute =
+    /// Every case, once each.
+    let all : KnownCustomAttribute list =
+        [
+            KnownCustomAttribute.DllImport
+            KnownCustomAttribute.Guid
+            KnownCustomAttribute.ComImport
+            KnownCustomAttribute.InterfaceType
+            KnownCustomAttribute.ClassInterface
+            KnownCustomAttribute.Serializable
+            KnownCustomAttribute.NonSerialized
+            KnownCustomAttribute.MethodImpl
+            KnownCustomAttribute.MarshalAs
+            KnownCustomAttribute.PreserveSig
+            KnownCustomAttribute.In
+            KnownCustomAttribute.Out
+            KnownCustomAttribute.Optional
+            KnownCustomAttribute.StructLayout
+            KnownCustomAttribute.FieldOffset
+            KnownCustomAttribute.TypeLibVersion
+            KnownCustomAttribute.ComCompatibleVersion
+            KnownCustomAttribute.SpecialName
+            KnownCustomAttribute.AllowPartiallyTrustedCallers
+            KnownCustomAttribute.WindowsRuntimeImport
+        ]
+
+    /// The namespace and the name of the attribute type, as <c>KnownCaList</c>'s entries spell them.
+    let name (known : KnownCustomAttribute) : string * string =
+        let interop = "System.Runtime.InteropServices"
+        let compilerServices = "System.Runtime.CompilerServices"
+
+        match known with
+        | KnownCustomAttribute.DllImport -> interop, "DllImportAttribute"
+        | KnownCustomAttribute.Guid -> interop, "GuidAttribute"
+        | KnownCustomAttribute.ComImport -> interop, "ComImportAttribute"
+        | KnownCustomAttribute.InterfaceType -> interop, "InterfaceTypeAttribute"
+        | KnownCustomAttribute.ClassInterface -> interop, "ClassInterfaceAttribute"
+        | KnownCustomAttribute.Serializable -> "System", "SerializableAttribute"
+        | KnownCustomAttribute.NonSerialized -> "System", "NonSerializedAttribute"
+        | KnownCustomAttribute.MethodImpl -> compilerServices, "MethodImplAttribute"
+        | KnownCustomAttribute.MarshalAs -> interop, "MarshalAsAttribute"
+        | KnownCustomAttribute.PreserveSig -> interop, "PreserveSigAttribute"
+        | KnownCustomAttribute.In -> interop, "InAttribute"
+        | KnownCustomAttribute.Out -> interop, "OutAttribute"
+        | KnownCustomAttribute.Optional -> interop, "OptionalAttribute"
+        | KnownCustomAttribute.StructLayout -> interop, "StructLayoutAttribute"
+        | KnownCustomAttribute.FieldOffset -> interop, "FieldOffsetAttribute"
+        | KnownCustomAttribute.TypeLibVersion -> interop, "TypeLibVersionAttribute"
+        | KnownCustomAttribute.ComCompatibleVersion -> interop, "ComCompatibleVersionAttribute"
+        | KnownCustomAttribute.SpecialName -> compilerServices, "SpecialNameAttribute"
+        | KnownCustomAttribute.AllowPartiallyTrustedCallers ->
+            "System.Security", "AllowPartiallyTrustedCallersAttribute"
+        | KnownCustomAttribute.WindowsRuntimeImport ->
+            "System.Runtime.InteropServices.WindowsRuntime", "WindowsRuntimeImportAttribute"
+
+/// <summary>
+/// What CoreCLR's emitter does with an attribute, by its constructor's declaring type and the owner
+/// (<c>RegMeta::DefineCustomAttribute</c>).
+/// </summary>
+[<RequireQualifiedAccess>]
+type CustomAttributeEmitKind =
+    /// Stored as a row, its blob as given.
+    | Ordinary
+    /// A pseudo-attribute, on any owner.
+    | Known of KnownCustomAttribute
+    /// <summary>
+    /// <c>System.Security.SuppressUnmanagedCodeSecurityAttribute</c> on a type or a method, which sets the owner's
+    /// <c>HasSecurity</c> flag and is stored as a row.
+    /// </summary>
+    | SuppressUnmanagedCodeSecurity
+    /// <summary>
+    /// <c>System.Security.DynamicSecurityMethodAttribute</c> on a method, which sets the method's
+    /// <c>RequireSecObject</c> flag and stores no row.
+    /// </summary>
+    | DynamicSecurityMethod
+
+/// <summary>
+/// The outcome of asking CoreCLR's emitter to define a custom attribute in a dynamic module's scope
+/// (<c>RegMeta::DefineCustomAttribute</c>).
+/// </summary>
+[<RequireQualifiedAccess>]
+type CustomAttributeDefinition =
+    /// A new <c>CustomAttribute</c> row, and the scope that holds it.
+    | Defined of CustomAttributeRid * EmitScope
+    /// <summary>
+    /// CoreCLR would not store the row as given, but would do what this kind says instead, which a scope does not
+    /// model, so nothing is added.
+    /// </summary>
+    | NotStoredAsGiven of CustomAttributeEmitKind
+
+/// <summary>
 /// A generic parameter whose variance PawPrint does not model when its type is created.
 /// </summary>
 [<RequireQualifiedAccess>]
@@ -641,3 +761,92 @@ module EmitScopeDefinitions =
                     named
 
             ParamDefinition.Defined (rid, scope)
+
+    /// <summary>
+    /// What CoreCLR's emitter does with an attribute of <paramref name="owner"/> whose constructor is
+    /// <paramref name="constructor"/>, as <c>RegMeta::DefineCustomAttribute</c> and <c>_IsKnownCustomAttribute</c>
+    /// decide it: by the namespace and name of the constructor's declaring type, compared ordinally, read from the
+    /// TypeRef or TypeDef that a MemberRef's parent is, or from the TypeDef that owns a MethodDef. Any other parent has
+    /// no name, and is <c>Ordinary</c>. The signature is never consulted.
+    /// </summary>
+    let classifyCustomAttribute
+        (owner : HasCustomAttribute)
+        (constructor : MethodDefOrRef)
+        (scope : EmitScope)
+        : CustomAttributeEmitKind
+        =
+        let operation = "EmitScopeDefinitions.classifyCustomAttribute"
+        // Refuses an owner the scope lacks.
+        EmitScope.typeOfCustomAttributeOwner owner scope |> ignore<TypeDefRid option>
+
+        let typeDefName (typeDef : TypeDefRid) : string * string =
+            let row = (EmitScope.typeDefs scope).[typeDef.Rid - 1]
+            EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope
+
+        let name : (string * string) option =
+            match constructor with
+            | MethodDefOrRef.MemberRef rid ->
+                if (EmitScope.tryMemberRefRid rid.Rid scope).IsNone then
+                    invalidArg (nameof constructor) $"%s{operation}: the scope has no MemberRef row %d{rid.Rid}"
+
+                match (EmitScope.memberRefs scope).[rid.Rid - 1].Parent with
+                | MemberRefParent.TypeRef typeRef ->
+                    let row = (EmitScope.typeRefs scope).[typeRef.Rid - 1]
+                    Some (EmitScope.stringAt row.Namespace scope, EmitScope.stringAt row.Name scope)
+                | MemberRefParent.TypeDef typeDef -> Some (typeDefName typeDef)
+                | MemberRefParent.TypeSpec _
+                | MemberRefParent.MethodDef _ -> None
+            | MethodDefOrRef.MethodDef rid ->
+                if (EmitScope.tryMethodDefRid rid.Rid scope).IsNone then
+                    invalidArg (nameof constructor) $"%s{operation}: the scope has no MethodDef row %d{rid.Rid}"
+
+                Some (typeDefName (EmitScope.methodDefs scope).[rid.Rid - 1].Owner)
+
+        match name with
+        | None -> CustomAttributeEmitKind.Ordinary
+        | Some name ->
+
+        match
+            KnownCustomAttribute.all
+            |> List.tryFind (fun known -> KnownCustomAttribute.name known = name)
+        with
+        | Some known -> CustomAttributeEmitKind.Known known
+        | None ->
+            // `RegMeta::DefineCustomAttribute` compares the joined path; every name a managed caller can write is a
+            // full name divided at its last dot, so comparing the two parts agrees with it.
+            match owner, name with
+            | HasCustomAttribute.MethodDef _, ("System.Security", "DynamicSecurityMethodAttribute") ->
+                CustomAttributeEmitKind.DynamicSecurityMethod
+            | (HasCustomAttribute.TypeDef _ | HasCustomAttribute.MethodDef _),
+              ("System.Security", "SuppressUnmanagedCodeSecurityAttribute") ->
+                CustomAttributeEmitKind.SuppressUnmanagedCodeSecurity
+            | _ -> CustomAttributeEmitKind.Ordinary
+
+    /// <summary>
+    /// Define a custom attribute of <paramref name="owner"/>, as <c>RegMeta::DefineCustomAttribute</c> does for
+    /// <c>TypeBuilder_DefineCustomAttribute</c>: unless <c>classifyCustomAttribute</c> says that the emitter does
+    /// something else with it, a new row at the next RID, its blob interned as given, with no search for an equal row.
+    /// </summary>
+    /// <exception cref="ArgumentException">The scope lacks the owner or the constructor.</exception>
+    let defineCustomAttribute
+        (owner : HasCustomAttribute)
+        (constructor : MethodDefOrRef)
+        (value : ImmutableArray<byte>)
+        (scope : EmitScope)
+        : CustomAttributeDefinition
+        =
+        match classifyCustomAttribute owner constructor scope with
+        | CustomAttributeEmitKind.Ordinary ->
+            let blob, scope = EmitScope.internBlob value scope
+
+            let rid, scope =
+                EmitScope.addCustomAttribute
+                    {
+                        Parent = owner
+                        Constructor = constructor
+                        Value = blob
+                    }
+                    scope
+
+            CustomAttributeDefinition.Defined (rid, scope)
+        | kind -> CustomAttributeDefinition.NotStoredAsGiven kind

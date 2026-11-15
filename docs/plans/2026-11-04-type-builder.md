@@ -6662,3 +6662,916 @@ its own invocation (`5x-impl/suite-*.log`):
 * A global method's parameters: `DefineParameter` works on one, and `CreateGlobalFunctions` stops at
   `TypeBuilder_TermCreateClass`'s refusal to create `<Module>`. That stage adds the scenario to the guest.
 * A step budget for one guest case, which would un-park `TypeBuilderDefineParameterWide.cs`.
+
+### 5y: what it is
+
+**Which stage.** 5x's decisions put custom attributes after 5x, planned from `DispatchProxyInternalInterface.cs`
+outwards. 5y is `TypeBuilder_DefineCustomAttribute`, which `SetCustomAttribute` reaches on each of `AssemblyBuilder`,
+`ModuleBuilder`, `TypeBuilder` (and `EnumBuilder`, which forwards to it), `MethodBuilder`, `ConstructorBuilder`,
+`FieldBuilder`, `PropertyBuilder`, `EventBuilder`, `ParameterBuilder` and `GenericTypeParameterBuilder`, through both the
+`CustomAttributeBuilder` and the `(ConstructorInfo, byte[])` overloads. Then reflection over what it writes:
+`GetCustomAttributes`, `GetCustomAttributesData`, `IsDefined`, `Attribute.GetCustomAttribute` and the inherited walks.
+Every program that calls `SetCustomAttribute` stops today at "Unimplemented native method (PInvokeImpl
+QCall!TypeBuilder_DefineCustomAttribute)", `DispatchProxyInternalInterface.cs` among them (its parked reason, measured by
+5u). Measured on `main` at eaec92392.
+
+Scratchpad paths below are under this session's scratchpad,
+`/private/tmp/claude-501/-Users-patrick-Documents-GitHub-WoofWare-PawPrint--claude-worktrees-test-pipeline-performance-724897/ba89fbb1-81d8-460f-a9be-c4df3a5bd899/scratchpad/`.
+Every probe was built against net10.0 and run on .NET 10.0.14 and rolled forward to 11.0.0-rc.3.26522.148
+(`DOTNET_ROLL_FORWARD=LatestMajor`, `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`).
+
+**What the guest needs: one feature.** `DispatchProxy` (IL read with `WoofWare.PawPrint.IlDump`,
+`5y/ildump-dispatchproxy-ignoreaccess.txt`) makes two calls. `IgnoreAccessChecksToAttributeBuilder.AddToModule` defines
+`System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute : Attribute` in the proxy's module and gives it
+`[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]`, a `CustomAttributeBuilder` with an enum constructor
+argument and a named property, through `TypeBuilder.SetCustomAttribute` before `CreateType`. It then hands back the
+*created* type's constructor, a `RuntimeConstructorInfo`, which `AssemblyBuilder.SetCustomAttribute` uses with the
+caller's assembly name. On .NET 10 and 11 the probe's `proxy` scenario (`5y/probe`, `Program.cs`; `net10.out`,
+`net11.out`) reads the proxy module's rows through CoreLib's own `MetadataImport` (see "the probe" below):
+
+| Parent | Row |
+|---|---|
+| `IgnoresAccessChecksToAttribute`, `0x02000003` | `0x0C000001`, constructor `0x0A000001` (a MemberRef to `AttributeUsageAttribute..ctor(AttributeTargets)`), blob `01 00 01 00 00 00 01 00 54 02 0D "AllowMultiple" 01` |
+| the assembly, `0x20000001` | `0x0C000002`, constructor `0x06000001` (the attribute's own MethodDef: `GetMemberRefOfMethodInfo` gives a method of the module its MethodDef), blob `01 00 05 "probe" 00 00` |
+
+A throwaway arm (`5y/throwaway1.diff`, 99 lines) added a `CustomAttribute` row type and table to the scope, a writer
+for table `0x0C` in RID order, and a handler that reads the module, the owner token, the constructor token and the blob,
+and appends the row. Built into the Release App, `DispatchProxyInternalInterface.cs` exits 0 under PawPrint
+(`5y/guest-dpii/pawprint-throwaway1.log`; on .NET 10 and 11 it exits 0 too). With the assembly's row dropped by the
+handler, it exits 4 (`pawprint-control-no-assembly-row.log`), so its check 4 reads the row and separates the two.
+Nothing else stands behind the guest: no pseudo-attribute, no reader change, no other QCall. (PawPrint lets the proxy
+implement the internal interface without the attribute, as the control shows. Real .NET is expected to refuse that, which
+is why `DispatchProxy` applies the attribute; not measured, and outside 5y: see "left to later stages".)
+
+**The other BCL consumers** (strings searched in the 10.0.14 shared framework, then the IL read): `System.Private.Xml`
+(XSLT's `XmlILModule` on the assembly and on methods; `XmlSerializer`'s assembly attributes, behind its own
+`AssemblyNative_InternalLoad` stop) and `System.Runtime.InteropServices` (COM marshalling: `IgnoresAccessChecksTo` and
+`DynamicInterfaceCastableImplementation`). None applies a pseudo-attribute. The ASP.NET Core framework calls none.
+
+**What CoreCLR does.** Read from `$DOTNET_RUNTIME_SRC_NET10`.
+
+* The public overloads (libraries `TypeBuilder.cs:272-287` and its siblings) refuse a null constructor, blob or builder
+  with `ArgumentNullException`, and pass `CustomAttributeBuilder`'s `Ctor` and `Data` to `SetCustomAttributeCore`.
+  `CustomAttributeBuilder`'s constructor validates its arguments in managed code and encodes the blob; a `Type` argument
+  is written as an assembly-qualified name carrying the running CoreLib's version, which is the only difference between
+  the two runtimes' blobs.
+* Each builder's `SetCustomAttributeCore` (in `System.Private.CoreLib/src/System/Reflection/Emit/`) computes the owner
+  token and the constructor token (`RuntimeModuleBuilder.GetMethodMetadataToken(ConstructorInfo)`, `:224`) and calls the
+  QCall. `RuntimeFieldBuilder` (`:153`), `RuntimePropertyBuilder` (`:100`) and `RuntimeEventBuilder` (`:83`) call
+  `ThrowIfCreated` first; `RuntimeTypeBuilder` (`:1726`), `RuntimeMethodBuilder` (`:697`, after `ThrowIfGeneric`),
+  `RuntimeParameterBuilder` (`:20`), `RuntimeAssemblyBuilder` (`:286`, token `0x20000001`) and `RuntimeModuleBuilder`
+  (`:1284`, token `1`, which is `0x00000001`) do not. `RuntimeMethodBuilder` also sets `m_isDllImport` when the
+  constructor's type is `DllImportAttribute`, after the QCall returns.
+* `RuntimeGenericTypeParameterBuilder` (`:218`) only queues the attribute (`SetGenParamCustomAttribute`,
+  `RuntimeTypeBuilder.cs:575`). A type's parameters bake the queue in `CreateTypeNoLock` (`:1538`), straight after
+  `DefineGenericParam`; a method's, when the method is tokenised (`RuntimeMethodBuilder.GetTokenNoLock`, `:602`). An
+  attribute queued after that is never written, silently. That is managed code, which PawPrint runs as it is.
+* `TypeBuilder_DefineCustomAttribute` (vm/comdynamic.cpp:915) calls `RegMeta::DefineCustomAttribute`
+  (md/compiler/custattr_emit.cpp:693), throws `ArgumentException` ("Invalid custom attribute provided.", no parameter
+  name) on any failed HRESULT, and, for the assembly's token, calls `UpdateRuntimeStateForAssemblyCustomAttribute`
+  (`:839`), which refreshes the debugger bits from a `DebuggableAttribute`, the friend cache on
+  `InternalsVisibleTo`/`IgnoresAccessChecksTo`, and the cached `RuntimeCompatibility` answer.
+* `RegMeta::DefineCustomAttribute` refuses a nil owner or constructor (unreachable from the managed callers), then asks
+  `_IsKnownCustomAttribute` (`:860`) whether the constructor's declaring type is a pseudo-attribute. It decides by that
+  type's namespace and name alone: a MemberRef's TypeRef or TypeDef, or a MethodDef's owner; a MemberRef on a TypeSpec
+  has no name and is never known. The overloads that "match by signature" each have a by-name fallback, so the name
+  decides. A known attribute goes to `_HandleKnownCustomAttribute` (`:1004`): its target is checked against the
+  attribute's list, its blob is parsed by the attribute's own grammar, the effect is written, and the row is written only
+  for the six attributes marked `bKEEPCA`. Otherwise two names are special-cased for a TypeDef or MethodDef owner:
+  `System.Security.DynamicSecurityMethodAttribute` becomes `mdRequireSecObject` with no row (CoreLib 10 and 11 no longer
+  define the type), and `System.Security.SuppressUnmanagedCodeSecurityAttribute` sets `tdHasSecurity` or
+  `mdHasSecurity` and keeps its row. Every other attribute is appended with `AddCustomAttributeRecord` and its blob
+  stored as given. Nothing checks that the owner row exists, nothing searches for a duplicate, and nothing parses the
+  blob.
+* The CustomAttribute table is not kept sorted. `AddRecord` (md/enc/metamodelrw.cpp:3861) clears the sorted flag and
+  invalidates the table's `VirtualSort`. `MDInternalRW::EnumInit` for `mdtCustomAttribute` (md/enc/mdinternalrw.cpp:1277),
+  behind `MetadataImport_Enum`, reads one owner's rows through `LookUpTableByCol` (metamodelrw.cpp:5598) over that
+  `VirtualSort`, whose `Compare` (`:7253`) orders by owner and then by RID. So reflection always gets an owner's rows in
+  the order they were added, at any table size. By-name lookups inside the VM (`CommonEnumCustomAttributeByName`,
+  `:823`) are different: from 25 rows they walk the lookup hash, which `AddCustomAttributesToHash` keeps, and so meet an
+  owner's rows newest first, as 5s found for MethodSemantics.
+* `md/compiler/custattr_emit.cpp` differs between the pins only in `StructLayoutAttribute`: .NET 11 accepts
+  `LayoutKind` 1 (`tdExtendedLayout`), which .NET 10 refuses. `vm/comdynamic.cpp`'s function is unchanged but for a dead
+  local; the builders' `SetCustomAttributeCore`s are identical.
+
+**The probe.** `5y/probe/Program.cs` reads raw rows through a skip-visibility `DynamicMethod` that calls CoreLib's
+internal `MetadataImport.EnumCustomAttributes`, and `GetCustomAttributeProps` by reflection, so that a real row is told
+apart from one reflection synthesises from flags. Each scenario is its own module. Outputs on the two runtimes are
+identical once the CoreLib version inside `Type` names is normalised (`5y/probe/diff-net10-net11-normalised.txt`,
+empty). A second probe, `5y/byname`, measures the VM's by-name lookup.
+
+| Emitted | Observed on .NET 10 and 11 |
+|---|---|
+| `Parents`: attributes on the assembly, `T`, the module, `M`, field `F`, `T` again, constructor `C`, property, event, parameter, `G`'s generic parameter, the assembly again, and a raw-overload attribute on `T` | the tokens are `0x0C000001` upwards in call order, whatever the owner; each owner's rows read back in call order; the module's owner is `0x00000001`, the assembly's `0x20000001`, a parameter's `0x08...`, a generic parameter's `0x2A000002`; the generic parameter's row is `0x0C00000D`, written at `CreateType` after every earlier call |
+| a type's generic parameter given an attribute after `CreateType`; a method's after the method is tokenised | no row: dropped |
+| null constructor; null blob; null builder | `ArgumentNullException` (`con`, `binaryAttribute`, `customBuilder`) |
+| `CustomAttributeBuilder` with too few, mistyped, or static-constructor arguments | `ArgumentException` from its constructor |
+| raw: an empty blob; a bad prolog; a truncated string; trailing bytes; `object..ctor`; `Exception(string)` | every one written as given. Reading: `CustomAttributeFormatException` from `GetCustomAttributesData` for the first three and from `GetCustomAttributes` for all four malformed ones (trailing bytes read back through `GetCustomAttributesData` as if absent); `object` and `Exception` are instantiated as attributes |
+| the constructor of `GenAttribute<>` (open); of `GenAttribute<int>` | both written. Any read of the open one's owner throws: `BadImageFormatException` from `GetCustomAttributesData`, `ArgumentException` from `GetCustomAttributes` and from `IsDefined` of any type. `GenAttribute<int>` reads back |
+| a known attribute on a wrong target (`Serializable` on a method, `In` on a field); a known one with a bad value (`DllImport("")`, a malformed `Guid`, `InterfaceType(99)`, `MethodImpl(0x7FFF)`, `TypeLibVersion(-1, 0)`) | `ArgumentException` "Invalid custom attribute provided.", and no row consumed: the next row takes the next token |
+| `Serializable` with an empty raw blob | accepted: an attribute with no arguments is not parsed |
+| after `CreateType`: on the type, method, parameter, assembly, module; on a field, property, event | the first five written and visible through the created type's reflection objects, the `RuntimeType` obtained before included; the last three `InvalidOperationException` from `ThrowIfCreated` |
+| `Duplicates`: `Single` (`AllowMultiple = false`) twice, `Tag("a")` twice | four rows; `GetCustomAttributes` and `GetCustomAttributesData` return all four; `GetCustomAttribute<Single>` throws `AmbiguousMatchException`; `IsDefined` is true |
+| `Inherited`: `Single`, `MultiInh`, `NoInh` on base `B`, `Single`, `MultiInh` on `D : B`, nothing on `E : D`; a virtual method and a property likewise | `D`'s inherited walk keeps its own `Single` and both `MultiInh`; `E` gets `D`'s then `B`'s; `NoInh` never; the method walk adds the base method's; the property's `GetCustomAttributes(true)` does not walk, `Attribute.GetCustomAttributes(property, true)` does |
+| `Order`: 30 attributes interleaved over `A` and `B` and one on the assembly, then one more on each after `A` is created (33 rows) | every owner's rows in call order, tokens interleaved; no reversal at any count |
+| `Args`: string, null string, enum, `Type` (CoreLib, probe's assembly, generic, null), `int[]` and null, `object` holding an int, a string, null, a `Type`, an enum, an `int[]`, `object[]` mixed, named fields and properties of each kind | each reads back as given through both readers. A `Type` naming a type of the dynamic assembly itself is written assembly-qualified, and every read of its owner throws `FileNotFoundException`: the dynamic assembly cannot be loaded by name |
+| `Impostor`: the module's own type `System.SerializableAttribute`, used through its `ConstructorBuilder` and through the created constructor | no row; the owner gets `tdSerializable`; reflection synthesises CoreLib's `SerializableAttribute` |
+| `5y/byname`: two `[InlineArray]` on one struct, 2 and 3 (and 3 and 2), in modules of 2 to 32 CustomAttribute rows | the type loader takes the first-added below 25 rows and the last-added from 25, counted when the type is created, wherever the other rows are. This is `ReadWriteMetadataLookup.rowsOfKey`'s rule exactly |
+
+**Pseudo-attributes, measured** (scenario `pseudo`, rows read raw; flags read from the created members):
+
+| Attribute | Target | Effect | CustomAttribute row |
+|---|---|---|---|
+| `Serializable` | type | `tdSerializable` | none |
+| `NonSerialized` | field | `fdNotSerialized` | none |
+| `SpecialName` | type, method, field, property, event | the `SpecialName` flag of each | none |
+| `ComImport` | type | `tdImport` | none |
+| `In`, `Out`, `Optional` | parameter | `pdIn`, `pdOut`, `pdOptional` | none |
+| `MarshalAs` | parameter (return value included), field (property by the target list) | `HasFieldMarshal` and a FieldMarshal row | none |
+| `StructLayout` | type | layout and string-format flags; a ClassLayout row for `Pack` and `Size` | none |
+| `FieldOffset` | field | a FieldLayout row | none |
+| `DllImport` | method | `mdPinvokeImpl`, `miPreserveSig`, an ImplMap row and a ModuleRef row | none |
+| `PreserveSig` | method | `miPreserveSig` | none |
+| `MethodImpl` (all three constructors) | method | implementation flags, validated against `miUserMask` | none |
+| `WindowsRuntimeImport` | type | `tdWindowsRuntime` | none (read) |
+| `Guid`, `InterfaceType`, `ClassInterface`, `TypeLibVersion`, `ComCompatibleVersion`, `AllowPartiallyTrustedCallers` | their target lists | validated only | kept |
+| `SuppressUnmanagedCodeSecurity` (special case) | type, method | `HasSecurity` | kept |
+
+**Pseudo-attributes on created members** (scenario `created`): all accepted. The metadata changes, and what reflection
+shows of it depends on whether the reader caches: `RuntimeType.Attributes` and `ParameterInfo.Attributes` keep their
+old values, but `MethodImplementationFlags` of the same `MethodInfo` shows `NoInlining` and `PreserveSig`, and
+`MarshalAs` appears in the parameter's `GetCustomAttributesData`. Reflection's pseudo-attributes are synthesised from
+whatever it reads, so `DllImport` on a created method whose `PinvokeImpl` flag the runtime cached never appears.
+
+**What PawPrint does with these, under the throwaway.** Each scenario but the pseudo ones was run under the Release App
+with the throwaway arm, and diffed against .NET 10 with the raw reads off (`5y/pawprint-throwaway/diff-*.txt`; with 5x's
+handler, in a detached worktree at `origin/plan-5x-set-param-info` with `5y/throwaway-on-5x.diff` applied,
+`5y/pawprint-5x-throwaway/`):
+
+* `Duplicates`, `Inherited` and `proxy`: identical. `Parents`, with the field's read left out: identical, every parent
+  kind included, the generic parameter's baked row and the dropped ones.
+* `Order`: wrong from the first owner with more than one row. `Assembly.read` builds `CustomAttributesByParentToken`
+  (`Domain/Assembly.fs:1350-1380`) by enumerating `metadataReader.CustomAttributes`, and SRM enumerates an unsorted
+  CustomAttribute table through a pointer table it sorts with `Array.Sort(int[], Comparison<int>)` on the owner alone
+  (`MemoryBlock.BuildPtrTable`, read with IlDump: `5y/ildump-srm-*.txt`), which is not stable. Measured directly
+  (`5y/srmorder/order.fsx`, `order.out`, over images the throwaway writer made): the whole-table enumeration is grouped by
+  owner as soon as the table is out of owner order, and `TypeDefinition.GetCustomAttributes()` loses RID order within an
+  owner from 17 rows (introsort's insertion-sort cutoff is 16). With the index built by RID instead (`for rid in 1 ..
+  GetTableRowCount CustomAttribute`, in `5y/throwaway2.diff`), `Order` matches real .NET (`diff-order-ridindex.txt`,
+  empty). This is the defect class 5x warned of: the throwaway passed every smaller case.
+* `Impostor` and every pseudo row: different, as expected of an arm that stores everything as a row.
+* Three stops on PawPrint's read side, reproduced on `main` with a compiled assembly and no emit at all
+  (`5y/readside`, `pawprint-main-*.log`):
+  * any field's `GetCustomAttributes` or `GetCustomAttributesData`: "Unimplemented native method (InternalCall) ...
+    MetadataImport::GetFieldOffset", which `RuntimeCustomAttributeData.GetFieldOffsetCustomAttribute` (:2250) calls for
+    every field;
+  * an `object`-typed constructor parameter (`TAGGED_OBJECT`) at `GetCustomAttributes`: "TODO: primitive type obj is not
+    yet supported as a CustomAttrib Elem" (`NativeCustomAttribute.fs:150-155`); `GetCustomAttributesData` works, being
+    managed;
+  * a generic attribute's instantiation at `GetCustomAttributes`: "RuntimeConstructorInfo does not declare expected
+    instance field 'm_value'".
+* Two more, seen only with emitted blobs: an empty blob at `GetCustomAttributes` stops at "TODO: ...
+  CreateCustomAttributeInstance *ppBlob (start) pointer is null" (`NativeCustomAttribute.fs:71`); and `IsDefined` over
+  an owner with the open generic constructor answers false where real .NET throws `ArgumentException`.
+* `StructLayout` reading (`Type.StructLayoutAttribute`) stops at `MetadataImport::GetClassLayout`, outside 5y.
+
+**What 5y must change in PawPrint.** Cited at `main` eaec92392.
+
+* `WoofWare.PawPrint.Domain/EmitScope.fs`: no CustomAttribute row. The coded-index unions (`:181-237`, `HasSemantics`
+  the model for a new `HasCustomAttribute`), the row types (`:248-418`), the scope record (`:438-474`), `create`
+  (`:688-754`), the adders (`addEvent`, `:1092-1104`, the template) and accessors (`:1118-1167`).
+* `WoofWare.PawPrint.Domain/EmitScopeDefinitions.fs`: `defineProperty` (`:472`), `defineEvent` (`:532`) are where a
+  `defineCustomAttribute` and the known-attribute classifier would sit.
+* `WoofWare.PawPrint.Domain/EmitScopeImage.fs`: the module docstring (`:50-75`) lists the tables whose RIDs move; the row
+  counts (`:322-350`); the coded-index sizes (`:352-395`); tables are written in table-number order, so CustomAttribute
+  (`0x0C`) goes between MemberRef (`:484-495`) and StandAloneSig (`:497-499`); the sorted mask declares only GenericParam
+  (`:653-655`).
+* `WoofWare.PawPrint.Loader/EmitScopeExtension.fs`: `addedToCreated` (`:89-96`) is the rule every member table applies;
+  CustomAttribute needs its own (see the options).
+* `WoofWare.PawPrint.Domain/Assembly.fs:1350-1380`: the index, as above.
+* `WoofWare.PawPrint/Native/NativeRuntimeTypeBuilder.fs`: no handler. `methodDefOrRef` (`:117-130`) checks a constructor
+  token; `TypeBuilder_DefineMethodSpec` (`:687-749`) reads a counted byte buffer with `NativeCall.readCountedBytes`;
+  `TypeBuilder_SetParentType` (`:750-798`) is a void QCall's shape. The stub's parameters are `QCallModule`, `int`,
+  `int`, `byte*` and `int`; the throwaway matched them so.
+* `WoofWare.PawPrint/Native/NativeQCall.fs:221-234`: the registrations.
+* Readers already in place: `MetadataImport.Enum`'s CustomAttribute arm (`NativeMetadataImport.fs:1236-1239`) and
+  `GetCustomAttributeProps` (`:1714-1777`, which copies the blob, so a later re-read moves nothing it handed out);
+  `NativeCustomAttribute` for instantiation and `CustomAttribute_ParseAttributeUsageAttribute`; `FriendAssemblies.scan`
+  (`FriendAssemblies.fs:490-565`), `RuntimeCompatibility` and `Debuggable` (`Debuggable.fs:41`), which read an assembly's
+  rows from the image at each re-read.
+* SRM's per-owner lookups that some readers use directly, which are unstable over an unsorted table of 17 rows or more:
+  `TypeInfo.fs:637-640` (the type's attribute list), `:708-730` (`IsByRefLike`, `InlineArray`), `FieldInfo.fs:215-228`
+  (`ThreadStatic`), `MethodInfo.fs:1410-1425`, `:1450-1462` (`UnsafeAccessor`), `:1480-1495` (`UnmanagedCallersOnly`),
+  `:1600-1612`, `StructMarshalStub.fs:133-135`. Each tests for existence or takes the first match, which is CoreCLR's
+  by-name lookup and order-sensitive only for two attributes of one name on one owner.
+* Tests: `TestEmitScopeImage.fs:507-514` asserts the image has no CustomAttribute rows; it changes. `EmitScopeGen.fs`
+  draws no attribute.
+
+**Conflicts with 5x.** 5x (#2255) is not in `main`. 5y branches from `main` and shares with it `EmitScope.fs`,
+`EmitScopeDefinitions.fs`, `EmitScopeImage.fs` (5x changes the docstring), `NativeRuntimeTypeBuilder.fs`,
+`NativeQCall.fs`, `EmitScopeGen.fs`, `TestEmitScopeImage.fs`, `TestImpureCases.fs`, `WoofWare.PawPrint.Test.fsproj` and
+this file. 5y alone touches `EmitScopeExtension.fs` and `Assembly.fs`. The overlaps are neighbouring lines; 5y reads
+nothing 5x adds except a parameter's token, which a guest needs only to give a parameter an attribute. The throwaway
+applied to 5x's tip without conflict.
+
+### 5y: the options
+
+Every option adds a `TypeBuilder_DefineCustomAttribute` handler that reads the module, the owner token, the
+constructor token and the blob (a null pointer with length 0 being the empty blob), and returns nothing. There are five
+choices.
+
+**Choice 1: what a row holds.**
+
+* **1A. A typed row with an opaque blob.** `CustomAttributeRow = { Parent : HasCustomAttribute; Constructor :
+  MethodDefOrRef; Value : BlobOffset }`, where `HasCustomAttribute` has a case for each owner a builder hands out
+  (Assembly, Module, TypeDef, MethodDef, Field, Param, Property, Event, GenericParam) with its coded index, as
+  `HasSemantics` has. The handler refuses any other table as a PawPrint fault. The blob is interned as given.
+  * Correctness: every measured row, malformed blobs included, which CoreCLR stores without parsing.
+  * Information: CoreCLR's row exactly.
+* **1B. The owner as a raw token.** What the throwaway did. Smaller, but the writer then maps tables to tags at
+  serialisation and a token naming no row is representable; 1a of stage 1 says every reference is typed.
+* **1C. The blob parsed into `CustomAttribValue`, re-encoded by the writer.** Rejected: CoreCLR stores the bytes it is
+  given, and four measured blobs do not parse.
+* Recommended: 1A.
+
+**Choice 2: the order of the image's table.**
+
+* **2A. CoreCLR's order, so that every RID is CoreCLR's token; PawPrint indexes by RID.** The writer emits the rows in
+  RID order with the table's sorted bit clear, which SRM accepts. `Assembly.read` builds `CustomAttributesByParentToken`
+  and `Attributes` by RID, not through SRM's enumeration; for an image on disk, whose table is sorted, the result is
+  unchanged.
+  * It keeps the plan's founding property: a handle in an earlier image means the same row in a later one. CoreLib's
+    `IsCustomAttributeDefined` (`RuntimeCustomAttributeData.cs`) enumerates an owner's tokens and then reads and filters
+    them one at a time; the filter resolves types, which can run guest code (an `AssemblyResolve` handler) that emits
+    into the same module between two reads. Read, not measured.
+  * The cost is the readers in the list above that ask SRM for an owner's attributes directly. Over a dynamic image of
+    17 rows or more they get the owner's rows in no defined order. That matters only for two attributes of one name on
+    one owner, where CoreCLR's own answer follows the 25-row rule (choice 5).
+* **2B. Sorted stably by owner, as InterfaceImpl and MethodImpl are (3e, 3f).** Every SRM reader then gets an owner's
+  rows in append order, and the index needs no change.
+  * But a row's image RID is no longer CoreCLR's token, and it moves whenever a later attribute's owner sorts before it,
+    which is almost always (an assembly's coded index sorts before most types'). Nothing public hands a CustomAttribute
+    token to a guest, but CoreLib's internals hold one across guest code (above), and `TypeInfo.Attributes` and
+    `MethodInfo.CustomAttributes` keep `CustomAttribute` records with handles for created types, which 3f's rule forbids
+    for a table whose rows move.
+* Recommended: 2A. The index change is one loop; the property it buys is the one every other table has.
+
+**Choice 3: the pseudo-attributes and the two special cases.**
+
+* **3A. Refuse each by name.** A pure Domain classifier states `_IsKnownCustomAttribute`: the constructor's declaring
+  type's namespace and name, read as the emitter reads them (a MemberRef's TypeRef or TypeDef, a MethodDef's owner, a
+  TypeSpec never), against the 24 names of `KnownCaList`, and the two security names for a TypeDef or MethodDef owner.
+  The handler stops with a TODO naming the attribute, the owner and what CoreCLR writes instead of a row. An impostor
+  type of the module (the measured `Impostor`) is refused like the real one, because the emitter treats it so.
+  * Correctness: no pseudo-attribute is ever stored as a row, which is the silent divergence the throwaway showed
+    (`Impostor`; `DllImport` led `CreateType` to refuse the method's body).
+  * Blast radius: programs that apply one are refused. None of the BCL consumers measured does.
+* **3B. Implement the attributes that only set flags on a row not yet created** (`Serializable`, `NonSerialized`,
+  `SpecialName`, `ComImport`, `WindowsRuntimeImport`, `In`, `Out`, `Optional`, `PreserveSig`, `MethodImpl`), and refuse
+  the rest. Each is a filled-in column, which the extension rule would admit for an uncreated owner. But each needs
+  the attribute's blob grammar, its target list and its validation, and a guest per attribute; it is a feature of its
+  own, and no consumer needs it yet.
+* **3C. Store every attribute as a row.** Rejected: measured divergent.
+* Recommended: 3A.
+
+**Choice 4: an ordinary attribute whose owner is a created type or a member of one.** Measured: real .NET writes it,
+and reflection over the created type shows it at once.
+
+* **4A. Admit it.** The extension rule for CustomAttribute refuses a changed or removed row, and admits a new row
+  whatever its owner. PawPrint's reflection reads an owner's attributes from the index that every re-read rebuilds, as
+  CoreCLR reads them from live metadata. What the type loader read at creation (`IsByRefLike`, `InlineArray`) is fixed
+  then in both.
+* **4B. Refuse it by name**, keeping "nothing added to a created type" uniform. It refuses what real .NET does without
+  fault, for no saving.
+* Recommended: 4A. Pseudo-attributes on created members stay refused under 3A, whichever is chosen.
+
+**Choice 5: two attributes of one name on one owner, as the VM reads them.** Measured: the type loader takes the
+first-added below 25 rows in the module and the last-added from 25. PawPrint's readers take whatever SRM gives.
+
+* **5A. Model it.** Route those readers, for a dynamic image, through `ReadWriteMetadataLookup.rowsOfKey` over the
+  owner's rows in RID order and the table's row count. Several readers in Domain, each given a `MetadataReader` and not
+  knowing whether the image is dynamic.
+* **5B. Refuse it.** Those readers refuse two matches on one owner of a dynamic image.
+* **5C. Leave it, recorded.** No guest or consumer measured reaches it.
+* Recommended: 5C for 5y, recorded below, with 5A as the later stage's first option. It is not this stage's feature:
+  it concerns readers that exist already and attributes no consumer duplicates.
+
+Open questions:
+
+1. Choice 1: 1A, 1B or 1C.
+2. Choice 2: 2A or 2B.
+3. Choice 3: 3A, 3B or 3C.
+4. The classifier's exact contract under 3A. Recommended: it returns `Ordinary`, `Known of name`, or `Special of
+   name`, and is checked against the host's emitter (the oracle). The two `MethodImpl` and `MarshalAs` constructors
+   matched "by signature" need no signature check, since a by-name entry follows each.
+5. Choice 4: 4A or 4B.
+6. Choice 5: 5A, 5B or 5C.
+7. An assembly's `DebuggableAttribute`. CoreCLR folds each call into the debugger bits as it comes (the last decides)
+   and only asserts on a malformed blob; PawPrint's `Debuggable.allowsJitOptimisation` takes the first and refuses a
+   malformed one as an unloadable assembly. (a) Refuse a `DebuggableAttribute` on an `AssemblyBuilder` by name in 5y
+   (recommended: one test of the owner and the name, and it keeps a rule written for images on disk from deciding a
+   dynamic assembly). (b) Admit it, and record the difference.
+8. Which checks the handler makes. Recommended: the owner's table is one of the nine and its RID names a row of the
+   scope, and the constructor is a MethodDef or MemberRef row (`methodDefOrRef`); each failure a PawPrint fault, since
+   the managed callers hand out only those. The length is not negative. A null blob pointer is accepted only with length
+   0.
+9. `MetadataImport.GetFieldOffset`, which every field's attribute read reaches, on `main`, for any assembly. (a) Its own
+   small PR before 5y, so that 5y's guest reads a field's attributes (recommended: it is a dependency, and the rule is to
+   land a dependency first). (b) 5y's guest leaves fields out, and a parked case records the stop.
+10. The other read-side stops (`TAGGED_OBJECT`, a generic attribute's instantiation, an empty blob's instantiation,
+    `IsDefined` over an open generic constructor). Recommended: each its own PR outside this plan, testable with
+    compiled guests except the last two; 5y's guest avoids them, and each gets a parked case that names its stop.
+11. Whether 5y waits for 5x. Recommended: no; it branches from `main` and rebases once 5x lands. The guest's parameter
+    module needs 5x's handler; if 5x is still out when 5y is ready, that module is parked with 5x's stop.
+12. The split (below).
+
+**The split.** Recommended:
+
+* **PR 0, outside the plan: `MetadataImport.GetFieldOffset`** (question 9), with a compiled guest over a field's
+  attributes. It un-parks nothing on its own.
+* **5y, one PR: ordinary custom attributes on every owner.** The row, the writer, the index by RID, the extension rule,
+  the handler, the classifier refusing every pseudo-attribute, the two special cases and an assembly's
+  `DebuggableAttribute`, and their tests. It un-parks `DispatchProxyInternalInterface.cs`. The index change is not split
+  out: it is behaviour-neutral without an unsorted table, and only this stage writes one.
+* **Later stages, each one feature:** the pseudo-attributes that set flags on uncreated rows; those that are validated
+  and kept (`Guid`, `InterfaceType`, `ClassInterface`, `TypeLibVersion`, `ComCompatibleVersion`,
+  `AllowPartiallyTrustedCallers`) with `SuppressUnmanagedCodeSecurity`; and those that write other tables, each with the
+  table's own stage (`StructLayout` with `TypeBuilder_SetClassLayout`, `FieldOffset` with
+  `TypeBuilder_SetFieldLayoutOffset`, `DllImport` with `TypeBuilder_SetPInvokeData`, `MarshalAs` with FieldMarshal).
+* **`SetConstant` is not 5y.** `TypeBuilder_SetConstantValue` writes the Constant table and rewrites a Param's,
+  Field's or Property's flags; it shares no code with custom attributes, and 5x and 5s already list it as its own stage.
+
+Splitting the ordinary attributes by owner was considered and rejected: the owner is one column of one row, the handler
+is the same for every kind, and the guest needs two kinds (a TypeDef and the assembly) at once.
+
+### 5y: the oracle
+
+Written first, and seen to fail before the handler exists:
+
+* `sourcesImpure/TypeBuilderCustomAttributes.cs` (`IsDynamicCodeSupported` on, registered in `TestImpureCases.fs`),
+  the probe's scenarios without the raw reads or the console, returning the number of the first failing check:
+  * `Parents`: an attribute on each of the nine owners, interleaved, read through `GetCustomAttributesData` and
+    `GetCustomAttributes` on the created members; the generic parameter's baked attribute; the two dropped ones; the
+    raw overload. The parameter's check needs 5x (question 11); the field's needs PR 0 (question 9).
+  * `Refusals`: the three `ArgumentNullException`s with their parameter names; `CustomAttributeBuilder`'s three
+    refusals; after `CreateType`, the field's, property's and event's `InvalidOperationException`, and the type's,
+    method's, parameter's, assembly's and module's attributes accepted and read back through the objects obtained
+    before.
+  * The malformed blobs that PawPrint's reader already handles as real .NET does: the bad prolog, the truncated string
+    and the trailing bytes, through both readers. (The empty blob's instantiation is question 10's.)
+  * `object..ctor` and `Exception(string)` as attributes.
+  * `Duplicates`, `Inherited`, and `Order` (33 rows, with an attribute added after `A` is created).
+  * The `Args` kinds except the `object`-typed ones' instantiation (question 10): each through `GetCustomAttributesData`,
+    and through `GetCustomAttributes` where PawPrint has the path; a `Type` naming the dynamic assembly's own type
+    throwing `FileNotFoundException`.
+  * Its terminal-state check, beside `assertPropertyRows`, reads the `Order` module's scope: every CustomAttribute row
+    in RID order (owner, constructor, blob), and the image's index for each owner, which must be the rows in RID order.
+    That is the only check of the RIDs, which no reflection API shows.
+* `DispatchProxyInternalInterface.cs` is un-parked, unchanged.
+* A parked guest, `TypeBuilderPseudoCustomAttributes.cs`, pins what real .NET does with each pseudo-attribute of the
+  table above (flags, synthesised attributes, refusals by target and by value, the impostor). Its parked ending is the
+  classifier's TODO at the first one; its reason names the later stages.
+* Every guest is built against net10.0 and run on .NET 10.0.14 and 11.0.0-rc.3 before it is committed, each with an
+  inverted control that must exit with that check's number on both: in the main guest, `Order`'s expectation of `A`'s
+  seventeenth attribute (so that the control exercises the order past SRM's cutoff); in the proxy guest, the existing
+  public-interface control (5u, exits 4). Under PawPrint they run with `PAWPRINT_TEST_RUNTIME` unset and `Net11`. The
+  throwaway's control (the assembly's row dropped: exit 4) shows the proxy guest's check is live under PawPrint too.
+* Domain, in a new `TestEmitScopeCustomAttributes`:
+  * `defineCustomAttribute` against a model over generated calls: each call gets the next RID, the row holds what was
+    given, two equal calls give two rows, and an owner or constructor the scope lacks is refused.
+  * The classifier against a fixed table: each of the 24 known names (and its namespace altered, its case altered, a
+    suffix added, and nested in a type) through a TypeRef, a TypeDef and a MethodDef constructor; a TypeSpec
+    constructor; the two special names on each owner kind.
+  * The image round trip (`TestEmitScopeImage`): the generator draws attributes over all nine owner kinds, interleaved,
+    with row counts below 17, from 17 to 24 and from 25 over-represented. SRM opens every image; every row reads back
+    at its RID; PawPrint's index (`Assembly.read`) gives each owner its rows in RID order. The fixed sample asserts its
+    coverage: an owner with 17 rows or more, interleaved owners, each owner kind, an empty blob.
+  * The SRM sweep, as a test of why the index is by RID: over row counts 1 to 64, the index is in RID order for every
+    owner, and SRM's own `GetCustomAttributes` is not, from 17 rows, for the fixed interleaving. If SRM's order ever
+    becomes stable the second half fails, and the reason can be revisited.
+  * `TestEmitScopeExtension`: a CustomAttribute row added for a created owner is admitted; a changed or removed row is
+    refused.
+* Differential properties against real .NET, in process:
+  * **The classifier.** For constructors drawn from a pool (CoreLib's own known attributes and near misses through
+    MemberRefs, and attribute types the test defines in the module with the known names, near misses and nested names
+    through their `ConstructorBuilder`s), each applied with an empty blob to a fresh TypeDef: the host writes a row,
+    read through the internal `MetadataImport` as the probe does, exactly when the classifier answers `Ordinary` or
+    `Special "SuppressUnmanagedCodeSecurity"`. This is what pins the classifier's truthfulness, which question 4 asks
+    for.
+  * **The rows.** A generated schedule of `SetCustomAttribute` calls over a few types with members, with raw blobs (some
+    malformed) and constructors from a small pool, owners from all nine kinds, some after `CreateType` where the managed
+    caller allows it. On the host, every owner's tokens and (constructor, blob) pairs read raw; through
+    `defineCustomAttribute` and the image, every owner's rows from the index. The host's tokens equal the RIDs, and each
+    owner's list is equal. The constructor tokens are fed from the host's `GetMethodMetadataToken`, the scope having as
+    many MemberRef and MethodDef rows, so that the property is about the CustomAttribute table alone. Coverage: an owner
+    with 17 rows or more, 25 rows in the module, an attribute after creation, each owner kind.
+* Mutants, each built fresh after the work is committed, run against the guests, the Domain tests and the differential
+  properties:
+  * the index built through `metadataReader.CustomAttributes` again (`Order`; the round trip; the rows differential);
+  * the writer sorting the table by owner (the terminal-state RID check; the round trip's RID check);
+  * two owner tags swapped: Assembly and Module, Property and Event, TypeDef and MethodDef (`Parents`; the round trip);
+  * the constructor's MethodDef and MemberRef tags swapped (the proxy guest, whose assembly attribute has a MethodDef
+    constructor; `Parents`, whose have MemberRefs);
+  * the blob one byte short, or its length read from the owner argument (every check that reads a value);
+  * a search for an equal existing row (`Duplicates`; the Domain model);
+  * the extension rule refusing a row for a created owner (the after-creation checks);
+  * the extended scope not kept by the handler (every read);
+  * the classifier with one known name dropped; matching the name without the namespace; matching through a TypeSpec
+    (the classifier differential and fixed table; the parked guest's ending for the first);
+  * the special cases dropped (the fixed table);
+  * the handler's check of the owner's table removed: expected to survive, since no caller passes another table.
+
+### 5y: left to later stages
+
+* The pseudo-attributes, in the three groups of the split, and pseudo-attributes on created members, whose rows CoreCLR
+  rewrites and some of whose readers see the change (`MethodImplementationFlags`, `MarshalAs`) and some not.
+* `SetConstant` (`TypeBuilder_SetConstantValue`) and the Constant table.
+* `MetadataImport.GetFieldOffset` (PR 0, if question 9 goes the other way) and `MetadataImport.GetClassLayout`.
+* The read-side stops of question 10, each reproduced on `main` with no emit except the last two.
+* Two attributes of one name on one owner as the VM reads them: the 25-row rule measured with `InlineArray`, which
+  `rowsOfKey` states. The readers are those listed under "what 5y must change", and an assembly's `RuntimeCompatibility`
+  is one more.
+* An assembly's `DebuggableAttribute`, if question 7 goes to (a).
+* The access check that real .NET makes when a dynamic type implements an interface it cannot see: PawPrint lets
+  `DispatchProxy`'s proxy load without `IgnoresAccessChecksTo` (the throwaway's control). With 5y in place a guest can
+  separate the two answers.
+* `DynamicInterfaceCastableImplementationAttribute`, which COM marshalling applies to an emitted type and the type loader
+  reads.
+* 5x's list stands: `XmlSerializer` (which also applies assembly attributes) behind `AssemblyNative_InternalLoad`, the
+  dynamic-methods class's queries, nested dynamic types, the `Signature.Init` fix, `TypeInfo.Events`, `<Module>` and
+  `CreateGlobalFunctions`, and the step budget for `TypeBuilderDefineParameterWide.cs`.
+
+**What this changes in the plan's earlier text.**
+
+* 5s's survey sized custom attributes as "a sorted table over every HasCustomAttribute parent". In a live dynamic module
+  the table is not sorted: CoreCLR appends, and reads one owner's rows through a virtual sort that keeps them in the
+  order added. The size is in the pseudo-attributes, which 5y defers.
+* Stage 1 says SRM "sorts `CustomAttribute` virtually". It does, but not stably, and `MetadataReader.CustomAttributes`
+  enumerates through that sort; an image whose table is in CoreCLR's order needs PawPrint's own index by RID.
+* 5u expected `DispatchProxy` over an internal interface to need custom attributes and "whatever then follows". Nothing
+  follows: the throwaway alone runs it to exit 0.
+
+### 5y: the decisions
+
+Taken 2026-11-14.
+
+Scratchpad paths below are under the scratchpad named in "5y: what it is". Two probes were run for these decisions, each on .NET 10.0.14 and 11.0.0: `5y-decide/stale` (`Program.cs`, `net10.out`, `net11.out`) and `5y-decide/probe2` (`Program.cs`, `net10.out`, `net11.out`, `net10-debuggable.out`). Upstream source was read in `$DOTNET_RUNTIME_SRC_NET10`; `md/enc/metamodelrw.cpp`, `md/compiler/custattr_emit.cpp`, `vm/comdynamic.cpp` and `CaptureModuleMetaDataToMemory` do not differ in `_NET11` in anything used here, except `StructLayout`'s new layout kind.
+
+* **The CustomAttribute table of a live dynamic module is never sorted, never gets a pointer table, and no row of it ever moves.** Checked against the pinned source, not taken from the planner.
+  * `AddRecord` (metamodelrw.cpp:3861) appends, clears the sorted flag and invalidates the `VirtualSort`. No other code adds a CustomAttribute row.
+  * The format has no pointer table for CustomAttribute. `CMiniMdRW` keeps pointer tables for Field, Method, Param, Property and Event only, and `DefineCustomAttribute` calls no `AddChildRow*` function. No counterpart of 5x's `FixParamSequence` exists for this table.
+  * The only code that sorts the table in place is `PreSaveFull` (`SORTER_WITHREMAP(CustomAttribute, Parent)`, metamodelrw.cpp:2845), and only under `MDUpdateFull`.
+  * `PreSaveFull` does run in a `Run` assembly. `Module::UpdateDynamicMetadataIfNeeded` (vm/ceeload.cpp:2924) calls `ReflectionModule::CaptureModuleMetaDataToMemory` at every class load of a dynamic module, with or without a debugger (`IsVisibleToDebugger` returns `TRUE`). That function sets `MDUpdateExtension` first. Under that mode `PreSaveFull` skips the removal of pointer tables (which needs `MDUpdateFull` and a handler) and every sort (each needs `MDUpdateFull` or `MDUpdateIncremental`). It converts markers and runs `FixUpTable` with no remap. So a class load changes no CustomAttribute row and no RID.
+  * `RegMeta::SetCustomAttributeValue` and `DeleteToken` have no caller in `vm/`. A row, once written, keeps its three columns.
+  * `MDInternalRW::EnumInit` (mdinternalrw.cpp:1277) reads one owner's rows through `LookUpTableByCol` over the `VirtualSort`, whose `Compare` breaks a tie by RID. So an owner's rows are enumerated in the order added, at every table size. The planner's `Order` (33 rows) measures the same.
+* **Question 1, the row: 1A.** `CustomAttributeRow = { Parent : HasCustomAttribute ; Constructor : MethodDefOrRef ; Value : BlobOffset }`.
+  * `HasCustomAttribute` has nine cases: `Assembly`, `Module`, `TypeDef of TypeDefRid`, `MethodDef of MethodDefRid`, `Field of FieldRid`, `Param of ParamRid`, `Property of PropertyRid`, `Event of EventRid`, `GenericParam of GenericParamRid`. `Assembly` and `Module` carry no RID, because each table has exactly one row. `CodedIndex` is the RID shifted left five bits with ECMA-335 II.24.2.6's tag (MethodDef 0, Field 1, TypeDef 3, Param 4, Module 7, Property 9, Event 10, Assembly 14, GenericParam 19).
+  * `HasCustomAttribute.tryOfToken : int -> EmitScope -> HasCustomAttribute option` is in Domain. It answers `None` for any other table, for an Assembly or Module token whose RID is not 1, and for a RID that names no row. The handler turns `None` into a PawPrint fault which names the token. This follows 5x: a refusal that no managed caller reaches is placed where a Domain test reaches it.
+  * `CustomAttributeRid` has an `internal` constructor and a `tryCustomAttributeRid`, as `EventRid` has. `EmitScope.addCustomAttribute` requires that the owner row, the constructor row and the blob offset exist.
+  * The blob is interned as given. An empty blob is offset 0.
+  * 1B is rejected: a token that names no row could be represented, and the writer would hold the map from tables to tags. 1C is rejected: CoreCLR stores the bytes without parsing, and four measured blobs do not parse.
+  * `HasCustomAttribute`, `CustomAttributeRow`, `CustomAttributeRid` and the new functions are public additions to a published package. The PR body says so.
+* **Question 2, the image's order: 2A, and every reader takes an owner's rows in RID order.**
+  * The writer emits the rows in RID order, between MemberRef and StandAloneSig, with the table's `Sorted` bit clear. All nine owner tables keep the scope's RIDs in the image (GenericParam included, by 5q), so the `Parent` column needs no remap.
+  * The width of the `Parent` column is decided by all 22 tables of the coded index, not by the nine that a builder hands out: a scope with 2048 MemberRef or TypeRef rows has a four-byte column. The width of the `Type` column is decided by MethodDef and MemberRef (8192 rows).
+  * `Assembly.read` builds `Attributes` and `CustomAttributesByParentToken` by RID, from 1 to the table's row count. For a table that is in owner order this gives what SRM's enumeration gives. For an unsorted table on disk it gives the order of CoreCLR's read-only reader, which scans by RID.
+  * This amends the planner's 2A. Domain gains one function that returns an owner's CustomAttribute handles in RID order: SRM's `GetCustomAttributes(owner)` gives the right set for an unsorted table (its pointer table groups by owner), so the function sorts that set by row number. Every direct call of SRM's per-owner lookup goes through it: `TypeInfo.fs` (the attribute list, `IsByRefLike`, `InlineArray`), `FieldInfo.fs` (`ThreadStatic`), `MethodInfo.fs` (the four sites) and `StructMarshalStub.fs`. A reader that takes the first match then takes the first added, which is CoreCLR's answer below 25 rows. The planner's 2A left those readers with "no defined order" from 17 rows; that cost is removed for one line of code.
+  * 2B is rejected. A row's image RID would move whenever a later row's owner sorts before it, and `TypeInfo.Attributes` and `MethodInfo.CustomAttributes` hold handles of created types' rows.
+  * A third structure was weighed: declaring the table sorted when it is not, as the image does for GenericParam. It is rejected: SRM would then search the table by bisection and return wrong sets, where today it returns right sets in an unspecified order.
+* **Question 3, pseudo-attributes: 3A.** `defineCustomAttribute` returns a union, as 5x's `defineParam` does: `CustomAttributeDefinition.Defined of CustomAttributeRid * EmitScope`, or `CustomAttributeDefinition.NotStoredAsGiven of CustomAttributeEmitKind`. The handler stops on the second with a TODO which names the attribute, the owner token and what CoreCLR does instead of storing the row.
+  * 3B is rejected for 5y: each flag-only attribute needs its blob grammar, its list of targets and its validation, and no measured consumer applies one.
+  * 3C is rejected: measured divergent (`Impostor`).
+  * A known attribute on a wrong target, or with a bad value, makes real .NET throw a catchable `ArgumentException`. PawPrint stops with the TODO in those cases too. The parked guest pins them.
+* **Question 4, the classifier's contract.** `EmitScopeDefinitions.classifyCustomAttribute (owner : HasCustomAttribute) (constructor : MethodDefOrRef) (scope : EmitScope) : CustomAttributeEmitKind`.
+  * `CustomAttributeEmitKind` is `Ordinary`, `Known of KnownCustomAttribute`, `SuppressUnmanagedCodeSecurity` or `DynamicSecurityMethod`. `KnownCustomAttribute` is a closed union of the 20 names of `KnownCaList`, with a function that gives each case its namespace and name. A string is rejected: the set is closed, and a test can then enumerate it.
+  * The name is read as `_IsKnownCustomAttribute` reads it: from the TypeRef or TypeDef that is a MemberRef's parent, or from the TypeDef that owns a MethodDef. Any other parent (a TypeSpec, a MethodDef) has no name and is `Ordinary`.
+  * The comparison is ordinal on the namespace and on the name. Nothing else is consulted. Measured (`5y-decide/probe2`): a type named `System.SerializableAttribute` in another dynamic assembly, reached through a TypeRef, is known; so is a nested type of that name; `System.Serializableattribute` and `SerializableAttribute` with no namespace are ordinary.
+  * A constructor of an instantiation of the module's own generic type arrives as that type's MethodDef (measured: the generic impostor of the same module is known). A constructor of an instantiation of another assembly's generic type arrives as a MemberRef on a TypeSpec and is ordinary (measured).
+  * `Known` does not depend on the owner. `SuppressUnmanagedCodeSecurity` is answered only for a TypeDef or MethodDef owner. `DynamicSecurityMethod` is answered only for a MethodDef owner. On any other owner each of the two names is `Ordinary`. Measured (`5y-decide/stale`, S3 to S5): `DynamicSecurityMethodAttribute` on a type writes an ordinary row; both names on a field write ordinary rows; on a method `DynamicSecurityMethodAttribute` sets `mdRequireSecObject` and writes no row.
+  * The two security names are compared as a namespace and a name, although the source compares the joined path. Every row that a managed caller can make holds a full name split at its last dot, so the two comparisons agree on every reachable scope, and the differential property checks the one that is written.
+  * The signature is never consulted. Each entry of `KnownCaList` that matches by signature (`MethodImpl`, `MarshalAs`, `StructLayout`) is followed by an entry of the same name that matches by name.
+  * `RegMeta` caches the answer for each constructor token (`m_caHash`). No name of a row can change, so the cache is not modelled.
+* **Question 5, a row whose owner is a created type or a member of one: refused in 5y. This reverses the planner's 4A.**
+  * The planner's reason for 4A, "what the type loader read at creation is fixed then in both", does not hold for PawPrint. Each re-read of the image rebuilds the `TypeInfo`, `MethodInfo` and `FieldInfo` of created types, and those derive loader facts from the attribute rows: `IsByRefLike`, the `InlineArray` length, `ThreadStatic`, `Intrinsic`, `UnsafeAccessor`, `UnmanagedCallersOnly`. Under 4A, `InlineArrayAttribute` added to a created struct changes that struct's `TypeInfo` in PawPrint and changes nothing in CoreCLR's method table. Read from `TypeInfo.fs:700-735` and `LoadedAssemblies.WithEmitScope`; not measured.
+  * `WithEmitScope` documents that "every created type reads back the same". 4A makes that sentence false, and `TestEmitScopeExtension`'s property would have to exclude attributes to stay green.
+  * No measured consumer adds an attribute to a created owner. `DispatchProxy` gives its attribute type the `AttributeUsage` before `CreateType`, and its other row is the assembly's.
+  * The rule. Domain gains `EmitScope.typeOfCustomAttributeOwner : HasCustomAttribute -> EmitScope -> TypeDefRid option`: the TypeDef itself; the owner of a MethodDef, Field, Property or Event; the owner of a Param's method; the type, or the owner of the method, that owns a GenericParam; `None` for `Assembly` and `Module`.
+    * `EmitScopeExtension.violations` reports `AddedToCreatedType (TableIndex.CustomAttribute, rid, type)` for a new row whose owner's type is created, and `RowChanged` for a changed or missing row.
+    * The handler asks the same function before it defines the row, and stops with a TODO which names the owner token and the created type, and says that real .NET writes the row and shows it through reflection at once. A guest can reach this stop, so it is a TODO and not the replacement's fault message.
+  * An attribute on the assembly or on the module is admitted at any time, whatever types are created. Measured on real .NET, and it is what the proxy guest does.
+  * `FieldBuilder`, `PropertyBuilder` and `EventBuilder` throw `InvalidOperationException` after creation in managed code, before the QCall. The guest checks those three.
+  * The planner's 4B is this decision, with the rule stated as data and shared by the handler and the extension rule.
+  * The relaxation is a later stage: admit a row on a created owner when its attribute is not one that the runtime reads. CoreCLR's `WellKnownAttribute` list (vm/wellknownattributes.h) is where that stage starts, and it is not the whole set, because some lookups pass a literal name.
+* **Question 6, duplicates and the 25-row rule: not modelled in 5y, and recorded as a known wrong answer.**
+  * The rule affects nothing that reflection's attribute APIs show. `GetCustomAttributes`, `GetCustomAttributesData`, `IsDefined` and `Attribute.*` enumerate through `EnumInit`, in RID order, at every size.
+  * It affects only a lookup by name inside the VM that takes one value, when one owner has two attributes of one name with different blobs and the module has 25 CustomAttribute rows or more. Then CoreCLR meets the newest first. Measured for `InlineArray` (`5y/byname`). `UnmanagedCallersOnly`, `UnsafeAccessor`, `UnmanagedFunctionPointer`, `DefaultDllImportSearchPaths` and an assembly's `RuntimeCompatibility` are read the same way (read, not measured). `Type.GUID` also reads by name, and `GuidAttribute` is a refused pseudo-attribute.
+  * With the RID-order function above, PawPrint's answer is exactly "the first added". It equals CoreCLR's below 25 rows and differs from 25 rows.
+  * Modelling it (5A) is rejected for 5y. The Domain readers receive a `MetadataReader` and cannot tell a dynamic image from one on disk, and the count that matters is the count when the type was created.
+  * A refusal at the write is rejected. Two rows of one name on one owner are common and harmless: `DispatchProxy` adds one `IgnoresAccessChecksTo` to its assembly for each foreign assembly.
+  * A parked guest pins real .NET's answers (below). Its parked reason says that PawPrint answers wrongly and does not stop. An issue is filed for it.
+* **Question 7, an attribute on an AssemblyBuilder that the runtime acts on. `DebuggableAttribute` is refused, and so is a friend attribute that PawPrint's scan rejects.** Both checks run after the row is defined and the image is re-read, only when the owner is `Assembly`, and both use the reader that would later decide from the row.
+  * `DebuggableAttribute`: the handler stops with a TODO when `NamedAttribute` finds the new row under `System.Diagnostics.DebuggableAttribute`. CoreCLR folds each call into the debugger bits (the last decides) and reads `pBlob[2]` and `pBlob[3]` whatever the length; `Debuggable.allowsJitOptimisation` takes the first and treats a malformed blob as an unloadable assembly. Measured: real .NET accepts a four-byte and a zero-length blob with no exception.
+  * `DebuggableAttribute` on the module or on a type is an ordinary row (the QCall acts only for token `0x20000001`). Measured on the module.
+  * `InternalsVisibleTo` and `IgnoresAccessChecksTo`: the planner's text misses that `UpdateCachedFriendAssemblyInfo` throws out of the QCall. Measured (`5y-decide/probe2`, the raw overload with `InternalsVisibleToAttribute`):
+    * a bad prolog, a truncated string, a zero-length blob and a null string each throw `BadImageFormatException` "Malformed custom attribute header.";
+    * a name with a version throws `COMException` 0x801311E5;
+    * an empty name throws `ArgumentException` on .NET 10 and `FileLoadException` on .NET 11;
+    * in each case the row is written first, every later friend attribute on that assembly throws the same exception and is also written, and types can still be created.
+  * PawPrint stores the scan's result in `DumpedAssembly.Friends` and would return from the QCall normally. So the handler stops with a TODO when the re-read assembly's `Friends` is an `Error`. The exception is not modelled, because its type differs between the runtimes and the row survives it.
+  * `RuntimeCompatibilityAttribute` is admitted. CoreCLR re-reads it by name at each call and PawPrint reads it from the current image at each use, so one attribute agrees. Two fall under question 6.
+* **Question 8, the handler.** It reads the module, the owner token, the constructor token, the pointer and the length, and returns nothing.
+  * The owner goes through `HasCustomAttribute.tryOfToken`. The constructor goes through `methodDefOrRef`, and a token that is neither a MethodDef nor a MemberRef row is a PawPrint fault.
+  * With length 0 the pointer is not read, whatever it is. A negative length, or a null pointer with a positive length, is a PawPrint fault. The managed stub passes a span's length, and the span of an empty array has a non-null reference, so "null only with length 0" is not the caller's guarantee and is not what the handler tests.
+  * The order of the steps: the arguments; the created-owner TODO; `defineCustomAttribute`, with the TODO for `NotStoredAsGiven`; `WithEmitScope`; for an `Assembly` owner, the two checks of question 7.
+  * A generic parameter's attribute after its queue is baked never reaches the QCall, and `MethodBuilder` sets `m_isDllImport` after it. Both are managed code, which PawPrint runs unchanged.
+* **Question 9, `MetadataImport.GetFieldOffset`: its own PR before 5y.** It is a dependency, it concerns every assembly, and it has a compiled guest of its own.
+* **Question 10, the other stops on the read side: each its own PR outside this plan.** 5y's guest avoids them and each gets a parked case.
+  * One of them is not a stop. `IsDefined` over an owner that carries a constructor of an open generic type answers `false` under PawPrint where real .NET throws `ArgumentException`. Only an emitted row reaches it, so 5y makes it reachable. Its parked case says that the answer is wrong, the PR body says so, and its fix is the first PR after 5y.
+* **Question 11: 5y does not wait for 5x.** It branches from `main`. 5x is in the merge queue, so 5y is rebased onto `main` with 5x in it before its PR opens, and the whole solution is rebuilt. If 5x has left the queue by then, the parameter's module becomes a guest of its own, parked with 5x's stop.
+* **Question 12, the split: PR 0 and one PR for 5y.**
+  * 5y's PR holds the row, the writer, the index by RID, the RID-order function with its eight call sites, the extension rule, the classifier, `defineCustomAttribute`, the handler and their tests.
+  * The index and the RID-order function are not split out: without an unsorted table they change no behaviour, and only this stage writes one.
+  * The classifier is not split out: it would ship with nothing calling it.
+  * The split by layer stays the cut to make if review finds the PR too large.
+  * Later stages, each one feature: the pseudo-attributes that set flags on rows not yet created; those that are validated and kept, with `SuppressUnmanagedCodeSecurity` and `DynamicSecurityMethod`; those that write another table, each with that table's stage; rows on created owners; `SetConstant`.
+* **Corrections to the other 5y sections.**
+  * "The 24 names of `KnownCaList`": the list has 24 entries and 20 names. `MethodImpl` has three entries, and `MarshalAs` and `StructLayout` two each. `StructLayout` also matches by signature with a fallback by name.
+  * "Two names are special-cased for a TypeDef or MethodDef owner": `DynamicSecurityMethodAttribute` is special only for a MethodDef owner (source, and measured).
+  * The special-case block of `RegMeta::DefineCustomAttribute` compares `szName`, a stack buffer that it fills only when the constructor's parent is a TypeRef or a TypeDef. For a MemberRef on a TypeSpec with a TypeDef or MethodDef owner it compares uninitialised memory. Measured (`5y-decide/stale`, S2, S3, S5, on osx-arm64): a generic attribute applied straight after `SuppressUnmanagedCodeSecurity` or `DynamicSecurityMethod` gets an ordinary row and no flag. In 5y a call that would leave either name in the buffer is refused first, so `Ordinary` is the only answer to model. The stage that admits the two names must measure this on Linux x64 before it does.
+  * "A MemberRef on a TypeSpec ... is never known" stands, and is now measured. The planner's `Impostor` scenario did not cover a TypeRef into another assembly, a nested type, or an instantiation of the module's own generic type; all three are known.
+  * Choice 2A's cost ("they get the owner's rows in no defined order") no longer exists, by the RID-order function.
+  * Choice 4's sentence about the type loader is wrong for PawPrint, as question 5 says. "Pseudo-attributes on created members stay refused" stands.
+  * "What CoreCLR does" omits the exception from the friend cache, and the unchecked read of a `DebuggableAttribute` blob.
+  * "The CustomAttribute table is not kept sorted" stands. The section does not say that `PreSaveFull` runs at every class load; it does, and it changes nothing here, for the reason in the first decision.
+  * The oracle's `Order` adds one attribute to `A` after `A` is created. That call is now a TODO. `Order` adds its last attributes to `B` (not created) and to the assembly.
+  * The oracle's `Refusals` expects attributes on a created type, method and parameter to be accepted. Those three move to a parked guest. The assembly's and the module's stay.
+  * The classifier's differential property is stated as "the host writes a row exactly when the classifier answers `Ordinary` or `Special`". With a TypeDef owner alone it cannot see `DynamicSecurityMethod`, and it cannot tell a flag from no flag. It is restated below.
+  * The mutant "the handler's check of the owner's table removed: expected to survive" is replaced: the check is `tryOfToken` in Domain, and a Domain test kills its removal.
+  * The SRM sweep's second half is kept as a coverage assertion, not as a claim about SRM: at one stated count or more, SRM's own order differs from RID order. If SRM becomes stable the assertion fails and says that the sweep no longer shows why the function sorts.
+* **The oracle, as the implementer builds it.** In this order:
+  * Before any commit, every guest is built against net10.0 and run on .NET 10.0.14 and 11.0.0-rc.3. Each has a control that inverts one check and must exit with that check's number on both.
+    * The main guest's control inverts `Order`'s expectation of `B`'s seventeenth attribute.
+    * The proxy guest's control is 5u's (exit 4).
+  * Commit 1 holds what compiles today, and its run is recorded.
+    * `sourcesImpure/TypeBuilderCustomAttributes.cs`, registered. It stops at "Unimplemented native method (PInvokeImpl QCall!TypeBuilder_DefineCustomAttribute)".
+    * `DispatchProxyInternalInterface.cs`, un-parked and unchanged. It stops at the same place.
+    * The parked guests below, each registered with that stop as its ending for now.
+    * A test that the index `Assembly.read` builds for CoreLib and for the test assembly equals the grouping of SRM's enumeration, stated in the test. It is green before and after the change to the index.
+  * Commit 2 holds the smallest Domain surface that lets the other tests compile: `HasCustomAttribute`, `CustomAttributeRid`, `CustomAttributeRow`, `KnownCustomAttribute`, `CustomAttributeEmitKind`, `CustomAttributeDefinition`, and `addCustomAttribute`, `classifyCustomAttribute`, `defineCustomAttribute` and `typeOfCustomAttributeOwner` with bodies that fail by name. With it come the Domain tests, the round trip, the extension tests and the two differential properties. Their failing run is recorded.
+  * Then Domain and the writer, then the index and the RID-order function, then the extension rule, then the handler. Each parked guest's ending is measured again and its reason is set.
+  * The main guest returns the number of its first failing check. Its modules:
+    * `Parents`: one attribute on each of the nine owners, interleaved, read through `GetCustomAttributesData` and `GetCustomAttributes` on the created members; a type's and a method's generic parameter (the baked rows); the two dropped ones; the raw overload; `DebuggableAttribute` on the module, which reads back as a row.
+    * `Refusals`: the three `ArgumentNullException`s with their parameter names; `CustomAttributeBuilder`'s three refusals; after `CreateType`, the field's, property's and event's `InvalidOperationException`; an attribute on the assembly and on the module after a type is created, read back through the objects obtained before.
+    * The malformed blobs that PawPrint's readers already handle as real .NET does: a bad prolog, a truncated string and trailing bytes through both readers, and a zero-length blob through `GetCustomAttributesData` alone.
+    * `object..ctor` and `Exception(string)` as attributes.
+    * `Duplicates` and `Inherited`, as measured.
+    * `Order`: 33 rows interleaved over `A`, `B` and the assembly, the last ones added after `A` is created, with 17 rows or more on `B`.
+    * `FirstOfTwo`: a struct with `InlineArray(2)` and then `InlineArray(3)` in a module of 17 to 24 CustomAttribute rows, and one in a module of 2 rows. Each has length 2. This is the guest's check of the RID-order function.
+    * `Args`: every kind that the throwaway arm read back equal, through `GetCustomAttributesData`, and through `GetCustomAttributes` where PawPrint has the path.
+    * Two IgnoresAccessChecksTo-shaped rows of one name on the assembly, both read back.
+  * Its terminal-state check reads two scopes.
+    * `Order`: every CustomAttribute row in RID order (owner, constructor, blob bytes), and the index of the image for each owner, which must be that owner's rows in RID order.
+    * `Parents`: each row's parent and constructor as SRM reads them from the image (the table and RID of each), so that a swapped tag is seen without reflection.
+  * The parked guests. Each pins what real .NET does, exits 0 there, and has a control.
+    * `TypeBuilderPseudoCustomAttributes.cs`: the planner's table, the impostor in the module, in another assembly and nested, the two security names on a type, a method and a field, and the wrong-target and bad-value `ArgumentException`s. Its ending is the classifier's TODO at the first.
+    * `TypeBuilderCustomAttributeAfterCreate.cs`: an ordinary attribute on a created type, method and parameter, visible through the objects obtained before. Its ending is the created-owner TODO.
+    * `TypeBuilderAssemblyRuntimeAttributes.cs`: the seven friend rows above and `DebuggableAttribute` twice. Its expectations name the runtime where the exception type differs. Its ending is the first of the two TODOs.
+    * `TypeBuilderDuplicateRuntimeAttributes.cs`: `5y/byname`'s rows from 25 upwards. Its reason says that PawPrint returns the first added and does not stop.
+    * One case for each stop of question 10, and one for the wrong `IsDefined`.
+  * A refusal fixture, beside `TestTypeBuilderPropertyRefusals`, runs four small guests under PawPrint and asserts the TODO's text: a pseudo-attribute; an ordinary attribute on a created type; `DebuggableAttribute` on the assembly; a friend attribute with a truncated blob.
+  * Domain, in a new `TestEmitScopeCustomAttributes`.
+    * `defineCustomAttribute` against a model, over generated calls with owners of all nine kinds: each `Defined` call gets the next RID; the row holds what was given; two equal calls give two rows; a `NotStoredAsGiven` call leaves the scope unchanged and the next row takes the next RID.
+    * `tryOfToken`: every token of the nine tables that names a row gives its case; every other table's token, an Assembly or Module token with RID 2, and a RID one past the end give `None`.
+    * `addCustomAttribute` refuses an owner, a constructor or a blob offset that the scope lacks.
+    * `typeOfCustomAttributeOwner` against a model that walks the rows, over generated scopes, with a parameter and a method's generic parameter over-represented.
+    * The classifier, over every case of `KnownCustomAttribute` and the two security names: through a TypeRef with each kind of resolution scope, through a TypeDef, through a nested TypeDef and through a MethodDef, on every owner kind. Then the near misses: the namespace altered, the case altered, a suffix added, the namespace and name joined into the name, and a TypeSpec parent.
+  * The image round trip (`TestEmitScopeImage`).
+    * The generator draws attributes over all nine owner kinds, interleaved with the rows that own them, with empty blobs and equal rows. Table sizes below 17, from 17 to 24 and from 25 are each over-represented.
+    * SRM opens every image. Every row reads back at its RID with its parent, constructor and blob. The index from `Assembly.read` gives each owner its rows in RID order. The RID-order function gives the same list for each TypeDef, MethodDef, Field and Param.
+    * The fixed sample asserts, each above a stated count: an owner with 17 rows or more; interleaved owners; each owner kind; an empty blob; two equal rows; a count at which SRM's own order differs from RID order.
+    * Two fixed cases for the column widths: 2047 and 2048 MemberRef rows with one attribute on a type, and 8191 and 8192 MemberRef rows with an attribute whose constructor is the last.
+    * The existing assertion that an image has no CustomAttribute rows becomes an assertion about a scope with none.
+  * `TestEmitScopeExtension`.
+    * A new row for an owner whose type is created is `AddedToCreatedType`, for each of the seven owner kinds that have a type. A new row on the assembly or the module, or on an owner whose type is not created, is admitted. A changed or missing row is `RowChanged`.
+    * The generated property draws attributes, compares each created type's attributes and its members' between the two images, and stays green with no exclusion.
+  * The classifier's differential property, in process against the host's emitter.
+    * The pool of constructors: CoreLib's own known attributes and near misses through MemberRefs; types that the test defines with each known name and each security name in the module (through the `ConstructorBuilder` and through the created constructor), nested in a type of the module, and in a second dynamic assembly; a generic type of a second dynamic assembly with a known name and no arity suffix, instantiated, so that the parent is a TypeSpec.
+    * Each constructor is applied with the blob `01 00 00 00` to a fresh TypeDef, a fresh MethodDef and a fresh Field.
+    * The host's result is read raw, through CoreLib's internal `MetadataImport` as the planner's probe reads it: whether a row was added, whether the call threw, and the owner's `HasSecurity` and `RequireSecObject` flags. The test fails if the internal method is missing; it does not skip.
+    * The model: `Ordinary` gives a row, no flag and no exception. `Known` gives no ordinary outcome: the call throws, or it adds no row. `SuppressUnmanagedCodeSecurity` gives a row and `HasSecurity`. `DynamicSecurityMethod` gives no row and `RequireSecObject`.
+    * A generic constructor is never applied straight after a security name on the same thread of calls, because of the uninitialised comparison above.
+  * The rows' differential property, in process.
+    * A generated schedule of `SetCustomAttribute` calls over a few types with members: raw blobs, some malformed; constructors from a pool with no pseudo-attribute; owners of all nine kinds; some calls on the assembly and the module after a type is created.
+    * The owners' tokens are forced on the host in a stated order before the first call, and the test adds the same rows to the scope in that order, as 5s's and 5x's properties do. The constructor tokens are read from the host, and the scope is given as many MemberRef and MethodDef rows.
+    * It compares, for every owner, the host's raw tokens and (constructor, blob) pairs with the index of the image of the scope that `defineCustomAttribute` built. The tokens equal the RIDs.
+    * It covers Domain, the writer and the index. It does not cover the handler's reading of its arguments or its TODOs, which the guests cover.
+    * Its fixed sample asserts, each above a stated count: an owner with 17 rows or more; a module with 25 rows or more; each owner kind; a generic parameter's baked row among later rows; a zero-length blob.
+  * Mutants. Each is built fresh after the work is committed, and "as built" records which test killed each. A mutant that survives where a killer is named means that a test is strengthened and the run repeated.
+    * The index built through `metadataReader.CustomAttributes` (`Order`; the round trip; the rows' differential property).
+    * The RID-order function without its sort (`FirstOfTwo`; the round trip).
+    * The writer sorting the table by owner (the terminal-state check; the round trip).
+    * The `Sorted` bit set for CustomAttribute (the round trip, from the first interleaved sample).
+    * Two owner tags swapped: Assembly and Module, Property and Event, TypeDef and MethodDef (the terminal-state check of `Parents`; the round trip).
+    * The constructor's two tags swapped (the proxy guest, whose assembly row has a MethodDef constructor; `Parents`).
+    * The `Parent` column's width decided by the nine owner tables alone (the fixed case of 2048 MemberRef rows).
+    * The blob one byte short, or its length read from the owner argument (every check that reads a value).
+    * A search for an equal row before adding (`Duplicates`; the Domain model).
+    * The extended scope not kept by the handler (every read).
+    * The classifier with one known name dropped; matching the name without the namespace; matching through a TypeSpec; consulting the resolution scope; treating a nested type as ordinary (the fixed table and the differential property for each; the parked guest's ending for the first).
+    * `SuppressUnmanagedCodeSecurity` answered for a Field owner; `DynamicSecurityMethod` answered for a TypeDef owner (the differential property; the fixed table).
+    * The created-owner TODO removed from the handler (the refusal fixture; the replacement's fault then stops the run with another message).
+    * The extension rule admitting a row for a created owner, or not comparing the earlier rows (`TestEmitScopeExtension` alone, since the handler stops first).
+    * The created-owner rule keyed on "any type is created" (the proxy guest, and `Order`'s rows on `B` and on the assembly).
+    * `typeOfCustomAttributeOwner` giving `None` for a Param, or a method's own RID as a type (its Domain model).
+    * The `DebuggableAttribute` check applied to every owner (`Parents`' row on the module). The check removed (the refusal fixture).
+    * The friend check removed (the refusal fixture). The friend check applied before the image is re-read, so that it sees the old result (the refusal fixture).
+    * `tryOfToken` accepting another table (its Domain test).
+    * Three guards have no killer, since no managed caller reaches them: the handler's fault for `None` from `tryOfToken`, for a constructor token of another table, and for a negative length. Each is recorded as surviving, with that reason.
+  * At the tip, the default suite and the four Guest suites run, each as its own invocation, built from the whole solution. The main guest and the proxy guest also run under PawPrint with `PAWPRINT_TEST_RUNTIME=Net11`.
+* **PR titles.** PR 0: "MetadataImport.GetFieldOffset". 5y: "Custom attributes through a dynamic module's builders (type-builder stage 5y)".
+* **Additions to "left to later stages".**
+  * An ordinary attribute on a created type or a member of one, with the parked guest as its oracle.
+  * The exception that real .NET throws for a malformed friend attribute, and `DebuggableAttribute` on an assembly.
+  * The uninitialised comparison in `RegMeta::DefineCustomAttribute`, to be measured on Linux x64 by the stage that admits the two security names.
+  * A known attribute's `ArgumentException` for a wrong target or a bad value, which 5y turns into a stop.
+  * The wrong `IsDefined` over a constructor of an open generic type.
+  * The three handler guards above, which are assertions about the managed callers.
+
+### 5y: as built
+
+Built 2026-11-14 as the decisions say, in eight commits after the two records: the tests that compile today
+(`24c2b49ad`); the Domain surface failing by name with its tests (`01f6a6247`); the rows, the classifier and the
+writer (`009149667`); the index and the RID-order function (`3229ace54`); the extension rule (`08d5679ec`); the handler
+(`fc5d20c15`); a fix that kept `checkRoundTrip`'s docstring on it (`571a79086`); and the classifier's tests
+strengthened after a mutant survived them (`28c1bccdf`). The branch was then rebased onto `main` at `689822905`, which
+holds PR 0 (`MetadataImport.GetFieldOffset`, #2262), `MetadataImport.GetClassLayout` (#2261) and the construction of an
+attribute whose constructor takes `object` arguments (#2259); after the record of this section (`fc2c52f86`),
+`0d345e300` registers the tagged-object guest as passing, and this section was updated. The branch was rebased again
+onto `36af1eeb2`, which holds the instantiation of generic attributes (#2260), and `8aeaab8e4` registers the
+generic-instance guest as passing. SHAs here are from that second rebase. A mutant run or suite named at a commit ran on
+that commit's content as it stood before the second rebase, and the first mutant run and the first suites ran before
+the first. Scratchpad paths are under
+`5y-impl/` in the scratchpad named in "5y: what it is". The wrong `IsDefined` is PawPrint issue #2257 and the 25-row
+rule #2258.
+
+**Measured on real .NET before any commit.** Each guest was built against net10.0 and run on .NET 10.0.14 and rolled
+forward to 11.0.0-rc.3, with a control (`5y-impl/guest`, `5y-impl/controls`). Every guest exits 0 on both runtimes, and
+every control exits the number of the check it inverts on both. Under PawPrint, "host" is the run on the test host's
+CoreLib and `Net11` the run with `PAWPRINT_TEST_RUNTIME=Net11`.
+
+| Guest | Control (exit on both) | PawPrint, host | PawPrint, `Net11` |
+|---|---|---|---|
+| `TypeBuilderCustomAttributes.cs` | `B`'s 17th and 18th swapped: 83 | 0, its field reads included, with its terminal-state check (42 s) | 0, the same (1 m 22 s) |
+| `DispatchProxyInternalInterface.cs` | the interface public: 4 | 0 | 0 |
+| `TypeBuilderPseudoCustomAttributes.cs` (parked) | the first type's `IsSerializable`: 7 | the classifier's TODO at the first call | not run |
+| `TypeBuilderCustomAttributeAfterCreate.cs` (parked) | the type's two rows swapped: 1 | the created-owner TODO | not run |
+| `TypeBuilderAssemblyRuntimeAttributes.cs` (parked) | the empty name's exception types swapped: 6 | the friend TODO at the first malformed friend attribute | not run |
+| `TypeBuilderDuplicateRuntimeAttributes.cs` (parked) | the first added expected at 25 rows: 1 | exits 1: the first added, a wrong answer (#2258) | not run |
+| `TypeBuilderCustomAttributeTaggedObject.cs` (registered by `0d345e300`) | 6 expected: 1 | 0 since #2259; before it, "primitive type obj is not yet supported as a CustomAttrib Elem" | 0 |
+| `TypeBuilderCustomAttributeGenericInstance.cs` (registered after rebasing onto #2260) | 5 expected: 1 | 0 since #2260; before it, "RuntimeConstructorInfo does not declare expected instance field 'm_value'" | 0 |
+| `TypeBuilderCustomAttributeEmptyBlobInstance.cs` (parked) | `ArgumentException` expected: 2 | "*ppBlob (start) pointer is null" | not run |
+| `TypeBuilderCustomAttributeOpenGenericIsDefined.cs` (parked) | no exception expected: 1 | exits 1: `IsDefined` answers false, a wrong answer (#2257) | not run |
+| `TypeBuilderCustomAttributeMalformedInstance.cs` (parked, new) | no exception for the third: 3 | "CustomAttrib blob has unexpected prolog 0x0002", with no guest exception | not run |
+| `TypeBuilderCustomAttributeNamedArguments.cs` (parked, new) | another type expected: 1 | "named argument has TYPE (0x50) type" | not run |
+
+Every parked guest's ending was measured again after the rebase, by naming the case: each is as the table says, the
+pseudo-attributes' guest still stopping at its first call, before anything #2261 reads. Before the rebase the main guest
+ran every module and stopped only at the field reads of `Parents`, at "Unimplemented native method (InternalCall) ...
+MetadataImport::GetFieldOffset", and with those reads left out (a probe edit, never committed) it exited 0 on both
+runtimes.
+
+The four guests of `TestTypeBuilderCustomAttributeRefusals` were run on real .NET as programs: each exits 0 on both
+runtimes (the malformed friend attribute's guest catches the `BadImageFormatException` that real .NET throws).
+
+**Red, as recorded.**
+* At `24c2b49ad`: all ten registered and parked guests stopped at "Unimplemented native method (PInvokeImpl
+  QCall!TypeBuilder_DefineCustomAttribute)"; the four refusal tests failed on that message, which lacks the TODO; the
+  two index tests passed.
+* At `01f6a6247`: of the 70 tests of `TestEmitScopeCustomAttributes`, `TestEmitScopeImage` and
+  `TestEmitScopeExtension`, 42 failed, each at a "TODO: ... is not implemented yet" (`EmitScope.addCustomAttribute` 31
+  times, through the generator), and 28 passed.
+* At `009149667`: the rows' differential property failed on an owner's rows in SRM's order; the round trip and the
+  extension property failed at the RID-order function's TODO. At `3229ace54` only the extension tests were red.
+
+**What was built.**
+* Domain. `HasCustomAttribute` (nine cases, `CodedIndex`, `Token`, `tryOfToken`), `CustomAttributeRid`,
+  `CustomAttributeRow`; `EmitScope.addCustomAttribute`, `customAttributes`, `tryCustomAttributeRid`,
+  `typeOfCustomAttributeOwner`, and `tryFieldRid`, `tryParamRid`, `tryGenericParamRid`. `KnownCustomAttribute` (the
+  twenty names, `all`, `name`), `CustomAttributeEmitKind`, `CustomAttributeDefinition`,
+  `EmitScopeDefinitions.classifyCustomAttribute` and `defineCustomAttribute`. `CustomAttribute.ofOwnerInRidOrder`. All
+  are public additions to the published Domain package.
+* The writer emits the table in RID order, not declared sorted, its `Parent` column sized by all 22 tables.
+* `Assembly.read` indexes by RID, and ten direct uses of SRM's per-owner lookup go through `ofOwnerInRidOrder` (a
+  type's list, `IsByRefLike`, `InlineArray`; a field's `ThreadStatic`; a parameter's `UnsafeAccessorType`, a method's
+  `UnsafeAccessor`, `UnmanagedCallersOnly` and attribute list; `StructMarshalStub`'s assembly and type).
+* `EmitScopeExtension.violations` compares the rows and refuses a new row of a created type's owner.
+* The handler `TypeBuilder_DefineCustomAttribute`, registered in `NativeQCall`, as question 8 orders it.
+* Tests: `TestEmitScopeCustomAttributes` (the model, `tryOfToken`, the refusals, the owner walk, the classifier's fixed
+  table and near misses, and the two differential properties), `TestCustomAttributeIndex`,
+  `TestTypeBuilderCustomAttributeRefusals`, the round trip's additions and its fixed sample, the two width cases, the
+  extension tests, and `assertCustomAttributeRows`.
+
+**The fixed sample** of the round trip (200 scopes, seed 20261114) measured, each floor about half: an owner with 17
+rows 40 (floor 20); interleaved owners 76 (35); 1 to 16 rows 61 (30); 17 to 24 rows 57 (25); 25 or more 40 (20); the
+assembly 59, the module 61, a type 105, a method 96, a field 72, a parameter 70, a property 57, an event 44, a generic
+parameter 81 (20 each); an empty blob 140 (70); two equal rows 130 (60); SRM's own order of an owner's rows not RID
+order 88 (40).
+
+**Mutants.** Each was built fresh in a detached worktree at `571a79086` (`5y-impl/mutate.py`, `5y-impl/mut`), with the
+main guest's field reads left out there so that it exits 0 unmutated; the baseline passed every fixture and guest
+named below. "RoundTrip" is `every row reads back at the RID the scope gave it`, "Sample" the fixed sample, "Widths"
+the two width cases, "Model" the `defineCustomAttribute` model, "RowsDiff" and "ClassDiff" the two differential
+properties, "Table" the classifier's fixed table and "NearMiss" its near misses, "Refusals" the refusal fixture, "Ext"
+`TestEmitScopeExtension`. A guest's number is its exit code; "main" is `TypeBuilderCustomAttributes.cs` and "proxy"
+`DispatchProxyInternalInterface.cs`.
+
+| Mutant | Killed by |
+|---|---|
+| the index built through `metadataReader.CustomAttributes` | RoundTrip, RowsDiff; main (80, `Order`) |
+| the RID-order function without its sort | RoundTrip; main (91, `FirstOfTwoMid`) |
+| the writer sorting the table by owner | RoundTrip, Sample, the extension round trip; main, at the terminal-state check of `Order` |
+| the `Sorted` bit set for CustomAttribute | RoundTrip, Sample |
+| the Assembly and Module tags swapped | RoundTrip; main (39); proxy (4) |
+| the Property and Event tags swapped | RoundTrip and the index-width round trips; main (75) |
+| the TypeDef and MethodDef tags swapped | RoundTrip, Widths; main (50) |
+| the constructor's two tags swapped | RoundTrip, Widths; main and proxy, at an unhandled `CustomAttributeFormatException` |
+| the `Parent` column sized by the nine owner tables alone | Widths (2048 and 8192), and the TypeRef index-width round trips |
+| the blob one byte short | main and proxy, at an unhandled `CustomAttributeFormatException` |
+| the length read from the owner argument | main and proxy, at "byte-view read past array bounds" |
+| a search for an equal row before adding | Model, RowsDiff; main (65, `Duplicates`) |
+| the extended scope not kept by the handler | main (39); proxy (4) |
+| the classifier with `Serializable` dropped | the twenty-names test, ClassDiff; the parked guest's ending moves to `SpecialNameAttribute` |
+| matching the name without the namespace | NearMiss, ClassDiff |
+| matching through a TypeSpec | NearMiss, ClassDiff, after the strengthening below |
+| consulting the resolution scope | Table, ClassDiff |
+| a nested type treated as ordinary | Table, ClassDiff |
+| `SuppressUnmanagedCodeSecurity` answered for a Field owner | Table, ClassDiff |
+| `DynamicSecurityMethod` answered for a TypeDef owner | Table, ClassDiff |
+| the created-owner TODO removed | Refusals |
+| the extension rule admitting a row of a created owner | Ext (the fixed test and the generated property) |
+| the extension rule not comparing the earlier rows | Ext (the fixed test and the rewritten-history property) |
+| the created-owner rule keyed on "any type is created" | main and proxy, at the TODO for the assembly's row |
+| `typeOfCustomAttributeOwner` giving `None` for a Param | the owner-walk model |
+| `typeOfCustomAttributeOwner` giving a method's own RID as a type | the owner-walk model |
+| the `DebuggableAttribute` check applied to every owner | main, at the TODO for `Parents`' module row |
+| the `DebuggableAttribute` check removed | Refusals |
+| the friend check removed | Refusals |
+| the friend check made before the re-read | Refusals |
+| `tryOfToken` accepting the MemberRef table | the `tryOfToken` test |
+| the handler's fault for `None` from `tryOfToken` removed | survives, as decided: no caller passes another table |
+| the handler's fault for a constructor of another table removed | survives, as decided |
+| the handler's fault for a negative length removed | survives, as decided |
+
+"Matching through a TypeSpec" first survived both named killers: their TypeSpec instantiated a type with an ordinary
+name, so a classifier that read the name through it still answered `Ordinary`. The fixed table and the differential's
+mirror now instantiate a TypeRef with the known name, as the host's instantiation does (`28c1bccdf`), and both kill
+it. The first build of "the constructor's table fault removed" still called `methodDefOrRef` and was not a mutant; it
+was rebuilt as one.
+
+**Mutants after the rebase.** With the field reads in place, five mutants whose killers include the main guest were
+built again at `0d345e300` (`5y-impl/mut2`): the index through `metadataReader.CustomAttributes` (main 80), the RID-order
+function without its sort (main 91), the writer sorting by owner (main, at the terminal-state check), the Assembly and
+Module tags swapped (main 39, proxy 4), and the Property and Event tags swapped (main 75). Each is killed as before, and
+by the same Domain tests.
+
+**Suites**, at `0d345e300`, after the reference assemblies were deleted and the whole solution built (0 warnings),
+each its own invocation under a lock slot (`5y-impl/r2`).
+
+| Suite | Passed | Failed | Skipped | Total | Duration |
+|---|---|---|---|---|---|
+| default | 5712 | 0 | 37 | 5749 | 24 m 48 s |
+| `Guest` | 234 | 0 | 0 | 234 | 28 m 39 s |
+| `GuestSolo` | 2 | 0 | 0 | 2 | 12 m 45 s |
+| `GuestPure` | 1192 | 0 | 0 | 1192 | 10 m 14 s |
+| `GuestImpure` | 291 | 0 | 0 | 291 | 5 m 5 s |
+| the main and proxy guests, `Net11` | 2 | 0 | 0 | 2 | 46 s |
+
+**Suites after the rebase onto #2260**, at `8aeaab8e4`, the whole solution built, each its own invocation under a lock
+slot (`5y-r3-*.log` in the scratchpad): default 5712 passed, 37 skipped, of 5749; `Guest` 234; `GuestSolo` 2;
+`GuestPure` 1194; `GuestImpure` 292. None failed. The generic-instance guest passes on the host CoreLib and under
+`Net11`.
+
+Before the first rebase, at `571a79086`, the same suites gave 5682/0/37 of 5719, 234, 2, 1187, and 289 of 290 for
+`GuestImpure`, whose one failure was the main guest at `GetFieldOffset`.
+
+**Corrections to the 5y sections.**
+* "The malformed blobs that PawPrint's readers already handle as real .NET does" holds for `GetCustomAttributesData`
+  alone. Instantiating a bad prolog, a truncated string or trailing bytes through `GetCustomAttributes` fails the run
+  where real .NET throws `CustomAttributeFormatException`.
+* "Every kind that the throwaway arm read back equal" did not include named arguments: of type `Type`, an array or an
+  enum, each stops at `CreatePropertyOrFieldData` when instantiated.
+
+**Correction to 5x.** 5x's amendment says of `PreSave`, under "left to later stages": "Not measured, and outside a `Run`
+assembly". `PreSaveFull` does run in a `Run` assembly: `Module::UpdateDynamicMetadataIfNeeded` calls
+`ReflectionModule::CaptureModuleMetaDataToMemory` at every class load of a dynamic module, which sets
+`MDUpdateExtension` and saves the metadata, and under that mode `PreSaveFull` converts `END_OF_TABLE` markers (5y's
+first decision, read from the pinned source). What that does to 5x's stranded rows is not measured. It changes no
+CustomAttribute row, which it neither sorts nor remaps.
+
+**Deviations.**
+* Commit 2 stubbed more than the decisions' list, so that the tests compile: `EmitScope.customAttributes`,
+  `tryCustomAttributeRid`, `HasCustomAttribute.tryOfToken`, `CodedIndex` and `Token`, and the RID-order function, each
+  failing by name; `tryFieldRid`, `tryParamRid` and `tryGenericParamRid` were real from the start.
+* `assertCustomAttributeRows` was registered with the handler, not in commit 1: it needs the Domain types.
+* The index test reads CoreLib and a Roslyn-compiled assembly with attributes on every owner kind, not the test
+  assembly itself, whose location `TestFrameworkLocatorRatchet` forbids reading outside `HostImage.fs`.
+* The classifier's differential model of `Known` was amended: the six `bKEEPCA` attributes (`Guid`, `InterfaceType`,
+  `ClassInterface`, `TypeLibVersion`, `ComCompatibleVersion`, `AllowPartiallyTrustedCallers`), with a well-formed blob on
+  a right target, store a row and set no flag, which is an ordinary outcome. Measured: `InterfaceType` with
+  `01 00 00 00` on a type. The model admits one row for those six names, and asserts that some known attribute was
+  refused and some wrote no row.
+* The main guest's malformed blobs and named arguments were narrowed. The plan said PawPrint already instantiates a
+  bad prolog, a truncated string and trailing bytes as real .NET does; it does not: each fails the run where real .NET
+  throws `CustomAttributeFormatException` (the throwaway had put the bad prolog on a field, whose reads it skipped).
+  Named arguments of type `Type`, `int[]` and an enum stop at `CreatePropertyOrFieldData` (the throwaway stopped at
+  `Args`' first `object` before reaching them). Those instantiations left the main guest, which keeps their
+  `GetCustomAttributesData` checks, and became two parked guests, `TypeBuilderCustomAttributeMalformedInstance.cs` and
+  `TypeBuilderCustomAttributeNamedArguments.cs`, under question 10's rule.
+* The main guest runs `Parents` last, and its malformed blobs are on types, so that every other module runs before the
+  field reads that need PR 0.
+* `Parents`' method generic parameter gets its attribute before `DefineConstructor` tokenises the method, so that its
+  row is written; the planner's probe queued it after, and it was dropped.
+* `FirstOfTwoMid` puts 10 rows on another type before the struct's two and 10 after (22 rows): `Array.Sort` with SRM's
+  comparison of owners alone, simulated over every arrangement of 17 to 24 rows, reverses the struct's two there
+  (`5y-impl/sim/sim.fsx`); the mutant without the sort confirms it (exit 91).
+* The rows' differential property gives attributes only to types' generic parameters: a method's parameter is written
+  when the method is tokenised, which happens before the first call, and an attribute queued after that is dropped.
+  After its types are created it gives attributes only to the assembly and the module.
+* `EmitScopeGen` draws its custom attributes apart from the other operations and inserts them among them, the table's
+  size drawn first. Drawn among the other operations, they diluted them below two existing floors (the generator's
+  skipped parameters, 9 against more than 10, and repeated event accessors, 5 against more than 5).
+* The four read-side cases of question 10 are emitted guests, `sourcesImpure`, like the rest; two of them could have
+  been compiled ones.
+
+**Additions to "left to later stages".**
+* Instantiating an emitted attribute whose blob does not parse, which real .NET refuses with
+  `CustomAttributeFormatException` and PawPrint fails the run on (`TypeBuilderCustomAttributeMalformedInstance.cs`).
+* Named arguments of type `Type`, an array or an enum at instantiation (`TypeBuilderCustomAttributeNamedArguments.cs`).
+* The main guest's `Args` instantiates no `object`-typed value; since #2259 it could.
+
+### #2257: as built
+
+Built 2026-11-15 on `bf44ca2b5` (5y, PR #2265, not yet in `main`), in two commits: the tests (`12f6e7563`) and the fix
+(`923fbe095`). Scratchpad paths are under `probe2257/` in the scratchpad of that session.
+
+**Where real .NET throws.** Measured with a probe on .NET 10.0.14 and 11.0.0-rc.3, identically (`probe2257/Program.cs`,
+`net10.out`, `net11.out`). The emitter writes the constructor of `GenAttribute<>` as MemberRef `0x0A000001` under the
+TypeSpec `0x1B000001`, `GenAttribute<!0>`. `CustomAttribute.FilterCustomAttributeRecord` resolves the row's type with
+`RuntimeModule.ResolveType(parent, null, null)`. That reaches the QCall `ModuleHandle_ResolveType`, whose signature walk
+meets `!0` with an empty `SigTypeContext`. `SigPointer::GetTypeVariableThrowing` then throws `BadImageFormatException`
+with HResult `0x8007000B` and the message "An attempt was made to load a program with an incorrect format.\n
+(0x8007000B)". `ModuleHandle.ResolveTypeHandle` finds the token valid and rethrows it. `RuntimeModule.ResolveType` wraps
+it in `ArgumentException` ("A BadImageFormatException has been thrown while parsing the signature. This is likely due
+to lack of a generic context. ..."). It is thrown before the type filter is consulted, so the attribute type asked
+about makes no difference. `IsDefined` (with and without inherit, of `Tag`, `GenAttribute<>`, `GenAttribute<int>`,
+`Attribute` and `object`), `GetCustomAttributes` (with and without a type), `Attribute.GetCustomAttribute`,
+`Attribute.GetCustomAttributes` and `Attribute.IsDefined` each throw that `ArgumentException`. `GetCustomAttributesData`
+and `CustomAttributes` resolve the constructor through `RuntimeType.GetMethodBase` instead, and the
+`BadImageFormatException` of `ModuleHandle_ResolveMethod` reaches the caller unwrapped. `Attributes` and
+`IsSerializable` do not read the row. `ResolveType(0x1B000001, [int])` gives `GenAttribute<int>`.
+
+**Where PawPrint diverged.** `ModuleHandle_ResolveType`'s TypeSpec arm passed the signature to
+`runtimeTypeHandleTargetForTypeToken`. Under an empty context, that function answers an instantiation over the
+definition's own parameters (`GenAttribute<!0>`) with the open definition, and it refuses a bare `!0` or `!0[]` with a
+TODO. `MatchesTypeFilter` rejected the open definition for every filter, so `IsDefined` answered false.
+`ModuleHandle_ResolveMethod` already raised the right exception, for a MethodSpec as well as for a MemberRef.
+
+**The fix.** It is in the QCall: a TypeSpec whose signature names a generic parameter that the caller's context does
+not supply (`containsUnboundGenericParameter`) raises `BadImageFormatException`, with the message its HResult gives.
+This is the rule and the message `ModuleHandle_ResolveMethod` already uses. `runtimeTypeHandleTargetForTypeToken` is
+unchanged. Its open-definition answer is still reached by `ldtoken` of a TypeSpec under an unbound context, which only
+invalid IL produces. CoreCLR's JIT reads that signature in the method's context too, and would throw there (read, not
+measured). This fix leaves that case alone.
+
+**Tests.**
+* `TestModuleResolveTypeSpec` resolves sixteen pairs of TypeSpec and context (`Holder<!0>`, `Holder<!!0>`,
+  `Holder<int>`, `!0`, `!0[]` and `!!0`, under no context, a type context, a method context and both) on the real
+  runtime and under PawPrint. Every missing-context case checks the exception types, the HResult and the inner message.
+* The guest `TypeBuilderCustomAttributeOpenGenericIsDefined.cs` was extended to eight checks, every query listed above
+  apart from `Attribute.GetCustomAttributes` and `CustomAttributes`, and un-parked. It exits 0 on both runtimes.
+  Controls expecting the first check's exception unwrapped, and the last's wrapped, exit 1 and 8 on both.
+* Red at `12f6e7563`: "Holder`1.Self in context none: the real runtime classifies it 128; PawPrint does not", and the
+  guest exits 1. Green at `923fbe095` on the host CoreLib and under `Net11`.
+
+**Mutants** (`mutate.py`; each applied to `923fbe095` and rebuilt):
+
+| Mutant | Unit test | Guest |
+|---|---|---|
+| no check | red: `Self`, none | red: 1 |
+| the exception without its message | red: `Self`, none (129) | green |
+| `TypeLoadException` instead | red: unhandled in the guest | red: 1 |
+| the method context ignored | red: `HolderOfV`, `m=int` | green |
+| the type context ignored | red: `Self`, `t=long` | green |
+| checked only for a generic instantiation | red: the `!0` TODO | green |
+
+**Suites** at `923fbe095`, with the whole solution built, each run as its own invocation under lock slot 2:
+
+| Suite | Passed | Failed | Skipped | Total | Duration |
+|---|---|---|---|---|---|
+| default | 5714 | 0 | 37 | 5751 | 14 m 58 s |
+| `Guest` | 234 | 0 | 0 | 234 | 13 m 3 s |
+| `GuestSolo` | 2 | 0 | 0 | 2 | 4 m 47 s |
+| `GuestPure` | 1194 | 0 | 0 | 1194 | 8 m 58 s |
+| `GuestImpure` | 293 | 0 | 0 | 293 | 6 m 20 s |
+
+`fantomas`, the docstring-attachment check and `footprint.py generate` changed nothing.

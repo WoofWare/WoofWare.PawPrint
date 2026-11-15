@@ -1414,7 +1414,7 @@ module MethodInfo =
         |> Seq.choose (fun paramHandle ->
             let parameter = metadataReader.GetParameter paramHandle
 
-            parameter.GetCustomAttributes ()
+            CustomAttribute.ofOwnerInRidOrder metadataReader (ParameterHandle.op_Implicit paramHandle)
             |> Seq.tryPick (fun attrHandle ->
                 let attr = metadataReader.GetCustomAttribute attrHandle
 
@@ -1446,12 +1446,13 @@ module MethodInfo =
     /// </summary>
     let private tryReadUnsafeAccessor
         (metadataReader : MetadataReader)
+        (methodHandle : MethodDefinitionHandle)
         (methodDef : MethodDefinition)
         : (int * string option * UnsafeAccessorTypeOverride list) option
         =
         let mutable result = None
 
-        for handle in methodDef.GetCustomAttributes () do
+        for handle in CustomAttribute.ofOwnerInRidOrder metadataReader (MethodDefinitionHandle.op_Implicit methodHandle) do
             if result.IsNone then
                 let attr = metadataReader.GetCustomAttribute handle
 
@@ -1477,12 +1478,12 @@ module MethodInfo =
     let private readUnmanagedCallersOnly
         (metadataReader : MetadataReader)
         (describeMethod : unit -> string)
-        (methodDef : MethodDefinition)
+        (methodHandle : MethodDefinitionHandle)
         : UnmanagedCallersOnlyApplication option
         =
         let describeTarget () = $"method %s{describeMethod ()}"
 
-        methodDef.GetCustomAttributes ()
+        CustomAttribute.ofOwnerInRidOrder metadataReader (MethodDefinitionHandle.op_Implicit methodHandle)
         |> Seq.map metadataReader.GetCustomAttribute
         |> Seq.tryFind (fun attr ->
             match CustomAttribute.constructorParentName metadataReader describeTarget attr.Constructor with
@@ -1563,7 +1564,7 @@ module MethodInfo =
                     // runtime from the attribute. Without that attribute, a managed IL method
                     // has no body at all, which CoreCLR refuses only when it is invoked; any
                     // other code type is unexpected, and we fail loudly to surface the gap.
-                    match tryReadUnsafeAccessor metadataReader methodDef with
+                    match tryReadUnsafeAccessor metadataReader methodHandle methodDef with
                     | Some (rawKind, targetName, typeNameOverrides) ->
                         let kind =
                             match rawKind with
@@ -1601,7 +1602,9 @@ module MethodInfo =
 
         let attrs =
             let result = ImmutableArray.CreateBuilder ()
-            let attrs = methodDef.GetCustomAttributes ()
+
+            let attrs =
+                CustomAttribute.ofOwnerInRidOrder metadataReader (MethodDefinitionHandle.op_Implicit methodHandle)
 
             for attr in attrs do
                 metadataReader.GetCustomAttribute attr
@@ -1661,7 +1664,7 @@ module MethodInfo =
             readUnmanagedCallersOnly
                 metadataReader
                 (fun () -> $"%s{assemblyName.Name}!%s{declaringTypeNamespace}.%s{declaringTypeName}::%s{methodName}")
-                methodDef
+                methodHandle
 
         let declaringType =
             ConcreteType.make

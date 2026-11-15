@@ -635,7 +635,7 @@ module TypeInfo =
                 $"Type %s{ns}.%s{name} in assembly %s{thisAssembly.FullName} has visibility %O{visibility} and %s{row}. ECMA-335 II.22.37 requires the two to agree, and CoreCLR refuses to load such a type, so this image is refused."
 
         let attrs =
-            typeDef.GetCustomAttributes ()
+            CustomAttribute.ofOwnerInRidOrder metadataReader (TypeDefinitionHandle.op_Implicit typeHandle)
             |> Seq.map (fun h -> CustomAttribute.make metadataReader h (metadataReader.GetCustomAttribute h))
             |> Seq.toList
 
@@ -707,7 +707,7 @@ module TypeInfo =
         let describeTarget () = $"type %s{ns}.%s{name}"
 
         let hasIsByRefLikeAttribute =
-            typeDef.GetCustomAttributes ()
+            CustomAttribute.ofOwnerInRidOrder metadataReader (TypeDefinitionHandle.op_Implicit typeHandle)
             |> Seq.exists (fun handle ->
                 let attr = metadataReader.GetCustomAttribute handle
 
@@ -717,7 +717,7 @@ module TypeInfo =
             )
 
         let inlineArrayLength =
-            typeDef.GetCustomAttributes ()
+            CustomAttribute.ofOwnerInRidOrder metadataReader (TypeDefinitionHandle.op_Implicit typeHandle)
             |> Seq.tryPick (fun handle ->
                 let attr = metadataReader.GetCustomAttribute handle
 
