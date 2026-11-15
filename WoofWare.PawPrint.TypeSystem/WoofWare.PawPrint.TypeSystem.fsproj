@@ -37,6 +37,7 @@
         <Compile Include="GcReferences.fs" />
         <Compile Include="FieldBlittability.fs" />
         <Compile Include="StructLayoutFacts.fs" />
+        <Compile Include="ExplicitFieldOffsets.fs" />
         <Compile Include="MemberReferenceInstantiation.fs" />
         <Compile Include="TypeAssignability.fs" />
         <Compile Include="ConstraintSatisfaction.fs" />

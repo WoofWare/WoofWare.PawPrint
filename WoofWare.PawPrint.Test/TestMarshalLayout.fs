@@ -106,7 +106,7 @@ module TestMarshalLayout =
             Id = FieldId.named name
             Name = name
             Contents = contents
-            Offset = offset
+            Offset = offset |> Option.map uint32
             Type = ty
             MarshallingDescriptor = descriptor
         }
@@ -410,7 +410,7 @@ module TestMarshalLayout =
 
             placements
             |> List.map (fun p -> p.Field.Name, p.NativeOffset)
-            |> shouldEqual (fields |> List.map (fun f -> f.Field.Name, f.Field.Offset |> Option.get))
+            |> shouldEqual (fields |> List.map (fun f -> f.Field.Name, f.Field.Offset |> Option.get |> int))
 
             for generated, placement in List.zip fields placements do
                 placement.NativeSize.Size |> shouldEqual generated.NativeWidth

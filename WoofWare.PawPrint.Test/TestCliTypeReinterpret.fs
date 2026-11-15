@@ -42,7 +42,7 @@ module TestCliTypeReinterpret =
             Id = FieldId.named name
             Name = name
             Contents = contents
-            Offset = Some offset
+            Offset = Some (uint32 offset)
             Type = fieldType
             MarshallingDescriptor = None
         }

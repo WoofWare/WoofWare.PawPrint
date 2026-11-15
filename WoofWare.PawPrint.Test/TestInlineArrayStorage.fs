@@ -70,14 +70,14 @@ module TestInlineArrayStorage =
 
     [<Test>]
     let ``a type with no inline-array attribute is untouched`` () : unit =
-        InlineArrayStorage.expand describe Layout.Default None [ intField ]
+        InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default None [ intField ]
         |> shouldEqual [ intField ]
 
     /// `[InlineArray(1)]` is legal and means one slot: the declared field, unchanged. It must not
     /// acquire a synthesised identity it does not need.
     [<Test>]
     let ``a single-slot inline array is the declared field alone`` () : unit =
-        InlineArrayStorage.expand describe Layout.Default (Some 1) [ intField ]
+        InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 1) [ intField ]
         |> shouldEqual [ intField ]
 
     /// Slot 0 *is* the declared field, so it keeps the metadata identity that `ldfld`,
@@ -86,7 +86,7 @@ module TestInlineArrayStorage =
     [<Test>]
     let ``repeats are synthesised with distinct identities and names`` () : unit =
         let expanded =
-            InlineArrayStorage.expand describe Layout.Default (Some 3) [ intField ]
+            InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 3) [ intField ]
 
         expanded |> List.length |> shouldEqual 3
 
@@ -121,7 +121,7 @@ module TestInlineArrayStorage =
     let ``all slot identities are pairwise distinct`` () : unit =
         let property (n : int) : bool =
             let ids =
-                InlineArrayStorage.expand describe Layout.Default (Some n) [ intField ]
+                InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some n) [ intField ]
                 |> List.map (fun f -> f.Id)
 
             List.length ids = n
@@ -140,7 +140,7 @@ module TestInlineArrayStorage =
     [<Test>]
     let ``the declared name still resolves uniquely to slot zero`` () : unit =
         let cvt =
-            InlineArrayStorage.expand describe Layout.Default (Some 4) [ intField ]
+            InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 4) [ intField ]
             |> ofFields
 
         CliValueType.GetFieldLayout "_item" cvt |> shouldEqual (0, 4)
@@ -153,7 +153,7 @@ module TestInlineArrayStorage =
     [<Test>]
     let ``expanded slots lay out at the element stride`` () : unit =
         let ints =
-            InlineArrayStorage.expand describe Layout.Default (Some 3) [ intField ]
+            InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 3) [ intField ]
             |> ofFields
 
         CliValueType.SizeOf ints
@@ -170,7 +170,7 @@ module TestInlineArrayStorage =
         )
 
         let refs =
-            InlineArrayStorage.expand describe Layout.Default (Some 2) [ refField ]
+            InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 2) [ refField ]
             |> ofFields
 
         CliValueType.SizeOf refs
@@ -201,7 +201,11 @@ module TestInlineArrayStorage =
         let twoFields = [ intField ; declaredField "other" intField.Contents int32Handle ]
 
         twoFields
-        |> InlineArrayStorage.expand describe Layout.Default (InlineArrayStorage.effectiveLength false (Some 2))
+        |> InlineArrayStorage.expand
+            describe
+            TypeLayoutKind.Sequential
+            Layout.Default
+            (InlineArrayStorage.effectiveLength false (Some 2))
         |> shouldEqual twoFields
 
         // Even a count CoreCLR would reject on a struct must not make us refuse
@@ -209,7 +213,11 @@ module TestInlineArrayStorage =
         InlineArrayStorage.effectiveLength false (Some 0) |> shouldEqual None
 
         twoFields
-        |> InlineArrayStorage.expand describe Layout.Default (InlineArrayStorage.effectiveLength false (Some 0))
+        |> InlineArrayStorage.expand
+            describe
+            TypeLayoutKind.Sequential
+            Layout.Default
+            (InlineArrayStorage.effectiveLength false (Some 0))
         |> shouldEqual twoFields
 
     /// CoreCLR raises `TypeLoadException` for each of these
@@ -223,13 +231,16 @@ module TestInlineArrayStorage =
             let exn = Assert.Throws<exn> (fun () -> f () |> ignore<CliField list>)
             exn.Message |> shouldContainText contains
 
-        expectFailure "exactly one" (fun () -> InlineArrayStorage.expand describe Layout.Default (Some 2) [])
+        expectFailure
+            "exactly one"
+            (fun () -> InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 2) [])
 
         expectFailure
             "exactly one"
             (fun () ->
                 InlineArrayStorage.expand
                     describe
+                    TypeLayoutKind.Sequential
                     Layout.Default
                     (Some 2)
                     [ intField ; declaredField "other" intField.Contents int32Handle ]
@@ -237,36 +248,66 @@ module TestInlineArrayStorage =
 
         expectFailure
             "must be positive"
-            (fun () -> InlineArrayStorage.expand describe Layout.Default (Some 0) [ intField ])
+            (fun () ->
+                InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 0) [ intField ]
+            )
 
         expectFailure
             "must be positive"
-            (fun () -> InlineArrayStorage.expand describe Layout.Default (Some -1) [ intField ])
+            (fun () ->
+                InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some -1) [ intField ]
+            )
 
         expectFailure
             "explicit layout"
             (fun () ->
                 InlineArrayStorage.expand
                     describe
+                    TypeLayoutKind.Explicit
                     Layout.Default
                     (Some 2)
                     [
                         { intField with
-                            Offset = Some 0
+                            Offset = Some 0u
                         }
                     ]
             )
+
+        // A FieldLayout row on a sequential type is ignored by CoreCLR, which asks only whether the
+        // type declares explicit layout.
+        InlineArrayStorage.expand
+            describe
+            TypeLayoutKind.Sequential
+            Layout.Default
+            (Some 2)
+            [
+                { intField with
+                    Offset = Some 0x80000000u
+                }
+            ]
+        |> List.length
+        |> shouldEqual 2
 
         // A declared `ClassSize` is a *separate* condition from explicit layout:
         // `[StructLayout(Sequential, Size = X)]` sets it without making the layout explicit.
         expectFailure
             "explicit size"
             (fun () ->
-                InlineArrayStorage.expand describe (Layout.Custom (size = 32, packingSize = 0)) (Some 2) [ intField ]
+                InlineArrayStorage.expand
+                    describe
+                    TypeLayoutKind.Sequential
+                    (Layout.Custom (size = 32, packingSize = 0))
+                    (Some 2)
+                    [ intField ]
             )
 
         // A `Pack` request without a size is legal, and must not be mistaken for one.
-        InlineArrayStorage.expand describe (Layout.Custom (size = 0, packingSize = 1)) (Some 2) [ intField ]
+        InlineArrayStorage.expand
+            describe
+            TypeLayoutKind.Sequential
+            (Layout.Custom (size = 0, packingSize = 1))
+            (Some 2)
+            [ intField ]
         |> List.length
         |> shouldEqual 2
 
@@ -275,18 +316,39 @@ module TestInlineArrayStorage =
         // and take the interpreter down with an OOM, in place of the loud rejection CoreCLR gives.
         expectFailure
             "exceeds"
-            (fun () -> InlineArrayStorage.expand describe Layout.Default (Some 1_000_000_000) [ intField ])
+            (fun () ->
+                InlineArrayStorage.expand
+                    describe
+                    TypeLayoutKind.Sequential
+                    Layout.Default
+                    (Some 1_000_000_000)
+                    [ intField ]
+            )
 
         // The bound is on the *product*, not on the count: the same count is legal or not depending
         // on the element's width. Both of these are rejected before any slot is materialised, so
         // asserting them costs nothing.
         expectFailure
             "exceeds"
-            (fun () -> InlineArrayStorage.expand describe Layout.Default (Some ((134217720 / 4) + 1)) [ intField ])
+            (fun () ->
+                InlineArrayStorage.expand
+                    describe
+                    TypeLayoutKind.Sequential
+                    Layout.Default
+                    (Some ((134217720 / 4) + 1))
+                    [ intField ]
+            )
 
         expectFailure
             "exceeds"
-            (fun () -> InlineArrayStorage.expand describe Layout.Default (Some ((134217720 / 8) + 1)) [ refField ])
+            (fun () ->
+                InlineArrayStorage.expand
+                    describe
+                    TypeLayoutKind.Sequential
+                    Layout.Default
+                    (Some ((134217720 / 8) + 1))
+                    [ refField ]
+            )
 
         // A large-but-legal count still expands, so the bound is a bound rather than a blanket
         // refusal. Deliberately *not* the exact boundary (33.5M slots for an `int` element): each
@@ -295,7 +357,7 @@ module TestInlineArrayStorage =
         // That is a property of the field-cell storage model, shared with any other enormous value
         // type and not revisited here; no bound tighter than CoreCLR's is imposed, because that
         // would refuse types CoreCLR loads.
-        InlineArrayStorage.expand describe Layout.Default (Some 4096) [ intField ]
+        InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some 4096) [ intField ]
         |> List.length
         |> shouldEqual 4096
 
@@ -304,6 +366,7 @@ module TestInlineArrayStorage =
             (fun () ->
                 InlineArrayStorage.expand
                     describe
+                    TypeLayoutKind.Sequential
                     Layout.Default
                     (Some 2)
                     [
@@ -361,7 +424,7 @@ module TestInlineArrayStorage =
                 CharSet = CharSet.Ansi
             }
 
-        InlineArrayStorage.expand describe Layout.Default (Some repeat) [ element ]
+        InlineArrayStorage.expand describe TypeLayoutKind.Sequential Layout.Default (Some repeat) [ element ]
         |> CliValueType.OfFields bct allCt declaredHandle facts
 
     /// The offsets at which a field of exactly `size` bytes lives, read back through the public

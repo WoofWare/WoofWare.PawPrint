@@ -73,9 +73,16 @@ type FieldInfo<'typeGeneric, 'fieldGeneric> =
         /// </summary>
         Attributes : FieldAttributes
 
-        /// Static fields don't have an offset at all; also, instance fields which don't have an explicit offset (but
-        /// which of course do have one implicitly, which is most fields) are None here.
-        Offset : int option
+        /// The Offset column of the field's FieldLayout row (ECMA-335 II.22.16), raw, or `None` if the field
+        /// has no row. The column is an unsigned four bytes, and every value is reported, those above
+        /// `Int32.MaxValue` included; CoreCLR reflects it as a `FieldOffsetAttribute` whose `Value` is
+        /// those bits as an `int`.
+        ///
+        /// A row is metadata, not a placement. CoreCLR places a field at its row only in an
+        /// explicit-layout type, which refuses to load when an instance field has no row or an
+        /// unusable one (`ExplicitFieldOffsets.place`); auto- and sequential-layout types load with
+        /// rows of any value and ignore them.
+        Offset : uint32 option
 
         /// The Relative Virtual Address for fields with the HasFieldRVA attribute.
         /// This points to the raw data in the PE image for fields used in array initialization, etc.
@@ -204,6 +211,78 @@ module FieldInfo =
 
         low < rows && parentOfRow low = target
 
+    /// The Offset column of `field`'s FieldLayout row (ECMA-335 II.22.16), raw, or `None` if it has
+    /// no row. Fails if it has more than one, which II.22.16 forbids.
+    ///
+    /// System.Reflection.Metadata's `FieldDefinition.GetOffset` reports an offset above
+    /// `Int32.MaxValue` as -1, its answer for no row, so this reads the table itself. CoreCLR reads
+    /// the column as an unsigned four bytes.
+    let private fieldLayoutOffset
+        (mr : MetadataReader)
+        (describeField : unit -> string)
+        (field : FieldDefinitionHandle)
+        : uint32 option
+        =
+        let rows = mr.GetTableRowCount TableIndex.FieldLayout
+
+        if rows = 0 then
+            None
+        else
+
+        // II.24.2.6: the Offset column is a 4-byte constant, and the Field column a simple index,
+        // two bytes wide while the Field table has fewer than 2^16 rows.
+        let fieldWidth =
+            if mr.GetTableRowCount TableIndex.Field < 0x10000 then
+                2
+            else
+                4
+
+        let rowSize = mr.GetTableRowSize TableIndex.FieldLayout
+
+        if rowSize <> 4 + fieldWidth then
+            failwith
+                $"FieldLayout row size %d{rowSize} disagrees with the ECMA-335 II.24.2.6 widths derived from the table row counts (4 + %d{fieldWidth})"
+
+        let target =
+            MetadataTokens.GetRowNumber (FieldDefinitionHandle.op_Implicit field : EntityHandle)
+
+        let offset = mr.GetTableMetadataOffset TableIndex.FieldLayout
+
+        // `BlobReader` is a struct, so it must be mutable for its reads to advance it.
+        let mutable reader =
+            BlobReader (NativePtr.add mr.MetadataPointer offset, rows * rowSize)
+
+        let fieldOfRow (row : int) : int =
+            reader.Offset <- row * rowSize + 4
+
+            if fieldWidth = 2 then
+                int (reader.ReadUInt16 ())
+            else
+                reader.ReadInt32 ()
+
+        // II.22.16 requires the table sorted by Field, which is also what CoreCLR's lookup and
+        // System.Reflection.Metadata's own rely on, so this is a binary search for the least row
+        // whose Field is not below `target`.
+        let mutable low = 0
+        let mutable high = rows
+
+        while low < high do
+            let middle = low + (high - low) / 2
+
+            if fieldOfRow middle < target then
+                low <- middle + 1
+            else
+                high <- middle
+
+        if low >= rows || fieldOfRow low <> target then
+            None
+        elif low + 1 < rows && fieldOfRow (low + 1) = target then
+            failwith
+                $"field %s{describeField ()} has more than one FieldLayout row, which ECMA-335 II.22.16 forbids; which one CoreCLR reports depends on how it searches the table"
+        else
+            reader.Offset <- low * rowSize
+            Some (reader.ReadUInt32 ())
+
     /// Does this field carry `[System.ThreadStaticAttribute]`?
     ///
     /// Accepted risk (consistent with the existing precedent in `MethodInfo.isIntrinsicAttribute`,
@@ -253,10 +332,10 @@ module FieldInfo =
         let declaringType =
             ConcreteType.make assembly declaringType declaringTypeNamespace declaringTypeName typeGenerics
 
-        let offset =
-            match def.GetOffset () with
-            | -1 -> None
-            | s -> Some s
+        let describeField () =
+            $"%s{assembly.Name}!%s{declaringTypeNamespace}.%s{declaringTypeName}::%s{name}"
+
+        let offset = fieldLayoutOffset mr describeField handle
 
         let rva =
             let v = def.GetRelativeVirtualAddress ()
@@ -280,10 +359,7 @@ module FieldInfo =
         // staticness first also short-circuits the metadata walk for the common case.
         let isThreadStatic =
             def.Attributes.HasFlag FieldAttributes.Static
-            && hasThreadStaticAttribute
-                mr
-                (fun () -> $"%s{assembly.Name}!%s{declaringTypeNamespace}.%s{declaringTypeName}::%s{name}")
-                handle
+            && hasThreadStaticAttribute mr describeField handle
 
         {
             Name = name

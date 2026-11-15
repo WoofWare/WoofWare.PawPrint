@@ -225,7 +225,7 @@ public interface IOpenInterface<T>
                     Id = FieldId.named "Obj"
                     Name = "Obj"
                     Contents = CliType.ObjectRef (Some objectAddr)
-                    Offset = Some 0
+                    Offset = Some 0u
                     Type = objectHandle
                     MarshallingDescriptor = None
                 }
@@ -250,7 +250,7 @@ public interface IOpenInterface<T>
                 Name = "Ptr"
                 Contents =
                     CliType.RuntimePointer (CliRuntimePointer.MethodTablePtr (RuntimeTypeHandleTarget.Closed intHandle))
-                Offset = Some 0
+                Offset = Some 0u
                 Type = intPtrHandle
                 MarshallingDescriptor = None
             }
@@ -290,7 +290,7 @@ public interface IOpenInterface<T>
                     Id = FieldId.named "Ref"
                     Name = "Ref"
                     Contents = CliType.ObjectRef (Some storedAddr)
-                    Offset = Some 0
+                    Offset = Some 0u
                     Type = objectHandle
                     MarshallingDescriptor = None
                 }
@@ -3935,7 +3935,7 @@ public unsafe struct PointerWrapper
                     Id = FieldId.named "Plain"
                     Name = "Plain"
                     Contents = CliType.Numeric (CliNumericType.NativeInt (NativeIntSource.Verbatim 7L))
-                    Offset = Some 0
+                    Offset = Some 0u
                     Type = intPtrHandle
                     MarshallingDescriptor = None
                 }
@@ -4750,7 +4750,7 @@ public unsafe struct PointerWrapper
                     Id = FieldId.named "A"
                     Name = "A"
                     Contents = CliType.Numeric (CliNumericType.Int32 0x11111111)
-                    Offset = Some 0
+                    Offset = Some 0u
                     Type = int32Handle
                     MarshallingDescriptor = None
                 }
@@ -4758,7 +4758,7 @@ public unsafe struct PointerWrapper
                     Id = FieldId.named "B"
                     Name = "B"
                     Contents = CliType.Numeric (CliNumericType.Int16 0x1111s)
-                    Offset = Some 2
+                    Offset = Some 2u
                     Type = int16Handle
                     MarshallingDescriptor = None
                 }

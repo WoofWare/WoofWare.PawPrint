@@ -246,7 +246,7 @@ module TestEvalStackBoxedPrimitiveView =
             CliField.Id = FieldId.named "leading"
             CliField.Name = "leading"
             Contents = contents
-            Offset = Some 0
+            Offset = Some 0u
             Type = declared
             MarshallingDescriptor = None
         }
@@ -366,7 +366,7 @@ module TestEvalStackBoxedPrimitiveView =
                 CliField.Id = FieldId.named name
                 CliField.Name = name
                 Contents = CliType.Numeric (CliNumericType.Int64 (Int64Source.Verbatim value))
-                Offset = Some 0
+                Offset = Some 0u
                 Type = int64Handle
                 MarshallingDescriptor = None
             }
@@ -415,7 +415,7 @@ module TestEvalStackBoxedPrimitiveView =
                 CliField.Id = FieldId.named "asLong"
                 CliField.Name = "asLong"
                 Contents = CliType.Numeric (CliNumericType.Int64 (Int64Source.Verbatim 7L))
-                Offset = Some 0
+                Offset = Some 0u
                 Type = int64Handle
                 MarshallingDescriptor = None
             }
@@ -468,7 +468,7 @@ module TestEvalStackBoxedPrimitiveView =
                 CliField.Id = FieldId.named name
                 CliField.Name = name
                 Contents = contents
-                Offset = Some offset
+                Offset = Some (uint32 offset)
                 Type = ty
                 MarshallingDescriptor = None
             }
@@ -520,7 +520,7 @@ module TestEvalStackBoxedPrimitiveView =
                 CliField.Id = FieldId.named name
                 CliField.Name = name
                 Contents = CliType.Numeric (CliNumericType.Int32 value)
-                Offset = Some offset
+                Offset = Some (uint32 offset)
                 Type = int32Handle
                 MarshallingDescriptor = None
             }
