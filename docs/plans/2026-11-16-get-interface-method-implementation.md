@@ -1,7 +1,7 @@
 # `RuntimeTypeHandle_GetInterfaceMethodImplementation` (issue #2290)
 
-Status: decided; pull request 1 (the TypeSystem) built, see "As built (PR 1)" at the end; pull request 2 (the
-handler and the guests) to do. Written 2026-11-16 on `pr-2289-num-virtuals` at `52f675317` (#2301, which implements
+Status: decided; both pull requests built: pull request 1 (the TypeSystem, merged as #2306) and pull request 2 (the
+handler and the guests), see "As built (PR 1)" and "As built (PR 2)" at the end. Written 2026-11-16 on `pr-2289-num-virtuals` at `52f675317` (#2301, which implements
 #2289 and was on the merge queue, not yet merged), on top of `main` at `0652e513a` (#2298, #2270).
 
 Scope is this one QCall, the third and last that `Type.GetInterfaceMap` makes, after
@@ -1206,3 +1206,118 @@ The default suite on commit 4's tree (commit 2's test files over the refactored 
 5,818 passed, 39 skipped; commit 3's new tests are the five more on the same base.
 `scripts/check-docstring-attachment-branch.sh`, `dotnet fantomas --check .` and `scripts/footprint.py generate` are
 clean.
+
+### As built (PR 2)
+
+Built on `fix-2290-qcall`, first on top of pull request 1's branch and then rebased onto `main` at `b799325a8`
+(#2306, pull request 1 squashed), whose tree is the same as that branch's tip. As the "Staging" section's pull
+request 2: the guests, the handler and the un-parking.
+
+#### Commits
+
+1. *Failing guests for RuntimeTypeHandle_GetInterfaceMethodImplementation*: every guest and test below, with the
+   red output in the message. Each guest stopped at "Unimplemented native method (PInvokeImpl
+   QCall!RuntimeTypeHandle_GetInterfaceMethodImplementation)", and each refusal test found that message where it
+   expected the `TODO`.
+2. *RuntimeTypeHandle_GetInterfaceMethodImplementation*: the handler, its registration, and the QCall named in
+   `docs/divergences.md`'s entry on per-instantiation method handles (decision 6).
+3. *Un-park TypeGetInterfaceMap.cs*.
+4. This record.
+
+No public API is added or changed in any published package: the handler is a new arm of
+`NativeRuntimeTypeQCall.tryExecute`.
+
+#### The handler
+
+In `Native/NativeRuntimeTypeQCall.fs` after `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals`, registered beside it
+in `Native/NativeQCall.fs`. It checks the argument count, decodes the two `QCallTypeHandle`s and the method handle,
+and then:
+
+- refuses, with a `TODO:` naming #2303, when the receiver or the interface is not `RuntimeTypeHandleTarget.Closed`,
+  before anything is concretised (decision 4);
+- fails loudly when the method handle's declaring type is not the interface it came with, or when the handle
+  carries a method instantiation; `GetMethodAt` mints neither;
+- asks `InterfaceMethodImplementation.resolve` with the method's definition, and stops the run on a binding failure
+  (`BindingStop.bound`, as the interpreter's dispatch wrapper does);
+- answers `Method` with `MethodHandleRegistry.getOrAllocateInternalHandle` on the declaring type the result carries,
+  which is the identity `GetMethodAt` mints for a slot's occupant; `NoTarget` with `zeroInternalHandle`; and
+  `Ambiguous` by raising `AmbiguousImplementationException` with its parameterless constructor's message (decisions
+  6 and 7).
+
+It is consistent with pull request 1's deviations: the instance search never reports a conflict for the interface
+map, so the handler's `Ambiguous` arm is reached only by a static method; and an open receiver cannot reach the
+TypeSystem function, so this refusal is the only one, and is tested here.
+
+#### Guests and tests
+
+| guest or test | what it checks | real .NET 10 and 11 | controls (each exits its own number on both) |
+|---|---|---|---|
+| `sourcesPure/TypeGetInterfaceMapTargets.cs` | 54 whole maps, each rendered row by row (interface method, target, declaring and reflected type, `generic`, `abstract`), and 4 identities of a target | exit 0 | 58 |
+| `sourcesPure/TypeGetInterfaceMapTask.cs` | `CTask` against `ITask`: rows `A, B, C, S, T` in order, each `CTask`'s method | exit 0 | 7 |
+| `sourcesImpure/TypeBuilderGetInterfaceMap.cs` | proxy-shaped MethodImpl, implicit implementation, abstract class implementing nothing (null), and the target's identity | exit 0 | 4 |
+| `TestGetInterfaceMethodImplementation`, "GetInterfaceMap over shapes C# refuses to compile" | 20 rows of the two-version library, and the two calls that differ from the map | exit 0 | 20 |
+| the same, "A generic definition's closed interface is refused" | `CGBase<>` with `IOne`: real .NET answers `CGBase<T>::M`; PawPrint refuses at the `TODO` | exit 0 | 5 |
+| the same, "A generic definition's open interface is refused" | `CGen<>` with its own `IG<T>`: likewise | exit 0 | 4 |
+
+A control is the guest built with one check changed: its expected string altered, or for a check written as
+`if (...) return N;`, its condition negated. Each was built once and run on real .NET 10.0.14 and on 11.0.0-rc.3 by
+roll-forward.
+
+- The Targets guest has the plan's list and decision 8's `CStatG`, and adds `CGDerOverride`, `CG`, `CGen<string>`,
+  `CGen<int>`, `VDer` at `ICo<string>`, `string[]` with `IEnumerable`, `int[,]` with `ICollection` and `int` with
+  `IComparable<int>`. `List<string>` with `IEnumerable<object>` is in `TypeGetInterfaceMap.cs`.
+- The cross-assembly shapes are one guest with a check per row rather than one guest per shape, so that PawPrint
+  starts once. They reuse pull request 1's `swapLibrary` and `swapClasses` (made `internal`), with one class added,
+  `CDiamondD : IBd, ICd`, for the instance diamond on an interface without variance and a receiver that is not
+  `IDynamicInterfaceCastable`. Checks 4 and 7 are the calls the decisions' staging asks for: a constrained call
+  through `IAsv<object>` returns 2 while the map throws, and one through `IAr` throws `EntryPointNotFoundException`
+  while the map names `IRr::IAr.S`.
+- Both refusal guests reach this QCall. That settles decision finding 5, which was read and not run:
+  `typeof(CGBase<>).GetInterfaceMap(typeof(IOne))` arrives here with an open receiver and a closed interface. The
+  hand-built `IG<T>` arrives too: `VerifyInterfaceIsImplemented`, `GetNumVirtualsAndStaticVirtuals`, `GetMethodAt`
+  and `GetMethodBase` all answer for it.
+- Under PawPrint every new guest passes on .NET 10's CoreLib and on .NET 11's (`PAWPRINT_TEST_RUNTIME=Net11`,
+  confirmed to select .NET 11 by a case parked on .NET 11 alone). The Targets guest took 13 s and the Task guest 5 s on
+  .NET 10; the three cross-assembly tests take 2 s together.
+
+#### Mutants
+
+Each applied to the committed code by an exact text replacement, the test project built, and the three selections
+run (the fixture above, `TestCategory=GuestPure&FullyQualifiedName~TypeGetInterfaceMap`,
+`TestCategory=GuestImpure&FullyQualifiedName~TypeBuilderGetInterfaceMap`); every file restored and checked against
+`HEAD` afterwards. All killed:
+
+| mutant | killed by |
+|---|---|
+| a null answer encoded as `MethodRegistryHandle 0` instead of a verbatim zero | the shapes guest, the Targets guest and the TypeBuilder guest: "RuntimeMethodHandle.GetMethodTable: registry id 0 did not resolve to a known MethodHandle", because `IsNullHandle` is false and `GetMethodBase` reads the handle |
+| a receiver that is not closed answered as no target instead of refused | both refusal tests: the guest ran, and threw `NullReferenceException` on the null target |
+| the handle's declaring type rebuilt from the definition with no type arguments | Targets check 35 (`CStatG`, `IStatG<string>`); shapes check 8 (`IRrG<string>`) |
+| the handle declared by the receiver instead of the type the search found the target on | Targets check 3 (`CDerNoOverride`); shapes check 5 (`IRr`'s reabstraction) |
+| a static `Ambiguous` answered as no target | shapes check 1 |
+| a static `Ambiguous` answered as its first candidate | shapes check 1 |
+| `Call` and `InterfaceMap` swapped in `StaticVirtualDispatch.resolve` (pull request 1 left this guest's call to here) | shapes check 4: the call throws `AmbiguousImplementationException` |
+
+The two fail-loud checks on the method handle (its declaring type, its method instantiation) have no killer:
+`GetInterfaceMap` passes only what `GetMethodAt` minted, so no guest can break them.
+
+#### Suites
+
+Each its own invocation after a whole-solution build with every `*/obj/*/*/ref` and `refint` deleted, at the tip
+before the rebase, whose tree is the rebased tip's; each Guest category under a lock slot:
+
+| suite | total | passed | skipped |
+|---|---|---|---|
+| default | 5,872 | 5,833 | 39 |
+| `TestCategory=Guest` | 234 | 234 | 0 |
+| `TestCategory=GuestSolo` | 2 | 2 | 0 |
+| `TestCategory=GuestPure` | 1,206 | 1,206 | 0 |
+| `TestCategory=GuestImpure` | 303 | 303 | 0 |
+
+`scripts/check-docstring-attachment-branch.sh`, `dotnet fantomas .` and `scripts/footprint.py generate` change
+nothing.
+
+#### FakeItEasy
+
+The planner's five FakeItEasy 8.0.0 scenarios (self-contained, AnyCPU, `IsDynamicCodeSupported` true), re-run under
+the Release App built from this branch on .NET 10's CoreLib: each exits 0 with the same stdout as real .NET 10, in 15
+to 23 s. #2092's snippet (`A.CallTo(() => fake.Value).Returns(42)`) prints "fake.Value = 42".
