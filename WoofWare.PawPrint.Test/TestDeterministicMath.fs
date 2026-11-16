@@ -2919,6 +2919,423 @@ module TestDeterministicMath =
         )
         |> reportFailures
 
+    /// ln 10 to `referenceBits` places, as `3 ln 2 + ln(5/4)` with `ln(5/4) = -ln(1 - 1/5)` summed
+    /// as `sum over k >= 1 of 1/(k 5^k)`, on top of `referenceLnTwo`. Deliberately not the
+    /// `atanh` series the implementation uses, so that a wrong constant in either shows up as a
+    /// disagreement rather than being shared by both.
+    let private referenceLnTen : BigInteger =
+        let mutable power = referenceScale / BigInteger 5
+        let mutable acc = BigInteger.Zero
+        let mutable k = 1
+
+        while not power.IsZero do
+            acc <- acc + power / BigInteger k
+            power <- power / BigInteger 5
+            k <- k + 1
+
+        BigInteger 3 * referenceLnTwo + acc
+
+    /// Whether `y` is the double nearest to the decimal logarithm of the strictly positive finite
+    /// `x`, decided without reference to any other logarithm: `y` is nearest exactly when `x` lies
+    /// strictly between 10 raised to the two midpoints bracketing `y`, since `10^t` is increasing.
+    /// The midpoints are dyadic rationals and are formed exactly; `10^t` is `e^(t ln 10)`, with
+    /// `t ln 10` off by under 2^-1380, far inside the 2^-1300 at which `compareWithExp` refuses.
+    ///
+    /// No tie can occur. `log10 x` is rational only when `x` is an integer power of ten (if
+    /// `10^(p/q) = x` in lowest terms, then `2^p 5^p = x^q` forces `q = 1`), and then it is an
+    /// integer, which is a double rather than a midpoint.
+    let private isCorrectlyRoundedLog10 (x : float) (y : float) : bool =
+        // As in `isCorrectlyRoundedLog`: one octave below the smallest subnormal, so that both
+        // neighbours of `y` and their midpoints are exact integer counts of 2^(fixedPoint - 1).
+        let fixedPoint = -1080
+
+        let compareWithPowerOfTen (neighbour : float) : int =
+            let midpoint =
+                (atExponent fixedPoint y + atExponent fixedPoint neighbour)
+                <<< (referenceBits + fixedPoint - 1)
+
+            compareWithExp x (floorDivide (midpoint * referenceLnTen) referenceScale)
+
+        Double.IsFinite y
+        && compareWithPowerOfTen (Math.BitDecrement y) > 0
+        && compareWithPowerOfTen (Math.BitIncrement y) < 0
+
+    /// The double nearest to `10^k`, by the host's parser, which has rounded correctly since
+    /// .NET Core 3.0. Used only to aim generators and edge lists at powers of ten, never as an
+    /// oracle.
+    let private nearestPowerOfTen (k : int) : float =
+        Double.Parse ($"1e%d{k}", Globalization.CultureInfo.InvariantCulture)
+
+    /// Where in the positive doubles a `log10` argument lies, among the places a uniform draw over
+    /// the bit patterns rarely or never reaches.
+    [<RequireQualifiedAccess>]
+    type private Log10Region =
+        /// Below the smallest normal, where `decompose` supplies no implicit leading bit.
+        | Subnormal
+        /// Within four ulps of the double nearest some `10^k`, where the answer is nearest an integer
+        /// and, at `10^0` to `10^22`, is one.
+        | NearPowerOfTen
+        /// Within 2^40 ulps of 1, where the answer is smallest and only the mantissa contributes.
+        | NearOne
+        /// A normal whose binary exponent exceeds 900 in magnitude: the largest answers of either sign.
+        | ExtremeExponent
+        | Elsewhere
+
+    let private classifyLog10Argument (x : float) : Log10Region =
+        let bits = BitConverter.DoubleToInt64Bits x
+        let biasedExponent = int ((bits >>> 52) &&& 0x7FFL)
+
+        let withinUlpsOf (ulps : int64) (target : float) : bool =
+            abs (bits - BitConverter.DoubleToInt64Bits target) <= ulps
+
+        // The host's `log10` only picks which power of ten to compare against.
+        let k = int (Math.Round (Math.Log10 x))
+
+        if biasedExponent = 0 then
+            Log10Region.Subnormal
+        elif k >= -307 && k <= 308 && withinUlpsOf 4L (nearestPowerOfTen k) then
+            Log10Region.NearPowerOfTen
+        elif withinUlpsOf (1L <<< 40) 1.0 then
+            Log10Region.NearOne
+        elif abs (biasedExponent - 1023) > 900 then
+            Log10Region.ExtremeExponent
+        else
+            Log10Region.Elsewhere
+
+    /// Positive finite doubles, weighted towards the regions of `Log10Region` other than
+    /// `Elsewhere`: uniform bit patterns, doubles near 1, doubles within four ulps of the double
+    /// nearest a power of ten, subnormals, and normals at either end of the exponent range.
+    let private genLog10Argument : Gen<float> =
+        let nearPowerOfTen =
+            gen {
+                // Normal powers only, so that stepping four ulps down stays positive.
+                let! k = Gen.choose (-307, 308)
+                let! offset = Gen.choose (-4, 4)
+
+                return
+                    BitConverter.Int64BitsToDouble (BitConverter.DoubleToInt64Bits (nearestPowerOfTen k) + int64 offset)
+            }
+
+        let subnormal =
+            gen {
+                let! fraction = Gen.choose64 (1L, 0xF_FFFF_FFFF_FFFFL)
+                return BitConverter.Int64BitsToDouble fraction
+            }
+
+        let extremeExponent =
+            gen {
+                let! biasedExponent = Gen.oneof [ Gen.choose (1, 122) ; Gen.choose (1924, 2046) ]
+                let! fraction = Gen.choose64 (0L, 0xF_FFFF_FFFF_FFFFL)
+                return BitConverter.Int64BitsToDouble ((int64 biasedExponent <<< 52) ||| fraction)
+            }
+
+        Gen.frequency
+            [
+                2, genPositiveFiniteDouble
+                // Only half of `genNearOneDouble`'s draws are within 2^40 ulps of 1.
+                2, genNearOneDouble
+                1, nearPowerOfTen
+                1, subnormal
+                1, extremeExponent
+            ]
+
+    [<Test>]
+    let ``log10 is correctly rounded`` () : unit =
+        // The real specification of `log10`: the result is the double nearest the exact decimal
+        // logarithm, decided by bracketing `x` between powers of ten rather than by comparing
+        // against a second logarithm.
+        let property (cover : Log10Region -> unit) (x : float) : bool =
+            cover (classifyLog10Argument x)
+            isCorrectlyRoundedLog10 x (DeterministicMath.log10 x)
+
+        let coverage =
+            CoverageSample.check propertyConfig (Arb.fromGen genLog10Argument) property
+
+        [
+            Log10Region.Subnormal
+            Log10Region.NearPowerOfTen
+            Log10Region.NearOne
+            Log10Region.ExtremeExponent
+            Log10Region.Elsewhere
+        ]
+        |> List.choose (fun region ->
+            let count = coverage.Count region
+
+            if count >= 25 then
+                None
+            else
+                Some $"the fixed sample reached %A{region} only %d{count} times, under the floor of 25"
+        )
+        |> reportFailures
+
+    [<Test>]
+    let ``log10 is correctly rounded at the ends of the range, next to one and next to powers of ten`` () : unit =
+        // The arguments a random draw is least likely to produce: the extreme subnormal and normal
+        // values, every power of two (where the implementation's mantissa logarithm is exactly zero),
+        // the doubles adjacent to 1 (where the answer is as small as it ever gets), and the double
+        // nearest every power of ten with its two neighbours (where the answer is nearest an integer).
+        let nextToOne =
+            [ 1..64 ]
+            |> List.collect (fun n ->
+                let one = BitConverter.DoubleToInt64Bits 1.0
+
+                [
+                    BitConverter.Int64BitsToDouble (one + int64 n)
+                    BitConverter.Int64BitsToDouble (one - int64 n)
+                ]
+            )
+
+        let powersOfTwo = [ -1074 .. 1023 ] |> List.map (fun k -> Math.ScaleB (1.0, k))
+
+        let nearPowersOfTen =
+            [ -323 .. 308 ]
+            |> List.collect (fun k ->
+                let nearest = nearestPowerOfTen k
+                [ Math.BitDecrement nearest ; nearest ; Math.BitIncrement nearest ]
+            )
+            |> List.filter (fun x -> x > 0.0)
+
+        let ends =
+            [
+                Double.Epsilon
+                Math.BitIncrement Double.Epsilon
+                Math.BitDecrement 2.2250738585072014e-308
+                2.2250738585072014e-308
+                Double.MaxValue
+                Math.BitDecrement Double.MaxValue
+                // sqrt 2 rounded each way: the boundary at which the implementation halves its
+                // mantissa.
+                1.4142135623730950
+                Math.BitIncrement 1.4142135623730950
+                Math.BitDecrement 1.4142135623730950
+                0.70710678118654757
+                Math.BitIncrement 0.70710678118654757
+                Math.BitDecrement 0.70710678118654757
+            ]
+
+        nextToOne @ powersOfTwo @ nearPowersOfTen @ ends
+        |> List.choose (fun x ->
+            let actual = DeterministicMath.log10 x
+
+            if isCorrectlyRoundedLog10 x actual then
+                None
+            else
+                Some
+                    $"log10(%.17g{x}) = %.17g{actual} (bits %016x{BitConverter.DoubleToUInt64Bits actual}) is not correctly rounded"
+        )
+        |> reportFailures
+
+    [<Test>]
+    let ``the log10 oracle rejects the neighbours of the right answer`` () : unit =
+        // `isCorrectlyRoundedLog10` is what every other log10 test leans on, so check it is not
+        // vacuous: of a correctly rounded answer and its two neighbours, it accepts exactly one.
+        let property (x : float) : bool =
+            let y = DeterministicMath.log10 x
+
+            isCorrectlyRoundedLog10 x y
+            && not (isCorrectlyRoundedLog10 x (Math.BitIncrement y))
+            && not (isCorrectlyRoundedLog10 x (Math.BitDecrement y))
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen genLog10Argument) property)
+
+    [<Test>]
+    let ``log10 of each power of ten that is a double is exactly its exponent`` () : unit =
+        // 10^n = 2^n 5^n is a double exactly when 5^n fits in 53 bits, which is n <= 22. There the
+        // decimal logarithm is the integer n itself, so the answer is pinned bit for bit, +0 at
+        // n = 0 included; this is what a caller counting digits with `(int)Math.Log10(n) + 1`
+        // relies on. 10^23 is checked not to be a double, so that the range is exactly the one
+        // `DeterministicMath.log10`'s docstring argues about.
+        let isExactly (power : BigInteger) (x : float) : bool =
+            let mantissa, exponent = DeterministicMath.decompose x
+
+            if exponent >= 0 then
+                (mantissa <<< exponent) = power
+            else
+                mantissa = (power <<< -exponent)
+
+        let tenToThe23 = BigInteger.Pow (BigInteger 10, 23)
+
+        let notADouble =
+            if isExactly tenToThe23 (float tenToThe23) then
+                [
+                    "10^23 converted to a double exactly, so the powers of ten that are doubles go further than 10^22"
+                ]
+            else
+                []
+
+        let failures =
+            [ 0..22 ]
+            |> List.choose (fun n ->
+                let power = BigInteger.Pow (BigInteger 10, n)
+                let x = float power
+
+                if not (isExactly power x) then
+                    Some $"10^%d{n} did not convert to a double exactly"
+                else
+
+                let actual = BitConverter.DoubleToUInt64Bits (DeterministicMath.log10 x)
+                let expected = BitConverter.DoubleToUInt64Bits (float n)
+
+                if actual = expected then
+                    None
+                else
+                    Some $"log10(1e%d{n}): expected bits %016x{expected}, got %016x{actual}"
+            )
+
+        notADouble @ failures |> reportFailures
+
+    [<Test>]
+    let ``ln 10 agrees with an independent series`` () : unit =
+        // The implementation's `3 ln 2 + 2 atanh(1/9)` against the reference's
+        // `3 ln 2 + sum 1/(k 5^k)`, at the implementation's precision, to within the error its
+        // docstring budgets: 2^-244, which is 2^12 units of 2^-fractionBits.
+        let reference = referenceLnTen >>> (referenceBits - DeterministicMath.fractionBits)
+
+        let difference = BigInteger.Abs (DeterministicMath.lnTen - reference)
+
+        if difference > (BigInteger.One <<< 12) then
+            failwith
+                $"lnTen differs from the reference by %O{difference} units of 2^-%d{DeterministicMath.fractionBits}"
+
+        // And the reference itself against the implementation's `log`, which shares no series
+        // with it.
+        DeterministicMath.roundToDouble referenceLnTen -referenceBits
+        |> shouldEqual (DeterministicMath.log 10.0)
+
+    [<Test>]
+    let ``log10 agrees with the host libm to within one ulp`` () : unit =
+        // A sanity check rather than a specification: the host's `log10` is not guaranteed
+        // correctly rounded, so where the two disagree it is PawPrint that is expected to be right,
+        // and `log10 is correctly rounded` is what says so.
+        let property (x : float) : bool =
+            ulpDistance (DeterministicMath.log10 x) (Math.Log10 x) <= 1.0
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen genLog10Argument) property)
+
+    [<Test>]
+    let ``log10 is monotone`` () : unit =
+        // Correct rounding of an increasing function gives a non-decreasing one; stated on its own
+        // because it is the property a caller comparing two logarithms relies on. Adjacent doubles
+        // are the pairs most likely to be reordered, so each draw checks one such pair too.
+        let property (a : float, b : float) : bool =
+            let smaller, larger = if a <= b then a, b else b, a
+
+            DeterministicMath.log10 smaller <= DeterministicMath.log10 larger
+            && DeterministicMath.log10 a <= DeterministicMath.log10 (Math.BitIncrement a)
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen (Gen.zip genLog10Argument genLog10Argument)) property)
+
+    [<Test>]
+    let ``log10 of every negative argument is the positive quiet NaN`` () : unit =
+        // A domain error for every x < 0, -infinity included; the payload of the NaN it generates
+        // is PawPrint's choice, as for every other generated NaN in this module.
+        let property (x : float) : bool =
+            let negative = -(abs x)
+
+            if negative = 0.0 then
+                true
+            else
+                BitConverter.DoubleToUInt64Bits (DeterministicMath.log10 negative) = BitConverter.DoubleToUInt64Bits
+                    DeterministicMath.quietNaN
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen genFiniteDouble) property)
+
+    [<Test>]
+    let ``log10 is a pure function of its argument`` () : unit =
+        let property (x : float) : bool =
+            let first = BitConverter.DoubleToUInt64Bits (DeterministicMath.log10 x)
+            first = BitConverter.DoubleToUInt64Bits (DeterministicMath.log10 x)
+
+        Check.One (propertyConfig, Prop.forAll (Arb.fromGen genFiniteDouble) property)
+
+    /// The C17 Annex F (F.10.3.8) `log10` special cases, as a table of (x, expected bits).
+    let private log10SpecialCases : (float * uint64) list =
+        let ofBits (bits : uint64) : float = BitConverter.UInt64BitsToDouble bits
+        let positiveNaN = 0x7FF8000000000000UL
+        let negativeNaN = 0xFFF8000000000000UL
+
+        [
+            // log10(1) is +0: the sign of this zero is specified.
+            1.0, 0x0000000000000000UL
+            // log10(±0) is -infinity, a pole: both zeros alike.
+            0.0, BitConverter.DoubleToUInt64Bits -infinity
+            -0.0, BitConverter.DoubleToUInt64Bits -infinity
+            infinity, BitConverter.DoubleToUInt64Bits infinity
+            // Every negative argument, -infinity included, is a domain error.
+            -1.0, positiveNaN
+            -10.0, positiveNaN
+            -Double.Epsilon, positiveNaN
+            Double.MinValue, positiveNaN
+            -infinity, positiveNaN
+            // A NaN propagates with its payload and sign intact, quieted if it was signalling,
+            // as for `log`. `Double.NaN` is the *negative* quiet NaN.
+            nan, negativeNaN
+            ofBits 0x7FF8000000000000UL, positiveNaN
+            ofBits 0x7FF8000000000123UL, 0x7FF8000000000123UL
+            ofBits 0xFFF8000000000123UL, 0xFFF8000000000123UL
+            ofBits 0x7FF0000000000123UL, 0x7FF8000000000123UL
+            ofBits 0xFFF0000000000123UL, 0xFFF8000000000123UL
+            ofBits 0x7FF0000000000001UL, 0x7FF8000000000001UL
+        ]
+
+    [<Test>]
+    let ``log10 matches the C99 special cases`` () : unit =
+        log10SpecialCases
+        |> List.choose (fun (x, expected) ->
+            let actual = BitConverter.DoubleToUInt64Bits (DeterministicMath.log10 x)
+
+            if actual = expected then
+                None
+            else
+                Some $"log10(%.17g{x}): expected bits %016x{expected}, got %016x{actual}"
+        )
+        |> reportFailures
+
+    /// The rows of `log10SpecialCases` on which the host is allowed to disagree, with the one other
+    /// answer it may give. Every row here is a NaN's payload or sign; the zeros and infinities
+    /// admit no alternative, because Annex F fixes them.
+    let private log10HostAlternatives : Map<uint64, uint64> =
+        let negativeNaN = 0xFFF8000000000000UL
+
+        [
+            // The payload of a *freshly generated* NaN is the hardware's: glibc computes it as
+            // `(x - x) / 0` or `(x - x) / (x - x)`, for which x86 produces the negative quiet NaN.
+            BitConverter.DoubleToUInt64Bits -1.0, negativeNaN
+            BitConverter.DoubleToUInt64Bits -10.0, negativeNaN
+            BitConverter.DoubleToUInt64Bits -Double.Epsilon, negativeNaN
+            BitConverter.DoubleToUInt64Bits Double.MinValue, negativeNaN
+            BitConverter.DoubleToUInt64Bits -infinity, negativeNaN
+            // macOS/Arm's libm hands a *signalling* NaN back unquietened, as its `log` does, where
+            // IEEE 754 clause 7.2 asks for the quiet one. Measured; its quiet NaNs it returns
+            // unchanged, sign included, so they need no row here.
+            0x7FF0000000000123UL, 0x7FF0000000000123UL
+            0xFFF0000000000123UL, 0xFFF0000000000123UL
+            0x7FF0000000000001UL, 0x7FF0000000000001UL
+        ]
+        |> Map.ofList
+
+    [<Test>]
+    let ``the host agrees about the log10 special cases`` () : unit =
+        log10SpecialCases
+        |> List.choose (fun (x, expected) ->
+            let host = BitConverter.DoubleToUInt64Bits (Math.Log10 x)
+            let key = BitConverter.DoubleToUInt64Bits x
+
+            let permitted =
+                match Map.tryFind key log10HostAlternatives with
+                | None -> [ expected ]
+                | Some alternative -> [ expected ; alternative ]
+
+            if List.contains host permitted then
+                None
+            else
+
+            let permitted = permitted |> List.map (sprintf "%016x") |> String.concat " or "
+
+            Some $"host log10(%.17g{x}): expected bits {permitted}, got %016x{host}"
+        )
+        |> reportFailures
+
     /// Every double bit pattern, so NaNs of both signs, signalling and quiet, with payloads,
     /// arrive as operands at about the rate of any other exponent.
     let private genAnyDouble : Gen<float> =
