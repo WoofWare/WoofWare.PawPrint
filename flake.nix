@@ -220,7 +220,8 @@
           # pure cost, and on macOS the darwin fixup hooks would inspect them pointlessly.
           dontFixup = true;
         };
-      # `scripts/test_footprint.py` needs hypothesis; the devshell and the `footprint` check share it.
+      # `scripts/test_footprint.py` and `scripts/test_check_package_dependencies.py` need hypothesis;
+      # the devshell and the `footprint` and `package-dependencies` checks share it.
       python = pkgs.python3.withPackages (ps: [ps.hypothesis]);
       dotnetTool = dllOverride: toolName: toolVersion: hash:
         pkgs.stdenvNoCC.mkDerivation rec {
@@ -333,6 +334,18 @@
             ''
               export HOME=$TMPDIR
               python3 ${./scripts/test_footprint.py} ${./scripts/footprint.py}
+              touch $out
+            '';
+          # scripts/check-package-dependencies.py is what `expected-pack` relies on to say that no
+          # published package gained a dependency, so it is held to properties over generated
+          # nupkgs. Runs here so that a change to the script cannot quietly retire it.
+          package-dependencies =
+            pkgs.runCommand "package-dependencies" {
+              buildInputs = [python];
+            }
+            ''
+              export HOME=$TMPDIR
+              python3 ${./scripts/test_check_package_dependencies.py} ${./scripts/check-package-dependencies.py}
               touch $out
             '';
         }
