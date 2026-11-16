@@ -1,7 +1,8 @@
 # `RuntimeTypeHandle_GetInterfaceMethodImplementation` (issue #2290)
 
-Status: proposed, awaiting decisions. Written 2026-11-16 on `pr-2289-num-virtuals` at `52f675317` (#2301, which
-implements #2289 and was on the merge queue, not yet merged), on top of `main` at `0652e513a` (#2298, #2270).
+Status: decided; pull request 1 (the TypeSystem) built, see "As built (PR 1)" at the end; pull request 2 (the
+handler and the guests) to do. Written 2026-11-16 on `pr-2289-num-virtuals` at `52f675317` (#2301, which implements
+#2289 and was on the merge queue, not yet merged), on top of `main` at `0652e513a` (#2298, #2270).
 
 Scope is this one QCall, the third and last that `Type.GetInterfaceMap` makes, after
 `RuntimeTypeHandle_VerifyInterfaceIsImplemented` (#2270, merged as #2298) and
@@ -92,8 +93,8 @@ else
 
 Line numbers below are .NET 10's `methodtable.cpp`; .NET 11's are 75 to 101 lower for the same functions
 (`FindDispatchImpl` 5444 / 5369, `FindDefaultInterfaceImplementation` 5805 / 5729, `ResolveVirtualStaticMethod`
-8167 / 8066). The functions this QCall reaches are the same on both runtimes except for the handling of an async
-variant method, which `GetInterfaceMap` never passes (read, by diffing each function).
+8167 / 8066). The functions this QCall reaches have the same logic on both runtimes except for the handling of an
+async variant method, which `GetInterfaceMap` never passes (read, by diffing each function).
 
 **An instance method** (all read).
 
@@ -1047,3 +1048,161 @@ candidate the exact pass did.
   docstrings.
 - If anything in the characterisation property or the dump shows the call path and the host disagreeing on a
   C#-compilable shape, stop and ask rather than adjusting the property.
+
+### As built (PR 1)
+
+Built on `fix-2290-dispatch-walk`, on top of the two plan commits, as the "Staging" section's pull request 1: the
+TypeSystem half, with no handler and no guest.
+
+#### Commits
+
+1. *Make the generated interface corpus of TestNumVirtualsAndStaticVirtuals public*, and *Move the generated
+   interface corpus into InterfaceCorpusGenerator*: decision 8's move, in two commits so that the second changes
+   nothing but which file the text is in. `scripts/check-move-is-rename-only.sh HEAD~ --split ...` (the command is
+   in the second commit's message) reports that the fragments reproduce the old file. The first commit only drops
+   `private` from the moved definitions, which a move to another module needs and the move check cannot accept.
+   The new file is `InterfaceCorpusGenerator.fs`, because `.gitignore` excludes `Generated*.fs`.
+2. *Characterise the dispatch walk against GetInterfaceMap*: decision 2's property, green on the unchanged code.
+3. *Failing tests for InterfaceMethodImplementation.resolve*: the reflection function's property over the three
+   corpora, the examples of decisions 3 and 6, and the added assertion in `TestStaticVirtualOverrideOrder`. The
+   commit message quotes the compile errors.
+4. *Extract the interface half of both dispatch walks*: decision 1, items 1, 2 and 4, with no caller value.
+5. *InterfaceMethodImplementation.resolve: GetInterfaceMap's target*: `InterfaceMethodCaller` and the public
+   function.
+
+The published `WoofWare.PawPrint.TypeSystem` package gains one public type, `InterfaceMapTarget`, and one public
+function, `InterfaceMethodImplementation.resolve`, in `InterfaceMethodImplementation.fs` after
+`StaticVirtualDispatch.fs`. Nothing public is removed or changed. The internal additions are
+`InterfaceMethodSearch` and `InterfaceMethodCaller` (both in `ConcreteVirtualDispatch.fs`),
+`ConcreteVirtualDispatch.searchInstanceInterfaceMethod` and `StaticVirtualDispatch.search`.
+`DefaultInterfaceImplementation.search` takes the interface's handle in place of interning the method's declaring
+type, and reads only the method's identity, so it accepts the definition or a concretised method.
+
+#### The characterisation property
+
+`TestInterfaceMethodImplementation.fs`. Measured on a .NET 10 host:
+
+- CoreLib (every exported type that is not an interface, and a spread of instantiations and arrays): 6,965 rows
+  compared, 332 answered by a default body, 2,170 static, 172 constrained generic methods skipped, 423 open
+  receivers skipped. Floors at about half. No exported CoreLib type implements an interface with an unconstrained
+  generic method, so the generated corpus carries that count.
+- Generated corpora (`InterfaceCorpusGenerator.genImplementingCorpus`, 100 cases from `CoverageSample`'s fixed
+  seed, then 100 fresh): the generator now gives variant interfaces (`out` and `in`), an `object` argument, and
+  classes and structs that implement interface members explicitly, implicitly, by a virtual or abstract method, by
+  an override further down the chain, by `new` re-implementation of a re-listed interface, by re-listing alone, and
+  by leaving a default body. A third of the corpora begin with an interface pair (`I1 : I0` giving one of `I0`'s
+  methods a default body and reabstracting the other), which makes a default body on a more specific interface and
+  an interface's own reabstraction common. Pairs include each variance-compatible instantiation a receiver does not
+  implement. The fixed sample reached: a class's own method 860 times, an inherited one 125, a default body on the
+  interface asked about 127, on a more specific interface 23, a null row 88, a static row by a MethodImpl 430, by a
+  default body 18, a row through variance 89, a generic method definition 179; floors at about half.
+  `TestNumVirtualsAndStaticVirtuals` generates the same corpora as before: `genCorpus` draws exactly what it drew.
+- Shapes C# refuses: the plan's two-version library, extended with the decider's shapes, loaded beside the classes
+  in one collectible `AssemblyLoadContext` per shape, the second version first. Loading the second version first is
+  enough for the classes' reference to bind to it; no `Load` override was needed. Each of 19 shapes asserts the host
+  answer the plan measured and the one call answer the call path gives.
+
+#### Where the decisions were silent, or did not match the code
+
+- **The IDynamicInterfaceCastable shapes.** Finding 4 says the call path answers `Unmodelled` for an
+  `IDynamicInterfaceCastable` receiver whose interface method ends in a reabstraction or a diamond. It does not: the
+  call path's `IDynamicInterfaceCastable` refusal is in its "nothing found" branch, and those shapes find something.
+  Measured, the call path answers `Reabstracted` (`IRi`'s reabstraction) and `Ambiguous` (`IBd`, `ICd`), both
+  consistent with the host's null target. The characterisation records those answers. The reflection function never
+  consults `IDynamicInterfaceCastable`, as decision 1 item 4 says, and the instance-diamond shape kills the mutant
+  that makes it.
+- **An instance conflict for the interface map.** Decision 1 item 3 says the instance search for `InterfaceMap`
+  answers nothing found at a conflict on an interface with no variance; decision 5's table says the projection makes
+  a conflict `NoTarget`. Item 3 was built, so the instance search never reports a conflict for `InterfaceMap`, and the
+  projection's conflict arm fails loudly as a PawPrint bug rather than answering a value no search produces.
+- **A class's virtual method.** `tryResolveVirtualImplementation` also resolves a class's virtual method, and when the
+  class walk finds nothing it has always run the default-body search with the class's method, which never finds a
+  body but does register the interfaces it looks at. The refactor keeps that call (through the same default-body
+  function, with the class's concretised method), so that no state changes.
+- **The commit order makes the refactor commit untestable on its own.** Commit 3's tests name the function commit 5
+  adds, so the test project does not build at commit 4. The characterisation property, the default suite and the
+  dump were run on commit 4's tree with commit 3's test edits taken back out (commit 2's test files over commit 4's
+  TypeSystem). Commit 3 changes only tests and commit 4 only the TypeSystem, so that tree is the refactor exactly.
+- **Open receivers.** The reflection function takes `ConcreteTypeHandle`s, which cannot name an open receiver, so the
+  refusal of decision 4 has nothing to test in this pull request: the CoreLib corpus counts the open receivers it
+  skips, and the refusal tests are the handler's, in pull request 2.
+- **A synthesised static method.** `StaticVirtualDispatch.resolve` now reads the method's definition before its
+  search rather than only at its last step. A synthesised static interface method fails there as it failed before, a
+  little earlier; none exists.
+
+#### The before-and-after dump
+
+A throwaway test, not committed, wrote one line for every question of the three corpora (the CoreLib corpus, 100
+generated corpora from a fixed seed, and the 19 shapes): the call path's answer, rendered with its type and method
+arguments' handles, then the number of concrete types registered and of assemblies loaded once the query returned.
+8,738 lines. Run twice on commit 2's tree: identical. Run on commit 4's tree (as above) and on commit 5: **identical**
+to commit 2's, byte for byte.
+
+#### Mutants
+
+Each mutant was applied to the committed code by an exact text replacement, the test project built, and the tests
+named run; every file was restored afterwards and checked against `HEAD`. "Shapes" means `TestInterfaceMethodImplementation`'s
+shapes C# refuses, "generated" and "CoreLib" its other corpora; "call path" is the characterisation property, "map" the
+reflection function's property.
+
+The plan's table:
+
+| mutant | killed by |
+|---|---|
+| a null answer encoded as a handle | the handler's; pull request 2 |
+| an instance reabstraction answered as the reabstraction (also the decisions' "variant pass's first survivor answered although abstract": the same projection arm) | map, shapes (instance reabstraction, `IDynamicInterfaceCastable` reabstraction, `IAw` with the reabstraction first) |
+| a static reabstraction answered as null | map, shapes (static and generic static reabstraction) |
+| an instance conflict answered as `Ambiguous` (the interface map's search reports the conflict at an interface with no variance) | map, shapes (`IDynamicInterfaceCastable` diamond) |
+| a static `Ambiguous` answered as null | map, shapes (static diamonds) |
+| a static `Ambiguous` answered as its first candidate | map, shapes |
+| the instance conflict through a variant interface answered as null | map, shapes (`IAv<string>`, `IAw<string>` with the reabstraction second) |
+| the static conflict in the variant pass answered as the first survivor | map, shapes (`IAsv<object>`) |
+| the target declared by the receiver instead of the type on its chain | the example "A target is declared by the instantiation the walk found it on" (`CGDer`), map over generated and CoreLib |
+| the slot's owner instead of what the receiver's slot holds (realised as the occupant of that slot in the base-most class that has it) | call path and map, over generated and CoreLib |
+| a default body declared by the interface asked about | the example (`CCoD` at `ICoD<object>`), map over generated and shapes |
+| per-level variance passes merged (`tryFindImplementationSlot` searches every level exactly before any by variance) | only `TestInterfaceDispatchMap`'s generated hierarchies. The new generator drops a class whose base implements another instantiation of one of its interfaces, so it has no `VDer` shape |
+| a static method resolved by default bodies before the chain's MethodImpls | call path and map over generated and CoreLib, `TestStaticVirtualOverrideOrder`, `TestStaticVirtualOverrideOrderRefusals`, `TestAsyncVariantDispatch` |
+| the chain's static MethodImpls searched from the base down (each level's exact and variant searches kept) | call path and map over generated: a base's explicit implementation won over the derived class's |
+| an interface's own reabstraction answered as a body (realised in `DefaultInterfaceImplementation.candidateOn`, by counting a method's own abstract declaration as a candidate) | call path and map over shapes (`IRr`, `IRrG<string>`), map over generated |
+| an array receiver answered from its element type | map over CoreLib (`int[]`, `string[]`, `int[,]`) |
+| a generic method answered as an instantiation over invented arguments | not representable: `InterfaceMapTarget.Method` carries a definition and no method arguments |
+| open receivers concretised instead of refused | not representable here: the function takes `ConcreteTypeHandle`s; the handler's refusal is pull request 2's |
+| the caller value ignored in the call path | as "`Call` and `InterfaceMap` swapped in the instance public function", below |
+
+The decisions' additions:
+
+| mutant | killed by |
+|---|---|
+| a static reabstraction's declaring type built from the definition with no type arguments | map, shapes (`IRrG<string>`) |
+| the reflection search consults `IDynamicInterfaceCastable` when it finds nothing | map, shapes (`IDynamicInterfaceCastable` diamond) |
+| the variant pass's survivor skipped when abstract, for the next one with a body | map, shapes (`IAw` with the reabstraction first) |
+| the variant pass's first survivor answered although abstract | the plan's "instance reabstraction answered as the reabstraction", above |
+| an instance conflict on an interface with no variance answered as its first candidate | map, shapes (`IDynamicInterfaceCastable` diamond) |
+| an abstract method of a class answered as `NoTarget` | map over generated and CoreLib |
+| an order-dependent static body refused by the reflection function | `TestStaticVirtualOverrideOrder`'s added assertion |
+| an order-dependent static body answered by the call path | `TestStaticVirtualOverrideOrder`'s existing refusal assertion, and two tests of `TestStaticVirtualOverrideOrderRefusals` |
+| `Call` and `InterfaceMap` swapped in the instance public function | `TestAmbiguousDefaultInterfaceDispatch` (both of its conflict tests), `TestCrossAssemblyAmbiguousDefault` (seven tests), `TestCrossAssemblyReabstraction` ("a reabstraction as specific as a body is ambiguous"), call path over shapes |
+| `Call` and `InterfaceMap` swapped in the static public function | call path over shapes (`IAsv<object>`: `Found` the first survivor). The cross-assembly guest whose call returns 2 is pull request 2's |
+| a generic static default body declared by the interface's definition instead of its instantiation | map over shapes (`CStatG`), generated and CoreLib |
+| the handler accepts an open definition with a closed interface | the handler's; pull request 2 |
+| the static interface map's search goes on from an exact-pass conflict into the variant pass | **survives**: equivalent, as the decisions say; the variant pass meets every candidate the exact pass did |
+
+#### Suites
+
+Each its own invocation after a whole-solution build with every `*/obj/*/*/ref` and `refint` deleted, on the tip
+after rebasing onto `main` at `753baef7d` (#2302, #2305); each Guest category under a lock slot:
+
+| suite | total | passed | skipped |
+|---|---|---|---|
+| default | 5,869 | 5,830 | 39 |
+| `TestCategory=Guest` | 234 | 234 | 0 |
+| `TestCategory=GuestSolo` | 2 | 2 | 0 |
+| `TestCategory=GuestPure` | 1,204 | 1,204 | 0 |
+| `TestCategory=GuestImpure` | 302 | 302 | 0 |
+
+Before the rebase, on `main` at `a8d94b827`, the same five were green with 5,862, 234, 2, 1,203 and 302 tests.
+
+The default suite on commit 4's tree (commit 2's test files over the refactored TypeSystem, as above): 5,857 total,
+5,818 passed, 39 skipped; commit 3's new tests are the five more on the same base.
+`scripts/check-docstring-attachment-branch.sh`, `dotnet fantomas --check .` and `scripts/footprint.py generate` are
+clean.
