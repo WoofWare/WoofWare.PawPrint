@@ -51,6 +51,28 @@ type VirtualImplementation =
     /// CoreCLR throws depends on how the JIT compiled the call.
     | Unmodelled of reason : string
 
+/// What the search for an interface method's implementation on a receiver found, before a caller
+/// decides what it means: `ConcreteVirtualDispatch.tryResolveVirtualImplementation` and
+/// `StaticVirtualDispatch.resolve` make a `VirtualImplementation` of it.
+[<RequireQualifiedAccess>]
+type internal InterfaceMethodSearch =
+    /// A method of the receiver's class chain, and the handle of the type on the chain declaring it:
+    /// for an instance method, what the receiver's slot holds that the chain's dispatch map names; for
+    /// a static one, the body of a MethodImpl of the chain. It may be abstract, as an abstract class's
+    /// method is. Only a static method's body can be order-dependent.
+    | OnChain of declaringType : ConcreteTypeHandle * body : DefaultInterfaceImplementation.FoundBody
+    /// The most specific default body, and the interface instantiation it was found on. An abstract
+    /// one is a reabstraction.
+    | DefaultBody of DefaultInterfaceImplementation.Candidate
+    /// Several equally specific default bodies.
+    | Conflict of DefaultInterfaceImplementation.Candidate list
+    /// A static method's own body, and the interface instantiation declaring it, where nothing else
+    /// supplies the method.
+    | OwnBody of
+        declaringType : ConcreteTypeHandle *
+        body : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
+    | Nothing
+
 /// Why a virtual call has no method to run, and throws instead of calling anything.
 [<RequireQualifiedAccess>]
 type DispatchFailure =
@@ -400,6 +422,167 @@ module ConcreteVirtualDispatch =
                 }
             )
         )
+
+    /// The default-body half of `MethodTable::FindDispatchImpl` for `method`, a method of `target`
+    /// (`DefaultInterfaceImplementation.search`): at `target` exactly, and only if that finds nothing
+    /// and `throughVariantInterface` holds, allowing variance, where the first survivor is the answer.
+    let private searchDefaultBodies
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (receiver : ConcreteTypeHandle)
+        (target : ConcreteTypeHandle)
+        (throughVariantInterface : bool)
+        (method : WoofWare.PawPrint.MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
+        (state : TypeSystemState)
+        : TypeSystemState * Result<InterfaceMethodSearch, TypeBindingFailure>
+        =
+        let search (allowVariance : bool) (state : TypeSystemState) =
+            DefaultInterfaceImplementation.search
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                allowVariance
+                receiver
+                target
+                method
+                state
+
+        match search false state with
+        | state, Error failure -> state, Error failure
+        | state, Ok [ only ] -> state, Ok (InterfaceMethodSearch.DefaultBody only)
+        | state, Ok (_ :: _ :: _ as candidates) -> state, Ok (InterfaceMethodSearch.Conflict candidates)
+        | state, Ok [] when not throughVariantInterface -> state, Ok InterfaceMethodSearch.Nothing
+        | state, Ok [] ->
+
+        // The variant search "[doesn't] look for a conflict for instance methods": it runs the first
+        // survivor. `sourcesPure/VariantInterfaceDefaultBodyPrecedence.cs` and
+        // `VariantInterfaceMapOrder.cs` pin its order against the real runtime.
+        match search true state with
+        | state, Error failure -> state, Error failure
+        | state, Ok [] -> state, Ok InterfaceMethodSearch.Nothing
+        | state, Ok (first :: _) -> state, Ok (InterfaceMethodSearch.DefaultBody first)
+
+    /// What `MethodTable::FindDispatchImpl` finds for `definition`, an instance method of the interface
+    /// instantiation `iface`, on `receiver`: the dispatch map of the receiver's chain, then the default
+    /// bodies (`searchDefaultBodies`). `walkBaseTypes` false is the exact-type probe of
+    /// `tryResolveVirtualImplementation`, which asks only whether the receiver supplies the body itself
+    /// and so searches no default bodies. A type the search reaches that does not bind is the failure.
+    let internal searchInstanceInterfaceMethod
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (receiver : ConcreteTypeHandle)
+        (walkBaseTypes : bool)
+        (iface : ConcreteTypeHandle)
+        (definition : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>)
+        (state : TypeSystemState)
+        : TypeSystemState * Result<InterfaceMethodSearch, TypeBindingFailure>
+        =
+        let interfaceMethod : SlotIdentity =
+            definition.DeclaringAssemblyFullName, definition.IdentityKey
+
+        match
+            ConcreteInterfaceDispatch.tryFindImplementationSlot
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                "callvirt"
+                state
+                receiver
+                walkBaseTypes
+                iface
+                interfaceMethod
+        with
+        | state, Error failure -> state, Error failure
+        | state, Ok (Some slot) ->
+            match
+                ConcreteMethodTable.dispatchTableOfClosed
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    "callvirt"
+                    state
+                    receiver
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok table ->
+
+            let occupant =
+                match table with
+                | Some table when slot >= 0 && slot < table.Occupants.Length -> table.Occupants.[slot]
+                | _ ->
+                    // A slot some type on the chain mapped is within the receiver's table, because slot
+                    // numbers are prefix-stable down the chain.
+                    failwith
+                        $"interface dispatch of %s{definition.Name}: the dispatch map names slot %i{slot}, which the receiver %O{receiver}'s method table does not have"
+
+            // The instantiation the receiver supplies for the occupant's declaring type. A synthesised
+            // array has no TypeDef row of its own, so it is stepped over to `System.Array`.
+            let rec declaringHandleOnChain (state : TypeSystemState) (level : ConcreteTypeHandle) =
+                let matches =
+                    match TypeSystemState.tryGetConcreteTypeInfo state level with
+                    | Some (levelTy, _) -> levelTy.Identity = occupant.DeclaredBy.Identity
+                    | None -> false
+
+                if matches then
+                    state, Ok level
+                else
+                    let state, baseType =
+                        TypeSystemState.resolveBaseConcreteType
+                            loggerFactory
+                            dotnetRuntimeDirs
+                            baseClassTypes
+                            state
+                            level
+
+                    match baseType with
+                    | Error failure -> state, Error failure
+                    | Ok baseType ->
+
+                    match baseType with
+                    | Some baseType -> declaringHandleOnChain state baseType
+                    | None ->
+                        failwith
+                            $"interface dispatch of %s{definition.Name}: slot %i{slot} of %O{receiver} holds a method of %s{occupant.DeclaredBy.Description}, which is not on the receiver's chain"
+
+            match declaringHandleOnChain state receiver with
+            | state, Error failure -> state, Error failure
+            | state, Ok implementationHandle ->
+
+            if not walkBaseTypes && implementationHandle <> receiver then
+                // The exact-type probe asks whether the receiver supplies the body itself; an
+                // inherited one means it does not.
+                state, Ok InterfaceMethodSearch.Nothing
+            else
+                state,
+                Ok (
+                    InterfaceMethodSearch.OnChain (
+                        implementationHandle,
+                        DefaultInterfaceImplementation.FoundBody.Certain occupant.Method
+                    )
+                )
+        | state, Ok None when not walkBaseTypes -> state, Ok InterfaceMethodSearch.Nothing
+        | state, Ok None ->
+
+        let declaringType =
+            state
+                .LoadedAssembly(definition.DeclaringAssemblyFullName)
+                .Value.TypeDefs.[definition.RequiredDeclaringType.Definition.Get]
+
+        let throughVariantInterface =
+            declaringType.Generics
+            |> Seq.exists (fun (_, metadata) -> metadata.Variance.IsSome)
+
+        searchDefaultBodies
+            loggerFactory
+            dotnetRuntimeDirs
+            baseClassTypes
+            receiver
+            iface
+            throughVariantInterface
+            definition
+            state
 
     let private tryResolveVirtualImplementationForSlot
         (loggerFactory : ILoggerFactory)
@@ -956,117 +1139,6 @@ module ConcreteVirtualDispatch =
                 )
             )
 
-        /// Answer an instance interface call from the dispatch map of the receiver's chain, then read
-        /// the slot it names from the receiver's own method table.
-        ///
-        /// `None` means no type on the chain maps the method -- only a default interface body can
-        /// answer -- or, when `walkBaseTypes` is false, that the receiver does not supply the body
-        /// itself.
-        let tryResolveByInterfaceDispatchMap
-            (state : TypeSystemState)
-            : TypeSystemState *
-              Result<
-                  (ConcreteTypeHandle *
-                  WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> *
-                  string) option,
-                  TypeBindingFailure
-               >
-            =
-            let interfaceMethod =
-                match methodToCall.IdentityKey with
-                | Some row, None -> methodToCall.DeclaringAssemblyFullName, (Some row, None)
-                | _ ->
-                    failwith
-                        $"TODO: interface dispatch to synthesised method %s{methodToCall.Name} on %O{methodToCall.RequiredDeclaringType.Name}, which has no MethodDef row to key the dispatch map on"
-
-            match TypeSystemState.internConcreteType baseClassTypes state methodToCall.RequiredDeclaringType with
-            | state, Error failure -> state, Error failure
-            | state, Ok targetHandle ->
-
-            match
-                ConcreteInterfaceDispatch.tryFindImplementationSlot
-                    loggerFactory
-                    dotnetRuntimeDirs
-                    baseClassTypes
-                    "callvirt"
-                    state
-                    dispatchTypeHandle
-                    walkBaseTypes
-                    targetHandle
-                    interfaceMethod
-            with
-            | state, Error failure -> state, Error failure
-            | state, Ok None -> state, Ok None
-            | state, Ok (Some slot) ->
-
-            match
-                ConcreteMethodTable.dispatchTableOfClosed
-                    loggerFactory
-                    dotnetRuntimeDirs
-                    baseClassTypes
-                    "callvirt"
-                    state
-                    dispatchTypeHandle
-            with
-            | state, Error failure -> state, Error failure
-            | state, Ok table ->
-
-            let occupant =
-                match table with
-                | Some table when slot >= 0 && slot < table.Occupants.Length -> table.Occupants.[slot]
-                | _ ->
-                    // A slot some type on the chain mapped is within the receiver's table, because slot
-                    // numbers are prefix-stable down the chain.
-                    failwith
-                        $"interface dispatch of %s{methodToCall.Name}: the dispatch map names slot %i{slot}, which the receiver %O{dispatchTypeHandle}'s method table does not have"
-
-            // The instantiation the receiver supplies for the occupant's declaring type. A synthesised
-            // array has no TypeDef row of its own, so it is stepped over to `System.Array`.
-            let rec declaringHandleOnChain (state : TypeSystemState) (level : ConcreteTypeHandle) =
-                let matches =
-                    match TypeSystemState.tryGetConcreteTypeInfo state level with
-                    | Some (levelTy, _) -> levelTy.Identity = occupant.DeclaredBy.Identity
-                    | None -> false
-
-                if matches then
-                    state, Ok level
-                else
-                    let state, baseType =
-                        TypeSystemState.resolveBaseConcreteType
-                            loggerFactory
-                            dotnetRuntimeDirs
-                            baseClassTypes
-                            state
-                            level
-
-                    match baseType with
-                    | Error failure -> state, Error failure
-                    | Ok baseType ->
-
-                    match baseType with
-                    | Some baseType -> declaringHandleOnChain state baseType
-                    | None ->
-                        failwith
-                            $"interface dispatch of %s{methodToCall.Name}: slot %i{slot} of %O{dispatchTypeHandle} holds a method of %s{occupant.DeclaredBy.Description}, which is not on the receiver's chain"
-
-            match declaringHandleOnChain state dispatchTypeHandle with
-            | state, Error failure -> state, Error failure
-            | state, Ok implementationHandle ->
-
-            if not walkBaseTypes && implementationHandle <> dispatchTypeHandle then
-                // The exact-type probe asks whether the receiver supplies the body itself; an
-                // inherited one means it does not.
-                state, Ok None
-            else
-                state,
-                Ok (
-                    Some (
-                        implementationHandle,
-                        occupant.Method,
-                        "Found interface implementation through the dispatch map"
-                    )
-                )
-
         let findClassImplementation
             (state : TypeSystemState)
             : TypeSystemState *
@@ -1164,33 +1236,6 @@ module ConcreteVirtualDispatch =
 
             walk state dispatchTypeHandle
 
-        let state, classImplementation =
-            match tryResolveBySlotTable state with
-            | state, Error failure -> state, Error failure
-            | state, Ok (Some result) -> state, Ok (Some result)
-            | state, Ok None when methodDeclaringType.IsInterface -> tryResolveByInterfaceDispatchMap state
-            | state, Ok None -> findClassImplementation state
-
-        match classImplementation with
-        | Error failure -> state, Error failure
-        | Ok (Some (implementationTypeHandle, impl, logMessage)) ->
-            logger.LogDebug logMessage
-            state, Ok (VirtualImplementation.Found (dispatchedOn implementationTypeHandle impl state))
-        | Ok None when not walkBaseTypes -> state, Ok VirtualImplementation.NotOverridden
-        | Ok None ->
-
-        logger.LogDebug "No concrete implementation found; searching for a default interface body"
-
-        let search (allowVariance : bool) (state : TypeSystemState) =
-            DefaultInterfaceImplementation.search
-                loggerFactory
-                dotnetRuntimeDirs
-                baseClassTypes
-                allowVariance
-                dispatchTypeHandle
-                methodToCall
-                state
-
         let foundDefault (state : TypeSystemState) (candidate : DefaultInterfaceImplementation.Candidate) =
             let body = DefaultInterfaceImplementation.instanceCandidateBody candidate
 
@@ -1285,44 +1330,107 @@ module ConcreteVirtualDispatch =
                 )
             | Ok false -> state, Ok VirtualImplementation.NotImplemented
 
-        // `FindDispatchImpl` searches at the call's exact instantiation, and only if that finds
-        // nothing, and the interface is variant, allowing variance.
-        match search false state with
+        // What the call runs, given what the search found.
+        let ofSearch
+            (state : TypeSystemState)
+            (found : InterfaceMethodSearch)
+            : TypeSystemState * Result<VirtualImplementation, TypeBindingFailure>
+            =
+            match found with
+            | InterfaceMethodSearch.OnChain (implementationTypeHandle, body) ->
+                logger.LogDebug "Found interface implementation through the dispatch map"
+                let impl = DefaultInterfaceImplementation.certainOrRefuse body
+                state, Ok (VirtualImplementation.Found (dispatchedOn implementationTypeHandle impl state))
+            | InterfaceMethodSearch.DefaultBody candidate -> foundDefault state candidate
+            | InterfaceMethodSearch.Conflict candidates ->
+                let candidates =
+                    candidates |> List.map DefaultInterfaceImplementation.instanceCandidateBody
+
+                if throughVariantInterface then
+                    // A conflict at the call's exact instantiation, where CoreCLR's search reports
+                    // one. Through a variant interface, though, whether the call throws depends on the
+                    // JIT: measured on an instance method, unoptimised code throws
+                    // AmbiguousImplementationException from the stub resolver, while optimised code
+                    // devirtualises with `throwOnConflict` false, so the conflict falls through to the
+                    // variant search, which runs the first candidate.
+                    let described =
+                        candidates
+                        |> List.map (fun m -> $"%s{MethodOwner.describe m.Owner}::%s{m.Name}")
+                        |> String.concat ", "
+
+                    state,
+                    Ok (
+                        VirtualImplementation.Unmodelled
+                            $"more than one most-specific default body of %s{methodToCall.Name} at a variant interface's exact instantiation, where CoreCLR throws or runs the first depending on how the JIT compiled the call: %s{described}"
+                    )
+                else
+                    state, Ok (VirtualImplementation.Ambiguous candidates)
+            | InterfaceMethodSearch.OwnBody _ ->
+                failwith
+                    $"BUG: virtual dispatch of %s{methodToCall.Name}: an instance method's search found a static method's own body"
+            | InterfaceMethodSearch.Nothing when not walkBaseTypes -> state, Ok VirtualImplementation.NotOverridden
+            | InterfaceMethodSearch.Nothing -> nothingFound state
+
+        if methodDeclaringType.IsInterface then
+            let definition =
+                match methodToCall.IdentityKey with
+                | Some (handle, _), None -> declaringAssy.Methods.[handle]
+                | _ ->
+                    failwith
+                        $"TODO: interface dispatch to synthesised method %s{methodToCall.Name} on %O{methodToCall.RequiredDeclaringType.Name}, which has no MethodDef row to key the dispatch map on"
+
+            match TypeSystemState.internConcreteType baseClassTypes state methodToCall.RequiredDeclaringType with
+            | state, Error failure -> state, Error failure
+            | state, Ok targetHandle ->
+
+            match
+                searchInstanceInterfaceMethod
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    dispatchTypeHandle
+                    walkBaseTypes
+                    targetHandle
+                    definition
+                    state
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok found -> ofSearch state found
+        else
+
+        let state, classImplementation =
+            match tryResolveBySlotTable state with
+            | state, Error failure -> state, Error failure
+            | state, Ok (Some result) -> state, Ok (Some result)
+            | state, Ok None -> findClassImplementation state
+
+        match classImplementation with
+        | Error failure -> state, Error failure
+        | Ok (Some (implementationTypeHandle, impl, logMessage)) ->
+            logger.LogDebug logMessage
+            state, Ok (VirtualImplementation.Found (dispatchedOn implementationTypeHandle impl state))
+        | Ok None when not walkBaseTypes -> state, Ok VirtualImplementation.NotOverridden
+        | Ok None ->
+
+        logger.LogDebug "No concrete implementation found; searching for a default interface body"
+
+        match TypeSystemState.internConcreteType baseClassTypes state methodToCall.RequiredDeclaringType with
         | state, Error failure -> state, Error failure
-        | state, Ok [ only ] -> foundDefault state only
-        | state, Ok (_ :: _ :: _ as candidates) ->
-            let candidates =
-                candidates |> List.map DefaultInterfaceImplementation.instanceCandidateBody
+        | state, Ok targetHandle ->
 
-            if throughVariantInterface then
-                // A conflict at the call's exact instantiation, where CoreCLR's search reports
-                // one. Through a variant interface, though, whether the call throws depends on the
-                // JIT: measured on an instance method, unoptimised code throws
-                // AmbiguousImplementationException from the stub resolver, while optimised code
-                // devirtualises with `throwOnConflict` false, so the conflict falls through to the
-                // variant search, which runs the first candidate.
-                let described =
-                    candidates
-                    |> List.map (fun m -> $"%s{MethodOwner.describe m.Owner}::%s{m.Name}")
-                    |> String.concat ", "
-
-                state,
-                Ok (
-                    VirtualImplementation.Unmodelled
-                        $"more than one most-specific default body of %s{methodToCall.Name} at a variant interface's exact instantiation, where CoreCLR throws or runs the first depending on how the JIT compiled the call: %s{described}"
-                )
-            else
-                state, Ok (VirtualImplementation.Ambiguous candidates)
-        | state, Ok [] when not throughVariantInterface -> nothingFound state
-        | state, Ok [] ->
-
-        // The variant search "[doesn't] look for a conflict for instance methods": it runs the first
-        // survivor. `sourcesPure/VariantInterfaceDefaultBodyPrecedence.cs` and
-        // `VariantInterfaceMapOrder.cs` pin its order against the real runtime.
-        match search true state with
+        match
+            searchDefaultBodies
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                dispatchTypeHandle
+                targetHandle
+                throughVariantInterface
+                methodToCall
+                state
+        with
         | state, Error failure -> state, Error failure
-        | state, Ok [] -> nothingFound state
-        | state, Ok (first :: _) -> foundDefault state first
+        | state, Ok found -> ofSearch state found
 
     /// One entry of a receiver's interface map, as `collectInterfaceMap` visits it.
     type private InterfaceSearchEntry =
