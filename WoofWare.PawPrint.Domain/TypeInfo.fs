@@ -389,6 +389,11 @@ type BaseClassTypes<'corelib> =
         /// `WAIT_FAILED` + `ERROR_INVALID_PARAMETER` into this before the managed
         /// wrapper ever sees a return value.
         DuplicateWaitObjectException : TypeInfo<GenericParamFromMetadata, TypeDefn>
+        /// `System.Threading.SynchronizationLockException`. Raised by the runtime — not the BCL —
+        /// when a thread releases a monitor it does not own: on .NET 10 CoreCLR's
+        /// `Monitor_Exit_Slowpath` QCall throws it once `Monitor.Exit_FastPath` has reported the
+        /// release an error.
+        SynchronizationLockException : TypeInfo<GenericParamFromMetadata, TypeDefn>
         /// `System.Security.VerificationException`. Raised by the runtime — not the BCL — when a
         /// generic method is instantiated with a type argument its type parameter's constraints
         /// refuse (`MethodDesc::SatisfiesMethodConstraints`, `IDS_EE_METHOD_CONSTRAINTS_VIOLATION`).

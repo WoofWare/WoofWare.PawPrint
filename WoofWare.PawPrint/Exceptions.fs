@@ -229,6 +229,7 @@ module internal ExceptionHResults =
             "System.NotSupportedException", int 0x80131515u // COR_E_NOTSUPPORTED
             "System.InvalidOperationException", int 0x80131509u // COR_E_INVALIDOPERATION
             "System.DuplicateWaitObjectException", int 0x80131529u // COR_E_DUPLICATEWAITOBJECT
+            "System.Threading.SynchronizationLockException", int 0x80131518u // COR_E_SYNCHRONIZATIONLOCK
             "System.EntryPointNotFoundException", int 0x80131523u // COR_E_ENTRYPOINTNOTFOUND
             "System.Runtime.AmbiguousImplementationException", int 0x8013106Au // COR_E_AMBIGUOUSIMPLEMENTATION
             "System.InvalidProgramException", int 0x8013153Au // COR_E_INVALIDPROGRAM

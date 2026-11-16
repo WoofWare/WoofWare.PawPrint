@@ -1902,6 +1902,8 @@ module ExceptionDispatching =
             ExceptionHResults.lookup "System.InvalidOperationException"
         elif id = baseClassTypes.DuplicateWaitObjectException.Identity then
             ExceptionHResults.lookup "System.DuplicateWaitObjectException"
+        elif id = baseClassTypes.SynchronizationLockException.Identity then
+            ExceptionHResults.lookup "System.Threading.SynchronizationLockException"
         elif id = baseClassTypes.EntryPointNotFoundException.Identity then
             ExceptionHResults.lookup "System.EntryPointNotFoundException"
         elif id = baseClassTypes.AmbiguousImplementationException.Identity then

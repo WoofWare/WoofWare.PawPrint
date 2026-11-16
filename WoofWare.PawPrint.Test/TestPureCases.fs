@@ -118,10 +118,6 @@ module TestPureCases =
     /// and how it was verified to behave on real .NET 10.
     let parkedOnNet10 : Map<string, string> =
         [
-            "SynchronizedMethodReleasedByBody.cs",
-            """A synchronized method whose body calls `Monitor.Exit(this)`, so the runtime's exit helper before its `ret` (`Monitor.ExitIfLockTaken` on .NET 10) finds the monitor free and raises `SynchronizationLockException`, which the JIT's fault handler round the body raises again by calling the helper a second time, and the caller catches. PawPrint's `Monitor.Exit_FastPath` stops first (measured): "TODO: Monitor.Exit_FastPath on a Free SyncBlock should throw SynchronizationLockException". Un-park when that raises. Verified to exit 0 on real .NET 10."""
-            "SynchronizedMethodFaultExitSkipsOwnClauses.cs",
-            """A synchronized method whose body calls `Monitor.Exit(this)` and then throws, so the fault handler the JIT wraps round its body calls the runtime's exit helper (`Monitor.ExitIfLockTaken` on .NET 10), which finds the monitor free and raises `SynchronizationLockException` outside every clause of the method's own. PawPrint's `Monitor.Exit_FastPath` stops first (measured): "TODO: Monitor.Exit_FastPath on a Free SyncBlock should throw SynchronizationLockException". Un-park when that raises. Verified to exit 0 on real .NET 10."""
             "RuntimeAsyncCatchWrapsAfterSuspension.cs",
             """On .NET 10 `LoadIntoBufferAsyncCore` is a state machine, and the `HttpRequestException` its `catch` makes goes through `ExceptionDispatchInfo.SetCurrentStackTrace`, which formats the current stack; formatting the state machine's `MoveNext` looks up the method it belongs to, by type name (`StackTrace.TryResolveStateMachineMethod`), which stops in `RuntimeAssembly.GetTypeCore` (measured): "MemoryBlock.readBytes: byte at offset 0 in <stack memory block #0> is uninitialised", as `RuntimeAsyncTraceHidesThunk.cs` does. .NET 11's runtime-async methods are no state machines. Un-park when `RuntimeAssembly.GetTypeCore` runs on .NET 10. Verified to exit 0 on real .NET 10."""
             "RuntimeAsyncTraceHidesThunk.cs",

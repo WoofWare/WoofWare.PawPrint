@@ -208,6 +208,36 @@ module NativeMonitor =
             let state = SyncBlockMonitor.pulseAll ctx.Thread addr state
             NativeHandlerResult.completed state |> Some
 
+        | "Monitor_Exit_Slowpath",
+          "System.Private.CoreLib",
+          "System.Threading",
+          "Monitor",
+          _,
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "ObjectHandleOnStack",
+                                                        objectHandleGenerics)
+            MonitorNestedEnum state.TypeSystem.ConcreteTypes "LeaveHelperAction" ],
+          MethodReturnType.Void when objectHandleGenerics.IsEmpty ->
+            // .NET 10 QCall: Monitor.Exit_Slowpath(ObjectHandleOnStack obj, LeaveHelperAction exitBehavior) -> void.
+            let operation = "Monitor_Exit_Slowpath"
+
+            if instruction.Arguments.Length <> 2 then
+                failwith $"%s{operation}: expected two native arguments, got %d{instruction.Arguments.Length}"
+
+            let addr =
+                addressFromObjectHandle operation ctx.BaseClassTypes state instruction.Arguments.[0]
+
+            let exitBehavior =
+                match instruction.Arguments.[1] |> CliType.unwrapPrimitiveLike with
+                | CliType.Numeric (CliNumericType.Int32 i) -> i
+                | other -> failwith $"%s{operation}: expected int32 LeaveHelperAction, got %O{other}"
+
+            match System_Threading_Monitor.Exit_Slowpath ctx.Thread addr exitBehavior state with
+            | Some state -> NativeHandlerResult.completed state |> Some
+            | None ->
+                NativeHandlerResult.raiseException ctx.BaseClassTypes.SynchronizationLockException state
+                |> Some
+
         | "Monitor_TryEnter_Slowpath",
           "System.Private.CoreLib",
           "System.Threading",
