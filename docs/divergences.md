@@ -1395,7 +1395,12 @@ reader of a slot number uses it only to index the same table, so a table of vari
 nothing a program does except through these numbers.
 
 **Observable example**: `RuntimeMethodHandle.GetSlot` and `RuntimeTypeHandle.GetNumVirtuals`,
-reached by reflecting over CoreLib's internals.
+reached by reflecting over CoreLib's internals. `RuntimeTypeHandle.GetNumVirtualsAndStaticVirtuals`
+and `RuntimeTypeHandle.GetMethodAt`, reached the same way, show it too. Measured on .NET 11.0.0-rc.3,
+`interface ITask { Task<int> A(); int B(); ValueTask C(); static abstract Task S(); static abstract
+int T(); }` has a count of 8, and `GetMethodAt` answers `A`, null, `B`, `C`, null, `S`, null, `T`;
+PawPrint answers 5 and `A`, `B`, `C`, `S`, `T`, and never a null handle. `Type.GetInterfaceMap`, the
+only caller of the count in CoreLib, returns the same map on both, because it skips null handles.
 
 **Where this lives in code**: `ConcreteVirtualDispatch` and `StaticVirtualDispatch` take the step
 from a variant to its ordinary sibling (`AsyncVariantDispatch`); `MethodTableLayout` lays out

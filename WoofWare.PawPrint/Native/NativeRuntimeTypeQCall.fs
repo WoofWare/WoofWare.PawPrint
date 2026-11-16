@@ -2336,6 +2336,42 @@ module NativeRuntimeTypeQCall =
             | other ->
                 failwith
                     $"%s{operation}: unexpected metadata token kind %O{other} from token 0x%08x{methodToken}; the managed wrapper should only forward MethodDef/MemberReference/MethodSpec"
+        // `[LibraryImport(..., EntryPoint = "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals")]`, called by
+        // the internal `RuntimeTypeHandle.GetNumVirtualsAndStaticVirtuals(RuntimeType)` with
+        // `new QCallTypeHandle(ref type)`, after a `Debug.Assert` that the type is not null.
+        | "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals",
+          "System.Private.CoreLib",
+          "System",
+          "RuntimeTypeHandle",
+          "GetNumVirtualsAndStaticVirtuals",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        qCallGenerics) ],
+          MethodReturnType.Returns (ConcretePrimitive state.TypeSystem.ConcreteTypes PrimitiveType.Int32) when
+            qCallGenerics.IsEmpty
+            ->
+            let operation = "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals"
+
+            if instruction.Arguments.Length <> 1 then
+                failwith $"%s{operation}: expected one native argument, got %d{instruction.Arguments.Length}"
+
+            let target =
+                instruction.Arguments.[0]
+                |> EvalStackValue.ofCliType
+                |> NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state
+
+            let state, count =
+                VirtualSlotLayout.numVirtualsAndStaticVirtuals
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    operation
+                    state
+                    target
+
+            state
+            |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 count)) ctx.Thread
+            |> NativeHandlerResult.completed
+            |> Some
         | "RuntimeTypeHandle_GetMethodAt",
           "System.Private.CoreLib",
           "System",

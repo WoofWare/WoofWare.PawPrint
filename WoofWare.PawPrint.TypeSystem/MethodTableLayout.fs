@@ -1816,6 +1816,35 @@ module MethodTableLayout =
             }
         )
 
+    /// The static virtual methods a type declares, in slot order: the slots CoreCLR numbers on from
+    /// `GetNumVirtuals()` for an interface, which `RuntimeTypeHandle_GetMethodAt` answers and
+    /// `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals` counts. Empty for every type that is not an
+    /// interface.
+    ///
+    /// A function of the definition's metadata alone, so the same for every instantiation of it.
+    let staticVirtualsOfDefinition
+        (operation : string)
+        (owner : SlotOwner)
+        (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>)
+        : VtableSlot list
+        =
+        // CoreCLR's two functions test this differently. `RuntimeTypeHandle_GetMethodAt` searches
+        // past the vtable only when `IsInterface()`; `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals`
+        // counts for any type whose `HasVirtualStaticMethods` flag is set, and the method table
+        // builder sets that flag on a class that merely implements such an interface too. They agree
+        // because no type but an interface can declare a static virtual: the builder refuses the type
+        // (`IDS_CLASSLOAD_STATICVIRTUAL`), and `declaredMethodsOf` refuses it in the same place, so a
+        // class's slots past the vtable never hold one.
+        if not typeInfo.IsInterface then
+            []
+        else
+            slotsBeyondVtableOfDefinition operation owner typeInfo
+            // CoreCLR's `IsVirtual() && IsStatic()`. `IsVirtual` alone would select the same slots,
+            // since `PlaceVirtualMethods` has already placed every instance virtual in the vtable,
+            // so nothing past it is virtual and not static; both conjuncts are kept as CoreCLR
+            // writes them.
+            |> List.filter (fun slot -> slot.Method.IsVirtual && slot.Method.IsStatic)
+
     /// A closed type's whole method table, as CoreCLR's `bmtVT->pSlotTable`: the vtable proper,
     /// followed by the region `PlaceNonVirtualMethods` fills. Slot numbers run across the two
     /// without a break, and `cVirtualSlots` -- `MethodTable::GetNumVirtuals()` -- is the length of
