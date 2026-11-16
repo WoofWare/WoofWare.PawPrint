@@ -371,6 +371,39 @@ module VirtualSlotLayout =
         | RuntimeTypeHandleTarget.Composite ((CompositeShape.Byref | CompositeShape.Pointer), _)
         | RuntimeTypeHandleTarget.FunctionPointer _ -> typeDesc ()
 
+    /// CoreCLR's `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals` (runtimehandles.cpp:365): the
+    /// number of slots `methodAt` answers for <paramref name="target"/>. That is `numVirtuals`, plus,
+    /// for an interface, the static virtual methods it declares itself, which `methodAt` numbers on
+    /// from the vtable. `Type.GetInterfaceMap` asks it for the length of its loop over `GetMethodAt`.
+    ///
+    /// On .NET 11 the number is CoreCLR's less its async variant slots: CoreCLR lays out one after
+    /// each `Task`-returning virtual, at which `GetMethodAt` answers null, and PawPrint lays out none
+    /// (`docs/divergences.md`, "A runtime-async method's async variant has no virtual slot of its
+    /// own"). `GetInterfaceMap` skips a null slot, so its maps are the same.
+    ///
+    /// A TypeDesc (a byref, pointer, function pointer or type variable) is refused: CoreCLR counts
+    /// the method table `TypeHandle::GetMethodTable` substitutes for it, which PawPrint does not
+    /// model (#2299). `GetInterfaceMap` never passes one.
+    let numVirtualsAndStaticVirtuals
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (target : RuntimeTypeHandleTarget)
+        : IlMachineState * int
+        =
+        // Before `numVirtuals`, which sends a closed byref, pointer or function pointer to
+        // `vtableOfClosed`, and that answers an empty vtable: without this, a closed pointer would
+        // count 0 where CoreCLR counts `UIntPtr`'s 15.
+        if TypeHandleTag.isTypeDesc target then
+            failwith
+                $"TODO: %s{operation}: %O{target} is a TypeDesc; CoreCLR counts the method table TypeHandle::GetMethodTable() gives it, UIntPtr's for a pointer or a function pointer and none (0) for a byref or a type variable, which PawPrint does not model (#2299)"
+
+        let state, numVirtuals =
+            numVirtuals loggerFactory baseClassTypes operation state target
+
+        state, numVirtuals + List.length (staticVirtualsOf operation state target)
+
     /// What `RuntimeTypeHandle_GetMethodAt` finds at a slot of a type's method table.
     [<RequireQualifiedAccess>]
     type MethodAtSlot =

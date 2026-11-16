@@ -331,9 +331,9 @@ module TestNumVirtualsAndStaticVirtuals =
             $"CoreLib: %d{exported.Length} types, %d{interfaces} interfaces, %d{staticTails} with a static tail, %d{nullSlots} with a null slot, %d{stopwatch.ElapsedMilliseconds} ms"
 
         List.ofSeq disagreements |> shouldEqual []
-        // The comparison of interfaces' tails says nothing if no interface has one: 43 measured on
-        // .NET 10, 44 on .NET 11.
-        Assert.That (staticTails, Is.GreaterThanOrEqualTo 40)
+        // The comparison of interfaces' tails says nothing if no interface has one: 33 of CoreLib's
+        // exported interfaces have one, measured on a .NET 10 host.
+        Assert.That (staticTails, Is.GreaterThanOrEqualTo 30)
 
     // ----- Generated corpora -----
 
@@ -1015,7 +1015,7 @@ module TestNumVirtualsAndStaticVirtuals =
             $"%O{runtime}: %d{interfaces} interfaces, %d{withStaticVirtual} with a static virtual"
 
         List.ofSeq disagreements |> shouldEqual []
-        // 43 and 44 measured among the exported interfaces alone.
+        // 50 on .NET 10 and 57 on .NET 11 measured, counting the interfaces CoreLib does not export.
         Assert.That (withStaticVirtual, Is.GreaterThanOrEqualTo 40)
 
     /// Real .NET 11 counts 2 and 3, an async variant slot after `DisposeAsync` and after

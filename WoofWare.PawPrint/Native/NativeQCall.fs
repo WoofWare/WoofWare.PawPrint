@@ -141,6 +141,8 @@ module NativeQCall =
             "Delegate_CreateMethodInfo", NativeDelegate.tryExecuteQCall "Delegate_CreateMethodInfo"
             "Delegate_InternalEqualMethodHandles", NativeDelegate.tryExecuteQCall "Delegate_InternalEqualMethodHandles"
             "RuntimeTypeHandle_GetMethodAt", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetMethodAt"
+            "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals",
+            NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals"
             "ModuleHandle_ResolveType", NativeRuntimeType.tryExecuteQCall "ModuleHandle_ResolveType"
             "ModuleHandle_ResolveMethod", NativeRuntimeType.tryExecuteQCall "ModuleHandle_ResolveMethod"
             "MethodTable_CanCompareBitsOrUseFastGetHashCode",
