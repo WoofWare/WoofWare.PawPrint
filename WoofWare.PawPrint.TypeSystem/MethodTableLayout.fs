@@ -507,8 +507,10 @@ module MethodTableLayout =
                 resolveTypeFromRef loggerFactory dotnetRuntimeDirs assembly assembly.TypeRefs.[handle] ctx
                 |> fun (ctx, identity) -> ctx, identity |> Result.map (fun identity -> identity, ImmutableArray.Empty)
             | BaseTypeInfo.TypeSpec handle ->
+                // A TypeSpec blob may begin with custom modifiers, which CoreCLR passes over when it
+                // loads the type the blob names.
                 let generic, arguments =
-                    match assembly.TypeSpecs.[handle].Signature with
+                    match TypeDefn.stripCustomModifiers assembly.TypeSpecs.[handle].Signature with
                     | TypeDefn.GenericInstantiation (generic, arguments) ->
                         generic, ImmutableArray.CreateRange arguments
                     | nominal -> nominal, ImmutableArray.Empty

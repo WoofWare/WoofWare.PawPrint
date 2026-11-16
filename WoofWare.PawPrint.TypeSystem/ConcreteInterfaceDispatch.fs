@@ -112,7 +112,9 @@ module ConcreteInterfaceDispatch =
             | MetadataToken.TypeDefinition _
             | MetadataToken.TypeReference _ -> ImmutableArray.Empty
             | MetadataToken.TypeSpecification handle ->
-                match spellingAssembly.TypeSpecs.[handle].Signature with
+                // A TypeSpec blob may begin with custom modifiers, which CoreCLR passes over when it
+                // loads the type the blob names.
+                match TypeDefn.stripCustomModifiers spellingAssembly.TypeSpecs.[handle].Signature with
                 | TypeDefn.GenericInstantiation (_, arguments) -> ImmutableArray.CreateRange arguments
                 | _ -> ImmutableArray.Empty
             | other ->
