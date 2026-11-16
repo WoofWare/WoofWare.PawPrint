@@ -630,3 +630,252 @@ The probes were not kept. One console program, built for .NET 10 and for .NET 11
 the wrong owner shows. A second program was compiled against a library and run against a second version of it (the
 swapped-library table). The consumer scenarios were Fable's, rerun unchanged. The throwaway also logged each open
 receiver it was asked about, to stderr.
+
+## Decisions
+
+Decided 2026-11-16 by the delegated decider, after checking the plan against `main` at `c50428b33` and against the
+pinned .NET 10 runtime source. The numbers match "Questions for the decider". "Checked" below means read in the code or
+in the planner's probe output during the decision; nothing new was run against real .NET.
+
+### What the check found, before the answers
+
+These change the staging, so they come first.
+
+- **The closed order bug already has an issue: #1318** (open since September, "returns the derived type's interfaces
+  before the base class's"). It does not mention the merged duplicates, and its proposed fix (recurse into the base
+  first inside `collectInterfaces`) is not the fix chosen here. The first pull request below closes it. No new issue is
+  filed for it.
+- **A generic definition is silently wrong today too, not only a closed type** (read, not measured). The handler
+  answers a definition whose rows are all closed, and walks its base afterwards, so `typeof(Action<>)` answers
+  `ISerializable`, `ICloneable` where real .NET answers `ICloneable`, `ISerializable` (real .NET's line is in the
+  planner's dump of CoreLib's definitions). Every generic delegate definition has this shape, and so does any
+  `class G<T> : ClosedBase, IClosed` whose base has an interface.
+- **The closed `interfaceMapOf` already computes the definition's map on the way.** Its owner context is
+  `SubstitutionContext.forDefinition` (`MethodTableLayout.ownerOfDefinition`), each entry's `Substitution` is rooted at
+  the definition, and the duplicate check compares those. The closed handle is used only as a cheap first filter and as
+  the entry's `Interface`. So the definition-level map is an extraction from that function, not a new algorithm, and
+  `MethodTableLayout.nominalIdentityOfSpelling` already resolves the identity a row names without closing anything.
+- **CoreCLR's "no expansion" rule is keyed on the type whose map is being built**, not on the interface being
+  expanded: `if (!(GetModule()->IsSystem() && (IsValueClass() || IsInterface())))` in `ExpandApproxInterface` reads the
+  builder's own module and kind. The plan's description of the throwaway ("followed by that interface's own list (none
+  for CoreLib value types and interfaces)") can be read the other way. `interfaceMapOf`'s `expandParents` is already
+  keyed on the type being built; keep it so. A user's class that implements a CoreLib interface expands that
+  interface's parents by walking its rows.
+- **The plan's line references into `methodtablebuilder.cpp` and its description of the handler, of
+  `collectInterfaceMap`, of `reflectedTypeTarget` and of `openConstructed` are accurate.** The probe outputs agree with
+  the tables: 31 of 1,147 closed lines differ on the baseline, none with the throwaway, and the swapped-library output is
+  identical under PawPrint and real .NET.
+
+### Staging: five pull requests, each landing on its own
+
+This replaces the plan's "Stages". The order of the plan's stages 2 and 3 is reversed, and the closed fix goes first.
+
+1. **The closed order (closes #1318).** Interpreter and tests only. The handler's closed arm (a `Concrete` receiver,
+   and an array, which asks for `System.Array`'s map) answers `InterfaceDispatch.interfaceMapOf`'s entries, in order,
+   duplicates kept. The definition arm keeps answering a definition whose rows are all closed, but **stops** (a `TODO`
+   naming #2309) when the definition's base class has a non-empty interface map, because that is the one case where its
+   order is wrong. `collectInterfaces` therefore loses its walk up the base chain; what is left of it serves only the
+   definition arm and is deleted in the third pull request. A stop was chosen over merging the base's map into that arm
+   in place: the merge would be a third statement of the order rule in the interpreter, written to be deleted a few days
+   later, and a stop is honest in the meantime.
+2. **The definition-level map in the TypeSystem, with `interfaceMapOf` re-expressed through it.** No change in
+   behaviour, no new consumer. `interfaceMapOfDefinition` (internal) is extracted from `interfaceMapOf`, and
+   `interfaceMapOf` becomes "the definition's map, each entry rebased onto the closed arguments and closed". The old
+   walk is deleted in the same pull request.
+3. **Open receivers (closes #2309).** The interpreter converts the definition's entries to targets (decision 4), the
+   handler answers a definition, an open construction and an array over a variable, and `collectInterfaces` and the
+   first pull request's temporary stop are deleted.
+4. **`GetUtf8NameInternal` of an open construction** (#2315). A few lines; it cannot
+   be reached through public API before the third pull request, so it follows it.
+5. **The `dynamic` guest** (decision 9). Tests only.
+
+Why the definition map replaces the old walk *before* the QCall reads it, rather than after as the plan had it: with
+the plan's order, two implementations of the order rule live side by side in the TypeSystem, held together by a
+property test, until a later refactor that nothing forces to happen. With this order there is never a second copy, the
+new function has a real consumer (all of dispatch) from the day it lands, and its oracle is the strongest one available:
+`TestInterfaceDispatchMap` against the host, `TestDispatchBindingFailure`, and every dispatch guest. The cost is that the
+fix the issue asks for waits for a refactor of code dispatch depends on. That is accepted; AGENTS.md asks for a
+dependency to land first. If the second pull request cannot reproduce `interfaceMapOf` exactly, stop and report; do not
+fall back to landing the definition map beside the old walk.
+
+Each pull request starts with a commit of tests alone, with the failing output recorded, as the plan's "Test design"
+says. For the second, which changes no behaviour, the first commit instead adds the new function *beside* the old walk
+with a property that the two agree entry for entry (handle, substitution by `substitutionsEquivalent`, and both flags)
+over `TestInterfaceDispatchMap`'s corpora; record that run in the pull request body, then delete the old walk and that
+property in a later commit of the same pull request.
+
+### 1. Where an open receiver's list comes from: A
+
+A definition-level interface map in the TypeSystem. B writes the order rule a second time and leaves the TypeSystem
+unable to answer for a definition, which #2303 and #2295 both need. C coerces an open identity into a closed one, which
+AGENTS.md's guidance on honest lookups rules out, and it can give a wrong answer silently when a stand-in coincides with
+a real argument.
+
+For the implementer:
+
+- The definition entry holds the interface's identity, its `TypeInfo`, the definition-rooted `Substitution`,
+  `DeclaredOnType` and `ImplementedByParent`. Consider making the closed `InterfaceMapEntry` hold a definition entry
+  plus the closed `Interface` and `Type`, so the two cannot disagree; that is the implementer's call.
+- The parent's entries come from the parent *definition's* map, rebased onto the arguments
+  `ConcreteMethodTable.baseOfDefinition` gives, as the closed function does today. Nothing is concretised while building
+  the definition map.
+- The duplicate check is "same interface identity, and `substitutionsEquivalent`". The closed handle comparison that
+  precedes it today is only a filter and goes away.
+- Do not memoise the definition map unless a measurement asks for it. Compare the time of the four Guest categories
+  before and after the second pull request and put the numbers in its body.
+- Two things may shift in the second pull request and must be looked at, not assumed. First, the order in which
+  interface types are resolved and concretised: the definition map resolves every row's identity before any argument is
+  closed, where the old walk interleaved them. That is CoreCLR's own order (`LoadApproxInterfaceMap`, then
+  `LoadExactInterfaceMap`), but it can change which assembly loads first and which concrete handle is registered first.
+  Second, which failure a type with two unbindable rows reports. `TestDispatchBindingFailure` and the guests that
+  observe assembly loads must stay green without edits; if one does not, stop and measure real .NET before changing
+  the test.
+
+### 2. The closed path: (i), and it lands first
+
+A closed receiver answers `interfaceMapOf`. That is the first pull request, before any open-receiver work, because a
+silent wrong answer is worse than a stop and the fix is a few lines over a function that is already compared with the
+host. After the third pull request the closed arm stays on `interfaceMapOf`; it does not move to the target conversion.
+The two closings (TypeSystem handles for a closed receiver, targets for an open one) are tied by a property instead:
+for every closed receiver in the corpora, converting the definition's entries with the receiver's closed arguments as
+targets gives exactly `interfaceMapOf`'s handles, in order.
+
+`interfaceMapOf`'s docstring says "a class or value type", and `TestInterfaceDispatchMap` leaves interfaces out. The
+first pull request makes an interface a supported receiver: correct the docstring, and extend the comparison with the
+host to every closed CoreLib interface and to closed instantiations of generic ones (the map only; an interface has no
+dispatch table to compare).
+
+### 3. Re-expressing `interfaceMapOf` through the definition map: part of this work, and before the QCall change
+
+It is the second pull request, not a follow-up and not a third stage. See "Staging" for the reason. #2309 closes with
+the third pull request.
+
+### 4. How an entry becomes a target: (a), direct conversion
+
+A function in the interpreter from a definition entry and the receiver's arguments (as targets) to a target:
+`Closed h` stays; `Formal (G, i)` is the receiver's `i`th argument, and a `Formal` of any other owner is a logic error
+that fails loudly, as `SubstitutionContext.rebase` does; `Spelled` is `reflectedTypeTarget` of the spelling in its own
+assembly, in an `Open` environment of the inner context converted the same way. (b) would have to re-spell tokens
+across assemblies, and (c) keeps no tie to the TypeSystem's entries.
+
+Points the plan did not state:
+
+- **An interface with no generic arguments must come back `Closed`.** `RuntimeTypeHandleTarget.openConstructed` given an
+  empty argument list returns `OpenGenericTypeDefinition`, which is wrong for `IEnumerable` or `IDisposable`. Test "every
+  argument is closed" (true of an empty list) before reaching for `openConstructed`.
+- "A definition applied to argument targets, in canonical form" is already written inline in `reflectedTypeTarget`'s
+  `GenericInstantiation` arm. Extract that one piece and call it from both places; do not write it again.
+- The whole answer is one function from a receiver target to an ordered list of targets, callable outside a guest. The
+  handler classifies the receiver, calls it, and allocates the array. The property tests call the same function.
+
+### 5. An array over a variable: (a), answer it
+
+`T[]`, `List<K>[]` and `T[,]` answer `System.Array`'s closed map, as a closed array does. The guest then stops in
+`GetUtf8NameInternal`, which is the fourth pull request. Until that lands, the stop is pinned by a refusal test that
+names #2315.
+
+### 6. `GetUtf8NameInternal` of an open construction: yes, an issue
+
+Filed as #2315, naming both ways to reach it. It is small (CoreCLR reads the
+definition's TypeDef name through `GetCl()`, and the arm for a bare definition already does that), and it is the fourth
+pull request. When it lands, the refusal test of decision 5 becomes two positive guest checks:
+`typeof(List<>).GetInterface("IList`1")` and `GetInterfaces()` on `List<>`'s `T[]`, eleven entries in the measured
+order.
+
+### 7. CoreLib's no-expansion rule: (a), mirror CoreCLR
+
+Value types and interfaces declared in CoreLib, keyed on the type whose map is being built. It changes in the second
+pull request, where the function is rewritten anyway, with a comment that says the rule cannot be observed over CoreLib
+as Roslyn compiles it. The mutant stays listed as equivalent.
+
+To keep "cannot be observed" a checked statement and not a measurement made once, add one cheap test over the host's
+CoreLib metadata: for every value type and interface CoreLib declares, the number of InterfaceImpl rows plus the host's
+count of the base class's interfaces equals the host's `GetInterfaces().Length`. While that holds, expansion can add
+nothing for those types. If a future CoreLib breaks it, the rule has become observable there, the comparison with the
+host tests it for real, and the "equivalent" label must be removed.
+
+### 8. The cast rule's `closeOver`: (a), left for #2295
+
+One feature per change. When the third pull request merges, say in its body what #2295 and #2303 can now use (a
+definition's interface map, with its flags), so those issues are updated from the merge and not from a promise.
+
+Two walks remain afterwards: `closeOver`, and `ConcreteVirtualDispatch.collectInterfaceMap`'s search order. The second
+is deliberate, but by CoreCLR's own text it is a view of the map (each class level's newly added entries, most derived
+level first), and it is written as an independent walk that removes duplicates by closed handle. Whether the two can
+disagree is not known; #2316 asks. It is not part of this work.
+
+### 9. The `dynamic` guest: yes, as its own pull request, last
+
+`sourcesPure/DynamicMemberAccess.cs`, both operations, after the third pull request. It is a separate pull request
+because its risks are the harness's (a reference to `Microsoft.CSharp`, the running time), not this feature's. Measure
+it in the harness first: it goes in `GuestSolo` if a single run takes about as long as that category's other tests. If
+it takes much longer than the Release App's three to five minutes, stop and ask before adding it. Autofac and Moq wait
+for #2092's consumer fixture.
+
+### 10. The swapped-library shapes: (a), fixed shapes, but with the host as the oracle
+
+Run them at the function level, with both images loaded on the host and in PawPrint as `TestInterfaceMethodImplementation`
+does with `swapLibrary`, and compare PawPrint's list with the host's `GetInterfaces()`; do not write the expected lists
+by hand. Because the oracle is the host, adding a shape costs one line, so add the interactions the plan's seven shapes
+miss (all against the second version of the library, where `IC<T> : IA<T>, IB`):
+
+- `class C2<T> : IC<T>, IA<T>`: a parent found by expansion and then declared by a later row (it keeps its earlier
+  position);
+- `class Der2<T> : BaseA<T>, IC<T>`: a parent the base class already implements (no second entry);
+- `class D2<T, U> : IC<T>, IA<U>`, and its instantiation over `int, int`: a parent found by expansion that a later row
+  duplicates only after substitution (two `IA<int>` entries);
+- `struct S2<T> : IC<T[]>`: expansion under a composite argument.
+
+These first go red or green in the first pull request for the closed receivers among them, since the expansion code is
+`interfaceMapOf`'s; the open receivers join in the third. Teaching the generator to drop rows is not done now.
+
+### What the planner missed
+
+**Tests and guest rows to add** (each expectation confirmed by a control on real .NET 10 and 11 first; where no
+measurement exists yet, that is said):
+
+- `typeof(Action<>)` gives `ICloneable`, `ISerializable` (measured in the planner's dump). In the first pull request this
+  is a refusal test for the temporary stop; in the third it becomes a guest check.
+- A user's `class OverClosed<T> : ClosedBase, IDisposable` gives `IB`, `IDisposable`: the same two steps. Not yet
+  measured.
+- A generic *method's* type parameter as an argument: the return type of `List<TM> M<TM>()` gives `List<>`'s eight over
+  `TM`. The issue lists this as unmeasured and the plan did not measure it either. Measure it, then add it.
+- An open-constructed *interface* receiver: `typeof(IC<>).MakeGenericType(K)` gives `IA<K>`, `IB`. The probe ran this;
+  the guest table has no such row.
+- An interface receiver whose argument is a bare definition: with `class X<T> : IC<X<T>>`,
+  `typeof(X<>).GetInterfaces()[0].GetInterfaces()` gives `IA<X#def>`, `IB`, the argument reference-equal to
+  `typeof(X<>)`. Not yet measured.
+- In `TypeGetInterfacesOrder.cs`: a closed interface receiver (`IC<int>`, `IList<int>`), an enum, and a struct.
+- The cross-check property of decision 2, and the CoreLib metadata test of decision 7.
+- For the generated hierarchies, extend `InterfaceCorpusGenerator` if its shapes are close; do not start a second
+  generator beside it without saying why.
+- Keep each property test to about a minute at the function level. If the substitution sweep over 1,750 instantiations
+  does not fit, sample it with a fixed seed and assert the labels' floors on the sample.
+
+**Mutants to add to the plan's table:**
+
+| mutant | killed by |
+|---|---|
+| first pull request: the closed arm back on search order, or duplicates removed by handle | `TypeGetInterfacesOrder.cs`; the host comparison |
+| first pull request: the temporary stop removed (a definition's base interfaces after its own) | the `Action<>` and `OverClosed<>` refusal tests |
+| an array receiver given no map, or its element's | the existing `ArrayGetInterfaces*` guests |
+| an interface with no generic arguments answered as `OpenGenericTypeDefinition` | guests 1 and 2, by reference; a canonical-form example |
+| `Formal (G, i)` read at the wrong index (arguments reversed) | `Dictionary<,>`, `Dup<,>`, `Outer<>.Inner<>` |
+| the no-expansion rule keyed on the interface being expanded, not on the type being built | none over CoreLib as compiled; equivalent, listed with the plan's other equivalent mutant |
+| second pull request: the duplicate check on interface identity alone | `Mixed<>` (`IA<int>` and `IA<T[]>`), `Dup<,>` |
+| second pull request: the parent's entries not rebased onto the extends clause | `Derived<int>`, `DeepBase<>` |
+
+**A diagnostic defect.** Every stop message in the probe output renders a type as
+`System.Reflection.Metadata.TypeDefinitionHandle`, because `RuntimeTypeHandleTarget.ToString` formats the metadata
+handle itself. Filed as #2318; not part of this work, but it will make the refusal
+tests' expected messages easier to read once fixed.
+
+**The constraint stop the plan only noted** is filed as #2317, since it is a stop
+on a call real .NET answers and no issue recorded it.
+
+### Issues and comments
+
+- New: #2315, #2316,
+  #2317, #2318.
+- A comment on #1318 with the duplicates, the measured extent, the definition case, and the fix chosen.
+- No issue for the closed order: #1318 is it.
