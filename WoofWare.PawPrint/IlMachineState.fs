@@ -300,6 +300,9 @@ module IlMachineState =
     let isRuntimeTypeHandleTargetAssignableTo =
         IlMachineRuntimeMetadata.isRuntimeTypeHandleTargetAssignableTo
 
+    let verifyInterfaceIsImplemented =
+        IlMachineRuntimeMetadata.verifyInterfaceIsImplemented
+
     let containsAnyGenericParameter =
         IlMachineRuntimeMetadata.containsAnyGenericParameter
 
