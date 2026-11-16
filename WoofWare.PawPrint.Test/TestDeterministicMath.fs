@@ -3012,7 +3012,8 @@ module TestDeterministicMath =
                 let! k = Gen.choose (-307, 308)
                 let! offset = Gen.choose (-4, 4)
 
-                return BitConverter.Int64BitsToDouble (BitConverter.DoubleToInt64Bits (nearestPowerOfTen k) + int64 offset)
+                return
+                    BitConverter.Int64BitsToDouble (BitConverter.DoubleToInt64Bits (nearestPowerOfTen k) + int64 offset)
             }
 
         let subnormal =
@@ -3031,7 +3032,8 @@ module TestDeterministicMath =
         Gen.frequency
             [
                 2, genPositiveFiniteDouble
-                1, genNearOneDouble
+                // Only half of `genNearOneDouble`'s draws are within 2^40 ulps of 1.
+                2, genNearOneDouble
                 1, nearPowerOfTen
                 1, subnormal
                 1, extremeExponent
@@ -3046,7 +3048,8 @@ module TestDeterministicMath =
             cover (classifyLog10Argument x)
             isCorrectlyRoundedLog10 x (DeterministicMath.log10 x)
 
-        let coverage = CoverageSample.check propertyConfig (Arb.fromGen genLog10Argument) property
+        let coverage =
+            CoverageSample.check propertyConfig (Arb.fromGen genLog10Argument) property
 
         [
             Log10Region.Subnormal
@@ -3144,13 +3147,19 @@ module TestDeterministicMath =
         // `DeterministicMath.log10`'s docstring argues about.
         let isExactly (power : BigInteger) (x : float) : bool =
             let mantissa, exponent = DeterministicMath.decompose x
-            exponent >= 0 && (mantissa <<< exponent) = power
+
+            if exponent >= 0 then
+                (mantissa <<< exponent) = power
+            else
+                mantissa = (power <<< -exponent)
 
         let tenToThe23 = BigInteger.Pow (BigInteger 10, 23)
 
         let notADouble =
             if isExactly tenToThe23 (float tenToThe23) then
-                [ "10^23 converted to a double exactly, so the powers of ten that are doubles go further than 10^22" ]
+                [
+                    "10^23 converted to a double exactly, so the powers of ten that are doubles go further than 10^22"
+                ]
             else
                 []
 
@@ -3178,15 +3187,15 @@ module TestDeterministicMath =
     [<Test>]
     let ``ln 10 agrees with an independent series`` () : unit =
         // The implementation's `3 ln 2 + 2 atanh(1/9)` against the reference's
-        // `3 ln 2 + sum 1/(k 5^k)`, at the implementation's precision. Its docstring budgets
-        // under 2^11 units of 2^-fractionBits of error; 2^12 here leaves a factor of two.
-        let reference =
-            referenceLnTen >>> (referenceBits - DeterministicMath.fractionBits)
+        // `3 ln 2 + sum 1/(k 5^k)`, at the implementation's precision, to within the error its
+        // docstring budgets: 2^-244, which is 2^12 units of 2^-fractionBits.
+        let reference = referenceLnTen >>> (referenceBits - DeterministicMath.fractionBits)
 
         let difference = BigInteger.Abs (DeterministicMath.lnTen - reference)
 
         if difference > (BigInteger.One <<< 12) then
-            failwith $"lnTen differs from the reference by %O{difference} units of 2^-%d{DeterministicMath.fractionBits}"
+            failwith
+                $"lnTen differs from the reference by %O{difference} units of 2^-%d{DeterministicMath.fractionBits}"
 
         // And the reference itself against the implementation's `log`, which shares no series
         // with it.
@@ -3297,7 +3306,8 @@ module TestDeterministicMath =
             BitConverter.DoubleToUInt64Bits Double.MinValue, negativeNaN
             BitConverter.DoubleToUInt64Bits -infinity, negativeNaN
             // macOS/Arm's libm hands a *signalling* NaN back unquietened, as its `log` does, where
-            // IEEE 754 clause 7.2 asks for the quiet one.
+            // IEEE 754 clause 7.2 asks for the quiet one. Measured; its quiet NaNs it returns
+            // unchanged, sign included, so they need no row here.
             0x7FF0000000000123UL, 0x7FF0000000000123UL
             0xFFF0000000000123UL, 0xFFF0000000000123UL
             0x7FF0000000000001UL, 0x7FF0000000000001UL

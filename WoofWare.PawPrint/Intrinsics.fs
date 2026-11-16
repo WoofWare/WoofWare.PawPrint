@@ -1984,6 +1984,34 @@ module Intrinsics =
             |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Float64 result)) currentThread
             |> advanceCaller
             |> IntrinsicResult.Completed
+        | CorelibAssembly, "Math", "Log10" when intrinsicKey.DeclaringTypeFullName = "System.Math" ->
+            // Declared as `Math.Log` above is, `[Intrinsic]` + `MethodImplOptions.InternalCall`
+            // with no IL body (Math.CoreCLR.cs in the pinned runtime source), and lowered by the
+            // JIT to the platform C library's `log10`. That is not correctly rounded everywhere
+            // either, so `DeterministicMath.log10` computes it from integer arithmetic alone. It is
+            // not `Math.Log` divided by ln 10, whose quotient misses exact answers such as
+            // log10(1000) = 3.
+            //
+            // Reached from FakeItEasy's `CallWriter`, which counts the digits of a call number as
+            // `(int)Math.Log10(n) + 1`.
+            match methodToCall.Signature.ParameterTypes, methodToCall.Signature.ReturnType with
+            | [ ConcreteDouble state.TypeSystem.ConcreteTypes ],
+              MethodReturnType.Returns (ConcreteDouble state.TypeSystem.ConcreteTypes) -> ()
+            | _ -> failwith $"Math.Log10: unexpected signature %s{formatMethodKey intrinsicKey}"
+
+            let argument, state = IlMachineState.popEvalStack currentThread state
+
+            let argument =
+                match argument with
+                | EvalStackValue.Float f -> EvalStackFloat.toDouble f
+                | _ -> failwith $"Math.Log10: unexpected eval stack value: %O{argument}"
+
+            let result = DeterministicMath.log10 argument
+
+            state
+            |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Float64 result)) currentThread
+            |> advanceCaller
+            |> IntrinsicResult.Completed
         | CorelibAssembly, "Math", "Sqrt" when intrinsicKey.DeclaringTypeFullName = "System.Math" ->
             // Declared the same way as the three above -- `[Intrinsic]` +
             // `MethodImplOptions.InternalCall`, no IL body -- so it likewise has no IL to run.

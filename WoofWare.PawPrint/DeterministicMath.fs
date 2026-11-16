@@ -457,6 +457,51 @@ module DeterministicMath =
         // `roundToDouble` gives the +0 that F.10.3.7 asks for.
         roundToDouble ((BigInteger e * lnTwo) + lnMantissa) -fractionBits
 
+    /// ln 10 in fixed point, as `3 ln 2 + ln(5/4)` with `ln(5/4) = 2 atanh(1/9)`. `lnTwo` is off
+    /// by under 2^-247 and the `atanh` series by under 2^-248, so this is off by under 2^-244.
+    let internal lnTen : BigInteger =
+        BigInteger 3 * lnTwo + BigInteger 2 * atanh (scale / BigInteger 9)
+
+    /// The decimal logarithm of `x`, with the semantics of C99 `log10` (C17 F.10.3.8) — which is
+    /// what CoreCLR's `Math.Log10` inherits from the platform C library.
+    ///
+    /// Accuracy: `ln x = e ln 2 + ln m` as in `log`, off by under 2^-236, is divided by `lnTen`,
+    /// off by under 2^-244 (relative error under 2^-245), and the quotient truncated to
+    /// 2^-`fractionBits`. Since `|log10 x|` is at most about 324, the result is off by under
+    /// 2^-236/ln 10 + 324 * 2^-245 + 2^-256, which is under 2^-235. Relative to the answer that is
+    /// under 2^-232 when `e` is non-zero, since `|log10 x|` is then at least `log10 2 / 2`. When `e`
+    /// is zero only `ln m` contributes, off by under 2^-247, and the smallest `|log10 x|` of any
+    /// double other than 1 is about 2^-54, at its neighbours, so the relative error is under 2^-193.
+    ///
+    /// The result is therefore correctly rounded unless the true value lies within 2^-193 relative
+    /// of a midpoint between two doubles. `log10 x` is rational only when `x` is an integer power
+    /// of ten (if `10^(p/q) = x` in lowest terms then `2^p 5^p = x^q`, which forces `q = 1`), and
+    /// the powers of ten that are doubles are `10^0` to `10^22`, since `5^22 < 2^53 < 5^23`. At
+    /// `10^0 = 1` the quotient is exactly zero, and the result the +0 that F.10.3.8 asks for. At
+    /// `10^n` for `n` from 1 to 22 the true value is the integer `n`, which is a double; every
+    /// midpoint is at least 2^-54 from it (half the ulp below 1, the finest of these), and the
+    /// quotient is within 2^-235, so it rounds to `n` exactly. Every other result is irrational and
+    /// so never exactly a midpoint; whether some double's comes within the bound of one is the
+    /// table maker's dilemma, as for `log`, and heuristically the expected number of such doubles
+    /// is under 2^-80.
+    let log10 (x : float) : float =
+        // The special cases are `log`'s, which F.10.3.8 repeats for this function.
+        if Double.IsNaN x then
+            quieted x
+        elif x = 0.0 then
+            // A pole, the same for both zeros; it must precede the negative case, which -0 would
+            // otherwise fall into.
+            -infinity
+        elif Double.IsNegative x then
+            // Every other negative, including -infinity, is a domain error.
+            quietNaN
+        elif Double.IsPositiveInfinity x then
+            infinity
+        else
+
+        let e, lnMantissa = reduceForLogarithm x
+        roundToDouble (divFixed ((BigInteger e * lnTwo) + lnMantissa) lnTen) -fractionBits
+
     /// The integer square root of a non-negative `n`: the greatest `r` with `r * r <= n`.
     let internal integerSqrt (n : BigInteger) : BigInteger =
         if n.Sign < 0 then
