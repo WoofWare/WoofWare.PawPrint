@@ -123,7 +123,7 @@ class World:
 
 
 @st.composite
-def worlds(draw, need_group=False, need_sibling=False, need_external=False):
+def worlds(draw, need_group=False, need_sibling=False, need_external=False, need_lib=False):
     """A consistent world: the nupkgs, the expectation and the directories all describe the same packages."""
     ids = draw(st.lists(st.sampled_from(SIBLING_IDS), min_size=2 if need_sibling else 1, max_size=4, unique=True))
     versions = {pid: draw(VERSION) for pid in ids}
@@ -141,6 +141,8 @@ def worlds(draw, need_group=False, need_sibling=False, need_external=False):
         lib = draw(st.lists(st.sampled_from(lib_pool(pid)), unique=True))
         specs[pid] = (groups, lib)
     first = ids[0]
+    if need_lib and not specs[first][1]:
+        specs[first][1].append(draw(st.sampled_from(lib_pool(first))))
     groups0 = specs[first][0]
     if (need_group or need_sibling or need_external) and not groups0:
         groups0[draw(st.sampled_from(TFMS))] = {}
@@ -194,7 +196,9 @@ def _escape(s):
 
 
 def _dependency_xml(d):
-    attrs = "".join(f' {k}="{_escape(d[k])}"' for k in ["id", "version", "include", "exclude"] if k in d)
+    known = ["id", "version", "include", "exclude"]
+    keys = [k for k in known if k in d] + sorted(k for k in d if k not in known)
+    attrs = "".join(f' {k}="{_escape(d[k])}"' for k in keys)
     return f"<dependency{attrs} />"
 
 
@@ -312,7 +316,7 @@ def lib_on(world, side, package_id):
     return world.nupkg(package_id)["lib"] if side == "nupkg" else world.expectation[package_id]["lib"]
 
 
-SIDE = st.sampled_from(["nupkg", "expectation"])
+SIDES = ["nupkg", "expectation"]
 
 
 class Base(unittest.TestCase):
@@ -360,20 +364,20 @@ class TestMatching(Base):
 class TestSiblings(Base):
     @given(worlds(need_sibling=True), st.data())
     def test_a_sibling_at_the_wrong_version(self, world, data):
-        pid, tfm, i = data.draw(st.sampled_from(dependency_sites(world, "nupkg", siblings=True)))
-        dep = world.nupkg(pid)["groups"][tfm][i]
-        sibling = world.nupkg(dep["id"])
-        right = sibling["version"]
+        site = data.draw(st.sampled_from(dependency_sites(world, "nupkg", siblings=True)))
+        right = world.nupkg(world.nupkg(site[0])["groups"][site[1]][site[2]]["id"])["version"]
         wrong = data.draw(st.sampled_from([v for v in VERSIONS + ["9.9.9"] if v != right]))
-        if data.draw(st.booleans()):
-            # The dependent names another version.
-            dep["version"] = wrong
-            self.assert_difference(world, pid, dep["id"], wrong, right)
-        else:
-            # The sibling was packed at another version.
-            sibling["version"] = wrong
-            sibling["file"] = f"{sibling['id']}.{wrong}.nupkg"
-            self.assert_difference(world, pid, dep["id"], wrong, right)
+        for end in ["dependent", "sibling"]:
+            w = copy.deepcopy(world)
+            pid, tfm, i = site
+            dep = w.nupkg(pid)["groups"][tfm][i]
+            if end == "dependent":
+                dep["version"] = wrong
+            else:
+                sibling = w.nupkg(dep["id"])
+                sibling["version"] = wrong
+                sibling["file"] = f"{sibling['id']}.{wrong}.nupkg"
+            self.assert_difference(w, pid, dep["id"], wrong, right)
 
     @given(worlds(need_sibling=True), st.data())
     def test_a_sibling_given_a_version_in_the_expectation_is_malformed(self, world, data):
@@ -384,96 +388,112 @@ class TestSiblings(Base):
 
 
 class TestDependencies(Base):
-    @given(worlds(need_group=True), SIDE, st.data())
-    def test_an_added_external_dependency(self, world, side, data):
-        pid = data.draw(st.sampled_from(sorted(p for p in world.dirs if groups_on(world, side, p))))
-        groups = groups_on(world, side, pid)
-        tfm = data.draw(st.sampled_from(sorted(groups)))
-        present = {d["id"] for d in groups[tfm]}
-        new_id = data.draw(st.sampled_from([e for e in EXTERNAL_IDS + ["Moq"] if e not in present]))
-        groups[tfm].append(dependency(new_id, data.draw(VERSION), data.draw(ATTRIBUTE), data.draw(ATTRIBUTE)))
-        # Added to the package, it is unexpected; added to the expectation, it is missing.
-        self.assert_difference(world, pid, tfm, new_id, "unexpected" if side == "nupkg" else "missing")
+    @given(worlds(need_group=True), st.data())
+    def test_an_added_external_dependency(self, world, data):
+        for side in SIDES:
+            w = copy.deepcopy(world)
+            pid = data.draw(st.sampled_from(sorted(p for p in w.dirs if groups_on(w, side, p))))
+            groups = groups_on(w, side, pid)
+            tfm = data.draw(st.sampled_from(sorted(groups)))
+            present = {d["id"] for d in groups[tfm]}
+            new_id = data.draw(st.sampled_from([e for e in EXTERNAL_IDS + ["Moq"] if e not in present]))
+            groups[tfm].append(dependency(new_id, data.draw(VERSION), data.draw(ATTRIBUTE), data.draw(ATTRIBUTE)))
+            # Added to the package, it is unexpected; added to the expectation, it is missing.
+            self.assert_difference(w, pid, tfm, new_id, "unexpected" if side == "nupkg" else "missing")
 
-    @given(worlds(need_sibling=True, need_external=True), SIDE, st.data())
-    def test_a_removed_dependency(self, world, side, data):
-        pid, tfm, i = data.draw(st.sampled_from(dependency_sites(world, side)))
-        removed = groups_on(world, side, pid)[tfm].pop(i)
-        self.assert_difference(world, pid, tfm, removed["id"], "missing" if side == "nupkg" else "unexpected")
+    @given(worlds(need_sibling=True, need_external=True), st.data())
+    def test_a_removed_dependency(self, world, data):
+        for side in SIDES:
+            for siblings in [True, False]:
+                w = copy.deepcopy(world)
+                pid, tfm, i = data.draw(st.sampled_from(dependency_sites(w, side, siblings)))
+                removed = groups_on(w, side, pid)[tfm].pop(i)
+                self.assert_difference(w, pid, tfm, removed["id"], "missing" if side == "nupkg" else "unexpected")
 
-    @given(worlds(need_sibling=True, need_external=True), SIDE, st.sampled_from(["include", "exclude"]), st.data())
-    def test_an_include_or_exclude_change(self, world, side, attribute, data):
-        pid, tfm, i = data.draw(st.sampled_from(dependency_sites(world, side)))
-        dep = groups_on(world, side, pid)[tfm][i]
-        old = dep.get(attribute)
-        new = data.draw(st.sampled_from([v for v in ATTRIBUTE_VALUES + ["Native"] if v != old]))
-        if new is None:
-            del dep[attribute]
-        else:
-            dep[attribute] = new
-        names = [pid, tfm, dep["id"], attribute] + [v for v in [old, new] if v is not None]
-        self.assert_difference(world, *names)
+    @given(worlds(need_sibling=True, need_external=True), st.data())
+    def test_an_include_or_exclude_change(self, world, data):
+        for side in SIDES:
+            for attribute in ["include", "exclude"]:
+                w = copy.deepcopy(world)
+                pid, tfm, i = data.draw(st.sampled_from(dependency_sites(w, side)))
+                dep = groups_on(w, side, pid)[tfm][i]
+                old = dep.get(attribute)
+                new = data.draw(st.sampled_from([v for v in ATTRIBUTE_VALUES + ["Native"] if v != old]))
+                if new is None:
+                    del dep[attribute]
+                else:
+                    dep[attribute] = new
+                names = [pid, tfm, dep["id"], attribute] + [v for v in [old, new] if v is not None]
+                self.assert_difference(w, *names)
 
-    @given(worlds(need_external=True), SIDE, st.data())
-    def test_an_external_version_change(self, world, side, data):
-        pid, tfm, i = data.draw(st.sampled_from(dependency_sites(world, side, siblings=False)))
-        dep = groups_on(world, side, pid)[tfm][i]
-        old = dep["version"]
-        new = data.draw(st.sampled_from([v for v in VERSIONS + ["[1.0.0, )"] if v != old]))
-        dep["version"] = new
-        self.assert_difference(world, pid, tfm, dep["id"], old, new)
+    @given(worlds(need_external=True), st.data())
+    def test_an_external_version_change(self, world, data):
+        for side in SIDES:
+            w = copy.deepcopy(world)
+            pid, tfm, i = data.draw(st.sampled_from(dependency_sites(w, side, siblings=False)))
+            dep = groups_on(w, side, pid)[tfm][i]
+            old = dep["version"]
+            new = data.draw(st.sampled_from([v for v in VERSIONS + ["[1.0.0, )"] if v != old]))
+            dep["version"] = new
+            self.assert_difference(w, pid, tfm, dep["id"], old, new)
 
-    @given(worlds(need_external=True), SIDE, st.data())
-    def test_an_external_dependency_without_its_version(self, world, side, data):
-        pid, tfm, i = data.draw(st.sampled_from(dependency_sites(world, side, siblings=False)))
-        dep = groups_on(world, side, pid)[tfm][i]
-        del dep["version"]
-        if side == "nupkg":
-            self.assert_difference(world, pid, tfm, dep["id"], "version")
-        else:
-            self.assert_unreadable(world, pid, dep["id"])
+    @given(worlds(need_external=True), st.data())
+    def test_an_external_dependency_without_its_version(self, world, data):
+        for side in SIDES:
+            w = copy.deepcopy(world)
+            pid, tfm, i = data.draw(st.sampled_from(dependency_sites(w, side, siblings=False)))
+            dep = groups_on(w, side, pid)[tfm][i]
+            del dep["version"]
+            if side == "nupkg":
+                self.assert_difference(w, pid, tfm, dep["id"], "version")
+            else:
+                self.assert_unreadable(w, pid, dep["id"])
 
 
 class TestGroups(Base):
-    @given(worlds(), SIDE, st.data())
-    def test_a_group_added(self, world, side, data):
-        pid = data.draw(st.sampled_from(sorted(p for p in world.dirs if len(groups_on(world, side, p)) < len(TFMS))))
-        groups = groups_on(world, side, pid)
-        tfm = data.draw(st.sampled_from([t for t in TFMS if t not in groups]))
-        groups[tfm] = []
-        if data.draw(st.booleans()):
-            groups[tfm].append(dependency("Ext", "1.0.0", None, None))
-        self.assert_difference(world, pid, tfm, "unexpected" if side == "nupkg" else "missing")
+    @given(worlds(), st.data())
+    def test_a_group_added(self, world, data):
+        for side in SIDES:
+            for with_dependency in [False, True]:
+                w = copy.deepcopy(world)
+                pid = data.draw(st.sampled_from(sorted(p for p in w.dirs if len(groups_on(w, side, p)) < len(TFMS))))
+                groups = groups_on(w, side, pid)
+                tfm = data.draw(st.sampled_from([t for t in TFMS if t not in groups]))
+                groups[tfm] = [dependency("Ext", "1.0.0", None, None)] if with_dependency else []
+                self.assert_difference(w, pid, tfm, "unexpected" if side == "nupkg" else "missing")
 
-    @given(worlds(need_group=True), SIDE, st.data())
-    def test_a_group_removed(self, world, side, data):
-        pid = data.draw(st.sampled_from(sorted(p for p in world.dirs if groups_on(world, side, p))))
-        groups = groups_on(world, side, pid)
-        tfm = data.draw(st.sampled_from(sorted(groups)))
-        del groups[tfm]
-        self.assert_difference(world, pid, tfm, "missing" if side == "nupkg" else "unexpected")
+    @given(worlds(need_group=True), st.data())
+    def test_a_group_removed(self, world, data):
+        for side in SIDES:
+            w = copy.deepcopy(world)
+            pid = data.draw(st.sampled_from(sorted(p for p in w.dirs if groups_on(w, side, p))))
+            groups = groups_on(w, side, pid)
+            tfm = data.draw(st.sampled_from(sorted(groups)))
+            del groups[tfm]
+            self.assert_difference(w, pid, tfm, "missing" if side == "nupkg" else "unexpected")
 
 
 class TestLib(Base):
-    @given(worlds(), SIDE, st.data())
-    def test_a_changed_lib_entry(self, world, side, data):
-        pid = data.draw(st.sampled_from(sorted(world.dirs)))
-        lib = lib_on(world, side, pid)
-        choices = ["add"] + (["remove", "rename"] if lib else [])
-        choice = data.draw(st.sampled_from(choices))
-        absent = [e for e in lib_pool(pid) + ["lib/net8.0/Castle.Core.dll"] if e not in lib]
-        if choice == "add":
-            entry = data.draw(st.sampled_from(absent))
-            lib.append(entry)
-            self.assert_difference(world, pid, entry, "unexpected" if side == "nupkg" else "missing")
-        elif choice == "remove":
-            entry = lib.pop(data.draw(st.integers(0, len(lib) - 1)))
-            self.assert_difference(world, pid, entry, "missing" if side == "nupkg" else "unexpected")
-        else:
-            i = data.draw(st.integers(0, len(lib) - 1))
-            old = lib[i]
-            lib[i] = data.draw(st.sampled_from(absent))
-            self.assert_difference(world, pid, old, lib[i])
+    @given(worlds(need_lib=True), st.data())
+    def test_a_changed_lib_entry(self, world, data):
+        for side in SIDES:
+            for change in ["add", "remove", "rename"]:
+                w = copy.deepcopy(world)
+                pid = data.draw(st.sampled_from(sorted(p for p in w.dirs if lib_on(w, side, p))))
+                lib = lib_on(w, side, pid)
+                absent = [e for e in lib_pool(pid) + ["lib/net8.0/Castle.Core.dll"] if e not in lib]
+                if change == "add":
+                    entry = data.draw(st.sampled_from(absent))
+                    lib.append(entry)
+                    self.assert_difference(w, pid, entry, "unexpected" if side == "nupkg" else "missing")
+                elif change == "remove":
+                    entry = lib.pop(data.draw(st.integers(0, len(lib) - 1)))
+                    self.assert_difference(w, pid, entry, "missing" if side == "nupkg" else "unexpected")
+                else:
+                    i = data.draw(st.integers(0, len(lib) - 1))
+                    old = lib[i]
+                    lib[i] = data.draw(st.sampled_from(absent))
+                    self.assert_difference(w, pid, old, lib[i])
 
 
 class TestPackageSet(Base):
@@ -488,108 +508,120 @@ class TestPackageSet(Base):
         world.dirs.add(new_id)
         self.assert_difference(world, new_id, "version.json")
 
-    @given(worlds(), st.sampled_from(NEW_IDS), st.booleans(), VERSION)
-    def test_an_unexpected_package(self, world, new_id, has_directory, version):
-        n = copy.deepcopy(world.nupkgs[0])
-        n.update(id=new_id, version=version, file=f"{new_id}.{version}.nupkg", groups={}, lib=[])
-        world.nupkgs.append(n)
-        if has_directory:
-            world.dirs.add(new_id)
-        self.assert_difference(world, new_id, "unexpected")
+    @given(worlds(), st.sampled_from(NEW_IDS), VERSION)
+    def test_an_unexpected_package(self, world, new_id, version):
+        for has_directory in [False, True]:
+            w = copy.deepcopy(world)
+            n = copy.deepcopy(w.nupkgs[0])
+            n.update(id=new_id, version=version, file=f"{new_id}.{version}.nupkg", groups={}, lib=[])
+            w.nupkgs.append(n)
+            if has_directory:
+                w.dirs.add(new_id)
+            self.assert_difference(w, new_id, "unexpected")
 
-    @given(worlds(), st.data())
-    def test_a_missing_package(self, world, data):
-        i = data.draw(st.integers(0, len(world.nupkgs) - 1))
-        removed = world.nupkgs.pop(i)
-        self.assert_difference(world, removed["id"], "missing")
+    @given(worlds(need_sibling=True))
+    def test_a_missing_package(self, world):
+        # Each package in turn, so that one which another depends on is among them.
+        for i in range(len(world.nupkgs)):
+            w = copy.deepcopy(world)
+            removed = w.nupkgs.pop(i)
+            out = self.assert_difference(w, removed["id"], "missing")
+            # Each package depending on the one not produced says so: that dependency names nothing.
+            lines = out.splitlines()
+            for n in w.nupkgs:
+                for tfm, deps in n["groups"].items():
+                    if any(d["id"] == removed["id"] for d in deps):
+                        prefix = f"{n['id']} {n['version']}: {tfm}: "
+                        self.assertTrue(any(line.startswith(prefix) and removed["id"] in line for line in lines), out)
 
     @given(worlds(), st.data())
     def test_a_file_named_other_than_its_id_and_version(self, world, data):
-        n = data.draw(st.sampled_from(world.nupkgs))
-        n["file"] = data.draw(
-            st.sampled_from(
-                [
-                    f"{n['id'].lower()}.{n['version']}.nupkg",
-                    f"{n['id']}.9.9.9.nupkg",
-                    f"{n['id']}.{n['version']}.symbols.nupkg",
-                    f"renamed.nupkg",
-                ]
-            )
-        )
-        self.assert_difference(world, n["id"], n["file"])
+        index = data.draw(st.integers(0, len(world.nupkgs) - 1))
+        n = world.nupkgs[index]
+        names = [
+            f"{n['id'].lower()}.{n['version']}.nupkg",
+            f"{n['id']}.9.9.9.nupkg",
+            f"{n['id']}.{n['version']}.symbols.nupkg",
+            "renamed.nupkg",
+        ]
+        for name in names:
+            w = copy.deepcopy(world)
+            w.nupkgs[index]["file"] = name
+            self.assert_difference(w, n["id"], name)
 
 
 class TestUnrepresentable(Base):
     @given(worlds(), st.data())
     def test_what_the_expectation_cannot_state_is_a_difference(self, world, data):
-        n = data.draw(st.sampled_from(world.nupkgs))
-        shape = data.draw(st.sampled_from(["frameworkReferences", "frameworkAssemblies", "loose", "untargeted"]))
-        if shape == "frameworkReferences":
-            n["extra_metadata"].append(
-                '<frameworkReferences><group targetFramework="net8.0">'
-                '<frameworkReference name="Microsoft.AspNetCore.App" /></group></frameworkReferences>'
-            )
-            name = "frameworkReferences"
-        elif shape == "frameworkAssemblies":
-            n["extra_metadata"].append(
-                '<frameworkAssemblies><frameworkAssembly assemblyName="System.Net" /></frameworkAssemblies>'
-            )
-            name = "frameworkAssemblies"
-        elif shape == "loose":
-            n["loose"].append(dependency("Moq", "4.20.72", None, None))
-            name = "Moq"
-        else:
-            n["untargeted"].append([dependency("Moq", "4.20.72", None, None)])
-            name = "targetFramework"
-        self.assert_difference(world, n["id"], name)
+        index = data.draw(st.integers(0, len(world.nupkgs) - 1))
+        for shape in ["frameworkReferences", "frameworkAssemblies", "loose", "untargeted", "attribute"]:
+            w = copy.deepcopy(world)
+            n = w.nupkgs[index]
+            if shape == "frameworkReferences":
+                n["extra_metadata"].append(
+                    '<frameworkReferences><group targetFramework="net8.0">'
+                    '<frameworkReference name="Microsoft.AspNetCore.App" /></group></frameworkReferences>'
+                )
+                name = "frameworkReferences"
+            elif shape == "frameworkAssemblies":
+                n["extra_metadata"].append(
+                    '<frameworkAssemblies><frameworkAssembly assemblyName="System.Net" /></frameworkAssemblies>'
+                )
+                name = "frameworkAssemblies"
+            elif shape == "loose":
+                n["loose"].append(dependency("Moq", "4.20.72", None, None))
+                name = "Moq"
+            elif shape == "untargeted":
+                n["untargeted"].append([dependency("Moq", "4.20.72", None, None)])
+                name = "targetFramework"
+            else:
+                tfm = data.draw(st.sampled_from(TFMS))
+                w.expectation[n["id"]]["dependencies"].setdefault(tfm, []).append(dependency("Moq", "4.20.72", None, None))
+                n["groups"].setdefault(tfm, []).append({"id": "Moq", "version": "4.20.72", "type": "Private"})
+                name = "type"
+            self.assert_difference(w, n["id"], name)
 
 
 class TestPrintedEntry(Base):
     @given(worlds(need_group=True), st.data())
     def test_the_printed_entry_is_what_the_package_holds(self, world, data):
-        n = data.draw(st.sampled_from(world.nupkgs))
-        change = data.draw(st.sampled_from(["add", "remove", "attribute", "version", "group", "lib"]))
-        groups = n["groups"]
-        if change == "add" or not any(groups.values()):
-            tfm = data.draw(st.sampled_from(sorted(groups))) if groups else "net8.0"
-            groups.setdefault(tfm, []).append(dependency("Moq", "4.20.72", None, "Build,Analyzers"))
-        elif change == "remove":
-            tfm = data.draw(st.sampled_from(sorted(t for t in groups if groups[t])))
-            groups[tfm].pop()
-        elif change == "attribute":
-            tfm = data.draw(st.sampled_from(sorted(t for t in groups if groups[t])))
-            groups[tfm][0]["include"] = "Native"
-        elif change == "version":
-            tfm = data.draw(st.sampled_from(sorted(t for t in groups if groups[t])))
-            externals = [d for d in groups[tfm] if d["id"] not in world.dirs]
-            if externals:
-                externals[0]["version"] = "[2.0.0, 3.0.0)"
+        index = data.draw(st.integers(0, len(world.nupkgs) - 1))
+        for change in ["add", "remove", "attribute", "version", "group", "lib"]:
+            w = copy.deepcopy(world)
+            n = w.nupkgs[index]
+            groups = n["groups"]
+            if change == "add" or (change in ["remove", "attribute", "version"] and not any(groups.values())):
+                tfm = data.draw(st.sampled_from(sorted(groups))) if groups else "net8.0"
+                groups.setdefault(tfm, []).append(dependency("Moq", "4.20.72", None, "Build,Analyzers"))
+            elif change == "remove":
+                tfm = data.draw(st.sampled_from(sorted(t for t in groups if groups[t])))
+                groups[tfm].pop()
+            elif change == "attribute":
+                tfm = data.draw(st.sampled_from(sorted(t for t in groups if groups[t])))
+                groups[tfm][0]["include"] = "Native"
+            elif change == "version":
+                tfm = data.draw(st.sampled_from(sorted(t for t in groups if groups[t])))
+                externals = [d for d in groups[tfm] if d["id"] not in w.dirs]
+                if externals:
+                    externals[0]["version"] = "[2.0.0, 3.0.0)"
+                else:
+                    groups[tfm].append(dependency("Ext", "2.0.0", None, None))
+            elif change == "group":
+                groups[data.draw(st.sampled_from([t for t in TFMS if t not in groups] or ["net11.0"]))] = []
             else:
-                groups[tfm].append(dependency("Ext", "2.0.0", None, None))
-        elif change == "group":
-            groups[data.draw(st.sampled_from([t for t in TFMS if t not in groups] or ["net11.0"]))] = []
-        else:
-            n["lib"].append("lib/net8.0/Castle.Core.dll")
-        code, out = run(world)
-        self.assertEqual(code, 1, out)
-        printed = actual_entries(out)
-        self.assertEqual(sorted(printed), [n["id"]], out)
-        world.expectation.update(printed)
-        code, out = run(world)
-        self.assertEqual(code, 0, out)
+                n["lib"].append("lib/net8.0/Castle.Core.dll")
+            code, out = run(w)
+            self.assertEqual(code, 1, out)
+            printed = actual_entries(out)
+            self.assertEqual(sorted(printed), [n["id"]], out)
+            w.expectation.update(printed)
+            code, out = run(w)
+            self.assertEqual(code, 0, out)
 
     @given(worlds())
     def test_the_printed_layout_is_the_json_it_means(self, world):
         text = check.format_entries(world.expectation)
         self.assertEqual(json.loads(text), world.expectation, text)
-
-
-def _zip(entries):
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as z:
-        for name, content in entries:
-            z.writestr(name, content)
-    return buffer.getvalue()
 
 
 NUPKG_UNREADABLE = [
@@ -608,6 +640,7 @@ NUPKG_UNREADABLE = [
 EXPECTATION_UNREADABLE = [
     "not JSON",
     "not an object",
+    "a package twice",
     "an entry with an unknown key",
     "a dependency with an unknown key",
     "lib not a list",
@@ -617,63 +650,73 @@ EXPECTATION_UNREADABLE = [
 
 
 class TestUnreadable(Base):
-    @given(worlds(), st.sampled_from(NUPKG_UNREADABLE), st.data())
-    def test_an_unreadable_nupkg(self, world, shape, data):
-        n = data.draw(st.sampled_from(world.nupkgs))
-        if shape == "not a zip":
-            n["zip_override"] = b"PK\x03\x04 but not really a zip"
-        elif shape == "no nuspec":
-            n["drop_nuspec"] = True
-        elif shape == "nuspec only in a subdirectory":
-            n["drop_nuspec"] = True
-            n["extra_entries"].append((f"content/{n['id']}.nuspec", nuspec_bytes(n)))
-        elif shape == "two nuspecs":
-            n["extra_entries"].append(("Other.nuspec", nuspec_bytes(n)))
-        elif shape == "malformed XML":
-            n["nuspec_override"] = nuspec_bytes(n)[:-20]
-        elif shape == "no id":
-            n["nuspec_override"] = nuspec_bytes(n).replace(f"<id>{n['id']}</id>".encode(), b"")
-        elif shape == "no version":
-            n["nuspec_override"] = nuspec_bytes(n).replace(f"<version>{n['version']}</version>".encode(), b"")
-        elif shape == "a group twice":
-            tfm = data.draw(st.sampled_from(TFMS))
-            n["groups"].setdefault(tfm, [])
-            n["nuspec_override"] = nuspec_bytes(n).replace(
-                b"</dependencies>", f'  <group targetFramework="{tfm}" />\n    </dependencies>'.encode()
-            )
-        elif shape == "a dependency twice in one group":
-            tfm = data.draw(st.sampled_from(TFMS))
-            n["groups"].setdefault(tfm, []).append(dependency("Moq", "1.0.0", None, None))
-            n["groups"][tfm].append(dependency("Moq", "2.0.0", None, None))
-        else:
-            tfm = data.draw(st.sampled_from(TFMS))
-            n["groups"].setdefault(tfm, []).append({"version": "1.0.0"})
-        self.assert_unreadable(world, n["file"])
+    @given(worlds(), st.data())
+    def test_an_unreadable_nupkg(self, world, data):
+        index = data.draw(st.integers(0, len(world.nupkgs) - 1))
+        for shape in NUPKG_UNREADABLE:
+            w = copy.deepcopy(world)
+            n = w.nupkgs[index]
+            if shape == "not a zip":
+                n["zip_override"] = b"PK\x03\x04 but not really a zip"
+            elif shape == "no nuspec":
+                n["drop_nuspec"] = True
+            elif shape == "nuspec only in a subdirectory":
+                n["drop_nuspec"] = True
+                n["extra_entries"].append((f"content/{n['id']}.nuspec", nuspec_bytes(n)))
+            elif shape == "two nuspecs":
+                n["extra_entries"].append(("Other.nuspec", nuspec_bytes(n)))
+            elif shape == "malformed XML":
+                n["nuspec_override"] = nuspec_bytes(n)[:-20]
+            elif shape == "no id":
+                n["nuspec_override"] = nuspec_bytes(n).replace(f"<id>{n['id']}</id>".encode(), b"")
+            elif shape == "no version":
+                n["nuspec_override"] = nuspec_bytes(n).replace(f"<version>{n['version']}</version>".encode(), b"")
+            elif shape == "a group twice":
+                # The second group is empty, so a reader keeping either one would see a difference instead.
+                tfm = data.draw(st.sampled_from(TFMS))
+                n["groups"].setdefault(tfm, [])
+                n["nuspec_override"] = nuspec_bytes(n).replace(
+                    b"</dependencies>", f'  <group targetFramework="{tfm}" />\n    </dependencies>'.encode()
+                )
+            elif shape == "a dependency twice in one group":
+                tfm = data.draw(st.sampled_from(TFMS))
+                n["groups"].setdefault(tfm, []).append(dependency("Moq", "1.0.0", None, None))
+                n["groups"][tfm].append(dependency("Moq", "2.0.0", None, None))
+            else:
+                tfm = data.draw(st.sampled_from(TFMS))
+                n["groups"].setdefault(tfm, []).append({"version": "1.0.0"})
+            self.assert_unreadable(w, n["file"])
 
-    @given(worlds(), st.sampled_from(EXPECTATION_UNREADABLE), st.data())
-    def test_an_unreadable_expectation(self, world, shape, data):
+    @given(worlds(), st.data())
+    def test_an_unreadable_expectation(self, world, data):
         pid = data.draw(st.sampled_from(sorted(world.expectation)))
-        entry = world.expectation[pid]
-        names = [pid]
-        if shape == "not JSON":
-            world.expectation_text = json.dumps(world.expectation)[:-1]
-            names = []
-        elif shape == "not an object":
-            world.expectation_text = json.dumps(list(world.expectation))
-            names = []
-        elif shape == "an entry with an unknown key":
-            entry["frameworkReferences"] = []
-        elif shape == "a dependency with an unknown key":
-            entry["dependencies"].setdefault("net8.0", []).append({"id": "Moq", "version": "1.0.0", "private": "x"})
-        elif shape == "lib not a list":
-            entry["lib"] = "lib/net8.0/x.dll"
-        elif shape == "a dependency twice in one group":
-            entry["dependencies"].setdefault("net8.0", []).extend(
-                [dependency("Moq", "1.0.0", None, None), dependency("Moq", "1.0.0", None, None)]
-            )
-        else:
-            entry["dependencies"].setdefault("net8.0", []).append({"version": "1.0.0"})
-        self.assert_unreadable(world, *names)
+        for shape in EXPECTATION_UNREADABLE:
+            w = copy.deepcopy(world)
+            entry = w.expectation[pid]
+            names = [pid]
+            if shape == "not JSON":
+                w.expectation_text = json.dumps(w.expectation)[:-1]
+                names = []
+            elif shape == "not an object":
+                w.expectation_text = json.dumps(list(w.expectation))
+                names = []
+            elif shape == "a package twice":
+                # json.loads would keep the second silently.
+                text = json.dumps(w.expectation)
+                w.expectation_text = text[:-1] + ", " + json.dumps(pid) + ": " + json.dumps(entry) + "}"
+            elif shape == "an entry with an unknown key":
+                entry["frameworkReferences"] = []
+            elif shape == "a dependency with an unknown key":
+                entry["dependencies"].setdefault("net8.0", []).append({"id": "Moq", "version": "1.0.0", "private": "x"})
+            elif shape == "lib not a list":
+                entry["lib"] = "lib/net8.0/x.dll"
+            elif shape == "a dependency twice in one group":
+                entry["dependencies"].setdefault("net8.0", []).extend(
+                    [dependency("Moq", "1.0.0", None, None), dependency("Moq", "1.0.0", None, None)]
+                )
+            else:
+                entry["dependencies"].setdefault("net8.0", []).append({"version": "1.0.0"})
+            self.assert_unreadable(w, *names)
 
     @given(worlds(), st.data())
     def test_two_nupkgs_with_one_id(self, world, data):

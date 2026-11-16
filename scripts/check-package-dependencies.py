@@ -34,8 +34,9 @@ given. Every other dependency is *external*, and the expectation states its vers
 exactly, so that a change to the floor consumers must meet is visible in review.
 
 A nuspec with a `frameworkReferences` or `frameworkAssemblies` element, a dependency
-outside a group, or a group with no targetFramework is reported as a difference: the
-expectation has no way to state one. The nuspec is read by local element names,
+outside a group, a group with no targetFramework, or any other element or attribute
+in its dependencies besides those above is reported as a difference: the expectation
+has no way to state one. The nuspec is read by local element names,
 because its XML namespace varies with the features a package uses. Each file must be
 named `<id>.<version>.nupkg`, as the release job derives a tag from the file name.
 

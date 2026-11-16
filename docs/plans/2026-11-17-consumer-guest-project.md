@@ -1,6 +1,7 @@
 # Regression guests for the libraries that run under PawPrint (issues #2092 and #2314)
 
-Status: proposed, not decided. Nothing below is implemented. The questions at the end are for the decider.
+Status: decided 2026-11-16 (see "Decisions"). PR 1 is built (see "As built (PR 1)" at the end); PR 2 and PR 3 are not
+started.
 
 Measured 2026-11-16 on `origin/main` at `418a1b8df`. Real .NET means 10.0.14 on the macOS host. PawPrint runs used
 the test project's own harness (`BoundedRun.runWith`, Release build) through a throwaway NUnit fixture that was never
@@ -792,3 +793,99 @@ It refers to #2092 and does not close it.
 
 There is no PR for the remaining mocking scenarios. Microsoft.Extensions.DependencyInjection (#2314) follows as its
 own pull request into the same project.
+
+### As built (PR 1)
+
+Branch `ci-nuspec-dependency-check`, closing #2323. What it adds:
+
+* `scripts/check-package-dependencies.py`, standard library only. It reads every `*.nupkg` beneath the directories
+  it is given (recursively, since a pattern download puts each artifact in a directory of its own) and makes the
+  three comparisons of decision 2, with the sibling rule, exact versions for external packages, the unstatable
+  shapes reported as differences, the `<id>.<version>.nupkg` file name rule, and exit 1 or 2 as decided. Its
+  docstring states what it cannot see (#2324, and anything outside `lib/` and the dependency groups).
+* `scripts/package-dependencies.json`, written by hand and then checked to be byte-identical to the layout the script
+  prints for a local pack. Its contents are the decision's list exactly.
+* `scripts/test_check_package_dependencies.py`, run by the flake's new `package-dependencies` check. Every property
+  builds real nupkgs from one generated model, renders the expectation and the version.json directories from the same
+  model, and runs the script's `main`. A matching set passes (with its distribution asserted); each single change, on
+  either the nupkg side or the expectation side, exits 1 and names the package and what differs; each unreadable shape
+  exits 2; the printed entry, pasted into the expectation, removes the package's differences; the printed layout
+  parses to the entry it stands for. Where a property has a few discrete shapes, every example runs all of them,
+  because a first run showed the deterministic profile never drawing one shape of ten.
+* `expected-pack`: a checkout, one `pattern: nuget-package-*` download into `$RUNNER_TEMP/packages`, and the script
+  run with the runner's own `python3 -I`. The six "exactly one nupkg" steps are gone; their comment moved to the new
+  step.
+* `AGENTS.md` and the `emulated-posix-kernel` skill: a new published package needs an entry in the expectation, and a
+  `WoofWare.PosixKernel` bump edits its version there too.
+
+Choices the decisions left open, or which go slightly beyond them:
+
+* Beyond the shapes decision 2 names, any element or attribute in a nuspec's `<dependencies>` other than groups,
+  dependencies and their `id`, `version`, `include` and `exclude` is reported as unstatable (exit 1). A group or a
+  dependency named twice in a nuspec, a `<dependency>` with no id, and a package named twice in the expectation (which
+  `json.loads` would otherwise keep silently) are unreadable (exit 2).
+* A dependency on a sibling whose nupkg was not given gets a line of its own naming the dependent, beside the
+  "missing package" line.
+* The packages are the top-level directories holding a `version.json` on disk, not in git's index, so that the CI job
+  needs no history. `--expectation` and `--root` exist for the tests; CI uses the defaults beside the script.
+* `flake.nix` is a root file, so this change moves every package's version, as any change to it does. `.github` is in
+  the test footprint, so CI runs the suites on this change although it touches no F#.
+
+Measured:
+
+* A local `nix develop -c dotnet pack --configuration Release`, staged in the layout of a pattern download: exit 0,
+  both at the plan's commit and at the implementation commit. The six artifacts of the merge-queue run for `418a1b8df`
+  (downloaded with `gh run download --pattern 'nuget-package-*'`): exit 0, also with Python 3.12, the runner image's.
+  So the sibling-version rule passes on today's packages.
+* A local pack with `<PackageReference Include="Moq" Version="4.20.72" />` temporarily added to
+  `WoofWare.PawPrint.fsproj`: exit 1, `WoofWare.PawPrint <version>: net8.0: unexpected dependency Moq
+  version="4.20.72" exclude="Build,Analyzers"`, then the actual entry and the rule. A copy of the clean pack with Moq
+  added to the PawPrint nuspec by hand and a `Castle.Core.dll` added to its `lib/`: exit 1, naming both.
+* `actionlint` reports the same nine findings on the workflow before and after, none in `expected-pack`. The pinned
+  `actions/download-artifact` (v8.0.1) takes `pattern`, and without `merge-multiple` extracts each artifact into a
+  directory named after it.
+
+Mutation testing: each comparison, the sibling rule and each refusal broken in turn in a copy of the script, with the
+properties run against the copy. All killed except one equivalent mutant: skipping the special message for a sibling
+whose nupkg is absent falls through to the general version-mismatch line, which also names the dependent; removing the
+line altogether is killed by `test_a_missing_package`.
+
+| mutant | tests that failed |
+|---|---|
+| unexpected group ignored | group added, group removed, printed entry |
+| missing group ignored | group added, group removed |
+| unexpected dependency ignored | removed dependency, added external dependency, printed entry |
+| missing dependency ignored | removed dependency, added external dependency, printed entry |
+| external version not compared | external version change, external dependency without its version, printed entry |
+| `include` not compared | include or exclude change, printed entry |
+| `exclude` not compared | include or exclude change |
+| sibling version not compared with the sibling's nupkg | sibling at the wrong version |
+| sibling treated as external | matching set, sibling at the wrong version, printed entry |
+| sibling versions taken from the dependents' nuspecs | sibling at the wrong version, missing package |
+| absent sibling nupkg reports nothing for the dependent | missing package |
+| unexpected `lib/` entry ignored | changed `lib/` entry, printed entry |
+| missing `lib/` entry ignored | changed `lib/` entry |
+| `lib/` entries not read | changed `lib/` entry, matching set, printed entry |
+| `version.json` without an entry ignored | `version.json` with no package |
+| entry without a `version.json` ignored | package with no `version.json` |
+| missing package ignored | missing package |
+| unexpected package ignored | unexpected package |
+| every top-level directory counted as a package | matching set, printed entry |
+| file name not checked | file named other than its id and version |
+| unstatable shapes ignored | what the expectation cannot state |
+| `frameworkReferences` not seen | what the expectation cannot state |
+| dependency outside a group not seen | what the expectation cannot state |
+| group without `targetFramework` dropped | what the expectation cannot state |
+| two nupkgs with one id accepted | two nupkgs with one id |
+| two nuspecs accepted | unreadable nupkg |
+| missing directory accepted | directory that does not exist |
+| a dependency twice in one nuspec group accepted | unreadable nupkg |
+| a group twice in one nuspec accepted | unreadable nupkg |
+| expectation: sibling with a version accepted | sibling given a version in the expectation |
+| expectation: external without a version accepted | external dependency without its version |
+| expectation: unknown key accepted | unreadable expectation |
+| printed entry keeps a sibling's version | printed entry |
+
+Not verifiable before it runs on GitHub: that the job's checkout, download and `$RUNNER_TEMP` path behave as read
+above, and that `nix flake check` on the Linux runner runs the new check (it ran on macOS through
+`nix build .#checks.aarch64-darwin.package-dependencies`).
