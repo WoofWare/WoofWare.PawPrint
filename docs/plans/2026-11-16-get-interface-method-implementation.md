@@ -699,3 +699,351 @@ None were kept. They were:
 - The parked guest, copied unchanged into a scratch project.
 
 A script compared each PawPrint run with the real run line by line, after dropping PawPrint's log lines.
+
+## Decisions
+
+Decided 2026-11-16 by the delegated decider, after checking the plan's claims against the code at `31247de24` and
+against both pinned runtime sources, and after extending the plan's two-version probe on real .NET 10 and 11.
+"Measured here" below means that extended probe; the two runtimes printed the same for every case.
+
+### What the checks found
+
+Confirmed by reading:
+
+- The QCall's text, its one managed caller and the managed loop are as the plan quotes them, on both runtimes.
+  `FindDispatchImpl`, `TryGetCandidateImplementation`, `FindDefaultInterfaceImplementation` and
+  `ResolveVirtualStaticMethod` have the same logic on .NET 10 and 11; the text differs only in contract macros and in
+  one async-variant argument, so "the same text" in the plan should read "the same logic".
+- The plan's reading of each step of the instance path and the static path is right, including the three places where
+  the QCall's answer differs from a call's.
+- `DefaultInterfaceImplementation.search`, `candidateOn` and `implementationOnType` read only identity from the method
+  they are given: its declaring interface, its MethodDef row, whether it is static and whether it is abstract. So
+  decision 3 (a) costs nothing in the lower pieces.
+- `TestStaticVirtualOverrideOrder.fs` already uses the host's `GetInterfaceMap` as its oracle and records, as
+  measured on .NET 10 and 11, that `GetInterfaceMap` resolves afresh at every call. So the plan's "read, not measured"
+  claim about an order-dependent static body is in fact measured: reflection answers the body a read now finds.
+
+Wrong or incomplete in the plan:
+
+1. **"Four call sites" and "existing dispatch tests green unedited" cannot both hold under the plan's B.**
+   `ConcreteVirtualDispatch.tryResolveVirtualImplementation` and `StaticVirtualDispatch.resolve` are also called
+   directly by `TestSzArrayInterfaceDispatch`, `TestDispatchReadsNoBody`, `TestAmbiguousDefaultInterfaceDispatch`,
+   `TestAsyncVariantDispatch`, `TestStaticVirtualOverrideOrder` and `TestDispatchBindingFailure`. A new parameter on
+   either function edits every one of those tests in the commit that is meant to change no behaviour.
+2. **`tryResolveVirtualImplementation` is not an interface-only function.** It also resolves a class's virtual
+   methods, by name and concretised signature. "The interface instantiation and the method definition in place of a
+   concretised method" cannot be its signature; it can only be the signature of the interface half.
+3. **`VirtualImplementation.Reabstracted` does not say which interface instantiation the reabstraction was found
+   on.** It carries the definition alone. The throwaway minted a static reabstraction's handle with no type
+   arguments, which is right only because the probed interface was not generic. Measured here:
+   `CReabsSG : IRrG<string>`, where `IRrG<T> : IArG<T>` reabstracts `static virtual int IArG<T>.S()`, maps
+   `IArG<string>.S` to `IRrG<string>::IArG<T>.S`, reflected as `IRrG<string>`, abstract. The same holds for a
+   generic class `CReabsSGen<int> : IRrG<int>`.
+4. **A receiver that implements `IDynamicInterfaceCastable` does reach the "nothing found" branch.** The plan says
+   dispatch's `Unmodelled` for such a receiver arises only for an interface the receiver does not implement.
+   Measured here: a class implementing `IDynamicInterfaceCastable` and an interface whose instance method ends in a
+   reabstraction, or in a diamond with no most specific body, maps that method to null. The call path answers
+   `Unmodelled` there today, so a projection of the call path would refuse where real .NET answers null.
+5. **An open receiver reaches this QCall through public API today.** PawPrint's `GetInterfaces` refuses an open
+   definition only where an interface row names a type parameter. `class CGBase<T> : IOne` has a closed row, so
+   `typeof(CGBase<>).GetInterfaceMap(typeof(IOne))` is expected to arrive here with an open receiver and a closed
+   interface (read, not run under PawPrint). Measured here on real .NET: with a default body the row is
+   `IAi.M -> IAi::M [IAi]`; with a class method it is `IAi.M -> CGBaseM<T>::M [CGBaseM<T>]`.
+6. **The variant pass's first survivor can be a reabstraction.** Measured here: `CDiamondW : IBw, ICw`, where `IBw`
+   reabstracts `IAw<string>.M` and `ICw` overrides it with a body, maps `IAw<string>.M` and `IAw<object>.M` to
+   **null**; with the interfaces listed in the other order (`ICw, IBw`) both map to `ICw`'s body. So the reflection
+   rule is "the first survivor, and null if it is abstract", not "the first survivor with a body".
+7. **The property's `Ambiguous` clause asks for something the host cannot supply.** When the host's
+   `GetInterfaceMap` throws there are no rows, so "agree on the others" has no oracle.
+
+### 1. How the QCall relates to the interpreter's dispatch
+
+**B, but with the caller's value kept inside the TypeSystem and out of every public signature.** One walk, as in
+CoreCLR; two public entry points, each with a result type that means one thing.
+
+The options were weighed like this:
+
+- **A** returns a wrong answer, silently, for a static conflict in the variant pass, and by finding 4 above refuses
+  three more shapes that real .NET answers. A wrong answer with no refusal is not acceptable here.
+- **C** replaces `VirtualImplementation` for every reader, the escape analysis included, to give answers that a
+  smaller change also gives.
+- **D** keeps two compositions of one search order. Nothing but a test would keep them in step.
+- **The plan's B** shares the walk, which is right. But it puts the caller's value on two public functions, so every
+  interpreter caller must pass it and can pass the wrong one; it edits six test files in the commit meant to change
+  nothing; and it makes the meaning of `VirtualImplementation` depend on an argument. Under `Reflection`,
+  `Reabstracted` would mean "this abstract method is the answer" for a static method and "null" for an instance one,
+  while its docstring says "the call throws `EntryPointNotFoundException`". AGENTS.md asks that a classifier's
+  contract stay truthful for its callers.
+
+What to build instead:
+
+1. **The two existing public functions keep their signatures, their docstrings and their behaviour.**
+   `ConcreteVirtualDispatch.tryResolveVirtualImplementation` and `StaticVirtualDispatch.resolve` go on answering
+   "which method does a call run". No caller in the interpreter, the escape analysis or the tests changes.
+2. **The interface half of each becomes one internal function** that takes the receiver, the interface's
+   `ConcreteTypeHandle` and the interface method's definition (decision 3), and returns an internal result that
+   states what the search found and nothing about what a caller does with it. A recommended shape, which the
+   implementer may adjust so long as each case means one thing:
+   - a method of the class chain (the occupant of the receiver's slot, or a static MethodImpl's body), with the
+     handle of the chain type that declares it. It may be abstract (`CAbs::M`);
+   - the most specific default body, with the handle of the interface instantiation it was found on. It may be
+     abstract, which is a reabstraction, and for a static method it may be order-dependent;
+   - a conflict, with its candidates and their interface handles;
+   - for a static method, the method's own body, reached when no interface in the receiver's map supplies it;
+   - nothing.
+3. **One internal value says which of CoreCLR's callers the search answers for**, a two-case DU private to the
+   TypeSystem (for instance `InterfaceMethodCaller.Call` and `InterfaceMethodCaller.InterfaceMap`). It decides
+   exactly what CoreCLR's own parameter decides, and nothing else:
+   - instance search (`throwOnConflict`): at a conflict in the exact pass, `Call` stops and reports the conflict;
+     `InterfaceMap` goes on to the variant pass if the interface is variant, and otherwise reports nothing found;
+   - static search (whether `uniqueResolution` is passed): at a conflict in the variant pass, `Call` reports the
+     first survivor; `InterfaceMap` reports the conflict.
+   Only three places name a case: the two existing public functions (`Call`) and the new function of decision 5
+   (`InterfaceMap`).
+4. **Everything else that differs is a projection of the internal result**, written once per caller:
+   - the call's projection is today's behaviour: `Found`, `Reabstracted`, `Ambiguous`, `Unmodelled` for an instance
+     conflict at a variant interface's exact instantiation, the `IDynamicInterfaceCastable` and generic-array
+     `Unmodelled` answers in the "nothing found" branch, and the refusal of an order-dependent static body;
+   - the reflection projection is decision 5's.
+   The `IDynamicInterfaceCastable` check, the SZ-array diversion to `SZArrayHelper`, and the refusal of an
+   order-dependent body belong to the call's side only. CoreCLR's `FindDispatchImpl` never consults
+   `IDynamicInterfaceCastable` (its stub resolver does), and this QCall caches nothing.
+5. An async variant is the call path's business: `AsyncVariantDispatch` stays in the two existing public functions.
+   The new function fails loudly if it is handed one, since `GetInterfaceMap` never passes one.
+
+Blast radius: the internals of `callvirt`, `ldvirtftn`, delegate binding, the constrained call and the escape
+analysis all run through the restructured code, so the refactor must be proved (decision 2). No public API is removed
+or changed; one type and one function are added. Reversibility: high, since the additions can be deleted without
+touching a caller. Information kept: all of it, in the internal result.
+
+### 2. May the public signatures change? How is the refactor proved?
+
+**They do not change**, by decision 1. The published `WoofWare.PawPrint.TypeSystem` package gains one public type
+and one public function, and loses nothing. Say that in the pull request's body.
+
+The refactor is proved behaviour-preserving in four ways, all required:
+
+1. **A characterisation property of the call path, written and green before the refactor, and never edited across
+   it.** In its own first commit, add to `TestInterfaceMethodImplementation.fs` a property that drives only the two
+   existing public functions and compares them with the host's `GetInterfaceMap`, over the three corpora of the
+   plan's test design. For each row:
+   - the host's target is not abstract: the call path answers `Found` with that method (same module, same token,
+     declared by the same type), or, for the fixed shapes listed below, the documented call-only answer;
+   - the host's target is an abstract method of a class: `Found` with that method;
+   - the host's target is an abstract method of an interface (a static reabstraction): `Reabstracted` with it;
+   - the host's target is null: anything but `Found`;
+   - the host throws `AmbiguousImplementationException`: `Ambiguous`, or `Found` with the first survivor for a
+     conflict in the variant pass.
+   The call-only answers are `Unmodelled` for the instance variant diamond at its exact instantiation, `Unmodelled`
+   for an `IDynamicInterfaceCastable` receiver, and the refusal of an order-dependent body. Assert that the CoreLib
+   corpus and the generated corpus produce **none** of them, and that each fixed two-version shape produces exactly
+   the one expected. A generic interface method needs method arguments on the call path: instantiate an
+   unconstrained one over `System.Object`, skip a constrained one, and count both with a floor.
+   If this property is red on the unchanged code, stop and report: that is a dispatch bug that exists today, and it
+   is fixed in a pull request of its own before this work goes on.
+2. **The existing suites, unedited.** The default suite and the four Guest categories, each as its own invocation,
+   green before and after. No file under `WoofWare.PawPrint.Test` that exists today is edited by the refactor
+   commit, except to move the generator of decision 8 in a commit that only moves it.
+3. **A before-and-after dump, byte-identical.** With a throwaway test that is not committed, write one line for
+   every (receiver, interface, method) of the three corpora, at a fixed FsCheck seed: the rendered
+   `VirtualImplementation` or the first line of the failure, followed by the number of concrete types registered and
+   the number of assemblies loaded once the query returns. Run it on the commit before the refactor and on each
+   commit after. The files must be identical. Record the line count and "identical" in the refactor commit's
+   message. The two counts are there because the search loads types as it goes, and a reordered or widened search
+   would otherwise pass unseen.
+4. **Mutants**, listed at the end, each observed red.
+
+The refactor is its own commit and adds no behaviour: it extracts the interface half, changes its input to the
+interface handle and the definition, and introduces the internal result with the call's projection. The caller's
+value and the reflection function arrive in the following commit, where the `Call` arm at each of the two branch
+points must be the code that was there before.
+
+### 3. What the shared walk is given for the interface method
+
+**(a): the interface's `ConcreteTypeHandle` and the method's definition**, for the internal interface functions
+only. The call path's method arguments stay a separate argument, as `methodGenerics` already is on
+`tryResolveVirtualImplementation`, and are attached by the call's projection. The reflection function passes none
+and returns none.
+
+(b) is refused: it puts invented arguments into a type that says "as the call instantiates it", and the plan measured
+that constraints reject them for 161 CoreLib rows. (c) is refused: it would stop `GetInterfaceMap` on every numeric
+type.
+
+### 4. Open receivers
+
+**(a): refuse, and file #2303.** The handler refuses, before it concretises
+anything, whenever the receiver or the interface is not `RuntimeTypeHandleTarget.Closed`. The `TODO:` message names
+the receiver and the interface, says that real .NET answers with methods of the open receiver or of the interface,
+and names the issue.
+
+By finding 5 this refusal is reachable through public API today, so its example tests are: `CGBase<>` with the
+closed `IOne` it lists (a guest or a machine-level test, which also settles whether the call arrives here as read);
+and, at the handler, `CGen<>` with its own `IG<T>`. (b) would be a second, definition-level dispatch, and nothing on
+FakeItEasy's path needs it.
+
+### 5. Where the projection lives
+
+**(a): in `WoofWare.PawPrint.TypeSystem`**, as the one new public function and its result type, in a new file
+compiled after `StaticVirtualDispatch.fs`. For instance:
+
+```fsharp
+[<RequireQualifiedAccess>]
+type InterfaceMapTarget =
+    /// The method `GetInterfaceMap` reports, and the type that declares it at the instantiation it was found on.
+    /// It may be abstract.
+    | Method of definition : MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> * declaringType : ConcreteTypeHandle
+    /// The row's target is null.
+    | NoTarget
+    /// `GetInterfaceMap` throws `AmbiguousImplementationException`. Only a static method gives this.
+    | Ambiguous of candidates : MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn> list
+```
+
+The function takes the receiver's handle, the interface's handle and the interface method's definition, and
+dispatches on whether the definition is static. Its projection of the internal result:
+
+| the search found | instance method | static method |
+|---|---|---|
+| a method of the class chain | `Method`, abstract or not | `Method`; an order-dependent body is the one a read now finds |
+| a default body that is not abstract | `Method`, declared by the interface instantiation it was found on | the same; an order-dependent body is the one a read now finds |
+| a default body that is abstract | `NoTarget` | `Method`, declared by the reabstracting interface's instantiation |
+| a conflict | `NoTarget` (it can only be the exact pass of an interface with no variance) | `Ambiguous` |
+| the method's own body (static only) | not applicable | `Method`, declared by the interface |
+| nothing | `NoTarget` | `NoTarget` |
+
+It fails loudly, naming the condition, when the method is not declared by the interface's definition, when it has no
+MethodDef row, when it is an async variant, and when the receiver is an SZ array and the interface is generic (the
+managed caller throws `Argument_ArrayGetInterfaceMap` before the QCall for that last one).
+
+`ResolveVirtualStaticMethod` skips its whole search when the receiver's interface map holds the canonical form of the
+interface. Read: that needs a receiver that is itself a canonical instantiation, which no reflection handle names, so
+it is not modelled, and a comment at the static projection says so.
+
+### 6. The handle the QCall answers
+
+**(a).** The handler mints the handle from `InterfaceMapTarget.Method`'s definition and declaring type with
+`MethodHandleRegistry.getOrAllocateInternalHandle`, as `GetMethodAt` mints. `NoTarget` is
+`MethodHandleRegistry.zeroInternalHandle`. `Ambiguous` raises. The declaring type must come from the result and never
+be rebuilt from a definition with no type arguments (finding 3).
+
+PawPrint has no canonical forms and no unboxing stubs; that is already a recorded divergence ("A method handle is
+per-instantiation, where CoreCLR shares one per canonical form" in `docs/divergences.md`). Add this QCall to that
+entry's list of places if the entry keeps one.
+
+### 7. The message of `AmbiguousImplementationException`
+
+**(a): the parameterless constructor's message**, raised with `NativeHandlerResult.raiseException`, as the call path
+raises it. No new issue. `docs/divergences.md` already records, under "`Activator.CreateInstance` rejection
+messages", that every exception PawPrint raises itself carries its type's default message. CoreCLR's text here would
+also need `System.__Canon` rendered: measured, the message for the variant static diamond names
+``'IAsv`1[System.__Canon].S()'``. Guests compare the exception's type and `HResult` (0x8013106a), never its message.
+
+### 8. The third corpus and a collectible `AssemblyLoadContext`
+
+**Yes.** `TestAmbiguousDefaultInterfaceDispatch.fs` already loads generated images into a collectible context on the
+host, so this is an established pattern. Load the second version of the library into the context first, then the
+classes compiled against the first version, so that the classes' reference binds to the image already loaded there.
+Use one context per case and unload it. Build Roslyn's metadata references once and share them; references rebuilt
+per case have exhausted native memory in this suite before. If the host side proves fragile, the cross-assembly
+guests alone carry these rows, and the pull request says that the TypeSystem-level oracle for them is missing.
+
+Corrections to the plan's property:
+
+- Where the host throws `AmbiguousImplementationException`, assert that PawPrint answers `Ambiguous` for at least
+  one static method of that interface, and where the host does not throw, that PawPrint answers `Ambiguous` for
+  none. Give each fixed conflict shape an interface with one method, so that the row in question is unambiguous.
+- Add these fixed shapes to the third corpus, all measured here on real .NET 10 and 11:
+  - generic static reabstraction: `IArG<string>.S -> IRrG<string>::IArG<T>.S`, abstract, reflected as
+    `IRrG<string>`; asked at `IRrG<string>`: null;
+  - variant instance diamond with a reabstraction listed first: null at `IAw<string>` and at `IAw<object>`; with
+    the reabstraction listed second: `ICw`'s body at both;
+  - an `IDynamicInterfaceCastable` receiver with an instance reabstraction as most specific: null; with an instance
+    diamond: null.
+- Add to the C#-compilable rows: `CStatG : IStatG<string>`, `IStatG<T> { static virtual int SV() => 1; }`, which
+  maps to `IStatG<string>::SV`, reflected as `IStatG<string>`.
+- Extend `TestStaticVirtualOverrideOrder`'s property with the new function: in the window where the call path
+  refuses, the reflection function answers the host's `GetInterfaceMap` body. This is an added assertion; the
+  existing ones stay as they are.
+- Lifting #2289's generator into a shared module is a move between files. Make it a commit that only moves, so that
+  `scripts/check-move-is-rename-only.sh` and the docstring attachment check pass on it.
+
+### 9. Correcting the issue
+
+**Yes.** Post the comment prepared for #2290, which corrects the `int[]` row, answers the body's open
+question about reabstractions and diamonds, and adds the cases measured here. Post the FakeItEasy result on #2092.
+
+### Staging
+
+Two pull requests, each landing on its own.
+
+**Pull request 1: the TypeSystem.** No handler, no guest.
+
+1. The characterisation property of decision 2, green on the unchanged code. Include the generator's move as its own
+   commit before it.
+2. The failing tests of the reflection function: the host property over the three corpora, the example tests of
+   decisions 3 and 6, and the added assertion in `TestStaticVirtualOverrideOrder`. The failing output (a compile
+   failure) goes in the commit message.
+3. The refactor of decision 1, items 1, 2 and 4: no caller value yet, no new behaviour. The dump of decision 2 is
+   run across this commit.
+4. The caller value and the reflection function. The dump is run again across this commit; the tests of commit 2 go
+   green.
+
+Because the dispatch internals change, the four Guest categories are part of this pull request's testing. If review
+finds it too large, commits 1 and 3 stand alone as a first pull request, since they leave nothing unused.
+
+**Pull request 2: the QCall.**
+
+1. The guests and handler-level tests, failing, with each guest's stop in the commit message: the plan's
+   `TypeGetInterfaceMapTargets.cs`, `TypeGetInterfaceMapTask.cs`, `TypeBuilderGetInterfaceMap.cs` and cross-assembly
+   guests, plus the open-receiver refusal tests of decision 4. Each guest is run as a control on real .NET 10 and 11
+   with every expectation perturbed, as the plan says.
+2. The handler in `Native/NativeRuntimeTypeQCall.fs`, registered in `Native/NativeQCall.fs`. It checks the argument
+   count, decodes the two type handles and the method handle, refuses a receiver or interface that is not closed,
+   fails loudly if the method handle's declaring type is not the interface it was passed, calls the reflection
+   function, and mints, pushes zero or raises per decision 6.
+3. Un-park `sourcesPure/TypeGetInterfaceMap.cs`.
+
+The cross-assembly guests also make the call where the plan measured that a call and the map differ, so that one
+guest pins both: the static variant diamond returns 2 from a constrained call through `IAsv<object>` while its map
+throws, and the static reabstraction throws `EntryPointNotFoundException` from the call while its map names the
+abstract method. They do not make the instance call through the variant diamond at its exact instantiation, which
+PawPrint refuses.
+
+File #2303 and #2304 before pull request 2 opens, so the
+`TODO:` text can name the first. The cross-assembly guest for a class that leaves a static abstract member
+unimplemented is not written: real .NET cannot load that type, and PawPrint's answer for it is
+#2304's subject.
+
+### Mutants to add to the plan's table
+
+Each must be observed red; record the test that kills it.
+
+| mutant | expected to be killed by |
+|---|---|
+| a static reabstraction's declaring type built from the definition with no type arguments | the generic static reabstraction shape (`IRrG<string>`) |
+| the reflection search consults `IDynamicInterfaceCastable` in its "nothing found" branch | the two `IDynamicInterfaceCastable` shapes (null, not a refusal) |
+| the variant pass's survivor skipped when abstract, in favour of the next one with a body | the variant diamond with the reabstraction listed first (null) |
+| the variant pass's first survivor answered although abstract | the same shape (null, not `IBw`'s reabstraction) |
+| an instance conflict on an interface with no variance answered as its first candidate | the instance diamond (null) |
+| an abstract method of a class answered as `NoTarget` | `CAbs` |
+| an order-dependent static body refused by the reflection function | the added assertion in `TestStaticVirtualOverrideOrder` |
+| an order-dependent static body answered by the call path | `TestStaticVirtualOverrideOrder`'s existing refusal assertion |
+| `Call` and `InterfaceMap` swapped in the instance public function | `TestAmbiguousDefaultInterfaceDispatch`, `TestCrossAssemblyAmbiguousDefault`, and the characterisation property's fixed shapes |
+| `Call` and `InterfaceMap` swapped in the static public function | the characterisation property's static variant diamond (`Found` first), and the cross-assembly guest's call returning 2 |
+| a generic static default body declared by the interface's definition instead of its instantiation | `CStatG` (`IStatG<string>`) |
+| the handler accepts an open definition with a closed interface | the `CGBase<>` refusal test |
+
+One mutant of the plan's is equivalent and need not be killed: making the static reflection search continue from an
+exact-pass conflict into the variant pass still ends in a conflict, because the variant pass considers every
+candidate the exact pass did.
+
+### Other notes for the implementer
+
+- The plan's sentence "the same text" for the two runtimes' `methodtable.cpp` functions should be "the same logic"
+  when the plan is revised as built.
+- The static search's order (chain MethodImpls exactly, then by variance, per level; then default bodies exactly,
+  then by variance; then the method's own body) is unchanged for both callers. Only the two branch points of
+  decision 1, item 3 read the caller's value. A reviewer should be able to find both by searching for the DU's name.
+- Run `scripts/check-docstring-attachment-branch.sh` after the extraction: it moves definitions that carry
+  docstrings.
+- If anything in the characterisation property or the dump shows the call path and the host disagreeing on a
+  C#-compilable shape, stop and ask rather than adjusting the property.
