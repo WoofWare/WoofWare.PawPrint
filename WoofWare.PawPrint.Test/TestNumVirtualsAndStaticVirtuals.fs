@@ -338,11 +338,11 @@ module TestNumVirtualsAndStaticVirtuals =
     // ----- Generated corpora -----
 
     /// What a generated member returns: `int`, or the declaring interface's parameter.
-    type private Returns =
+    type Returns =
         | RInt
         | RParam
 
-    type private MemberKind =
+    type MemberKind =
         | InstanceAbstract
         | DefaultBody
         | SealedBody
@@ -357,14 +357,14 @@ module TestNumVirtualsAndStaticVirtuals =
         | InstanceGeneric
         | StaticGeneric
 
-    type private Member =
+    type Member =
         {
             Kind : MemberKind
             Returns : Returns
         }
 
     /// How a derived interface overrides a method of an interface it inherits.
-    type private OverrideKind =
+    type OverrideKind =
         /// An explicit default body, `R IBase.M() => default;`.
         | ExplicitBody
         /// An instance reabstraction, `abstract R IBase.M();`.
@@ -372,7 +372,7 @@ module TestNumVirtualsAndStaticVirtuals =
         /// A static reabstraction, `static abstract R IBase.M();`.
         | StaticReabstract
 
-    type private Override =
+    type Override =
         {
             Interface : int
             Member : int
@@ -380,20 +380,20 @@ module TestNumVirtualsAndStaticVirtuals =
         }
 
     /// A generic argument in a generated declaration.
-    type private Argument =
+    type Argument =
         | AInt
         | AString
         /// The declaring entity's own parameter.
         | AParam
 
-    type private InterfaceUse =
+    type InterfaceUse =
         {
             Interface : int
             /// `None` exactly when the interface is not generic.
             Argument : Argument option
         }
 
-    type private InterfaceDecl =
+    type InterfaceDecl =
         {
             Generic : bool
             Members : Member list
@@ -401,26 +401,26 @@ module TestNumVirtualsAndStaticVirtuals =
             Overrides : Override list
         }
 
-    type private TypeDecl =
+    type TypeDecl =
         {
             IsStruct : bool
             Generic : bool
             Implements : InterfaceUse list
         }
 
-    type private Corpus =
+    type Corpus =
         {
             Interfaces : InterfaceDecl list
             Types : TypeDecl list
         }
 
-    let private substitute (outer : Argument option) (argument : Argument option) : Argument option =
+    let substitute (outer : Argument option) (argument : Argument option) : Argument option =
         match argument with
         | Some Argument.AParam -> outer
         | other -> other
 
     /// `used` and every interface it inherits, with arguments in the user's context.
-    let rec private closure (interfaces : InterfaceDecl list) (used : InterfaceUse) : InterfaceUse list =
+    let rec closure (interfaces : InterfaceDecl list) (used : InterfaceUse) : InterfaceUse list =
         used
         :: (interfaces.[used.Interface].Bases
             |> List.collect (fun b ->
@@ -433,7 +433,7 @@ module TestNumVirtualsAndStaticVirtuals =
 
     /// Keep each declared interface whose closure names no interface with a different argument from
     /// one already kept: two instantiations of one interface could unify, which C# refuses.
-    let private dropConflicts (interfaces : InterfaceDecl list) (declared : InterfaceUse list) : InterfaceUse list =
+    let dropConflicts (interfaces : InterfaceDecl list) (declared : InterfaceUse list) : InterfaceUse list =
         let conflicts (a : InterfaceUse) (b : InterfaceUse) : bool =
             a.Interface = b.Interface && a.Argument <> b.Argument
 
@@ -454,7 +454,7 @@ module TestNumVirtualsAndStaticVirtuals =
 
         List.rev kept
 
-    let private canOverride (kind : OverrideKind) (target : MemberKind) : bool =
+    let canOverride (kind : OverrideKind) (target : MemberKind) : bool =
         match kind, target with
         | OverrideKind.ExplicitBody, (MemberKind.InstanceAbstract | MemberKind.DefaultBody)
         | OverrideKind.Reabstract, (MemberKind.InstanceAbstract | MemberKind.DefaultBody)
@@ -465,7 +465,7 @@ module TestNumVirtualsAndStaticVirtuals =
     /// two instantiations of one interface in a closure, a member returns the parameter only of a
     /// generic interface, and each override names a method of an inherited interface which it can
     /// override and which nothing else in the corpus overrides.
-    let private repair (corpus : Corpus) : Corpus =
+    let repair (corpus : Corpus) : Corpus =
         let fixUse (generic : bool) (interfaces : InterfaceDecl list) (used : InterfaceUse) : InterfaceUse =
             let argument =
                 if not interfaces.[used.Interface].Generic then
@@ -545,10 +545,10 @@ module TestNumVirtualsAndStaticVirtuals =
             Types = types
         }
 
-    let private interfaceName (index : int) : string = $"I%d{index}"
-    let private typeName (index : int) : string = $"D%d{index}"
+    let interfaceName (index : int) : string = $"I%d{index}"
+    let typeName (index : int) : string = $"D%d{index}"
 
-    let private memberName (kind : MemberKind) (i : int) (k : int) : string =
+    let memberName (kind : MemberKind) (i : int) (k : int) : string =
         match kind with
         | MemberKind.InstanceProperty
         | MemberKind.StaticProperty -> $"P%d{i}_%d{k}"
@@ -558,7 +558,7 @@ module TestNumVirtualsAndStaticVirtuals =
         | MemberKind.StaticGeneric -> $"G%d{i}_%d{k}"
         | _ -> $"M%d{i}_%d{k}"
 
-    let private render (corpus : Corpus) : string =
+    let render (corpus : Corpus) : string =
         let builder = Text.StringBuilder ()
 
         let argumentText (parameter : string) (argument : Argument) : string =
@@ -694,7 +694,7 @@ module TestNumVirtualsAndStaticVirtuals =
 
         builder.ToString ()
 
-    let private genMember : Gen<Member> =
+    let genMember : Gen<Member> =
         Gen.map2
             (fun kind returns ->
                 {
@@ -720,7 +720,7 @@ module TestNumVirtualsAndStaticVirtuals =
                 ])
             (Gen.elements [ Returns.RInt ; Returns.RParam ])
 
-    let private genUse (count : int) : Gen<InterfaceUse> =
+    let genUse (count : int) : Gen<InterfaceUse> =
         Gen.map2
             (fun index argument ->
                 {
@@ -731,7 +731,7 @@ module TestNumVirtualsAndStaticVirtuals =
             (Gen.choose (0, count - 1))
             (Gen.elements [ Argument.AInt ; Argument.AString ; Argument.AParam ])
 
-    let private genInterfaceDecl (index : int) : Gen<InterfaceDecl> =
+    let genInterfaceDecl (index : int) : Gen<InterfaceDecl> =
         gen {
             let! generic = Gen.elements [ false ; true ]
             let! memberCount = Gen.choose (0, 4)
@@ -778,7 +778,7 @@ module TestNumVirtualsAndStaticVirtuals =
                 }
         }
 
-    let private genCorpus : Gen<Corpus> =
+    let genCorpus : Gen<Corpus> =
         gen {
             let! interfaceCount = Gen.choose (1, 4)
 
@@ -811,13 +811,13 @@ module TestNumVirtualsAndStaticVirtuals =
                     }
         }
 
-    let private listT : Type =
+    let listT : Type =
         typedefof<System.Collections.Generic.List<obj>>.GetGenericArguments().[0]
 
     /// Each interface's definition, its instantiations over `int` and `string`, and an open
     /// construction over a class's own parameter; each class and struct, and an instantiation of each
     /// generic one; and an array of each closed type among them.
-    let private pool (corpus : Corpus) (host : Reflection.Assembly) : Type list =
+    let pool (corpus : Corpus) (host : Reflection.Assembly) : Type list =
         let hostType (name : string) : Type =
             match host.GetType name with
             | null -> failwith $"generated type %s{name} not found"
