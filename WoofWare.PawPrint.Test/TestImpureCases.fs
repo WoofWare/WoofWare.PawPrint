@@ -456,6 +456,133 @@ module TestImpureCases =
         |> List.ofSeq
         |> shouldEqual [ 1 ; 0 ; 256 ; 65535 ]
 
+    /// <summary>
+    /// <c>TypeBuilderSetConstant.cs</c> has set constants in its modules <c>Values</c> and <c>Second</c>. This checks
+    /// every Constant row of each, in the scope's order (the order of each owner's first constant), by its owner's
+    /// token, its element type and its blob, and each owner's flags: the <c>CLASS</c> blob's four zero bytes and the
+    /// blobs an empty string leaves in a row are checked nowhere else in a guest.
+    /// </summary>
+    let private assertSetConstantRows (state : IlMachineState) : unit =
+        let hex (text : string) : byte list =
+            text.Split (' ', StringSplitOptions.RemoveEmptyEntries)
+            |> Seq.map (fun b -> Convert.ToByte (b, 16))
+            |> List.ofSeq
+
+        let rows (scope : EmitScope) =
+            EmitScope.constants scope
+            |> Seq.map (fun row -> row.Parent.Token, int row.Type, List.ofSeq (EmitScope.blobAt row.Value scope))
+            |> List.ofSeq
+
+        let flagsOf (scope : EmitScope) (token : int) : int =
+            let rid = token &&& 0x00FFFFFF
+
+            match token >>> 24 with
+            | 0x04 -> int (EmitScope.fields scope).[rid - 1].Flags
+            | 0x08 -> int (EmitScope.parameters scope).[rid - 1].Flags
+            | 0x17 -> int (EmitScope.properties scope).[rid - 1].Flags
+            | _ -> failwith $"0x%08x{token} owns no constant"
+
+        // `Values`: case i's parameter (Param 2i+1), return parameter (Param 2i+2), static literal field (Field 2i+1),
+        // instance field (Field 2i+2) and property (Property i+1), each given the case's value, in that order, as
+        // measured on real .NET 10 and 11 (`setconstant/probe`, scenario `values`).
+        let valueCases : (int * string) list =
+            [
+                0x02, "01"
+                0x03, "78 00"
+                0x04, "FB"
+                0x05, "C8"
+                0x06, "D4 FE"
+                0x07, "60 EA"
+                0x08, "05 00 00 00"
+                0x09, "FE FF FF FF"
+                0x0A, "EF CD AB 89 67 45 23 01"
+                0x0B, "FF FF FF FF FF FF FF FF"
+                0x0C, "00 00 C0 3F"
+                0x0D, "00 00 00 00 00 00 00 80"
+                0x0E, "61 00 62 00 63 00"
+                0x12, "00 00 00 00"
+                // "a\0b", cut at its NUL by the QCall.
+                0x0E, "61 00"
+                0x0E, ""
+                0x0E, "00 D8 78 00"
+                0x0D, "01 00 00 00 00 00 F4 7F"
+                0x03, "FF FF"
+                0x0C, "01 00 C0 7F"
+            ]
+
+        let values = dynamicScopeNamed state "Values"
+
+        let valueOwners (i : int) : (int * int) list =
+            [
+                0x08000000 ||| (2 * i + 1), 0x1000
+                0x08000000 ||| (2 * i + 2), 0x1000
+                0x04000000 ||| (2 * i + 1), 0x8056
+                0x04000000 ||| (2 * i + 2), 0x8006
+                0x17000000 ||| (i + 1), 0x1000
+            ]
+
+        rows values
+        |> shouldEqual
+            [
+                for i, (code, blob) in List.indexed valueCases do
+                    for token, _ in valueOwners i do
+                        yield token, code, hex blob
+            ]
+
+        for i in 0 .. valueCases.Length - 1 do
+            for token, flags in valueOwners i do
+                flagsOf values token |> shouldEqual flags
+
+        // `Second`: sequence k's parameter (Param k+1), static literal field (Field k+1) and property (Property k+1),
+        // each given the sequence's two values in turn; then `Alternate`'s `b` (Param 17) and `a` (Param 16). The row
+        // keeps the second value's element type, and its blob unless that is empty (`setconstant/probe`, scenario
+        // `second`, and `setconstant-decide/probe2`, scenario `odd`).
+        let sequences : (int * string) list =
+            [
+                0x08, "07 00 00 00"
+                0x0E, "78 00"
+                0x0E, "61 00 62 00 63 00"
+                0x0E, "05 00 00 00"
+                0x08, "05 00 00 00"
+                0x12, "00 00 00 00"
+                0x0E, "61 00 62 00 63 00"
+                0x05, "02"
+                0x0E, "78 00 79 00"
+                0x0E, "02"
+                0x0E, "01"
+                0x0E, "00 00 00 00"
+                0x0E, "78 00"
+                0x0E, "42 41"
+                0x0E, "41 00 42 00 43 00 44 00"
+            ]
+
+        let second = dynamicScopeNamed state "Second"
+
+        let sequenceOwners (k : int) : (int * int) list =
+            [
+                0x08000000 ||| (k + 1), 0x1000
+                0x04000000 ||| (k + 1), 0x8056
+                0x17000000 ||| (k + 1), 0x1000
+            ]
+
+        rows second
+        |> shouldEqual
+            [
+                for k, (code, blob) in List.indexed sequences do
+                    for token, _ in sequenceOwners k do
+                        yield token, code, hex blob
+
+                yield 0x08000011, 0x08, hex "03 00 00 00"
+                yield 0x08000010, 0x08, hex "04 00 00 00"
+            ]
+
+        for k in 0 .. sequences.Length - 1 do
+            for token, flags in sequenceOwners k do
+                flagsOf second token |> shouldEqual flags
+
+        flagsOf second 0x08000010 |> shouldEqual 0x1000
+        flagsOf second 0x08000011 |> shouldEqual 0x1000
+
     /// The cases parked on every runtime, each with why it is parked, what would un-park it, and
     /// how it was verified to behave on real .NET. `onRuntime` folds these into every runtime's
     /// parks.
@@ -585,6 +712,38 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """A dynamic type's parameter with the `struct` flag and no GenericParamConstraint row naming `System.ValueType`, measured on .NET 10 to exit 0: `GetGenericParameterConstraints` reports only the rows. PawPrint exits 1, reporting `ValueType` as well: `GenericParameter.readAll` drops a `ValueType` row beside the flag, as Roslyn writes one, and `NativeRuntimeTypeHelpers.genericParameterConstraintTargets` appends `ValueType` for the flag whether or not the metadata had the row. Any image without the row diverges alike, a static one too. Un-parked by reporting the rows as the metadata holds them."""
+            {
+                FileName = "TypeBuilderEnumLiteralWithoutConstant.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """An `EnumBuilder` whose second literal `DefineLiteral("B", 2L)` is refused, which leaves the field `B` without a constant, and an `EnumBuilder` over `char` (#2281). Measured on .NET 10 and 11 to exit 0: real .NET lists `B` with the value 0 (`B,A,C`) and reads the `char` enum; a control expecting `EMis`'s values to be `A:1,C:3` exits 3 on both. PawPrint stores each constant as real .NET does, and stops at `EMis`'s first read, in `Enum_GetValuesAndNames` (measured): "Enum.GetValuesAndNames: static literal enum field B had no metadata constant"; the `char` enum after it is not reached, and `NativeEnum` refuses its underlying type (read). Un-parked by #2281: `Enum_GetValuesAndNames` reading a literal without a constant as 0, as CoreCLR's `ReflectionInvocation::GetEnumValuesAndNames` does, and a `char` underlying type."""
+            {
+                FileName = "TypeBuilderSetConstantLongString.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """A string constant of 32768 characters, read back (#2282). Measured on .NET 10 and 11 to exit 0, and a control inverting the equality exits 2 on both. PawPrint stops at the constant, in the QCall's read of the string (measured): "TypeBuilder_SetConstantValue: unterminated UTF-16 string exceeded PawPrint's 32767-char scan limit". Un-parked by #2282, which removes the scan limit of `NativeCall.readNullTerminatedUtf16`; `TypeBuilderSetConstant.cs` holds a constant of 32767 characters, which passes."""
             {
                 FileName = "TypeBuilderPseudoAttributeGenericParamRetry.cs"
                 ExpectedReturnCode = 0
@@ -7401,6 +7560,26 @@ module TestImpureCases =
                 Oracle = OraclePolicy.Never
                 ExpectsUnhandledException = false
                 AssertTerminalState = Some assertValidatedPseudoAttributeRows
+            }
+            {
+                // `TypeBuilder_SetConstantValue` through every builder: each element type on each owner, the managed
+                // caller's conversions and refusals, second constants and the old blob an empty string keeps, enums,
+                // owners out of RID order, accessors, created types, and Castle DynamicProxy's copy of default values;
+                // `assertSetConstantRows` reads the rows of `Values` and `Second`. Measured on real .NET 10 and 11 to
+                // exit 0, and a control expecting `"abc"` then `""` to read `""` exits 107 on both.
+                FileName = "TypeBuilderSetConstant.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = Some assertSetConstantRows
             }
             {
                 // An emitted attribute whose constructor takes `object`, instantiated through `GetCustomAttributes`.

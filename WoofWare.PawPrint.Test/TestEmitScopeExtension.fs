@@ -72,7 +72,7 @@ module TestEmitScopeExtension =
         ]
 
     /// Everything a created type's `MethodTable` is built from, and what its methods run: its parent, its flags, its
-    /// custom attributes and its members', its
+    /// custom attributes and its members', the constants of its fields, parameters and properties, its
     /// generic parameters, its methods with their flags, implementation flags, parameters, generic parameters
     /// and bodies, and its fields, as handles into the image, with each member's flags, and its interface
     /// implementations and method impls in table order; and its properties and events, each with its
@@ -94,10 +94,13 @@ module TestEmitScopeExtension =
                     let parameters =
                         [
                             for p in (reader.GetMethodDefinition m).GetParameters () do
+                                let rid = rowNumber (ParameterHandle.op_Implicit p)
+
                                 yield
-                                    rowNumber (ParameterHandle.op_Implicit p),
+                                    rid,
                                     (reader.GetParameter p).Attributes,
-                                    attributesView reader (ParameterHandle.op_Implicit p)
+                                    attributesView reader (ParameterHandle.op_Implicit p),
+                                    imageConstant reader (HasConstant.Param (ParamRid rid))
                         ]
 
                     // A body moves as bodies before it are filled in, so it is compared by content.
@@ -127,10 +130,13 @@ module TestEmitScopeExtension =
         let fields =
             [
                 for f in definition.GetFields () do
+                    let rid = rowNumber (FieldDefinitionHandle.op_Implicit f)
+
                     yield
-                        rowNumber (FieldDefinitionHandle.op_Implicit f),
+                        rid,
                         (reader.GetFieldDefinition f).Attributes,
-                        attributesView reader (FieldDefinitionHandle.op_Implicit f)
+                        attributesView reader (FieldDefinitionHandle.op_Implicit f),
+                        imageConstant reader (HasConstant.Field (FieldRid rid))
             ]
 
         let interfaces =
@@ -158,6 +164,7 @@ module TestEmitScopeExtension =
                         rid,
                         (reader.GetPropertyDefinition p).Attributes,
                         attributesView reader (PropertyDefinitionHandle.op_Implicit p),
+                        imageConstant reader (HasConstant.Property (PropertyRid rid)),
                         semantics
                         |> List.filter (fun (_, _, a) -> a = association)
                         |> List.map (fun (s, m, _) -> s, m)
@@ -453,6 +460,25 @@ module TestEmitScopeExtension =
             if assemblyRow beforeReader <> assemblyRow afterReader then
                 yield "assembly", has (EmitScopeExtensionViolation.RowChanged (TableIndex.Assembly, 1))
 
+            // An owner loses its constant only if the scope's Constant rows changed: a row's type and value are filled
+            // in, which is admitted while nothing is created, but a row stays with its owner.
+            let constantRowChanged (violations : EmitScopeExtensionViolation list) =
+                violations
+                |> List.exists (fun v ->
+                    match v with
+                    | EmitScopeExtensionViolation.RowChanged (table, _) -> table = TableIndex.Constant
+                    | _ -> false
+                )
+
+            for owner in constantOwners before do
+                if (imageConstant beforeReader owner).IsSome then
+                    let stillOwned =
+                        List.contains owner (constantOwners after)
+                        && (imageConstant afterReader owner).IsSome
+
+                    if not stillOwned then
+                        yield "constant", constantRowChanged
+
             // A class's rows in a sorted table, in image order, gain rows only at the end, unless the
             // scope's rows of that table changed.
             let rowOfTable (table : TableIndex) (violations : EmitScopeExtensionViolation list) =
@@ -548,7 +574,7 @@ module TestEmitScopeExtension =
                 )
         )
 
-        for category in [ "row" ; "string" ; "blob" ; "guid" ; "sorted" ] do
+        for category in [ "row" ; "string" ; "blob" ; "guid" ; "sorted" ; "constant" ] do
             let count =
                 match seen.TryGetValue category with
                 | true, n -> n
@@ -1541,3 +1567,231 @@ module TestEmitScopeExtension =
                     if bit &&& mask = 0 then
                         EmitScopeExtension.violations createdTypes (withFlags table bit) (withFlags table mask)
                         |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, rid) ]
+
+    /// A scope with two types, `A` (TypeDef 2) and `B` (TypeDef 3), each with a field, a method with one parameter and a
+    /// property, in that order: `A`'s are Field 1, Param 1 and Property 1, and `B`'s Field 2, Param 2 and Property 2;
+    /// and the blobs of the `Int32`s 1 to 7.
+    let private constantOwnersScope () : EmitScope =
+        let mutable scope = apply Guid.Empty []
+
+        for name in [ "A" ; "B" ] do
+            let t, s =
+                match
+                    EmitScopeDefinitions.defineTopLevelTypeDef name Reflection.TypeAttributes.Public None [] scope
+                with
+                | TypeDefDefinition.Defined (rid, s) -> rid, s
+                | TypeDefDefinition.Duplicate _ -> failwith $"%s{name} is defined once"
+
+            let _, s =
+                EmitScopeDefinitions.defineField
+                    t
+                    "F"
+                    (ImmutableArray.Create<byte> [| 0x06uy ; 0x08uy |])
+                    Reflection.FieldAttributes.Public
+                    s
+
+            let m, s =
+                EmitScopeDefinitions.defineMethod
+                    t
+                    "M"
+                    (ImmutableArray.Create<byte> [| 0x00uy ; 0x01uy ; 0x01uy ; 0x08uy |])
+                    Reflection.MethodAttributes.Public
+                    s
+
+            let s =
+                match EmitScopeDefinitions.defineParam m 1 "p" 0 s with
+                | ParamDefinition.Defined (_, s) -> s
+                | ParamDefinition.StrandsLaterMethods _ -> failwith "one parameter strands nothing"
+
+            let _, s =
+                EmitScopeDefinitions.defineProperty
+                    t
+                    "P"
+                    (ImmutableArray.Create<byte> [| 0x08uy ; 0x00uy ; 0x08uy |])
+                    0
+                    s
+
+            scope <- s
+
+        // The blobs of the constants the tests set, so that setting one adds no heap entry.
+        for value in 1..7 do
+            scope <-
+                EmitScope.internBlob (ImmutableArray.Create<byte> (BitConverter.GetBytes value)) scope
+                |> snd
+
+        scope
+
+    /// The `HasDefault` bit of each owner's table, as corhdr.h states it.
+    let private hasDefaultBit (owner : HasConstant) : int =
+        match owner with
+        | HasConstant.Field _ -> 0x8000
+        | HasConstant.Param _
+        | HasConstant.Property _ -> 0x1000
+
+    let private ownerTable (owner : HasConstant) : TableIndex =
+        match owner with
+        | HasConstant.Field _ -> TableIndex.Field
+        | HasConstant.Param _ -> TableIndex.Param
+        | HasConstant.Property _ -> TableIndex.Property
+
+    /// `scope` with `owner`'s `HasDefault` bit ORed in, through the raw row function.
+    let private withHasDefault (owner : HasConstant) (scope : EmitScope) : EmitScope =
+        match owner with
+        | HasConstant.Field rid -> EmitScope.addFieldFlags rid Reflection.FieldAttributes.HasDefault scope
+        | HasConstant.Param rid -> EmitScope.addParamFlags rid Reflection.ParameterAttributes.HasDefault scope
+        | HasConstant.Property rid -> EmitScope.addPropertyFlags rid Reflection.PropertyAttributes.HasDefault scope
+
+    /// `scope` with `owner`'s Constant row set to an `I4` whose blob is `value`'s four bytes, through the raw row
+    /// function, and nothing else.
+    let private withRawConstant (owner : HasConstant) (value : int) (scope : EmitScope) : EmitScope =
+        let blob, scope =
+            EmitScope.internBlob (ImmutableArray.Create<byte> (BitConverter.GetBytes value)) scope
+
+        EmitScope.setConstant
+            {
+                Parent = owner
+                Type = ConstantTypeCode.Int32
+                Value = blob
+            }
+            scope
+
+    let private ownersOfA : HasConstant list =
+        [
+            HasConstant.Field (FieldRid 1)
+            HasConstant.Param (ParamRid 1)
+            HasConstant.Property (PropertyRid 1)
+        ]
+
+    [<Test>]
+    let ``a constant added to or changed for an owner is a fill, refused only for a created type`` () : unit =
+        let a = TypeDefRid 2
+        let b = TypeDefRid 3
+        let scope = constantOwnersScope ()
+
+        for owner in ownersOfA do
+            let table = ownerTable owner
+            let rid = 1
+            let added = scope |> withRawConstant owner 5 |> withHasDefault owner
+            let changed = added |> withRawConstant owner 7
+
+            // Added: the Constant row and the flag the emitter sets with it.
+            EmitScopeExtension.violations ImmutableHashSet.Empty scope added
+            |> shouldEqual []
+
+            EmitScopeExtension.violations (ImmutableHashSet.Create b) scope added
+            |> shouldEqual []
+
+            EmitScopeExtension.violations (ImmutableHashSet.Create a) scope added
+            |> List.sort
+            |> shouldEqual (
+                List.sort
+                    [
+                        EmitScopeExtensionViolation.FilledInCreatedType (table, rid, a)
+                        EmitScopeExtensionViolation.AddedToCreatedType (TableIndex.Constant, 1, a)
+                    ]
+            )
+
+            // Changed: a second constant of the owner, whose flag is already set.
+            EmitScopeExtension.violations ImmutableHashSet.Empty added changed
+            |> shouldEqual []
+
+            EmitScopeExtension.violations (ImmutableHashSet.Create b) added changed
+            |> shouldEqual []
+
+            EmitScopeExtension.violations (ImmutableHashSet.Create a) added changed
+            |> shouldEqual [ EmitScopeExtensionViolation.FilledInCreatedType (TableIndex.Constant, 1, a) ]
+
+    [<Test>]
+    let ``a gained HasDefault is a fill only beside a Constant row for its owner`` () : unit =
+        let a = TypeDefRid 2
+        let scope = constantOwnersScope ()
+
+        for owner in ownersOfA do
+            let table = ownerTable owner
+
+            // The flag alone, as no call of the emitter writes it.
+            for createdTypes in [ ImmutableHashSet.Empty ; ImmutableHashSet.Create a ] do
+                EmitScopeExtension.violations createdTypes scope (withHasDefault owner scope)
+                |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, 1) ]
+
+            // The flag beside a Constant row of another owner of the same table, `B`'s.
+            let other =
+                match owner with
+                | HasConstant.Field _ -> HasConstant.Field (FieldRid 2)
+                | HasConstant.Param _ -> HasConstant.Param (ParamRid 2)
+                | HasConstant.Property _ -> HasConstant.Property (PropertyRid 2)
+
+            let otherConstant = scope |> withRawConstant other 5 |> withHasDefault other
+
+            EmitScopeExtension.violations ImmutableHashSet.Empty otherConstant (withHasDefault owner otherConstant)
+            |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, 1) ]
+
+            // A Constant row whose owner has no flag is no violation of the rule: it compares two scopes, and does not
+            // validate one.
+            EmitScopeExtension.violations ImmutableHashSet.Empty scope (withRawConstant owner 5 scope)
+            |> shouldEqual []
+
+    [<Test>]
+    let ``a lost HasDefault is a changed row`` () : unit =
+        let a = TypeDefRid 2
+        let scope = constantOwnersScope ()
+
+        for owner in ownersOfA do
+            let table = ownerTable owner
+            let withConstant = scope |> withRawConstant owner 5
+            let before = withHasDefault owner withConstant
+
+            for createdTypes in [ ImmutableHashSet.Empty ; ImmutableHashSet.Create a ] do
+                EmitScopeExtension.violations createdTypes before withConstant
+                |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (table, 1) ]
+
+    [<Test>]
+    let ``a Constant row whose owner changes at its position is a changed row`` () : unit =
+        let scope = constantOwnersScope ()
+
+        // The first constant set is the field's in one history and the parameter's in the other.
+        let before = scope |> withRawConstant (HasConstant.Field (FieldRid 1)) 5
+        let after = scope |> withRawConstant (HasConstant.Param (ParamRid 1)) 5
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty before after
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Constant, 1) ]
+
+        // A row the later scope does not have.
+        EmitScopeExtension.violations ImmutableHashSet.Empty before scope
+        |> shouldEqual [ EmitScopeExtensionViolation.RowChanged (TableIndex.Constant, 1) ]
+
+        // Two owners' rows in the other order.
+        let fieldThenParam = before |> withRawConstant (HasConstant.Param (ParamRid 1)) 6
+
+        let paramThenField =
+            after
+            |> withRawConstant (HasConstant.Field (FieldRid 1)) 5
+            |> withRawConstant (HasConstant.Param (ParamRid 1)) 6
+
+        EmitScopeExtension.violations ImmutableHashSet.Empty fieldThenParam paramThenField
+        |> shouldEqual
+            [
+                EmitScopeExtensionViolation.RowChanged (TableIndex.Constant, 1)
+                EmitScopeExtensionViolation.RowChanged (TableIndex.Constant, 2)
+            ]
+
+    [<Test>]
+    let ``a constant changed for an owner of a type not created is a fill while another type is created`` () : unit =
+        let a = TypeDefRid 2
+        let b = TypeDefRid 3
+        let scope = constantOwnersScope ()
+
+        // `A`'s constants first, so that `B`'s rows come after them; then `B`'s change.
+        let before =
+            (scope, ownersOfA)
+            ||> List.fold (fun s owner -> s |> withRawConstant owner 1 |> withHasDefault owner)
+            |> withRawConstant (HasConstant.Param (ParamRid 2)) 2
+            |> withHasDefault (HasConstant.Param (ParamRid 2))
+
+        let after = before |> withRawConstant (HasConstant.Param (ParamRid 2)) 3
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create a) before after
+        |> shouldEqual []
+
+        EmitScopeExtension.violations (ImmutableHashSet.Create b) before after
+        |> shouldEqual [ EmitScopeExtensionViolation.FilledInCreatedType (TableIndex.Constant, 4, b) ]

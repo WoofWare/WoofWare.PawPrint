@@ -85,6 +85,11 @@ module EmitScopeGen =
         /// nine kinds a builder hands out, as `EmitScopeDefinitions.addPseudoAttributeFlag` sets it; nothing when the
         /// owner is not among the attribute's targets.
         | SetPseudoAttributeFlag of owner : int * attribute : int
+        /// A constant of a field, parameter or property already in the scope, if it has any, set as
+        /// `EmitScopeDefinitions.defineConstant` sets it: a value among `constantValues`, some empty strings and some
+        /// one- and two-byte values, so that a second constant of an owner keeps an old blob; nothing for a property
+        /// with an accessor.
+        | SetConstant of owner : int * value : int
 
     /// What happened to one `Op.Param`, in the replay of CoreCLR's tables beside the scope.
     type ParamEvent =
@@ -142,6 +147,39 @@ module EmitScopeGen =
         |> Gen.map String.Concat
 
     let genNamespace : Gen<string> = Gen.elements [ "" ; "A" ; "A.B" ; "日本" ]
+
+    /// The values a generated constant holds: one of each case, and among them an empty string and values whose blobs
+    /// are one and two bytes long, which an empty string given later leaves in the row.
+    let constantValues : ConstantValue list =
+        [
+            ConstantValue.Int32 5
+            ConstantValue.String "abc"
+            ConstantValue.String ""
+            ConstantValue.Byte 2uy
+            ConstantValue.Boolean 1uy
+            ConstantValue.Int16 0x4142s
+            ConstantValue.NullReference
+            ConstantValue.Char 'x'
+            ConstantValue.Int64 0x0044004300420041L
+            ConstantValue.UInt64 UInt64.MaxValue
+            ConstantValue.SByte -5y
+            ConstantValue.UInt16 60000us
+            ConstantValue.UInt32 0xFFFFFFFEu
+            ConstantValue.Single 0x7fc00001
+            ConstantValue.Double 0x7ff4000000000001L
+            ConstantValue.String ("x" + string (char 0xD800))
+        ]
+
+    /// Every owner of `scope` a constant may have: each field, then each parameter, then each property.
+    let constantOwners (scope : EmitScope) : HasConstant list =
+        [
+            for i in 1 .. (EmitScope.fields scope).Count do
+                yield HasConstant.Field (FieldRid i)
+            for i in 1 .. (EmitScope.parameters scope).Count do
+                yield HasConstant.Param (ParamRid i)
+            for i in 1 .. (EmitScope.properties scope).Count do
+                yield HasConstant.Property (PropertyRid i)
+        ]
 
     let typeFlagChoices : TypeAttributes list =
         [
@@ -347,6 +385,7 @@ module EmitScopeGen =
                     return Op.MethodSemanticsRun (association, semantics, method, count)
                 }
                 3, Gen.map2 (fun o a -> Op.SetPseudoAttributeFlag (o, a)) choice choice
+                2, Gen.map2 (fun o v -> Op.SetConstant (o, v)) choice choice
             ]
 
     /// Every owner of `scope` a custom attribute may have, as `HasCustomAttribute`: the assembly if the scope has
@@ -947,6 +986,13 @@ module EmitScopeGen =
                 match EmitScopeDefinitions.addPseudoAttributeFlag flags owner scope with
                 | Some scope -> withScope scope applied
                 | None -> applied
+        | Op.SetConstant (ownerChoice, valueChoice) ->
+            match pick ownerChoice (constantOwners scope) with
+            | None -> applied
+            | Some owner ->
+                match EmitScopeDefinitions.defineConstant owner (pick valueChoice constantValues).Value scope with
+                | ConstantDefinition.Defined scope -> withScope scope applied
+                | ConstantDefinition.DetachesAccessors -> applied
 
     let emptyScope (mvid : Guid) : EmitScope =
         let scope = EmitScope.create "RefEmit_InMemoryManifestModule" mvid
@@ -1150,7 +1196,8 @@ module EmitScopeGen =
     /// <summary>
     /// Whether <c>after</c>, a row of <c>describeRows</c>, differs from <c>before</c> at most in what the emitter fills
     /// in after adding a row, which an extension of a scope may change while the row's type is not created: a method's
-    /// implementation flags, a type's parent, and bits that a pseudo-attribute sets gained by a flags column. The
+    /// implementation flags, a type's parent, and bits that a pseudo-attribute or a constant sets gained by a flags
+    /// column (a constant's <c>HasDefault</c> is admitted here whether or not the owner has a <c>Constant</c> row). The
     /// masks are spelled out here, not taken from <c>KnownCustomAttribute.flagMask</c>, so that a test reading back an
     /// image does not take the rule it checks from the code it checks.
     /// </summary>
@@ -1179,13 +1226,13 @@ module EmitScopeGen =
                 unbox<FieldAttributes * int * int * int> after
 
             (name, signature, owner) = (name', signature', owner')
-            && gained 0x0280 (int attributes) (int attributes')
+            && gained 0x8280 (int attributes) (int attributes')
         elif table = TableIndex.Param then
             let attributes, sequence, name = unbox<ParameterAttributes * int * int> before
             let attributes', sequence', name' = unbox<ParameterAttributes * int * int> after
 
             (sequence, name) = (sequence', name')
-            && gained 0x0013 (int attributes) (int attributes')
+            && gained 0x1013 (int attributes) (int attributes')
         elif table = TableIndex.Event then
             let attributes, name, eventType = unbox<EventAttributes * int * int> before
             let attributes', name', eventType' = unbox<EventAttributes * int * int> after
@@ -1284,3 +1331,20 @@ module EmitScopeGen =
     let methodSemanticsRows (pe : PEReader) (reader : MetadataReader) : (int * int * int) list =
         rawRows pe reader TableIndex.MethodSemantics [ 2 ; 2 ; 2 ]
         |> List.map (fun row -> row.[0], row.[1], row.[2])
+
+    /// The constant the image holds for a field, parameter or property, found as SRM finds it, by searching the
+    /// `Constant` table for the owner: its element type and its blob's bytes, or `None`.
+    let imageConstant (reader : MetadataReader) (owner : HasConstant) : (ConstantTypeCode * byte list) option =
+        let handle =
+            match owner with
+            | HasConstant.Field rid ->
+                (reader.GetFieldDefinition (MetadataTokens.FieldDefinitionHandle rid.Rid)).GetDefaultValue ()
+            | HasConstant.Param rid -> (reader.GetParameter (MetadataTokens.ParameterHandle rid.Rid)).GetDefaultValue ()
+            | HasConstant.Property rid ->
+                (reader.GetPropertyDefinition (MetadataTokens.PropertyDefinitionHandle rid.Rid)).GetDefaultValue ()
+
+        if handle.IsNil then
+            None
+        else
+            let constant = reader.GetConstant handle
+            Some (constant.TypeCode, List.ofArray (reader.GetBlobBytes constant.Value))

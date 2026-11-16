@@ -530,8 +530,16 @@ module TestEmitScopeImage =
 
         checkCustomAttributes scope image reader
 
+        // Each owner's constant, where SRM's search of the sorted table finds it.
+        reader.GetTableRowCount TableIndex.Constant
+        |> shouldEqual (EmitScope.constants scope).Count
+
+        for row in EmitScope.constants scope do
+            imageConstant reader row.Parent
+            |> shouldEqual (Some (row.Type, List.ofSeq (EmitScope.blobAt row.Value scope)))
+
         // Nothing the scope cannot hold.
-        for table in [ TableIndex.Constant ; TableIndex.ModuleRef ; TableIndex.NestedClass ] do
+        for table in [ TableIndex.ModuleRef ; TableIndex.NestedClass ] do
             reader.GetTableRowCount table |> shouldEqual 0
 
         reader.GetUserString (MetadataTokens.UserStringHandle 0) |> shouldEqual ""

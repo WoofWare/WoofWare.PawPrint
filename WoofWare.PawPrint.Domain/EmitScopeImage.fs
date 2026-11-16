@@ -49,9 +49,9 @@ type private SingleTextSectionBuilder (content : SectionLocation -> BlobBuilder,
 /// form PawPrint's loader reads like any assembly on disk.
 ///
 /// Every RID in the image is the one the scope gave its row, except in `InterfaceImpl` and `MethodImpl`,
-/// which ECMA-335 requires to be sorted and which are sorted stably by class, and `MethodSemantics`, sorted
-/// stably by its association's coded index. A row of those three tables therefore moves when a row added
-/// later sorts before it; nothing hands out their RIDs.
+/// which ECMA-335 requires to be sorted and which are sorted stably by class, `MethodSemantics`, sorted
+/// stably by its association's coded index, and `Constant`, sorted by its parent's coded index. A row of
+/// those four tables therefore moves when a row added later sorts before it; nothing hands out their RIDs.
 ///
 /// `CustomAttribute`, which ECMA-335 also requires to be sorted, is in the scope's order, as CoreCLR's read-write
 /// metadata keeps it in a live dynamic module, so that each RID is the token CoreCLR gave the row. The header does not
@@ -152,6 +152,15 @@ module EmitScopeImage =
     let private semanticsOrder (rows : ImmutableList<MethodSemanticsRow>) : int[] =
         rows
         |> Seq.mapi (fun i row -> (row.Association.CodedIndex, i), i)
+        |> Seq.sortBy fst
+        |> Seq.map snd
+        |> Array.ofSeq
+
+    // ECMA-335 II.22.9 requires `Constant` sorted by its `Parent` column, the HasConstant coded index. A scope holds at
+    // most one row per owner, so no two rows tie. The result lists the scope's positions (from 0) in image order.
+    let private constantOrder (rows : ImmutableList<ConstantRow>) : int[] =
+        rows
+        |> Seq.mapi (fun i row -> (row.Parent.CodedIndex, i), i)
         |> Seq.sortBy fst
         |> Seq.map snd
         |> Array.ofSeq
@@ -326,6 +335,10 @@ module EmitScopeImage =
             let rows = EmitScope.methodSemantics scope
             rows |> semanticsOrder |> Array.map (fun i -> rows.[i])
 
+        let constants =
+            let rows = EmitScope.constants scope
+            rows |> constantOrder |> Array.map (fun i -> rows.[i])
+
         let rowCounts = Array.zeroCreate tableCount
         rowCounts.[int TableIndex.Module] <- 1
         rowCounts.[int TableIndex.TypeRef] <- (EmitScope.typeRefs scope).Count
@@ -337,6 +350,7 @@ module EmitScopeImage =
         rowCounts.[int TableIndex.ParamPtr] <- paramPtr.Length
         rowCounts.[int TableIndex.Param] <- parameters.Count
         rowCounts.[int TableIndex.InterfaceImpl] <- interfaceImpls.Length
+        rowCounts.[int TableIndex.Constant] <- constants.Length
         rowCounts.[int TableIndex.CustomAttribute] <- (EmitScope.customAttributes scope).Count
         rowCounts.[int TableIndex.MemberRef] <- (EmitScope.memberRefs scope).Count
         rowCounts.[int TableIndex.StandAloneSig] <- (EmitScope.standAloneSigs scope).Count
@@ -390,6 +404,9 @@ module EmitScopeImage =
 
         let typeOrMethodDefSize =
             codedIndexSize rowCounts [ TableIndex.TypeDef ; TableIndex.MethodDef ] 1
+
+        let hasConstantSize =
+            codedIndexSize rowCounts [ TableIndex.Field ; TableIndex.Param ; TableIndex.Property ] 2
 
         let hasSemanticsSize =
             codedIndexSize rowCounts [ TableIndex.Event ; TableIndex.Property ] 1
@@ -547,6 +564,13 @@ module EmitScopeImage =
             writeIndex tables memberRefParentSize "MemberRef.Class" coded
             str "MemberRef.Name" row.Name
             blob "MemberRef.Signature" row.Signature
+
+        // Constant (II.22.9): the element type, a padding byte, the parent and the value.
+        for row in constants do
+            tables.WriteByte (byte row.Type)
+            tables.WriteByte 0uy
+            writeIndex tables hasConstantSize "Constant.Parent" row.Parent.CodedIndex
+            blob "Constant.Value" row.Value
 
         // CustomAttribute (II.22.10), in RID order, which is not owner order: the header does not declare it sorted.
         for row in EmitScope.customAttributes scope do
