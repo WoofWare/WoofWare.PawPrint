@@ -1,0 +1,82 @@
+{
+  "WoofWare.PawPrint": {
+    "lib": [
+      "lib/net8.0/WoofWare.PawPrint.dll"
+    ],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "Microsoft.Extensions.Logging.Abstractions", "version": "9.0.2", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Domain", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Loader", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Semantics", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.TypeSystem", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PosixKernel", "version": "0.1.424", "exclude": "Build,Analyzers"}
+      ]
+    }
+  },
+  "WoofWare.PawPrint.Analysis": {
+    "lib": [
+      "lib/net8.0/WoofWare.PawPrint.Analysis.dll",
+      "lib/net8.0/WoofWare.PawPrint.Analysis.xml"
+    ],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Domain", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Loader", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Semantics", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.TypeSystem", "exclude": "Build,Analyzers"}
+      ]
+    }
+  },
+  "WoofWare.PawPrint.Domain": {
+    "lib": [
+      "lib/net8.0/WoofWare.PawPrint.Domain.dll",
+      "lib/net8.0/WoofWare.PawPrint.Domain.xml"
+    ],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "Microsoft.Extensions.Logging.Abstractions", "version": "9.0.2", "exclude": "Build,Analyzers"}
+      ]
+    }
+  },
+  "WoofWare.PawPrint.Loader": {
+    "lib": [
+      "lib/net8.0/WoofWare.PawPrint.Loader.dll",
+      "lib/net8.0/WoofWare.PawPrint.Loader.xml"
+    ],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Domain", "exclude": "Build,Analyzers"}
+      ]
+    }
+  },
+  "WoofWare.PawPrint.Semantics": {
+    "lib": [
+      "lib/net8.0/WoofWare.PawPrint.Semantics.dll",
+      "lib/net8.0/WoofWare.PawPrint.Semantics.xml"
+    ],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Domain", "exclude": "Build,Analyzers"}
+      ]
+    }
+  },
+  "WoofWare.PawPrint.TypeSystem": {
+    "lib": [
+      "lib/net8.0/WoofWare.PawPrint.TypeSystem.dll",
+      "lib/net8.0/WoofWare.PawPrint.TypeSystem.xml"
+    ],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Domain", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Loader", "exclude": "Build,Analyzers"}
+      ]
+    }
+  }
+}

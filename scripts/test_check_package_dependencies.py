@@ -274,7 +274,7 @@ def run(world):
             directories.append(directory)
             with open(os.path.join(directory, n["file"]), "wb") as f:
                 f.write(nupkg_bytes(n))
-        given = directories if world.split else [packed]
+        given = directories if world.split and directories else [packed]
         if world.missing_directory:
             given = given + [os.path.join(tmp, "no-such-directory")]
         out = io.StringIO()
@@ -577,6 +577,11 @@ class TestPrintedEntry(Base):
         world.expectation.update(printed)
         code, out = run(world)
         self.assertEqual(code, 0, out)
+
+    @given(worlds())
+    def test_the_printed_layout_is_the_json_it_means(self, world):
+        text = check.format_entries(world.expectation)
+        self.assertEqual(json.loads(text), world.expectation, text)
 
 
 def _zip(entries):

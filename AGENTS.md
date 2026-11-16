@@ -48,7 +48,7 @@ Each file opens with a docstring saying what it is for, and the `.fsproj` lists 
 
 None of the first five sees `WoofWare.PawPrint`, so none can reach `IlMachineState`, and the project graph enforces it. That is the point of the split: an analyser must resolve and reason exactly as the interpreter does without seeing its machine state. Put a new fact in the lowest project that can hold it.
 
-Every project `WoofWare.PawPrint` references must be a published package: a `ProjectReference` to a non-packable project silently produces a nupkg naming a dependency that does not exist. A new one needs its own `PackageId`, its own `version.json` (whose `pathFilters` `scripts/footprint.py generate` writes), and entries in the `nuget-pack`, `expected-pack` and `github-release-dry-run` CI jobs.
+Every project `WoofWare.PawPrint` references must be a published package: a `ProjectReference` to a non-packable project silently produces a nupkg naming a dependency that does not exist. A new one needs its own `PackageId`, its own `version.json` (whose `pathFilters` `scripts/footprint.py generate` writes), an entry in `scripts/package-dependencies.json`, and entries in the `nuget-pack` and `github-release-dry-run` CI jobs. CI's `expected-pack` job holds every published package's dependencies and `lib/` entries to that file, so that a dependency used only by tests cannot become one of a published package; `scripts/check-package-dependencies.py` says what it compares.
 
 The libraries target `net8.0` for compatibility with future consumers; executables and tests target `net10.0`. The split is deliberate, not drift.
 
@@ -65,7 +65,7 @@ The library must never read the host: no `System.Environment`, `DateTime.Now`, `
 
 The emulated POSIX kernel is the external NuGet package `WoofWare.PosixKernel` (source, tests and issues at https://github.com/Smaug123/WoofWare.PosixKernel; see its `AGENTS.md`). The `emulated-posix-kernel` skill covers PawPrint's side. In brief:
 
-* PawPrint pins one version, in `WoofWare.PawPrint/WoofWare.PawPrint.fsproj`, and every other project takes it through that reference. A kernel change is made in its repository and arrives here by a version bump, followed by `nix build .#default.fetch-deps && ./result nix/deps.json`.
+* PawPrint pins one version, in `WoofWare.PawPrint/WoofWare.PawPrint.fsproj`, and every other project takes it through that reference. A kernel change is made in its repository and arrives here by a version bump, followed by `nix build .#default.fetch-deps && ./result nix/deps.json`, and its version in `scripts/package-dependencies.json`.
 * Only its public API is visible here. When PawPrint needs something it does not expose, that is a change to the kernel, not a reason to reach around it.
 * The kernel speaks POSIX and knows nothing of .NET. A conversion between POSIX and a .NET encoding goes in a `WoofWare.PawPrint/Native/*Pal.fs` adapter of its own, and the kernel gets the POSIX value. If the conversion seems to need a kernel change, the kernel is missing a POSIX concept, and that concept is the change to request.
 

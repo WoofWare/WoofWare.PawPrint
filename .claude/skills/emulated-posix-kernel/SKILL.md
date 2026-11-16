@@ -181,8 +181,10 @@ PawPrint needs a syscall, a field or a fact the package does not provide:
 
 1. Make the change in the kernel's repository, with its own tests (its skill
    says which tier), and get it released to NuGet.
-2. Bump the version in `WoofWare.PawPrint/WoofWare.PawPrint.fsproj`, and regenerate
-   `nix/deps.json` with `nix build .#default.fetch-deps && ./result nix/deps.json`.
+2. Bump the version in `WoofWare.PawPrint/WoofWare.PawPrint.fsproj`, regenerate
+   `nix/deps.json` with `nix build .#default.fetch-deps && ./result nix/deps.json`,
+   and bump its version in `scripts/package-dependencies.json`, which CI's
+   `expected-pack` job holds `WoofWare.PawPrint`'s nuspec to.
 3. Wire it up here, in a PR of its own.
 
 Until the release lands, the PawPrint handler refuses with a `failwith` naming

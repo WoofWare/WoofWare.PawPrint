@@ -355,71 +355,29 @@ jobs:
         name: nuget-package-analysis
         path: WoofWare.PawPrint.Analysis/bin/Release/WoofWare.PawPrint.Analysis.*.nupkg
 
+  # Each published package must depend on exactly what scripts/package-dependencies.json says,
+  # hold exactly the lib/ entries it says, and be produced at all. The script's docstring says
+  # what it compares, and its own properties run in the flake's `package-dependencies` check.
   expected-pack:
     needs: [nuget-pack]
     runs-on: ubuntu-latest
     steps:
-      - name: Download NuGet artifact (PawPrint)
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Each artifact lands in a directory of its own, named after it, beneath `path`.
+      - name: Download every NuGet artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: nuget-package-pawprint
-          path: packed-pawprint
-      - name: Check NuGet contents
-        # Verify that there is exactly one nupkg in the artifact that would be NuGet published
-        run: if [[ $(find packed-pawprint -maxdepth 1 -name 'WoofWare.PawPrint.*.nupkg' -printf c | wc -c) -ne "1" ]]; then exit 1; fi
-      - name: Download NuGet artifact (Domain)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: nuget-package-domain
-          path: packed-domain
-      - name: Check NuGet contents
-        # Verify that there is exactly one nupkg in the artifact that would be NuGet published
-        run: if [[ $(find packed-domain -maxdepth 1 -name 'WoofWare.PawPrint.Domain.*.nupkg' -printf c | wc -c) -ne "1" ]]; then exit 1; fi
-      - name: Download NuGet artifact (Semantics)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: nuget-package-semantics
-          path: packed-semantics
-      # WoofWare.PawPrint's nuspec depends on this package because a ProjectReference always
-      # becomes one. If it ever stopped being produced, that dependency would point at nothing
-      # and the PawPrint package would be uninstallable -- with every other check here still
-      # green, since the assembly would simply be missing from lib/ rather than the build failing.
-      - name: Check NuGet contents
-        # Verify that there is exactly one nupkg in the artifact that would be NuGet published
-        run: if [[ $(find packed-semantics -maxdepth 1 -name 'WoofWare.PawPrint.Semantics.*.nupkg' -printf c | wc -c) -ne "1" ]]; then exit 1; fi
-      - name: Download NuGet artifact (Loader)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: nuget-package-loader
-          path: packed-loader
-      # WoofWare.PawPrint's nuspec depends on this package because a ProjectReference always
-      # becomes one. If it ever stopped being produced, that dependency would point at nothing
-      # and the PawPrint package would be uninstallable -- with every other check here still
-      # green, since the assembly would simply be missing from lib/ rather than the build failing.
-      - name: Check NuGet contents
-        # Verify that there is exactly one nupkg in the artifact that would be NuGet published
-        run: if [[ $(find packed-loader -maxdepth 1 -name 'WoofWare.PawPrint.Loader.*.nupkg' -printf c | wc -c) -ne "1" ]]; then exit 1; fi
-      - name: Download NuGet artifact (TypeSystem)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: nuget-package-typesystem
-          path: packed-typesystem
-      # WoofWare.PawPrint's nuspec depends on this package because a ProjectReference always
-      # becomes one. If it ever stopped being produced, that dependency would point at nothing
-      # and the PawPrint package would be uninstallable -- with every other check here still
-      # green, since the assembly would simply be missing from lib/ rather than the build failing.
-      - name: Check NuGet contents
-        # Verify that there is exactly one nupkg in the artifact that would be NuGet published
-        run: if [[ $(find packed-typesystem -maxdepth 1 -name 'WoofWare.PawPrint.TypeSystem.*.nupkg' -printf c | wc -c) -ne "1" ]]; then exit 1; fi
-      - name: Download NuGet artifact (Analysis)
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: nuget-package-analysis
-          path: packed-analysis
-      # Nothing else here depends on this package; the check is that it is produced at all.
-      - name: Check NuGet contents
-        # Verify that there is exactly one nupkg in the artifact that would be NuGet published
-        run: if [[ $(find packed-analysis -maxdepth 1 -name 'WoofWare.PawPrint.Analysis.*.nupkg' -printf c | wc -c) -ne "1" ]]; then exit 1; fi
+          pattern: nuget-package-*
+          path: ${{ runner.temp }}/packages
+      # The script requires exactly one package for each top-level directory with a version.json.
+      # That matters most for the packages which others here depend on (a ProjectReference always
+      # becomes a dependency): if one stopped being produced, the dependency on it would point at
+      # nothing and the dependent package would be uninstallable, while every build stayed green.
+      # So the script also requires each dependency on a sibling package to name the version of
+      # that sibling's own nupkg from this run. It uses only the standard library, so this job
+      # needs no Nix.
+      - name: Check each package's dependencies and lib/ entries
+        run: python3 -I scripts/check-package-dependencies.py "$RUNNER_TEMP/packages"
 
   github-release-dry-run:
     strategy:
