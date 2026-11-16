@@ -20,7 +20,7 @@ module System_Threading_Monitor =
 
     /// Write back a SyncBlock whose `Lock` portion is freshly held by `owner`
     /// at `depth`, preserving the existing `WaitQueue` and accepting a fresh
-    /// `AcquireQueue`. Used by the ownership-transfer paths in `Exit_FastPath`
+    /// `AcquireQueue`. Used by the ownership-transfer paths in `tryRelease`
     /// (and re-used by `SyncBlockMonitor.pulse` indirectly via the same shape).
     let private writeHeld
         (addr : ManagedHeapAddress)
@@ -318,13 +318,11 @@ module System_Threading_Monitor =
 
         (state, WhatWeDid.Executed) |> ExecutionResult.stepped
 
-    /// .NET 10 InternalCall: Monitor.Exit_FastPath(obj) -> LeaveHelperAction.
-    /// LeaveHelperAction.None (0) means the unlock fully succeeded and IL skips the slowpath;
-    /// any non-zero value (Signal/Yield/Contention/Error) routes the IL through Exit_Slowpath.
-    /// PawPrint can decrement the SyncBlock directly, so we always return None on success and
-    /// fail loud if the unlock would have surfaced as Error in the real runtime.
+    /// One release of `addr`'s monitor by `currentThread`, as CoreCLR's `LeaveObjMonitorHelper` makes
+    /// it: `None` if `currentThread` does not own the monitor (it is free, or another thread holds
+    /// it), which leaves the monitor as it was.
     ///
-    /// When the final `Exit` releases the lock and the `AcquireQueue` is non-empty, ownership
+    /// When the final release frees the lock and the `AcquireQueue` is non-empty, ownership
     /// is transferred directly to the FIFO head: that thread's status flips back to `Runnable`
     /// already holding the lock with `ReentrancyCount = 1` for fresh entrants (`None`
     /// snapshot) or with its prior depth restored (`Some depth` snapshot, set when the head
@@ -333,6 +331,61 @@ module System_Threading_Monitor =
     /// until `Pulse` / `PulseAll` moves them onto `AcquireQueue`, and a fully-released lock
     /// with a non-empty wait queue is a legitimate state (the SyncBlock stays present, just
     /// with `Lock = Free`).
+    let private tryRelease
+        (currentThread : ThreadId)
+        (addr : ManagedHeapAddress)
+        (state : IlMachineState)
+        : IlMachineState option
+        =
+        let block = IlMachineState.getSyncBlock addr state
+
+        match block.Lock with
+        | SyncBlockLock.Free -> None
+        | SyncBlockLock.Held locked when locked.LockingThread <> currentThread -> None
+        | SyncBlockLock.Held locked when locked.ReentrancyCount > 1 ->
+            let locked =
+                { locked with
+                    ReentrancyCount = locked.ReentrancyCount - 1
+                }
+
+            writeHeld addr block.WaitQueue locked state |> Some
+        | SyncBlockLock.Held locked ->
+            // Last release. If anyone is queued for Enter, ownership transfers atomically
+            // to the FIFO head; otherwise the lock becomes Free (but the SyncBlock
+            // record persists so the WaitQueue is preserved across the transition).
+            match locked.AcquireQueue with
+            | [] ->
+                IlMachineState.setSyncBlock
+                    addr
+                    {
+                        Lock = SyncBlockLock.Free
+                        WaitQueue = block.WaitQueue
+                    }
+                    state
+                |> Some
+            | (nextOwner, snapshot) :: rest ->
+                // `None` snapshot = fresh entrant from Monitor.Enter (ReentrancyCount = 1).
+                // `Some depth` = waiter resumed from Monitor.Wait, restored to its prior depth.
+                let restoredDepth = snapshot |> Option.defaultValue 1
+
+                let nextLocked =
+                    {
+                        LockingThread = nextOwner
+                        ReentrancyCount = restoredDepth
+                        AcquireQueue = rest
+                    }
+
+                state
+                |> writeHeld addr block.WaitQueue nextLocked
+                |> Scheduler.setThreadStatus nextOwner ThreadStatus.Runnable
+                |> Some
+
+    /// .NET 10 InternalCall: Monitor.Exit_FastPath(obj) -> LeaveHelperAction.
+    /// Returns LeaveHelperAction.None (0) when the release succeeded, and the IL skips the slow
+    /// path. When the current thread does not own the monitor it returns LeaveHelperAction.Error
+    /// (4) with the monitor unchanged, as CoreCLR's FCall does, and the IL's `Exit_Slowpath`
+    /// raises. PawPrint transfers ownership to a queued entrant itself, so it never returns
+    /// Signal, Yield or Contention.
     let Exit_FastPath
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (currentThread : ThreadId)
@@ -341,57 +394,39 @@ module System_Threading_Monitor =
         =
         let lockObj, state = popOneObject currentThread 0 state
 
-        let state =
+        let state, action =
             match IlMachineState.evalStackValueToObjectRef baseClassTypes state lockObj with
             | None -> failwith "TODO: Monitor.Exit_FastPath should throw ArgumentNullException for null obj"
             | Some addr ->
-                let block = IlMachineState.getSyncBlock addr state
+                match tryRelease currentThread addr state with
+                | Some state -> state, 0
+                | None -> state, 4
 
-                match block.Lock with
-                | SyncBlockLock.Free ->
-                    failwith "TODO: Monitor.Exit_FastPath on a Free SyncBlock should throw SynchronizationLockException"
-                | SyncBlockLock.Held locked ->
-                    if locked.LockingThread <> currentThread then
-                        failwith
-                            "TODO: Monitor.Exit_FastPath by a non-owning thread should throw SynchronizationLockException"
-                    elif locked.ReentrancyCount > 1 then
-                        let locked =
-                            { locked with
-                                ReentrancyCount = locked.ReentrancyCount - 1
-                            }
-
-                        writeHeld addr block.WaitQueue locked state
-                    else
-                        // Last release. If anyone is queued for Enter, ownership transfers atomically
-                        // to the FIFO head; otherwise the lock becomes Free (but the SyncBlock
-                        // record persists so the WaitQueue is preserved across the transition).
-                        match locked.AcquireQueue with
-                        | [] ->
-                            IlMachineState.setSyncBlock
-                                addr
-                                {
-                                    Lock = SyncBlockLock.Free
-                                    WaitQueue = block.WaitQueue
-                                }
-                                state
-                        | (nextOwner, snapshot) :: rest ->
-                            // `None` snapshot = fresh entrant from Monitor.Enter (ReentrancyCount = 1).
-                            // `Some depth` = waiter resumed from Monitor.Wait, restored to its prior depth.
-                            let restoredDepth = snapshot |> Option.defaultValue 1
-
-                            let nextLocked =
-                                {
-                                    LockingThread = nextOwner
-                                    ReentrancyCount = restoredDepth
-                                    AcquireQueue = rest
-                                }
-
-                            state
-                            |> writeHeld addr block.WaitQueue nextLocked
-                            |> Scheduler.setThreadStatus nextOwner ThreadStatus.Runnable
-
-        // LeaveHelperAction.None = 0 — caller's IL takes the early Ret branch.
         let state =
-            IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 0)) currentThread state
+            IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 action)) currentThread state
 
         (state, WhatWeDid.Executed) |> ExecutionResult.stepped
+
+    /// .NET 10 QCall: Monitor.Exit_Slowpath(ObjectHandleOnStack obj, LeaveHelperAction exitBehavior),
+    /// reached when `Exit_FastPath` returned an action other than None. For every action but Signal,
+    /// CoreCLR's `Monitor_Exit_Slowpath` attempts the release again and throws
+    /// `SynchronizationLockException` if it fails. `None` says the current thread does not own the
+    /// monitor, which is unchanged, and the caller raises that exception.
+    let Exit_Slowpath
+        (currentThread : ThreadId)
+        (addr : ManagedHeapAddress)
+        (exitBehavior : int)
+        (state : IlMachineState)
+        : IlMachineState option
+        =
+        match exitBehavior with
+        | 0 ->
+            failwith
+                "Monitor_Exit_Slowpath was called with LeaveHelperAction.None, which the BCL's Exit and ExitIfLockTaken never pass it"
+        | 1 ->
+            failwith
+                "Monitor_Exit_Slowpath was called with LeaveHelperAction.Signal, which PawPrint's Exit_FastPath never returns: it transfers ownership to a queued entrant itself"
+        | 2
+        | 3
+        | 4 -> tryRelease currentThread addr state
+        | other -> failwith $"Monitor_Exit_Slowpath was called with %d{other}, which is not a LeaveHelperAction"

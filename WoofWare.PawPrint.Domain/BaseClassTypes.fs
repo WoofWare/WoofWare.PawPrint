@@ -171,6 +171,9 @@ module BaseClassTypes =
         let duplicateWaitObjectException =
             findCorelibType corelib "System" "DuplicateWaitObjectException"
 
+        let synchronizationLockException =
+            findCorelibType corelib "System.Threading" "SynchronizationLockException"
+
         let verificationException =
             findCorelibType corelib "System.Security" "VerificationException"
 
@@ -281,6 +284,7 @@ module BaseClassTypes =
             NotSupportedException = notSupportedException
             InvalidOperationException = invalidOperationException
             DuplicateWaitObjectException = duplicateWaitObjectException
+            SynchronizationLockException = synchronizationLockException
             VerificationException = verificationException
             AmbiguousMatchException = ambiguousMatchException
             EntryPointNotFoundException = entryPointNotFoundException

@@ -176,6 +176,7 @@ module NativeQCall =
             "Monitor_Pulse", NativeMonitor.tryExecuteQCall "Monitor_Pulse"
             "Monitor_PulseAll", NativeMonitor.tryExecuteQCall "Monitor_PulseAll"
             "Monitor_TryEnter_Slowpath", NativeMonitor.tryExecuteQCall "Monitor_TryEnter_Slowpath"
+            "Monitor_Exit_Slowpath", NativeMonitor.tryExecuteQCall "Monitor_Exit_Slowpath"
             "StackTrace_GetStackFramesInternal", NativeStackTrace.tryExecuteQCall "StackTrace_GetStackFramesInternal"
             "DebugDebugger_IsManagedDebuggerAttached",
             NativeDebugger.tryExecuteQCall "DebugDebugger_IsManagedDebuggerAttached"
