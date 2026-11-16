@@ -617,7 +617,7 @@ module TestInterfaceMethodImplementation =
 
     /// A library whose second version adds the bodies and reabstractions C# would refuse the classes
     /// over; `swapClasses` is compiled against the first.
-    let private swapLibrary : string =
+    let internal swapLibrary : string =
         """
 // Static diamond: two equally specific bodies of a static virtual.
 public interface IAs { static virtual int S() => 1; }
@@ -725,7 +725,7 @@ public interface ICd : IAd
 }
 """
 
-    let private swapClasses : string =
+    let internal swapClasses : string =
         """
 public class CDiamondS : IBs, ICs { }
 public class CReabsS : IRr { }
