@@ -148,33 +148,37 @@ module internal UnaryMetadataArrayOps =
         state, WhatWeDid.Executed
 
     /// The element type an `ldelem` or `stelem` names (ECMA-335 III.4.9, III.4.20), which must be
-    /// a TypeDef, TypeRef or TypeSpec, resolved as `newarr` and `ldelema` resolve theirs.
+    /// a TypeDef, TypeRef or TypeSpec, or a closed type in a dynamic method's scope, resolved as
+    /// `newarr` and `ldelema` resolve theirs.
     let private elementTypeOperand
         (ctx : UnaryMetadataIlOpContext)
         (state : IlMachineState)
         : IlMachineState * ConcreteTypeHandle
         =
-        let state, elementTypeResult =
-            IlMachineState.resolveTypeMetadataToken
+        match ctx.TypeOperand with
+        | ResolvedTypeOperand.FromScope handle -> state, handle
+        | ResolvedTypeOperand.FromMetadata (activeAssy, metadataToken) ->
+            let state, elementTypeResult =
+                IlMachineState.resolveTypeMetadataToken
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    state
+                    activeAssy
+                    metadataToken
+
+            let elementType, assy =
+                TokenBindingStop.typeToken activeAssy metadataToken elementTypeResult
+
+            let state = state.WithLoadedAssembly assy
+
+            IlMachineState.concretizeType
                 ctx.LoggerFactory
                 ctx.BaseClassTypes
                 state
-                ctx.ActiveAssembly
-                ctx.MetadataToken
-
-        let elementType, assy =
-            TokenBindingStop.typeToken ctx.ActiveAssembly ctx.MetadataToken elementTypeResult
-
-        let state = state.WithLoadedAssembly assy
-
-        IlMachineState.concretizeType
-            ctx.LoggerFactory
-            ctx.BaseClassTypes
-            state
-            assy.DefinitionFullName
-            ctx.CurrentMethod.DeclaringTypeGenerics
-            ctx.CurrentMethod.Generics
-            elementType
+                assy.DefinitionFullName
+                ctx.CurrentMethod.DeclaringTypeGenerics
+                ctx.CurrentMethod.Generics
+                elementType
 
     let executeLdelema (ctx : UnaryMetadataIlOpContext) (state : IlMachineState) : IlMachineState * WhatWeDid =
         let loggerFactory = ctx.LoggerFactory

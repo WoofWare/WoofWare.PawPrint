@@ -6796,6 +6796,28 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `ldelem <type>` and `stelem <type>` with an operand resolved against a
+                // `DynamicScope`: element types of every kind, arrays whose element type is not
+                // the operand's, the operands the JIT refuses, scope entries rewritten after
+                // `CreateDelegate`, and the `System.Linq.Expressions` compiler, which emits both.
+                // Registered with the dynamic-code switch overridden, like its siblings. Measured
+                // to exit 0 on real .NET 10 and 11, and each check, perturbed on its own, to exit
+                // with its own number on both.
+                FileName = "DynamicMethodArrayElementToken.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `ldtoken` with a type-shaped operand resolved against a `DynamicScope`. Unlike
                 // every other type-shaped opcode, `ldtoken` accepts a type of any shape, so the
                 // guest pins an open generic definition, a bare generic parameter and `System.Void`

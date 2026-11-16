@@ -1049,7 +1049,8 @@ which answers `MemberReferenceResolution.RefusedParent` for each instruction to 
 (`EscapeAnalysis.resolutionRefusal`), `catch` clauses' included, whether or not the JIT compiles the
 clause's protected block, and reports the refusal where the method is called.
 `TestFabricatedTypeOperandRefusal` pins each instruction over metadata,
-`DynamicMethodTypeToken.cs` over a `DynamicScope`, and `TestFabricatedVoidParentMemberReference`
+`DynamicMethodTypeToken.cs` over a `DynamicScope` (and `DynamicMethodArrayElementToken.cs` `ldelem`
+and `stelem` there), and `TestFabricatedVoidParentMemberReference`
 each method instruction over a parent of `System.Void`, each with the instruction reached on every
 run and no handler of its own, where the two runtimes agree. `TestFabricatedCatchClauseRefusal`
 pins where PawPrint stops over a metadata `catch` clause against where the real runtime refuses.

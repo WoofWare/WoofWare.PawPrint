@@ -68,10 +68,10 @@ type internal ResolvedMetadataOperand =
 /// <see cref="ResolvedMetadataOperand"/> as an op whose operand names a *type* sees it.
 /// </summary>
 /// <remarks>
-/// A separate two-case type rather than a third arm at each of the eleven such ops, so that the one
+/// A separate two-case type rather than a third arm at each such op, so that the one
 /// question "is this operand even a type?" is asked in one place (<c>UnaryMetadataIlOpContext.TypeOperand</c>)
-/// and every op keeps a total match. Adding a further type-flavoured case therefore breaks all
-/// eleven, which is the point; adding a method- or field-flavoured one breaks none of them, which is
+/// and every op keeps a total match. Adding a further type-flavoured case therefore breaks every
+/// such op, which is the point; adding a method- or field-flavoured one breaks none of them, which is
 /// also the point.
 /// </remarks>
 [<RequireQualifiedAccess>]
@@ -104,7 +104,7 @@ type internal ResolvedFieldOperand =
 /// </summary>
 /// <remarks>
 /// <c>ldtoken</c> asks the scope "which target does this handle stand for", where
-/// <see cref="ResolvedTypeOperand"/>'s eleven opcodes ask "which closed type is this". The metadata
+/// each of <see cref="ResolvedTypeOperand"/>'s opcodes asks "which closed type is this". The metadata
 /// case stays a raw token: <c>ldtoken</c> accepts field and method tokens there too, and decodes
 /// them itself.
 /// </remarks>

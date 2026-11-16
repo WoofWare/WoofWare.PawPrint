@@ -356,7 +356,7 @@ module internal DynamicScopeOperand =
     /// <para>
     /// The walk every type-shaped opcode shares, stopping at the target itself. What an opcode then
     /// *demands* of that target is its own question: see <see cref="closedType"/>, which is this
-    /// plus the narrowing the eleven closed-type opcodes want, against <c>ldtoken</c>, which takes
+    /// plus the narrowing each closed-type opcode wants, against <c>ldtoken</c>, which takes
     /// the answer unnarrowed because it hands the handle to the guest rather than consuming it.
     /// </para>
     /// <para>
@@ -435,7 +435,7 @@ module internal DynamicScopeOperand =
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="typeHandleTarget"/> plus the narrowing the eleven closed-type opcodes want: an open
+    /// <see cref="typeHandleTarget"/> plus the narrowing each closed-type opcode wants: an open
     /// generic definition, a bare generic parameter and an open constructed type are each an
     /// <c>InvalidProgramException</c> for them, against a closed control that runs (measured).
     /// </para>

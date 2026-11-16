@@ -639,3 +639,234 @@ module TestIlDecoding =
     [<Test>]
     let ``every method body in CoreLib decodes to instructions that tile it exactly`` () =
         assertDecodesCleanly HostImage.coreLibPath
+
+    /// What a `DynamicScope` entry named by an instruction's operand may be.
+    [<RequireQualifiedAccess>]
+    type private ExpectedScopeKind =
+        | Type
+        | AnyType
+        | Method
+        | Field
+        | Refused
+
+    /// The opcodes whose scope operands PawPrint does not resolve yet, each for a reason
+    /// `IlDecoding.scopeOperandKind` gives. An opcode wired up to its scope operand comes off
+    /// this set.
+    let private refusedScopeOperands : Set<UnaryMetadataTokenIlOp> =
+        Set.ofList
+            [
+                UnaryMetadataTokenIlOp.Jmp
+                UnaryMetadataTokenIlOp.Calli
+                UnaryMetadataTokenIlOp.Ldftn
+                UnaryMetadataTokenIlOp.Ldvirtftn
+                UnaryMetadataTokenIlOp.Constrained
+                UnaryMetadataTokenIlOp.Cpobj
+                UnaryMetadataTokenIlOp.Mkrefany
+                UnaryMetadataTokenIlOp.Refanyval
+            ]
+
+    /// Every `UnaryMetadataTokenIlOp` case, with the BCL's `OpCode` for it.
+    let private metadataTokenOps : (UnaryMetadataTokenIlOp * OpCode) list =
+        FSharpType.GetUnionCases typeof<UnaryMetadataTokenIlOp>
+        |> Array.map (fun case ->
+            let op = FSharpValue.MakeUnion (case, [||]) |> unbox<UnaryMetadataTokenIlOp>
+
+            let key =
+                match caseNameOverrides.TryGetValue case.Name with
+                | true, k -> k
+                | false, _ -> case.Name.ToLowerInvariant ()
+
+            match opCodes.TryGetValue key with
+            | true, opCode -> op, opCode
+            | false, _ -> failwith $"%s{case.Name}: no ECMA instruction is named %s{key}"
+        )
+        |> List.ofArray
+
+    /// The scope entry an opcode's operand names, from the BCL's `OpCodes` table: a type for
+    /// `InlineType`, a type of any shape for `InlineTok` (`ldtoken`), and so on; or refused, for
+    /// an opcode pinned in `refusedScopeOperands`.
+    let private expectedScopeKind (op : UnaryMetadataTokenIlOp) (opCode : OpCode) : ExpectedScopeKind =
+        if refusedScopeOperands.Contains op then
+            ExpectedScopeKind.Refused
+        else
+            match opCode.OperandType with
+            | OperandType.InlineType -> ExpectedScopeKind.Type
+            | OperandType.InlineTok -> ExpectedScopeKind.AnyType
+            | OperandType.InlineMethod -> ExpectedScopeKind.Method
+            | OperandType.InlineField -> ExpectedScopeKind.Field
+            | other ->
+                failwith
+                    $"%O{op}'s operand is %O{other}, which names no scope entry this test knows; pin it in refusedScopeOperands or say what it names"
+
+    let private actualScopeKind (op : UnaryMetadataTokenIlOp) : ExpectedScopeKind =
+        match IlDecoding.scopeOperandKind op with
+        | IlDecoding.ScopeOperandKind.Type -> ExpectedScopeKind.Type
+        | IlDecoding.ScopeOperandKind.AnyType -> ExpectedScopeKind.AnyType
+        | IlDecoding.ScopeOperandKind.Method -> ExpectedScopeKind.Method
+        | IlDecoding.ScopeOperandKind.Field -> ExpectedScopeKind.Field
+        | IlDecoding.ScopeOperandKind.NotYetSupported _ -> ExpectedScopeKind.Refused
+
+    [<Test>]
+    let ``each opcode's scope operand kind is the one its operand type names`` () =
+        let refused =
+            metadataTokenOps
+            |> List.filter (fun (op, _) -> actualScopeKind op = ExpectedScopeKind.Refused)
+            |> List.map fst
+            |> Set.ofList
+
+        let describe (ops : Set<UnaryMetadataTokenIlOp>) : string =
+            ops |> Seq.map (fun op -> $"%O{op}") |> String.concat ", "
+
+        let failures =
+            [
+                let unpinned = Set.difference refused refusedScopeOperands
+
+                if not unpinned.IsEmpty then
+                    yield
+                        $"scopeOperandKind refuses these, which refusedScopeOperands does not pin: %s{describe unpinned}"
+
+                let resolved = Set.difference refusedScopeOperands refused
+
+                if not resolved.IsEmpty then
+                    yield
+                        $"refusedScopeOperands pins these, which scopeOperandKind now resolves (take them off it): %s{describe resolved}"
+
+                for op, opCode in metadataTokenOps do
+                    let expected = expectedScopeKind op opCode
+                    let actual = actualScopeKind op
+
+                    if expected <> actual then
+                        yield
+                            $"%O{op} (operand %O{opCode.OperandType}): expected %A{expected}, scopeOperandKind says %A{actual}"
+            ]
+
+        if not failures.IsEmpty then
+            failwith (String.Join ("\n", failures))
+
+    /// What a generated scope token exercised: the kind its opcode's operand names; for an
+    /// operand the decoder admits whatever its tag, a tag naming no type table, which the
+    /// decoder must still mask off; and for `ldtoken`, whose tag decides, which tag it had.
+    [<RequireQualifiedAccess>]
+    type private ScopeTokenLabel =
+        | Kind of ExpectedScopeKind
+        | AdmittedUnderNonTypeTag
+        | LdtokenTypeDef
+        | LdtokenTypeRef
+        | LdtokenTypeSpec
+        | LdtokenOtherTag
+
+    let private scopeTokenGen : Gen<UnaryMetadataTokenIlOp * OpCode * int32> =
+        let ldtoken =
+            metadataTokenOps
+            |> List.filter (fun (op, _) -> op = UnaryMetadataTokenIlOp.Ldtoken)
+
+        gen {
+            let! op, opCode = Gen.frequency [ 4, Gen.elements metadataTokenOps ; 1, Gen.elements ldtoken ]
+
+            let! tag =
+                Gen.frequency
+                    [
+                        // TypeRef, TypeDef and TypeSpec.
+                        3, Gen.elements [ 0x01uy ; 0x02uy ; 0x1Buy ]
+                        // Tables naming no type, and bytes naming no table.
+                        1, Gen.elements [ 0x00uy ; 0x04uy ; 0x06uy ; 0x0Auy ; 0x11uy ; 0x2Buy ; 0x70uy ; 0xFFuy ]
+                        2, Gen.choose (0, 255) |> Gen.map byte
+                    ]
+
+            let! index = Gen.choose (0, 0x00FFFFFF)
+            return op, opCode, (int32 tag <<< 24) ||| index
+        }
+
+    [<Test>]
+    let ``a dynamic-scope token decodes to the scope index when its opcode's operand kind admits it`` () =
+        let property
+            (cover : ScopeTokenLabel -> unit)
+            (op : UnaryMetadataTokenIlOp, opCode : OpCode, token : int32)
+            : unit
+            =
+            let expected = expectedScopeKind op opCode
+            cover (ScopeTokenLabel.Kind expected)
+
+            let tag = byte (uint32 token >>> 24)
+            let index = token &&& 0x00FFFFFF
+
+            // The decoder admits a `ldtoken` whose tag is TypeDef or TypeRef, and refuses every
+            // other tag, TypeSpec included.
+            let admitted =
+                match expected with
+                | ExpectedScopeKind.Type
+                | ExpectedScopeKind.Method
+                | ExpectedScopeKind.Field ->
+                    if tag <> 0x01uy && tag <> 0x02uy && tag <> 0x1Buy then
+                        cover ScopeTokenLabel.AdmittedUnderNonTypeTag
+
+                    true
+                | ExpectedScopeKind.Refused -> false
+                | ExpectedScopeKind.AnyType ->
+                    match tag with
+                    | 0x02uy ->
+                        cover ScopeTokenLabel.LdtokenTypeDef
+                        true
+                    | 0x01uy ->
+                        cover ScopeTokenLabel.LdtokenTypeRef
+                        true
+                    | 0x1Buy ->
+                        cover ScopeTokenLabel.LdtokenTypeSpec
+                        false
+                    | _ ->
+                        cover ScopeTokenLabel.LdtokenOtherTag
+                        false
+
+            let bytes = encode opCode (Operand.MetadataToken token)
+
+            let outcome =
+                try
+                    IlDecoding.decodeInstructions IlTokenUniverse.DynamicScope bytes |> Ok
+                with e ->
+                    Error e
+
+            let render (decoded : (IlOp * int) list) : string =
+                decoded
+                |> List.map (fun (op, off) -> $"%O{op} at %i{off}")
+                |> String.concat "; "
+
+            match admitted, outcome with
+            | true, Ok [ IlOp.UnaryMetadataToken (actualOp, MetadataOperand.FromDynamicScope actualIndex), 0 ] when
+                actualOp = op && actualIndex = index
+                ->
+                ()
+            | true, Ok decoded ->
+                failwith
+                    $"%O{op} with token 0x%08x{token}: expected scope entry %i{index} at 0, got [%s{render decoded}]"
+            | true, Error e ->
+                failwith $"%O{op} with token 0x%08x{token}: expected scope entry %i{index}, but decoding raised %O{e}"
+            | false, Ok decoded ->
+                failwith $"%O{op} with token 0x%08x{token}: expected a refusal, got [%s{render decoded}]"
+            | false, Error e ->
+                let named =
+                    $"a dynamic method's %O{op} names DynamicScope entry %i{index} (token 0x%08x{token})"
+
+                if not (e.Message.Contains named) then
+                    failwith $"%O{op} with token 0x%08x{token}: the refusal %A{e.Message} does not say %A{named}"
+
+        let coverage =
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 2000) (Arb.fromGen scopeTokenGen) property
+
+        // Counted over a fixed sample: a run cannot fall short by chance.
+        for kind in
+            [
+                ExpectedScopeKind.Type
+                ExpectedScopeKind.AnyType
+                ExpectedScopeKind.Method
+                ExpectedScopeKind.Field
+                ExpectedScopeKind.Refused
+            ] do
+            coverage.Count (ScopeTokenLabel.Kind kind) |> shouldBeGreaterThan 75
+
+        coverage.Count ScopeTokenLabel.AdmittedUnderNonTypeTag
+        |> shouldBeGreaterThan 200
+
+        coverage.Count ScopeTokenLabel.LdtokenTypeDef |> shouldBeGreaterThan 30
+        coverage.Count ScopeTokenLabel.LdtokenTypeRef |> shouldBeGreaterThan 30
+        coverage.Count ScopeTokenLabel.LdtokenTypeSpec |> shouldBeGreaterThan 30
+        coverage.Count ScopeTokenLabel.LdtokenOtherTag |> shouldBeGreaterThan 30

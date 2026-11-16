@@ -515,7 +515,7 @@ module internal UnaryMetadataTokenOps =
                 // the guest already holds, so unlike the metadata arms below there is no token to
                 // look up, no generic context to substitute, and no closedness question: `ldtoken`
                 // of an open definition, of a bare generic parameter and of `System.Void` are all
-                // measured to run on real .NET, where the eleven consuming opcodes refuse all three.
+                // measured to run on real .NET, where each consuming opcode refuses all three.
                 state, Ok (LdtokenTarget.Type target)
             | ResolvedLdtokenOperand.FromMetadata (activeAssy, metadataToken) ->
 
