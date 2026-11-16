@@ -238,6 +238,26 @@ module ExceptionDispatching =
     /// out of scope, for both passes. A frame that never began has no `finally` to run either.
     let private hasNotStarted (frame : MethodState) : bool = frame.PendingTypeInit.IsSome
 
+    /// Whether an exception reaching `frame` is in the scope of the method's own exception-handling
+    /// regions, for both passes. It is not if nothing of the frame has run (`hasNotStarted`), nor
+    /// while the frame is calling a monitor helper for its synchronized method: CoreCLR's JIT makes
+    /// those calls inside the `try` round the whole body that its fault handler guards, and outside
+    /// every clause of the method's own (`fgAddSyncMethodEnterExit`, jit/flowgraph.cpp), whatever
+    /// instruction the frame is at.
+    let private ownClausesInScope (frame : MethodState) : bool =
+        if hasNotStarted frame then
+            false
+        else
+
+        match frame.Synchronized with
+        | Some (SynchronizedFrame.Entering _)
+        | Some (SynchronizedFrame.ExitingOnReturn _)
+        | Some (SynchronizedFrame.ExitingOnUnwind _) -> false
+        | Some SynchronizedFrame.AwaitingEnter
+        | Some (SynchronizedFrame.Holding _)
+        | Some SynchronizedFrame.Exited
+        | None -> true
+
     /// What `exceptionObject`, of type `exceptionType`, wraps if it is a
     /// `RuntimeWrappedException` (its `_wrappedException`, which may be null), and `None` if it is
     /// any other type.
@@ -806,7 +826,7 @@ module ExceptionDispatching =
         | None ->
 
         let state, accepting =
-            if hasNotStarted frame then
+            if not (ownClausesInScope frame) then
                 state, None
             else
 
@@ -896,11 +916,11 @@ module ExceptionDispatching =
         | ExceptionEscape.AsyncContextHelper ->
             failwith
                 $"TODO: an exception escaped %s{frame.ExecutingMethod.Name}, which the runtime called for the contexts of the runtime-async body beneath it. CoreCLR's JIT makes that call outside the body's handlers, so the exception would leave the body without restoring its contexts again; PawPrint does not model that, and refuses to continue."
-        | ExceptionEscape.SynchronizedMethodHelper ->
-            failwith
-                $"TODO: an exception escaped %s{frame.ExecutingMethod.Name}, which the runtime called for the monitor of the synchronized method beneath it. CoreCLR's JIT makes that call inside the try its fault handler guards but outside every clause of the method's own, and the search of that frame cannot tell so from the instruction it is at; PawPrint refuses to continue rather than let one of the method's own clauses catch the exception."
         | ExceptionEscape.Propagate
-        | ExceptionEscape.WrapInTargetInvocation ->
+        | ExceptionEscape.WrapInTargetInvocation
+        // The synchronized method's frame beneath, which is making the helper's call, offers the
+        // exception none of its clauses (`ownClausesInScope`).
+        | ExceptionEscape.SynchronizedMethodHelper ->
 
         if
             returnState.WasInitialisingType.IsSome
@@ -1098,7 +1118,7 @@ module ExceptionDispatching =
                 "Logic error: the second pass of exception dispatch unwound past a helper the runtime called for a runtime-async body's contexts; the first pass refuses to search past such a frame"
         | ExceptionEscape.SynchronizedMethodHelper ->
             failwith
-                "Logic error: the second pass of exception dispatch unwound past a monitor helper the runtime called for a synchronized method; the first pass refuses to search past such a frame"
+                "Logic error: the first pass of exception dispatch named a wrapping boundary at a monitor helper the runtime called for a synchronized method, which wraps nothing"
         | ExceptionEscape.RaisedAgainFromCaller ->
             // `WrapNonCompliantException`'s `EX_CATCH` hands the exception back to `IL_Throw`,
             // which dispatches it from the `throw`. That raise continues the trace the exception
@@ -1151,6 +1171,17 @@ module ExceptionDispatching =
                 }
 
         state, wrapped, tieType
+
+    /// Whether the second pass is at the frame its outcome names.
+    let private isAtTarget
+        (unwind : ExceptionUnwindState<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        : bool
+        =
+        match unwind.Target with
+        | ExceptionSearchOutcome.CaughtAt (frameId, _)
+        | ExceptionSearchOutcome.AbandonedAtFilter frameId
+        | ExceptionSearchOutcome.RaisedAgainAt frameId -> frameId = unwind.Frame
+        | ExceptionSearchOutcome.NoHandler -> false
 
     /// Run the first pass to a verdict, then the second pass to the frame it names.
     ///
@@ -1220,14 +1251,7 @@ module ExceptionDispatching =
 
         let frame = ThreadState.getFrame unwind.Frame threadState
 
-        let targetFrame =
-            match unwind.Target with
-            | ExceptionSearchOutcome.CaughtAt (frameId, _)
-            | ExceptionSearchOutcome.AbandonedAtFilter frameId
-            | ExceptionSearchOutcome.RaisedAgainAt frameId -> Some frameId
-            | ExceptionSearchOutcome.NoHandler -> None
-
-        let atTarget = targetFrame = Some unwind.Frame
+        let atTarget = isAtTarget unwind
 
         let boundary =
             if atTarget then
@@ -1236,9 +1260,9 @@ module ExceptionDispatching =
                 None
 
         let regions =
-            if hasNotStarted frame then
-                // Nothing of this frame has run, so nothing of it needs cleaning up. Same scope
-                // rule the first pass applied when declining to offer its `catch` clauses.
+            if not (ownClausesInScope frame) then
+                // None of this frame's cleanup clauses is in scope. Same scope rule the first pass
+                // applied when declining to offer its `catch` clauses.
                 Seq.empty
             else
 
@@ -1253,7 +1277,24 @@ module ExceptionDispatching =
         | Some region ->
             enterCleanupHandler currentThread frame threadState state region unwind
             |> ExceptionDispatchResult.Dispatched
-        | None ->
+        | None -> afterOwnCleanup loggerFactory corelib state currentThread unwind
+
+    /// Go on with the second pass at `unwind.Frame`, the thread's active frame, whose own cleanup
+    /// clauses between `unwind.PC` and the frame's boundary have all run or are out of scope: run
+    /// the fault handlers the JIT puts round the whole body, and then deliver the exception there
+    /// or unwind past the frame.
+    and private afterOwnCleanup
+        (loggerFactory : ILoggerFactory)
+        (corelib : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (currentThread : ThreadId)
+        (unwind : ExceptionUnwindState<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        : ExceptionDispatchResult
+        =
+        let threadState = state.ThreadState.[currentThread]
+        let frame = ThreadState.getFrame unwind.Frame threadState
+
+        let atTarget = isAtTarget unwind
 
         // Whether the exception leaves the frame. A catch, or the filter abandoned, in this frame
         // keeps it; a wrapping boundary on it (`RaisedAgainAt`) removes it as surely as unwinding
@@ -1269,13 +1310,42 @@ module ExceptionDispatching =
             deliverToTarget loggerFactory corelib state currentThread frame threadState unwind
         else
 
+        let state, frame, threadState =
+            match frame.Synchronized with
+            | Some (SynchronizedFrame.ExitingOnUnwind (monitor, _)) ->
+                // The fault handler's own call of the monitor exit helper raised this exception,
+                // which replaces the one the handler was running for, and leaves the handler and
+                // the frame with nothing more of either run.
+                let frame = MethodState.withSynchronizedFrame SynchronizedFrame.Exited frame
+
+                let threadState = ThreadState.setFrame unwind.Frame frame threadState
+
+                let state =
+                    { state with
+                        ThreadState = state.ThreadState |> Map.add currentThread threadState
+                    }
+                    |> IlMachineState.setNativeMemoryPool (
+                        NativeFlagCell.free monitor.LockTaken (IlMachineState.getNativeMemoryPool state)
+                    )
+
+                state, frame, threadState
+            | Some SynchronizedFrame.AwaitingEnter
+            | Some (SynchronizedFrame.Entering _)
+            | Some (SynchronizedFrame.Holding _)
+            | Some (SynchronizedFrame.ExitingOnReturn _)
+            | Some SynchronizedFrame.Exited
+            | None -> state, frame, threadState
+
         match frame.Synchronized with
-        | Some (SynchronizedFrame.Holding monitor) ->
+        | Some (SynchronizedFrame.Entering monitor)
+        | Some (SynchronizedFrame.Holding monitor)
+        | Some (SynchronizedFrame.ExitingOnReturn monitor) ->
             // The fault handler CoreCLR's JIT wraps round a synchronized method's body
             // (`fgAddSyncMethodEnterExit`, jit/flowgraph.cpp) calls the runtime's monitor exit
             // helper, which is managed code, as the exception leaves it. It is the outermost
-            // handler of the method, so every cleanup clause of the method's own has run. The
-            // frame's next step makes that call, and the unwind resumes from here once it returns
+            // handler of the method, so every cleanup clause of the method's own has run, or is
+            // out of scope because the exception escaped a monitor helper's call. The frame's next
+            // step makes that call, and the unwind resumes from here once it returns
             // (`resumeParkedUnwind`).
             let threadState =
                 ThreadState.setFrame
@@ -1289,7 +1359,7 @@ module ExceptionDispatching =
             |> ExceptionDispatchResult.Dispatched
         | Some (SynchronizedFrame.ExitingOnUnwind _) ->
             failwith
-                $"BUG: the second pass of exception dispatch reached %O{frame.ExecutingMethod} again while its monitor was still to be released for an earlier unwind; an exception escaping the monitor helper ends the run in the first pass"
+                $"BUG: the second pass of exception dispatch reached %O{frame.ExecutingMethod} while its fault handler's call of the monitor exit helper was still to finish, after marking that call finished"
         | Some SynchronizedFrame.AwaitingEnter
         | Some SynchronizedFrame.Exited
         | None ->
@@ -1585,9 +1655,10 @@ module ExceptionDispatching =
             failwith
                 $"Logic error: a fault-handler helper resumed an unwind parked on frame %O{unwind.Frame} while the thread was executing frame %O{threadState.ActiveMethodState}"
 
-        // The unwind as it was parked: every cleanup clause of the frame between its program counter
-        // and the frame's boundary had already run.
-        secondPass loggerFactory corelib state currentThread unwind
+        // The unwind as it was parked: every cleanup clause of the frame's own between its program
+        // counter and the frame's boundary had already run, or was out of scope, so none is
+        // searched for again.
+        afterOwnCleanup loggerFactory corelib state currentThread unwind
 
     /// CoreCLR's `ExceptionObject::ClearStackTraceForThrow` (object.h): null the three fields a
     /// previous raise, or a guest's own write, left a trace in — `_remoteStackTraceString`,

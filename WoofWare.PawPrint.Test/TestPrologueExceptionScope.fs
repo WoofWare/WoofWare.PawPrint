@@ -6,7 +6,10 @@ open NUnit.Framework
 open WoofWare.PawPrint
 
 /// A frame whose prologue has not finished has not started, so its exception-handling regions are
-/// not in scope for the exception the prologue itself raises.
+/// not in scope for the exception the prologue itself raises. Nor are they while the frame is
+/// calling a monitor helper for its synchronized method, which CoreCLR's JIT calls outside every
+/// clause of the method's own, whatever instruction the frame is at; the tests of that are at the
+/// end.
 ///
 /// The CLR emits the type-initialisation check outside the method's EH regions, so a failure goes
 /// to the *caller* even when the method's try region starts at the first instruction and catches
@@ -297,4 +300,203 @@ module TestPrologueExceptionScope =
         let threadState = state.ThreadState.[thread]
         threadState.ActiveMethodState |> shouldEqual calleeFrameId
         threadState.LiveFrameCount |> shouldEqual 2
+        threadState.MethodState.IlOpIndex |> shouldEqual catchAllOffset.HandlerOffset
+
+    let private anException : CliException<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle> =
+        {
+            ExceptionObject = ManagedHeapAddress 42
+            Trace =
+                {
+                    Frames = []
+                    HeadOrigin = TraceHeadOrigin.IlThrow
+                }
+        }
+
+    /// How far the callee's synchronized method has got with its monitor, as each test sets it.
+    [<RequireQualifiedAccess>]
+    type private Progress =
+        | Entering
+        | Holding
+        | ExitingOnReturn
+        | ExitingOnUnwind
+
+    /// `twoFrames` over `region`, with the callee made a synchronized method's frame that has got
+    /// as far as `progress` with a monitor over a fresh `lockTaken` cell. The callee's program
+    /// counter is 0, inside `region`'s `try`.
+    let private synchronizedFrames
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (region : ExceptionRegion)
+        (progress : Progress)
+        : IlMachineState * ThreadId * FrameId * FrameId
+        =
+        let state, thread, callerFrameId, calleeFrameId = twoFrames loggerFactory region
+
+        let lockTaken, pool =
+            NativeFlagCell.allocate (IlMachineState.getNativeMemoryPool state)
+
+        let monitor : SynchronizedMonitor =
+            {
+                Lock = ManagedHeapAddress 7
+                LockTaken = lockTaken
+            }
+
+        let synchronized =
+            match progress with
+            | Progress.Entering -> SynchronizedFrame.Entering monitor
+            | Progress.Holding -> SynchronizedFrame.Holding monitor
+            | Progress.ExitingOnReturn -> SynchronizedFrame.ExitingOnReturn monitor
+            | Progress.ExitingOnUnwind ->
+                // The fault handler is calling the exit helper for an earlier exception, which
+                // nothing catches.
+                SynchronizedFrame.ExitingOnUnwind (
+                    monitor,
+                    {
+                        Exception = anException
+                        ExceptionType = objectHandle ()
+                        Frame = calleeFrameId
+                        PC = 0
+                        Target = ExceptionSearchOutcome.NoHandler
+                    }
+                )
+
+        let state =
+            state
+            |> IlMachineState.setNativeMemoryPool pool
+            |> IlMachineState.mapFrame
+                thread
+                calleeFrameId
+                (fun frame ->
+                    { frame with
+                        Synchronized = Some synchronized
+                    }
+                )
+
+        state, thread, callerFrameId, calleeFrameId
+
+    let private dispatchFromCallee
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (state : IlMachineState)
+        (thread : ThreadId)
+        : IlMachineState
+        =
+        match ExceptionDispatching.dispatchException loggerFactory bct state thread anException (objectHandle ()) with
+        | ExceptionDispatchResult.Dispatched state -> state
+        | other -> failwith $"Expected the exception to be dispatched, got %O{other}"
+
+    /// The callee is parked, at its program counter of 0, for its fault handler to call the exit
+    /// helper on the way to `target`, having entered none of its own clauses.
+    let private assertParkedForFaultExit
+        (state : IlMachineState)
+        (thread : ThreadId)
+        (target : ExceptionSearchOutcome)
+        (calleeFrameId : FrameId)
+        : unit
+        =
+        let threadState = state.ThreadState.[thread]
+        threadState.ActiveMethodState |> shouldEqual calleeFrameId
+        threadState.LiveFrameCount |> shouldEqual 2
+        threadState.MethodState.IlOpIndex |> shouldEqual 0
+
+        match threadState.MethodState.Synchronized with
+        | Some (SynchronizedFrame.ExitingOnUnwind (_, unwind)) -> unwind.Target |> shouldEqual target
+        | other -> failwith $"Expected the callee to be calling its fault handler's exit helper, got %A{other}"
+
+    [<TestCase "Entering">]
+    [<TestCase "ExitingOnReturn">]
+    let ``a frame calling its monitor helper does not catch, and calls the exit helper as the exception leaves``
+        (progress : string)
+        : unit
+        =
+        let progress =
+            match progress with
+            | "Entering" -> Progress.Entering
+            | "ExitingOnReturn" -> Progress.ExitingOnReturn
+            | other -> failwith $"unknown progress %s{other}"
+
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let state, thread, callerFrameId, calleeFrameId =
+            synchronizedFrames loggerFactory catchAll progress
+
+        let state = dispatchFromCallee loggerFactory state thread
+
+        assertParkedForFaultExit state thread (ExceptionSearchOutcome.CaughtAt (callerFrameId, catchAll)) calleeFrameId
+
+    [<TestCase "Entering">]
+    [<TestCase "ExitingOnReturn">]
+    let ``a frame calling its monitor helper runs none of its cleanup`` (progress : string) : unit =
+        let progress =
+            match progress with
+            | "Entering" -> Progress.Entering
+            | "ExitingOnReturn" -> Progress.ExitingOnReturn
+            | other -> failwith $"unknown progress %s{other}"
+
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let state, thread, _callerFrameId, calleeFrameId =
+            synchronizedFrames loggerFactory (ExceptionRegion.Finally catchAllOffset) progress
+
+        let state = dispatchFromCallee loggerFactory state thread
+        // Nothing catches: both frames carry only the `finally`.
+        assertParkedForFaultExit state thread ExceptionSearchOutcome.NoHandler calleeFrameId
+
+    [<Test>]
+    let ``a frame holding its monitor does catch and does run its cleanup`` () : unit =
+        // The control for the tests above and below: the same frames between calls of the monitor
+        // helpers offer their own clauses.
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        for region in [ catchAll ; ExceptionRegion.Finally catchAllOffset ] do
+            let state, thread, _callerFrameId, calleeFrameId =
+                synchronizedFrames loggerFactory region Progress.Holding
+
+            let state = dispatchFromCallee loggerFactory state thread
+
+            let threadState = state.ThreadState.[thread]
+            threadState.ActiveMethodState |> shouldEqual calleeFrameId
+            threadState.LiveFrameCount |> shouldEqual 2
+            threadState.MethodState.IlOpIndex |> shouldEqual catchAllOffset.HandlerOffset
+
+    [<Test>]
+    let ``an exception escaping the fault handler's exit helper leaves the frame with nothing more of it run``
+        ()
+        : unit
+        =
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        for region in [ catchAll ; ExceptionRegion.Finally catchAllOffset ] do
+            let state, thread, callerFrameId, _calleeFrameId =
+                synchronizedFrames loggerFactory region Progress.ExitingOnUnwind
+
+            let state = dispatchFromCallee loggerFactory state thread
+
+            // The caller's clause, of the same region, is the one entered, and the callee is gone.
+            let threadState = state.ThreadState.[thread]
+            threadState.ActiveMethodState |> shouldEqual callerFrameId
+            threadState.LiveFrameCount |> shouldEqual 1
+            threadState.MethodState.IlOpIndex |> shouldEqual catchAllOffset.HandlerOffset
+
+    [<Test>]
+    let ``an unwind the fault handler's exit helper resumes runs none of the frame's cleanup`` () : unit =
+        // The enter helper raised at the callee's program counter of 0, inside its `finally`'s
+        // `try`. Once the fault handler's exit helper returns, the unwind goes on to the caller's
+        // `finally` without entering the callee's.
+        let _, loggerFactory = LoggerFactory.makeTest ()
+
+        let state, thread, callerFrameId, calleeFrameId =
+            synchronizedFrames loggerFactory (ExceptionRegion.Finally catchAllOffset) Progress.Entering
+
+        let state = dispatchFromCallee loggerFactory state thread
+        assertParkedForFaultExit state thread ExceptionSearchOutcome.NoHandler calleeFrameId
+
+        let state =
+            match
+                SynchronizedMethodMonitor.resume loggerFactory bct SynchronizedMethodStep.AfterExitOnUnwind thread state
+            with
+            | ExecutionResult.Stepped (state, _, _) -> state
+            | other -> failwith $"Expected the unwind to resume, got %O{other}"
+
+        let threadState = state.ThreadState.[thread]
+        threadState.ActiveMethodState |> shouldEqual callerFrameId
+        threadState.LiveFrameCount |> shouldEqual 1
         threadState.MethodState.IlOpIndex |> shouldEqual catchAllOffset.HandlerOffset

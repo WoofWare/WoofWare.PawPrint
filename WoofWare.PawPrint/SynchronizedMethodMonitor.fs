@@ -16,7 +16,9 @@ open Microsoft.Extensions.Logging
 /// a runtime-async body's contexts. The body's IL is not rewritten, which would move the offsets its
 /// stack traces report. Each helper takes the JIT's hidden <c>bool</c> saying whether the monitor
 /// is held (<c>SynchronizedMonitor.LockTaken</c>), so a contended enter blocks, and an exit after
-/// the body released the monitor itself fails, inside CoreLib exactly as on CoreCLR.
+/// the body released the monitor itself fails, inside CoreLib exactly as on CoreCLR. While a helper
+/// runs, the frame's <c>SynchronizedFrame</c> says which call it is making, so that exception
+/// dispatch offers an exception escaping the helper none of the method's own clauses.
 /// </remarks>
 [<RequireQualifiedAccess>]
 module SynchronizedMethodMonitor =
@@ -125,7 +127,7 @@ module SynchronizedMethodMonitor =
             |> IlMachineState.mapFrame
                 thread
                 frameId
-                (MethodState.withSynchronizedFrame (SynchronizedFrame.Holding monitor))
+                (MethodState.withSynchronizedFrame (SynchronizedFrame.Entering monitor))
             |> callHelper
                 loggerFactory
                 baseClassTypes
@@ -140,6 +142,10 @@ module SynchronizedMethodMonitor =
         | Some (SynchronizedFrame.Holding _)
         | Some SynchronizedFrame.Exited
         | None -> None
+        | Some (SynchronizedFrame.Entering _ as progress)
+        | Some (SynchronizedFrame.ExitingOnReturn _ as progress) ->
+            failwith
+                $"BUG: %O{state.ThreadState.[thread].MethodState.ExecutingMethod} is about to run an instruction while its monitor is %A{progress}, a call of a monitor helper that has not returned to it"
 
     /// What the active frame of `thread` does at a `ret`, before it returns, if it is a synchronized
     /// method's still holding its monitor: the call of the exit helper, after which the `ret` runs
@@ -155,11 +161,20 @@ module SynchronizedMethodMonitor =
 
         match frame.Synchronized with
         | Some (SynchronizedFrame.Holding monitor) ->
-            exit loggerFactory baseClassTypes monitor SynchronizedMethodStep.AfterExitOnReturn thread state
+            let frameId = state.ThreadState.[thread].ActiveMethodState
+
+            state
+            |> IlMachineState.mapFrame
+                thread
+                frameId
+                (MethodState.withSynchronizedFrame (SynchronizedFrame.ExitingOnReturn monitor))
+            |> exit loggerFactory baseClassTypes monitor SynchronizedMethodStep.AfterExitOnReturn thread
             |> Some
         | Some SynchronizedFrame.Exited
         | None -> None
         | Some (SynchronizedFrame.AwaitingEnter as progress)
+        | Some (SynchronizedFrame.Entering _ as progress)
+        | Some (SynchronizedFrame.ExitingOnReturn _ as progress)
         | Some (SynchronizedFrame.ExitingOnUnwind _ as progress) ->
             failwith $"BUG: %O{frame.ExecutingMethod} reached a ret while its monitor was %A{progress}"
 
@@ -184,9 +199,16 @@ module SynchronizedMethodMonitor =
             |> IlMachineState.mapFrame thread frameId (MethodState.withSynchronizedFrame SynchronizedFrame.Exited)
 
         match step, frame.Synchronized with
-        | SynchronizedMethodStep.AfterEnter, Some (SynchronizedFrame.Holding _) ->
+        | SynchronizedMethodStep.AfterEnter, Some (SynchronizedFrame.Entering monitor) ->
+            let state =
+                state
+                |> IlMachineState.mapFrame
+                    thread
+                    frameId
+                    (MethodState.withSynchronizedFrame (SynchronizedFrame.Holding monitor))
+
             ExecutionResult.stepped (state, WhatWeDid.Executed)
-        | SynchronizedMethodStep.AfterExitOnReturn, Some (SynchronizedFrame.Holding monitor) ->
+        | SynchronizedMethodStep.AfterExitOnReturn, Some (SynchronizedFrame.ExitingOnReturn monitor) ->
             // The frame's `ret`, whose program counter did not move, runs again and returns.
             ExecutionResult.stepped (leave monitor state, WhatWeDid.Executed)
         | SynchronizedMethodStep.AfterExitOnUnwind, Some (SynchronizedFrame.ExitingOnUnwind (monitor, unwind)) ->
