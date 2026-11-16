@@ -7411,6 +7411,25 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `RuntimeTypeHandle_VerifyInterfaceIsImplemented` over a created `TypeBuilder` type
+                // and over the dynamic-methods class, on either side. Dynamic-code switch overridden
+                // to true like the other `DynamicMethod` guests; measured to exit 0 on real .NET 10
+                // and 11.
+                FileName = "TypeBuilderVerifyInterfaceIsImplemented.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `MetadataImport.Enum` of a dynamic module's TypeDef, which has no Event rows, then of
                 // its compiled base's, through `GetEvents` of a dynamic type deriving from a class with
                 // events. Dynamic-code switch overridden to true like its siblings; measured to exit 0

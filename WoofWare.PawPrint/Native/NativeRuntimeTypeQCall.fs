@@ -319,6 +319,66 @@ module NativeRuntimeTypeQCall =
                     state
 
             NativeHandlerResult.completed state |> Some
+        // `[LibraryImport(..., EntryPoint = "RuntimeTypeHandle_VerifyInterfaceIsImplemented")]`, called by
+        // the instance method `RuntimeTypeHandle.VerifyInterfaceIsImplemented(RuntimeTypeHandle)` with
+        // `GetNativeHandle()` of both, which throws in managed code for a default handle, so neither
+        // argument is null here.
+        | "RuntimeTypeHandle_VerifyInterfaceIsImplemented",
+          "System.Private.CoreLib",
+          "System",
+          "RuntimeTypeHandle",
+          _,
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        receiverGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        interfaceGenerics) ],
+          MethodReturnType.Void when receiverGenerics.IsEmpty && interfaceGenerics.IsEmpty ->
+            let operation = "RuntimeTypeHandle_VerifyInterfaceIsImplemented"
+
+            if instruction.Arguments.Length <> 2 then
+                failwith $"%s{operation}: expected two native arguments, got %d{instruction.Arguments.Length}"
+
+            let receiver =
+                instruction.Arguments.[0]
+                |> EvalStackValue.ofCliType
+                |> NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state
+
+            let interfaceType =
+                instruction.Arguments.[1]
+                |> EvalStackValue.ofCliType
+                |> NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state
+
+            let state, verdict =
+                IlMachineState.verifyInterfaceIsImplemented
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    state
+                    receiver
+                    interfaceType
+
+            let raise (message : string) : NativeHandlerResult option =
+                NativeHandlerResult.raiseExceptionWithMessage ctx.BaseClassTypes.ArgumentException (Some message) state
+                |> Some
+
+            // CoreCLR's `COMPlusThrow(kArgumentException, W("<resource>"))` names a CoreLib resource,
+            // which `EEResourceException` looks up in managed code under the guest's culture. These
+            // are `Strings.resx`'s English texts (#2296).
+            match verdict with
+            | IlMachineRuntimeMetadata.InterfaceVerification.Implemented -> NativeHandlerResult.completed state |> Some
+            // Arg_InvalidHandle
+            | IlMachineRuntimeMetadata.InterfaceVerification.ReceiverIsTypeVariable -> raise "Invalid handle."
+            // Arg_NotFoundIFace
+            | IlMachineRuntimeMetadata.InterfaceVerification.ReceiverIsTypeDesc -> raise "Interface not found."
+            // Argument_InterfaceMap
+            | IlMachineRuntimeMetadata.InterfaceVerification.ReceiverIsInterface ->
+                raise "'this' type cannot be an interface itself."
+            // Arg_MustBeInterface
+            | IlMachineRuntimeMetadata.InterfaceVerification.TargetIsNotInterface ->
+                raise "Type passed must be an interface."
+            // Arg_NotFoundIFace
+            | IlMachineRuntimeMetadata.InterfaceVerification.NotImplemented -> raise "Interface not found."
         | "RuntimeTypeHandle_IsCollectible",
           "System.Private.CoreLib",
           "System",

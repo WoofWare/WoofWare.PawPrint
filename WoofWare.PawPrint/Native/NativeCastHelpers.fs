@@ -9,39 +9,6 @@ open NativeRuntimeTypeHelpers
 /// cast helpers the JIT would otherwise emit calls to.
 [<RequireQualifiedAccess>]
 module NativeCastHelpers =
-    /// CoreCLR's `TypeHandle::IsTypeDesc` (`typehandle.h`): a handle is a `TypeDesc` rather
-    /// than a `MethodTable` exactly when it names a byref, pointer, function pointer or
-    /// generic variable. Arrays of every rank *do* have MethodTables and are not TypeDescs;
-    /// nor is an open generic type definition, which has a canonical MethodTable of its own,
-    /// nor an open constructed type, which CoreCLR's class loader gives a MethodTable of its
-    /// own too (`TypeVarTypeDesc::LoadConstraints`, `vm/typedesc.cpp:826`).
-    ///
-    /// `ObjIsInstanceOfCore` answers a flat `false` for a TypeDesc target without consulting
-    /// the structural walk at all.
-    let private isTypeDescTarget (target : RuntimeTypeHandleTarget) : bool =
-        match target with
-        // `CreateMinimalMethodTable` produces a MethodTable, not a TypeDesc (methodtable.cpp:663);
-        // this is the same answer `TypeHandleTag.forTarget` gives, and must stay consistent with it.
-        | RuntimeTypeHandleTarget.DynamicMethodsClass _ -> false
-        | RuntimeTypeHandleTarget.GenericParameter _
-        | RuntimeTypeHandleTarget.MethodGenericParameter _ -> true
-        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition _
-        | RuntimeTypeHandleTarget.OpenConstructed _ -> false
-        // The shape decides, as for a closed one: `T&` is a ParamTypeDesc and `T[]` an array
-        // MethodTable (`CreateTypeHandleForTypeKey`, clsload.cpp:2715).
-        | RuntimeTypeHandleTarget.Composite ((CompositeShape.Byref | CompositeShape.Pointer), _)
-        | RuntimeTypeHandleTarget.FunctionPointer _ -> true
-        | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) -> false
-        | RuntimeTypeHandleTarget.Closed handle ->
-            match handle with
-            | ConcreteTypeHandle.Byref _
-            | ConcreteTypeHandle.Pointer _
-            | ConcreteTypeHandle.FunctionPointer _ -> true
-            | ConcreteTypeHandle.Concrete _
-            | ConcreteTypeHandle.OneDimArrayZero _
-            | ConcreteTypeHandle.Continuation _
-            | ConcreteTypeHandle.Array _ -> false
-
     /// Is `target` an interface type? Only a nominal, MethodTable-backed handle can be one:
     /// CoreCLR asks this of `toTypeHnd.AsMethodTable()`, which is only reached once the
     /// TypeDesc case has already been excluded.
@@ -153,7 +120,7 @@ module NativeCastHelpers =
 
         if nullableMatches then
             state, true
-        elif isTypeDescTarget target then
+        elif TypeHandleTag.isTypeDesc target then
             state, false
         else
 

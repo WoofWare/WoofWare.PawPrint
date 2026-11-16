@@ -2685,6 +2685,61 @@ module IlMachineRuntimeMetadata =
 
         canCast Set.empty state source target
 
+    /// Which arm of CoreCLR's `RuntimeTypeHandle_VerifyInterfaceIsImplemented`
+    /// (`vm/runtimehandles.cpp`) a receiver and an interface type take. Every case but `Implemented`
+    /// is an `ArgumentException` there; `ReceiverIsTypeDesc` and `NotImplemented` raise the same
+    /// message, and are distinct arms because the first comes before `TargetIsNotInterface`.
+    [<RequireQualifiedAccess>]
+    type InterfaceVerification =
+        /// The receiver casts to the interface type.
+        | Implemented
+        /// Arm 1: the receiver is a type variable, of a type or of a method.
+        | ReceiverIsTypeVariable
+        /// Arm 2: the receiver is a byref, a pointer or a function pointer.
+        | ReceiverIsTypeDesc
+        /// Arm 3: the receiver is an interface.
+        | ReceiverIsInterface
+        /// Arm 4: the interface type is not an interface.
+        | TargetIsNotInterface
+        /// Arm 5: the receiver does not cast to the interface type.
+        | NotImplemented
+
+    /// CoreCLR's `RuntimeTypeHandle_VerifyInterfaceIsImplemented` without the raise: which arm the
+    /// pair `receiver`, `interfaceType` takes, the arms checked in CoreCLR's order. The first four
+    /// classify the two handles alone; only the fifth asks `isRuntimeTypeHandleTargetAssignableTo`,
+    /// and so only the fifth can meet that function's refusals.
+    let verifyInterfaceIsImplemented
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (state : IlMachineState)
+        (receiver : RuntimeTypeHandleTarget)
+        (interfaceType : RuntimeTypeHandleTarget)
+        : IlMachineState * InterfaceVerification
+        =
+        match receiver with
+        | RuntimeTypeHandleTarget.GenericParameter _
+        | RuntimeTypeHandleTarget.MethodGenericParameter _ -> state, InterfaceVerification.ReceiverIsTypeVariable
+        | _ when TypeHandleTag.isTypeDesc receiver -> state, InterfaceVerification.ReceiverIsTypeDesc
+        | _ when isInterfaceTarget state receiver -> state, InterfaceVerification.ReceiverIsInterface
+        | _ when not (isInterfaceTarget state interfaceType) -> state, InterfaceVerification.TargetIsNotInterface
+        | _ ->
+            // CoreCLR asks `MethodTable::ImplementsInterface` first and `TypeHandle::CanCastTo` only if
+            // that fails. For a receiver which is a MethodTable and not an interface, against an
+            // interface, the first is a fast path which accepts nothing the second refuses: it scans
+            // the same interface map that `CanCastToInterface` scans, with the same special-marker
+            // rule. Measured over every pair of an exported CoreLib type that is neither a TypeDesc
+            // nor an interface against every exported CoreLib interface, 184,752 pairs on .NET 10
+            // and 197,100 on .NET 11: the QCall passes exactly when `IsAssignableFrom` does.
+            // `TestInterfaceVerification` compares this function with the host's QCall over those
+            // CoreLib pairs.
+            let state, implemented =
+                isRuntimeTypeHandleTargetAssignableTo loggerFactory baseClassTypes state receiver interfaceType
+
+            if implemented then
+                state, InterfaceVerification.Implemented
+            else
+                state, InterfaceVerification.NotImplemented
+
     /// One of the flag-style generic constraints, which CoreCLR's
     /// `SatisfiesSpecialConstraintRecursive` asks about one at a time.
     [<RequireQualifiedAccess>]

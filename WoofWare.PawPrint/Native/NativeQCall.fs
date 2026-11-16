@@ -118,6 +118,8 @@ module NativeQCall =
             "RuntimeTypeHandle_GetInterfaces", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetInterfaces"
             "RuntimeTypeHandle_IsCollectible", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_IsCollectible"
             "RuntimeTypeHandle_IsVisible", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_IsVisible"
+            "RuntimeTypeHandle_VerifyInterfaceIsImplemented",
+            NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_VerifyInterfaceIsImplemented"
             "RuntimeTypeHandle_RegisterCollectibleTypeDependency",
             NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_RegisterCollectibleTypeDependency"
             "RuntimeTypeHandle_MakeByRef", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_MakeByRef"
