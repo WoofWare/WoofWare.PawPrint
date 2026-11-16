@@ -725,7 +725,7 @@ module TestGetInterfacesOrder =
 
         let coverage =
             CoverageSample.check
-                (Config.QuickThrowOnFailure.WithMaxTest 40)
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
                 (Arb.fromGen genCorpus)
                 (fun cover corpus -> checkGenerated cover corpus)
 
@@ -734,11 +734,11 @@ module TestGetInterfacesOrder =
         // About half of what the fixed sample reaches.
         for label, floor in
             [
-                Label.Duplicate, 1
-                Label.DeclaresOverInterfacefulBase, 1
-                Label.ValueTypeReceiver, 1
-                Label.InterfaceReceiver, 1
-                Label.NestedReceiver, 1
+                Label.Duplicate, 68
+                Label.DeclaresOverInterfacefulBase, 190
+                Label.ValueTypeReceiver, 65
+                Label.InterfaceReceiver, 210
+                Label.NestedReceiver, 100
             ] do
             Assert.That (coverage.Count label, Is.GreaterThanOrEqualTo floor, $"%A{label}")
 

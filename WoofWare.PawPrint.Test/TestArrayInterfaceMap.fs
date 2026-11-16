@@ -8,16 +8,15 @@ open FsUnitTyped
 open NUnit.Framework
 open WoofWare.PawPrint
 
-/// `RuntimeTypeHandle_GetInterfaces` gives an array handle no interfaces of its own and lets
-/// the ordinary base-type walk collect `System.Array`'s closure instead — mirroring CoreCLR,
-/// which copies the parent's interface map row for row into every array MethodTable
-/// (`src/coreclr/vm/array.cpp:410-424`).
+/// CoreCLR makes `System.Array` the parent of every array MethodTable and copies its interface
+/// map row for row into the array's (`src/coreclr/vm/array.cpp:410-424`), so
+/// `RuntimeTypeHandle_GetInterfaces` answers `System.Array`'s map for any array.
 ///
-/// That fall-through is only correct because an array's base type really does resolve to
-/// `System.Array`, for every element type and every rank. These tests pin that invariant: if
-/// `resolveBaseConcreteType` ever stopped answering `System.Array` for an array handle, the
-/// QCall would silently report the *wrong* interface set rather than fail, and the only
-/// symptom would be a differential test's exit code.
+/// These tests pin both halves for PawPrint: an array's base type resolves to `System.Array`, for
+/// every element type and every rank, which is what reflection's `BaseType` and the method table's
+/// parent report; and `System.Array` declares exactly the interfaces an array's map holds. Either
+/// going wrong would report a wrong answer rather than fail, and the only symptom would be a
+/// differential test's exit code.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestArrayInterfaceMap =
@@ -133,8 +132,7 @@ module TestArrayInterfaceMap =
     [<Test>]
     let ``nested array element types do not change the base type`` () : unit =
         // int[][][]... to a few levels: each level is still an array whose base is
-        // System.Array, so the fall-through terminates at the same place however deep the
-        // element nesting goes.
+        // System.Array, however deep the element nesting goes.
         let state, elementHandle = concretize (state ()) "System" "Int32"
 
         let mutable handle = ConcreteTypeHandle.OneDimArrayZero elementHandle
@@ -145,8 +143,8 @@ module TestArrayInterfaceMap =
 
     [<Test>]
     let ``System.Array declares exactly the interfaces an array inherits`` () : unit =
-        // The fall-through reports whatever System.Array's closure contains, so pin that
-        // closure by name. The differential tests assert the resulting totals (6 for a
+        // The QCall reports System.Array's map for every array, so pin its interfaces by
+        // name. The differential tests assert the resulting totals (6 for a
         // multi-dimensional array, and 11 for an SZ array once PopulateInterfaces has added
         // the five implicit generic ones); if corelib ever changes System.Array's interface
         // list, those numbers move, and this test names what moved.

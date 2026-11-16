@@ -2689,8 +2689,8 @@ module NativeRuntimeTypeQCall =
             // wrapper RuntimeHandles.cs:559 initialises `result` to `[]`).
             //
             // The managed wrapper short-circuits TypeDesc cases (byref/pointer/generic
-            // parameter) by returning `[]` before reaching the QCall, so we expect a
-            // closed MethodTable here.
+            // parameter) by returning `[]` before reaching the QCall, so a type with a
+            // MethodTable arrives here; `RuntimeTypeInterfaces.ofReceiver` answers it.
             let operation = "RuntimeTypeHandle.GetInterfaces"
 
             let typeHandleTarget =
