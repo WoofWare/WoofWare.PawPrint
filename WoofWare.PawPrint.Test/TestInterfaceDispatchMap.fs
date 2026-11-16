@@ -118,16 +118,6 @@ module TestInterfaceDispatchMap =
         let state, interfaceMap =
             InterfaceDispatch.interfaceMapOf loggerFactory bct "test" state receiver
 
-        // Asked of the state the walk left, and then set aside, so that the comparisons below see the
-        // state they always saw.
-        let _, definitionMapFailures =
-            DefinitionInterfaceMapEquivalence.disagreements
-                loggerFactory
-                state.DotnetRuntimeDirs
-                bct
-                state.TypeSystem
-                receiver
-
         let pawPrintInterfaces =
             interfaceMap
             |> List.map (fun entry -> toHost hostAssemblies state entry.Interface)
@@ -144,8 +134,6 @@ module TestInterfaceDispatchMap =
                 ]
             else
                 []
-
-        let mapFailures = mapFailures @ definitionMapFailures
 
         if host.IsInterface then
             state,

@@ -75,29 +75,6 @@ module ConcreteInterfaceDispatch =
         | Some (implTy, typeInfo) -> state, Ok (implHandle, implTy, typeInfo)
         | None -> failwith $"Interface implementation handle %O{implHandle} was not registered or has no TypeDef row"
 
-    /// One entry of a type's interface map (`bmtInterfaceEntry`), with the two flags
-    /// `PlaceInterfaceMethods` decides placement by.
-    type internal InterfaceMapEntry =
-        {
-            /// The interface instantiation, as the type sees it.
-            Interface : ConcreteTypeHandle
-            Type : ConcreteType<ConcreteTypeHandle>
-            TypeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>
-            /// The same instantiation read in the vocabulary of the *generic definition* of the type
-            /// whose map this is, which is where CoreCLR compares an interface method's signature
-            /// against the type's candidates. Closing both sides first would let two distinct
-            /// declarations coincide: `C<T> : I<int>` declaring `M(T)` and `M(int)` must bind
-            /// `I<int>.M(int)` to `M(int)` alone, even in `C<int>`.
-            Substitution : TypeConcretization.SubstitutionContext
-            /// The type lists this interface in its own InterfaceImpl rows, rather than reaching it
-            /// only through its parent or through another interface. A declared interface the parent
-            /// also implements is *re-implemented*: its slots are matched afresh against the type's
-            /// own methods.
-            DeclaredOnType : bool
-            /// The parent's interface map already holds this instantiation.
-            ImplementedByParent : bool
-        }
-
     /// The substitution an InterfaceImpl row's own spelling denotes, read in `spellingContext`.
     let private spelledInterfaceSubstitution
         (operation : string)
@@ -177,6 +154,18 @@ module ConcreteInterfaceDispatch =
                 TypeConcretization.SubstitutionContext.Arguments = ImmutableArray.Create argument
             })
             .Arguments.[0]
+
+    /// One entry of a closed type's interface map (`bmtInterfaceEntry`): its definition's entry, and
+    /// the interface instantiation that entry closes to under the type's arguments.
+    type internal InterfaceMapEntry =
+        {
+            /// The entry on the type's generic definition, which carries the substitution and the two
+            /// flags `PlaceInterfaceMethods` decides placement by.
+            Definition : DefinitionInterfaceMapEntry
+            /// The interface instantiation, as the type sees it.
+            Interface : ConcreteTypeHandle
+            Type : ConcreteType<ConcreteTypeHandle>
+        }
 
     /// The interface map of the generic definition `identity` (or of a non-generic type, which is its
     /// own definition), in CoreCLR's order: the parent definition's entries first, re-read in this
@@ -454,22 +443,28 @@ module ConcreteInterfaceDispatch =
 
         state, closed |> Result.map (fun closed -> closed.[0])
 
-    /// The interface map of the closed type `typeHandle`: its definition's map
-    /// (`interfaceMapOfDefinition`), each entry closed under the type's arguments, in the same order
-    /// and with the same duplicates. The type's base chain is loaded first, as CoreCLR loads a type's
-    /// parent before the type, so a closed type whose ancestor does not bind has no map.
-    let internal interfaceMapOfClosingDefinition
+    /// The interface map of a class, value type or interface, in CoreCLR's order: the parent's
+    /// entries first, then each interface the type declares followed by its own parents,
+    /// depth-first, each instantiation appearing once. This is the list `Type.GetInterfaces()`
+    /// reports, entry for entry. An interface has no parent, so its map is its own rows, each followed
+    /// by its parents.
+    ///
+    /// It is the map of the type's generic definition (`interfaceMapOfDefinition`), each entry closed
+    /// under the type's arguments, in the same order and with the same duplicates. Instantiations are
+    /// told apart as CoreCLR tells them apart, on the generic definition, so a type naming two
+    /// instantiations that its own arguments make coincide -- `C<T, U> : I<T>, I<U>` at
+    /// `C<int, int>` -- has two entries with one closed handle.
+    ///
+    /// The type's base chain is loaded first, as CoreCLR loads a type's parent before the type, so a
+    /// closed type whose ancestor does not bind has no map.
+    let internal interfaceMapOf
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (operation : string)
         (state : TypeSystemState)
         (typeHandle : ConcreteTypeHandle)
-        : TypeSystemState *
-          Result<
-              (ConcreteTypeHandle * ConcreteType<ConcreteTypeHandle> * DefinitionInterfaceMapEntry) list,
-              TypeBindingFailure
-           >
+        : TypeSystemState * Result<InterfaceMapEntry list, TypeBindingFailure>
         =
         let ty, _ =
             match TypeSystemState.tryGetConcreteTypeInfo state typeHandle with
@@ -532,193 +527,18 @@ module ConcreteInterfaceDispatch =
 
                 match respellings with
                 | Error failure -> state, Error failure
-                | Ok () -> state, Ok ((handle, interfaceTy, entry) :: closedSoFar)
+                | Ok () ->
+                    let closed =
+                        {
+                            Definition = entry
+                            Interface = handle
+                            Type = interfaceTy
+                        }
+
+                    state, Ok (closed :: closedSoFar)
             )
 
         state, reversed |> Result.map List.rev
-
-    /// The interface map of a class, value type or interface, in CoreCLR's order: the parent's
-    /// entries first, then each interface the type declares followed by its own parents,
-    /// depth-first, each instantiation appearing once (`MethodTableBuilder::ExpandApproxInheritedInterfaces`
-    /// and `ExpandApproxDeclaredInterfaces`, methodtablebuilder.cpp). This is the list
-    /// `Type.GetInterfaces()` reports, entry for entry. An interface has no parent, so its map is
-    /// its own rows, each followed by its parents.
-    ///
-    /// Instantiations are told apart as CoreCLR tells them apart, on the generic definition, so a
-    /// type naming two instantiations that its own arguments make coincide -- `C<T, U> : I<T>, I<U>`
-    /// at `C<int, int>` -- has two entries with one closed handle.
-    let rec internal interfaceMapOf
-        (loggerFactory : ILoggerFactory)
-        (dotnetRuntimeDirs : string seq)
-        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (operation : string)
-        (state : TypeSystemState)
-        (typeHandle : ConcreteTypeHandle)
-        : TypeSystemState * Result<InterfaceMapEntry list, TypeBindingFailure>
-        =
-        let ty, typeInfo =
-            match TypeSystemState.tryGetConcreteTypeInfo state typeHandle with
-            | Some found -> found
-            | None -> failwith $"%s{operation}: %O{typeHandle} has no TypeDef row, so it has no interface map"
-
-        let owner = ConcreteMethodTable.ownerOfDefinition operation state ty.Identity
-
-        let assembly, _ = ConcreteMethodTable.definitionMetadata operation state ty.Identity
-
-        let state, parentHandle =
-            TypeSystemState.resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state typeHandle
-
-        match parentHandle with
-        | Error failure -> state, Error failure
-        | Ok parentHandle ->
-
-        let state, inherited =
-            match parentHandle with
-            | None -> state, Ok []
-            | Some parentHandle ->
-                match interfaceMapOf loggerFactory dotnetRuntimeDirs baseClassTypes operation state parentHandle with
-                | state, Error failure -> state, Error failure
-                | state, Ok parentMap ->
-
-                let state, baseOfDefinition =
-                    ConcreteMethodTable.baseOfDefinition
-                        loggerFactory
-                        dotnetRuntimeDirs
-                        baseClassTypes
-                        operation
-                        state
-                        owner
-                        typeInfo
-
-                match baseOfDefinition with
-                | Error failure -> state, Error failure
-                | Ok None ->
-                    failwith
-                        $"%s{operation}: %s{owner.Description} has a base type as an instantiation but none as a definition"
-                | Ok (Some (baseIdentity, arguments)) ->
-
-                let inherited =
-                    parentMap
-                    |> List.map (fun entry ->
-                        { entry with
-                            Substitution =
-                                TypeConcretization.SubstitutionContext.rebase baseIdentity arguments entry.Substitution
-                            DeclaredOnType = false
-                            ImplementedByParent = true
-                        }
-                    )
-
-                state, Ok inherited
-
-        match inherited with
-        | Error failure -> state, Error failure
-        | Ok inherited ->
-
-        // "Checking for further expanded interfaces isn't necessary for the system module, as we can
-        // rely on the C# compiler to have found all of the interfaces that the type implements"
-        // (methodtablebuilder.cpp, `ExpandApproxInterface`): for a value type declared in CoreLib, an
-        // interface's own parents are not expanded where it is declared. Classes are unaffected.
-        let expandParents =
-            not (
-                ty.Identity.AssemblyFullName = baseClassTypes.Corelib.DefinitionFullName
-                && LoadedTypeInfo.isValueType baseClassTypes state._LoadedAssemblies typeInfo
-            )
-
-        let rec expand
-            (declared : bool)
-            (spellingAssembly : DumpedAssembly)
-            (spellingContext : TypeConcretization.SubstitutionContext)
-            (spellingOwner : ConcreteType<ConcreteTypeHandle>)
-            (state : TypeSystemState)
-            (map : InterfaceMapEntry list)
-            (row : WoofWare.PawPrint.InterfaceImplementation)
-            : TypeSystemState * Result<InterfaceMapEntry list, TypeBindingFailure>
-            =
-            match
-                resolveImplementedInterface loggerFactory dotnetRuntimeDirs baseClassTypes spellingOwner row state
-            with
-            | state, Error failure -> state, Error failure
-            | state, Ok (handle, interfaceTy, interfaceTypeInfo) ->
-
-            let substitution =
-                spelledInterfaceSubstitution
-                    operation
-                    spellingAssembly
-                    spellingContext
-                    interfaceTypeInfo
-                    row.InterfaceHandle
-
-            // The same instantiation *of the definition*, which a matching closed handle is necessary
-            // but not sufficient for: `C<T> : B<T>, I<int>` over `B<T> : I<T>` holds `I<!0>` and
-            // `I<int>` as two entries, and at `C<int>` both close to `I<int>`.
-            let rec findExisting
-                (state : TypeSystemState)
-                (i : int)
-                (entries : InterfaceMapEntry list)
-                : TypeSystemState * Result<int option, TypeBindingFailure>
-                =
-                match entries with
-                | [] -> state, Ok None
-                | entry :: rest when entry.Interface <> handle -> findExisting state (i + 1) rest
-                | entry :: rest ->
-                    match
-                        TypeSystemState.substitutionsEquivalent
-                            loggerFactory
-                            dotnetRuntimeDirs
-                            baseClassTypes
-                            state
-                            entry.Substitution
-                            substitution
-                    with
-                    | state, Error failure -> state, Error failure
-                    | state, Ok true -> state, Ok (Some i)
-                    | state, Ok false -> findExisting state (i + 1) rest
-
-            match findExisting state 0 map with
-            | state, Error failure -> state, Error failure
-            | state, Ok (Some existing) ->
-                // Already present: an entry is added once, and its parents with it. Re-declaring it
-                // on this type is recorded, since that is what makes it re-implemented here.
-                if declared then
-                    state,
-                    map
-                    |> List.mapi (fun i entry ->
-                        if i = existing then
-                            { entry with
-                                DeclaredOnType = true
-                            }
-                        else
-                            entry
-                    )
-                    |> Ok
-                else
-                    state, Ok map
-            | state, Ok None ->
-
-            let entry =
-                {
-                    Interface = handle
-                    Type = interfaceTy
-                    TypeInfo = interfaceTypeInfo
-                    Substitution = substitution
-                    DeclaredOnType = declared
-                    ImplementedByParent = false
-                }
-
-            let map = map @ [ entry ]
-
-            if not expandParents then
-                state, Ok map
-            else
-
-            let interfaceAssembly, _ =
-                ConcreteMethodTable.definitionMetadata operation state interfaceTy.Identity
-
-            (state, map, interfaceTypeInfo.ImplementedInterfaces)
-            |||> StateResult.fold (expand false interfaceAssembly substitution interfaceTy)
-
-        (state, inherited, typeInfo.ImplementedInterfaces)
-        |||> StateResult.fold (expand true assembly owner.Substitution ty)
 
     /// The interface method a MethodImpl declaration names, together with the interface instantiation
     /// it names it on -- closed, and read in the vocabulary of the owner's generic definition, whose
@@ -1123,14 +943,15 @@ module ConcreteInterfaceDispatch =
             |||> StateResult.fold (fun state (parentSlotsIfBuilt, placed) (index, entry) ->
                 // Inherited and not re-declared, so the parent's map answers -- unless the parent is
                 // abstract and so may have left a method to a default body.
-                let inheritedOnly = entry.ImplementedByParent && not entry.DeclaredOnType
+                let inheritedOnly =
+                    entry.Definition.ImplementedByParent && not entry.Definition.DeclaredOnType
 
                 if inheritedOnly && not parentIsAbstract then
                     state, Ok (parentSlotsIfBuilt, placed)
                 else
 
                 let interfaceMethods =
-                    entry.TypeInfo.Methods
+                    entry.Definition.TypeInfo.Methods
                     |> List.filter (fun method -> method.IsVirtual && not method.IsStatic)
 
                 (state, (parentSlotsIfBuilt, placed), interfaceMethods)
@@ -1139,7 +960,7 @@ module ConcreteInterfaceDispatch =
                         {
                             Signature = interfaceMethod.Signature
                             AssemblyFullName = interfaceMethod.DeclaringAssemblyFullName
-                            DeclaringTypeGenerics = entry.Substitution
+                            DeclaringTypeGenerics = entry.Definition.Substitution
                         }
 
                     let interfaceMethodKey : SlotIdentity =
@@ -1173,7 +994,7 @@ module ConcreteInterfaceDispatch =
                     | state, Error failure -> state, Error failure
                     | state, Ok (Some method) ->
                         state, Ok (parentSlotsIfBuilt, placed.SetItem (key, slotOfOwnMethod method))
-                    | state, Ok None when entry.ImplementedByParent ->
+                    | state, Ok None when entry.Definition.ImplementedByParent ->
                         // "Explicit re-declaration of an inherited interface will try to match only
                         // newslot methods [of this type]": an unmatched slot keeps the parent's mapping,
                         // which dispatch reaches by walking up.
@@ -1276,7 +1097,7 @@ module ConcreteInterfaceDispatch =
                                 dotnetRuntimeDirs
                                 baseClassTypes
                                 state
-                                entry.Substitution
+                                entry.Definition.Substitution
                                 declaredSubstitution
                         with
                         | state, Error failure -> state, Error failure

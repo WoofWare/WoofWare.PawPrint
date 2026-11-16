@@ -91,20 +91,6 @@ module TestGetInterfacesOrder =
         let state, receiverTarget =
             HostTypeTarget.target loggerFactory bct images state receiver
 
-        // Asked of a closed receiver and then set aside, so that the answer below is asked of the
-        // state it always was.
-        let definitionMapFailures =
-            match receiverTarget with
-            | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle) ->
-                DefinitionInterfaceMapEquivalence.disagreements
-                    loggerFactory
-                    state.DotnetRuntimeDirs
-                    bct
-                    state.TypeSystem
-                    handle
-                |> snd
-            | _ -> []
-
         let before = state
 
         let state, actual =
@@ -120,7 +106,6 @@ module TestGetInterfacesOrder =
             types |> List.map (fun t -> t.ToString ()) |> String.concat ", "
 
         match actual with
-        | _ when not definitionMapFailures.IsEmpty -> state, Some (String.concat "\n" definitionMapFailures)
         | Error message -> state, Some $"%O{receiver}: threw %s{message}\n    host     [%s{render host}]"
         | Ok actual when actual = expected -> state, None
         | Ok actual ->
