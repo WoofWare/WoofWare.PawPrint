@@ -1051,3 +1051,330 @@ public class CDicDiamond : System.Runtime.InteropServices.IDynamicInterfaceCasta
             )
 
         failures |> shouldEqual []
+
+    // ----- The interface map -----
+
+    /// What `InterfaceMethodImplementation.resolve` answers.
+    [<RequireQualifiedAccess>]
+    type internal MapAnswer =
+        | Answered of InterfaceMapTarget
+        /// The binding failure the type system returned, or the first line of what it threw.
+        | Failed of string
+        | Skipped of Skip
+
+    /// What `InterfaceMethodImplementation.resolve` answers for `question`. It is given the interface
+    /// method's definition, never method arguments, so a constrained generic method is asked about
+    /// like any other.
+    let internal mapAnswer
+        (images : HostTypeTarget.Images)
+        (state : IlMachineState)
+        (question : Question)
+        : IlMachineState * MapAnswer
+        =
+        match closedHandles images state question with
+        | state, Error skip -> state, MapAnswer.Skipped skip
+        | state, Ok (receiver, iface) ->
+
+        let definition = definitionOf images question.Method
+        let before = state.TypeSystem
+
+        let after, answer =
+            try
+                match InterfaceMethodImplementation.resolve loggerFactory dirs bct receiver iface definition before with
+                | after, Ok answer -> after, MapAnswer.Answered answer
+                | after, Error failure -> after, MapAnswer.Failed $"%O{failure}"
+            with e ->
+                before, MapAnswer.Failed (firstLine e.Message)
+
+        { state with
+            TypeSystem = after
+        },
+        answer
+
+    let private describeMap (answer : MapAnswer) : string =
+        let name (m : WoofWare.PawPrint.MethodInfo<_, _, _>) : string =
+            $"%s{MethodOwner.describe m.Owner}::%s{m.Name}"
+
+        match answer with
+        | MapAnswer.Answered (InterfaceMapTarget.Method (definition, declaringType)) ->
+            $"Method %s{name definition} declared by %O{declaringType}"
+        | MapAnswer.Answered InterfaceMapTarget.NoTarget -> "NoTarget"
+        | MapAnswer.Answered (InterfaceMapTarget.Ambiguous candidates) ->
+            let candidates = candidates |> List.map name |> String.concat ", "
+            $"Ambiguous %s{candidates}"
+        | MapAnswer.Failed message -> $"Failed %s{message}"
+        | MapAnswer.Skipped skip -> $"Skipped %A{skip}"
+
+    /// Where the interface map's answer is not the host's, why: a target must be the same MethodDef
+    /// of the same image, declared by the same type at the same instantiation; a null target is
+    /// `NoTarget`; a map that throws is `Ambiguous`, and only such a map is.
+    let internal judgeMap
+        (images : HostTypeTarget.Images)
+        (state : IlMachineState)
+        (question : Question)
+        (host : HostAnswer)
+        (answer : MapAnswer)
+        : IlMachineState * string option
+        =
+        let disagree () =
+            Some $"%O{question}: the host says %s{describeHost host}, the interface map %s{describeMap answer}"
+
+        match host, answer with
+        | _, MapAnswer.Skipped _ -> state, None
+        | HostAnswer.Target m, MapAnswer.Answered (InterfaceMapTarget.Method (definition, declaringType)) ->
+            let state, expected =
+                HostTypeTarget.target loggerFactory bct images state m.DeclaringType
+
+            let agrees =
+                sameDefinition images definition m
+                && expected = RuntimeTypeHandleTarget.Closed declaringType
+
+            state, (if agrees then None else disagree ())
+        | HostAnswer.NoTarget, MapAnswer.Answered InterfaceMapTarget.NoTarget
+        | HostAnswer.Throws, MapAnswer.Answered (InterfaceMapTarget.Ambiguous _) -> state, None
+        | _, _ -> state, disagree ()
+
+    [<Test>]
+    let ``CoreLib: the interface map agrees with GetInterfaceMap`` () : unit =
+        let stopwatch = Stopwatch.StartNew ()
+        let images = [ hostCoreLib, corelib ]
+        let failures = ResizeArray<string> ()
+        let mutable state = coreState
+        let mutable compared = 0
+        let mutable byDefaultBody = 0
+        let mutable statics = 0
+        let mutable constrained = 0
+        let mutable openReceivers = 0
+
+        for receiver, iface in coreLibPairs do
+            if receiver.ContainsGenericParameters then
+                openReceivers <- openReceivers + 1
+            else
+
+            for question, host in hostAnswers receiver iface do
+                let afterAnswer, answer = mapAnswer images state question
+                let afterJudging, failure = judgeMap images afterAnswer question host answer
+                state <- afterJudging
+
+                match answer with
+                | MapAnswer.Skipped _ -> ()
+                | MapAnswer.Answered _
+                | MapAnswer.Failed _ ->
+                    compared <- compared + 1
+
+                    if question.Method.IsStatic then
+                        statics <- statics + 1
+
+                    if isConstrained question.Method then
+                        constrained <- constrained + 1
+
+                    match host with
+                    | HostAnswer.Target m when m.DeclaringType.IsInterface -> byDefaultBody <- byDefaultBody + 1
+                    | _ -> ()
+
+                match failure with
+                | Some failure -> failures.Add failure
+                | None -> ()
+
+        TestContext.Progress.WriteLine
+            $"CoreLib interface map: %d{compared} rows compared, %d{byDefaultBody} by a default body, %d{statics} static, %d{constrained} constrained generic, %d{openReceivers} open receivers skipped, %d{stopwatch.ElapsedMilliseconds} ms"
+
+        failures |> Seq.truncate 40 |> List.ofSeq |> shouldEqual []
+
+        // About half of what a .NET 10 host measured: the call path's rows, and the constrained generic
+        // methods it skips.
+        Assert.That (compared, Is.GreaterThanOrEqualTo 3500)
+        Assert.That (byDefaultBody, Is.GreaterThanOrEqualTo 160)
+        Assert.That (statics, Is.GreaterThanOrEqualTo 1000)
+        Assert.That (constrained, Is.GreaterThanOrEqualTo 80)
+        Assert.That (openReceivers, Is.GreaterThanOrEqualTo 200)
+
+    let private checkGeneratedMap (cover : Label -> unit) (corpus : ImplementingCorpus) : unit =
+        withImplementingCorpus
+            corpus
+            (fun source images state pairs ->
+                let mutable state = state
+                let failures = ResizeArray<string> ()
+
+                for receiver, iface in pairs do
+                    if not receiver.ContainsGenericParameters then
+                        for question, host in hostAnswers receiver iface do
+                            for label in labels question host do
+                                cover label
+
+                            let afterAnswer, answer = mapAnswer images state question
+                            let afterJudging, failure = judgeMap images afterAnswer question host answer
+                            state <- afterJudging
+
+                            match failure with
+                            | Some failure -> failures.Add failure
+                            | None -> ()
+
+                if failures.Count > 0 then
+                    failwith (
+                        $"%d{failures.Count} disagreements with the host:\n"
+                        + String.concat "\n" failures
+                        + $"\nin the corpus:\n%s{source}"
+                    )
+            )
+
+    [<Test>]
+    let ``Generated corpora: the interface map agrees with GetInterfaceMap`` () : unit =
+        let coverage =
+            CoverageSample.check
+                (Config.QuickThrowOnFailure.WithMaxTest 100)
+                (Arb.fromGen genImplementingCorpus)
+                (fun cover corpus -> checkGeneratedMap cover corpus)
+
+        // The fixed sample is the call path's, so its floors are too.
+        for label, floor in
+            [
+                Label.OwnMethod, 430
+                Label.Inherited, 60
+                Label.DefaultOnItself, 60
+                Label.DefaultOnMoreSpecific, 11
+                Label.NullRow, 44
+                Label.StaticByMethodImpl, 215
+                Label.StaticByDefault, 9
+                Label.ThroughVariance, 44
+                Label.GenericMethodDefinition, 89
+            ] do
+            Assert.That (coverage.Count label, Is.GreaterThanOrEqualTo floor, $"%A{label}")
+
+    [<Test>]
+    let ``Shapes C# refuses: the interface map agrees with GetInterfaceMap`` () : unit =
+        let failures =
+            shapes
+            |> List.choose (fun shape ->
+                withShape
+                    shape
+                    (fun images state question host ->
+                        match checkHost shape.Host host with
+                        | Some failure -> Some $"%s{shape.Name}: %s{failure}"
+                        | None ->
+
+                        let state, answer = mapAnswer images state question
+
+                        judgeMap images state question host answer
+                        |> snd
+                        |> Option.map (fun failure -> $"%s{shape.Name}: %s{failure}")
+                    )
+            )
+
+        failures |> shouldEqual []
+
+    // ----- Examples -----
+
+    let private exampleSource : string =
+        """
+public interface IOne { void M(); }
+public interface IGM { void G<T>(); static abstract void SG<T>(); }
+public class CGM : IGM { public void G<T>() { } public static void SG<T>() { } }
+public interface IGDM { void G<T>() { } }
+public class CGDM : IGDM { }
+public class CGBase<T> : IOne { public virtual void M() { } }
+public class CGDer : CGBase<string> { }
+public interface ICoD<out T> { string D() => "x"; }
+public class CCoD : ICoD<string> { }
+"""
+
+    let private exampleImage : byte[] Lazy =
+        lazy
+            (Roslyn.compileAssembly
+                "InterfaceMethodImplementationExamples"
+                OutputKind.DynamicallyLinkedLibrary
+                []
+                [ exampleSource ])
+
+    /// The interface map's answer for the one method of `iface` named `methodName`, asked about on
+    /// `receiver`, with the host's map of the same row; each type built from the example library's host
+    /// assembly. The host's target must be a method, and the answer is checked against it by `judgeMap`.
+    let private example
+        (receiver : Reflection.Assembly -> Type)
+        (iface : Reflection.Assembly -> Type)
+        (methodName : string)
+        : InterfaceMapTarget * MethodInfo * RuntimeTypeHandleTarget
+        =
+        let dumped =
+            use stream = new MemoryStream (exampleImage.Value)
+            AssemblyApi.read loggerFactory None stream
+
+        let context =
+            AssemblyLoadContext ("interfaceMethodImplementationExamples", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (exampleImage.Value)
+                context.LoadFromStream stream
+
+            let images = [ hostCoreLib, corelib ; host, dumped ]
+            let state = coreState.WithLoadedAssembly dumped
+
+            let question, hostAnswer =
+                hostAnswers (receiver host) (iface host)
+                |> List.find (fun (question, _) -> question.Method.Name = methodName)
+
+            let target =
+                match hostAnswer with
+                | HostAnswer.Target target -> target
+                | other -> failwith $"%O{question}: the host's map says %A{other}"
+
+            let state, answer = mapAnswer images state question
+
+            match judgeMap images state question hostAnswer answer with
+            | _, Some failure -> failwith failure
+            | state, None ->
+
+            let _, declaring =
+                HostTypeTarget.target loggerFactory bct images state target.DeclaringType
+
+            match answer with
+            | MapAnswer.Answered answer -> answer, target, declaring
+            | other -> failwith $"%O{question}: %s{describeMap other}"
+        finally
+            context.Unload ()
+
+    let private hostNamed (name : string) : Reflection.Assembly -> Type =
+        fun host ->
+            match host.GetType name with
+            | null -> failwith $"the example library has no type %s{name}"
+            | t -> t
+
+    /// Generic interface methods are answered by their definitions: the function is given no method
+    /// arguments and returns none.
+    [<Test>]
+    let ``A generic interface method's target is its definition`` () : unit =
+        for receiver, iface, methodName, declaringType in
+            [
+                "CGM", "IGM", "G", "CGM"
+                "CGM", "IGM", "SG", "CGM"
+                "CGDM", "IGDM", "G", "IGDM"
+            ] do
+            match example (hostNamed receiver) (hostNamed iface) methodName with
+            | InterfaceMapTarget.Method (definition, _), target, _ ->
+                target.IsGenericMethodDefinition |> shouldEqual true
+                definition.Signature.GenericParameterCount |> shouldEqual 1
+                definition.RequiredDeclaringType.Name |> shouldEqual declaringType
+            | other, _, _ -> failwith $"%s{receiver} / %s{iface}::%s{methodName}: %A{other}"
+
+    /// The target is declared by the type the walk found it on, at that type's instantiation: a base
+    /// class's instantiation for an inherited method, and the instantiation of the interface a default
+    /// body was found on, not the one asked about.
+    [<Test>]
+    let ``A target is declared by the instantiation the walk found it on`` () : unit =
+        let cases : (string * (Reflection.Assembly -> Type) * (Reflection.Assembly -> Type) * string * string) list =
+            [
+                "CGDer / IOne", hostNamed "CGDer", hostNamed "IOne", "M", "CGBase`1[System.String]"
+                "CCoD / ICoD<object>",
+                hostNamed "CCoD",
+                (fun host -> (hostNamed "ICoD`1" host).MakeGenericType typeof<obj>),
+                "D",
+                "ICoD`1[System.String]"
+            ]
+
+        for name, receiver, iface, methodName, expected in cases do
+            match example receiver iface methodName with
+            | InterfaceMapTarget.Method (_, declaringType), target, declaring ->
+                string target.DeclaringType |> shouldEqual expected
+                declaring |> shouldEqual (RuntimeTypeHandleTarget.Closed declaringType)
+            | other, _, _ -> failwith $"%s{name}: %A{other}"
