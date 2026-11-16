@@ -403,3 +403,89 @@ static List<object> Tokens(ILGenerator il)
 // The slot holding typeof(int)'s handle, which must be the only one.
 int slot = SlotOf(Tokens(il), typeof(int));
 ```
+
+## Decisions
+
+Decided 2026-11-16 by the delegated decider, after reading the code at `020170ddb`.
+
+**The claim that there is no structural choice holds.** `elementTypeOperand` returns a `ConcreteTypeHandle` and makes
+the same three calls as the `FromMetadata` arms of `executeNewarr` and `executeLdelema`; `executeLdelem` and
+`executeStelem` both call `refuseTypeOperand` on its result before popping anything; and `UnaryMetadataIlOp.execute`
+already narrows every `ScopeOperandKind.Type` operand through `closedType` before it dispatches. So the two arms under
+"The change" are the whole fix. Implement them as written.
+
+**Leave the three copies of operand resolution unmerged.** `executeNewarr` passes the frame's `MethodState.Generics`
+and the other two pass `ctx.CurrentMethod.Generics`, and the remarks on `ResolvedMetadataOperand` say the ops' metadata
+paths are kept apart on purpose for that reason. Whether the two sources can ever differ is a question about the
+metadata path, which this change does not otherwise touch, and a dynamic method has no method generics in either. Do
+not fold them here, and do not file anything for it.
+
+For item 3 of "The change", stop counting: say "each such op" where the comments say "eleven". A count in a comment is
+wrong again at the next opcode.
+
+1. **No new issue for the empty-stack refusal.** It is #2278 ("Invalid IL stops the run instead of raising
+   InvalidProgramException"). Both failures of `stelem void` on an empty stack, the refused operand and the stack
+   underflow, are `InvalidProgramException` with the default message on real .NET, raised when the body is compiled.
+   Once #2278 turns the stack-shape analysis's `StackUnderflow` into that exception, no guest can tell which of the two
+   PawPrint noticed first, so there is nothing left to order. The planner's measurement is worth keeping, so it goes on
+   #2278 as a comment (the decider's caller posts it). In the guest, leave out the bare `stelem`, as the plan says, and
+   keep the bare `ldelem` checks (53, 54).
+
+2. **The width-mismatched `ldelem` becomes an issue, #2313, and nothing in
+   this change.** It is not a `docs/divergences.md` entry: that file records behaviour we chose, and a silently
+   different value is not one we would choose. The issue asks first for a loud stop when the instruction's element
+   size differs from the array's, and for the byte-level read only if a real emitter turns out to need it. It covers
+   the short forms (`ldelem.i2` and the rest) and the metadata path as well, since both share the gap. Do not add a
+   width check in this PR; mention the issue in the PR body.
+
+3. **No Microsoft.Extensions.DependencyInjection guest in this PR, and no `PackageReference` anywhere in it.** The
+   owner has since said a test-only package dependency is acceptable provided no published package gains one, so the
+   objection is no longer the dependency; it is that the project to hold such guests does not exist yet, and creating
+   it is #2092's first step, not part of a nine-line fix. The DI modes join that project once it exists, tracked by
+   #2314, which carries the probe's source and the reason an exit code
+   alone proves nothing there. This PR's consumer check is the `System.Linq.Expressions` compiler (checks 69, 70). The
+   PR closes #2308 and its body records the seven DI modes as measured by hand with the fix, naming the follow-up
+   issue.
+
+### Additions to the test plan
+
+- **Give `ldelem`'s result to an instruction that depends on its stack shape.** Before this change the `Ldelem` arm
+  of `StackShapeOfMethod.dynamicTokenShape` could not be reached from a guest, because the decoder refused the body
+  first. This PR is the first to run it, and most of the planned checks return the loaded value straight away. Add
+  three checks: `ldelem int64` followed by `ldc.i8` and `add`; `ldelem float64` followed by `ldc.r8` and `add`; and
+  `ldelem Big` followed by `ldfld` of its third field (through a local and `ldloca` if the direct form is not legal).
+  Measure each on real .NET first, as for the others.
+- **A jagged array.** `ldelem int[]` of an `int[][]`, then `ldlen`; and `stelem int[]`. The operand is then an array
+  type, which is a different kind of `ConcreteTypeHandle` from every operand in the table.
+- **`stelem` of null with a reference-type operand into a non-null array** (`stelem string` of `ldnull`), since every
+  planned `stelem` of a reference stores a real object.
+- **Unit test 2: derive the `ldtoken` expectation from the decoder as it is now, not from the plan's sentence.** The
+  decoder admits a `ldtoken` whose tag is TypeDef or TypeRef and stops on every other tag, TypeSpec included. Label
+  the TypeSpec tag for coverage so that the generator is known to reach it.
+- **Unit test 1's pinned refusal set** must be compared as a set of cases, with the failure message printing the
+  difference in both directions, so that the next opcode to be wired up fails with a message that says which name to
+  remove.
+- **`docs/divergences.md`**, under "A byref or `System.Void` type operand fails when it is reached": its last
+  paragraph names `DynamicMethodTypeToken.cs` as what pins each instruction over a `DynamicScope`. Add the new guest
+  there, since it is what pins `ldelem` and `stelem`.
+- **Time the guest.** It mints about seventy-five dynamic methods and compiles two expression trees. If it takes more
+  than about a minute under PawPrint, move checks 69 and 70 to a guest of their own beside
+  `ExpressionLambdaCompileEmitted.cs` instead of trimming the table.
+- Run the whole default suite as well as the Guest categories: the edit to `elementTypeOperand` re-indents the metadata
+  arm, and `TestFabricatedTypeOperandRefusal`, `TestResolutionFaultsOnHost` and `TestFabricatedWrappedEnumStore` are
+  what hold that arm.
+
+### Additions to the mutant table
+
+| mutant | should be killed by |
+|---|---|
+| `executeStelem` pops before the refusal | the `stelem` rows of 31 to 45 (a null array then gives `NullReferenceException`) |
+| `executeLdelem` pops before the refusal | also the `ldelem` of a null array rows of 31 to 45, not only 53 |
+| the `Ldelem` arm of `dynamicTokenShape` no longer asks `TypeOperand.refusal` | 53 (the body would stop on `StackUnderflow`) |
+| the `Ldelem` arm of `dynamicTokenShape` answers a fixed shape (`int32`'s) | the three shape-dependent checks added above |
+| `elementTypeOperand`'s `FromScope` arm returns the array type of the handle, or its element type | the jagged-array checks |
+
+Record for the plan's row "`executeLdelem` pops before the refusal" which check really went red. Check 53 has nothing
+on the stack, so a pop there may stop the run instead of failing the check; a stopped run is still a kill, but say so.
+
+If any mutant in either table survives, stop and report it before opening the PR.
