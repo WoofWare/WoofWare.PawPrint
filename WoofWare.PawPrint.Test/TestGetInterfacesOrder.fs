@@ -885,6 +885,188 @@ public struct S2<T> : IC<T[]> { }
         finally
             context.Unload ()
 
+    // ----- A TypeSpec with a leading custom modifier -----
+
+    /// An image with `I<T>`, `B<T> : I<T>` and a class `C`, a type `Modifier` naming nothing, and
+    /// either `C : modopt(Modifier) I<int>` (`onInterface`) or `C : modopt(Modifier) B<int>`. C# never
+    /// spells either, but a TypeSpec blob may begin with custom modifiers, and CoreCLR loads both.
+    let private modifiedTypeSpecImage (onInterface : bool) : byte[] =
+        let metadata = Reflection.Metadata.Ecma335.MetadataBuilder ()
+        let nil = Unchecked.defaultof<Reflection.Metadata.EntityHandle>
+
+        let definition (handle : Reflection.Metadata.TypeDefinitionHandle) : Reflection.Metadata.EntityHandle =
+            Reflection.Metadata.TypeDefinitionHandle.op_Implicit handle
+
+        metadata.AddModule (
+            0,
+            metadata.GetOrAddString "ModifiedSpec.dll",
+            metadata.GetOrAddGuid (Guid ("6e1c1f0e-8f5a-4c4e-9d55-2b8c6f1d0a71")),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>
+        )
+        |> ignore<Reflection.Metadata.ModuleDefinitionHandle>
+
+        metadata.AddAssembly (
+            metadata.GetOrAddString "ModifiedSpec",
+            Version (1, 0, 0, 0),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>,
+            enum<Reflection.AssemblyFlags> 0,
+            Reflection.AssemblyHashAlgorithm.None
+        )
+        |> ignore<Reflection.Metadata.AssemblyDefinitionHandle>
+
+        let coreLibName = hostCoreLib.GetName ()
+
+        let coreLibRef =
+            metadata.AddAssemblyReference (
+                metadata.GetOrAddString coreLibName.Name,
+                coreLibName.Version,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddBlob (coreLibName.GetPublicKeyToken ()),
+                enum<Reflection.AssemblyFlags> 0,
+                Unchecked.defaultof<_>
+            )
+
+        let objectRef =
+            metadata.AddTypeReference (
+                Reflection.Metadata.AssemblyReferenceHandle.op_Implicit coreLibRef,
+                metadata.GetOrAddString "System",
+                metadata.GetOrAddString "Object"
+            )
+            |> fun handle ->
+                (Reflection.Metadata.TypeReferenceHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+
+        let addType
+            (name : string)
+            (attributes : Reflection.TypeAttributes)
+            (baseType : Reflection.Metadata.EntityHandle)
+            =
+            metadata.AddTypeDefinition (
+                attributes,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddString name,
+                baseType,
+                Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle 1,
+                Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle 1
+            )
+
+        addType "<Module>" Reflection.TypeAttributes.NotPublic nil
+        |> ignore<Reflection.Metadata.TypeDefinitionHandle>
+
+        let iface =
+            addType
+                "I`1"
+                (Reflection.TypeAttributes.Public
+                 ||| Reflection.TypeAttributes.Interface
+                 ||| Reflection.TypeAttributes.Abstract)
+                nil
+
+        let baseClass = addType "B`1" Reflection.TypeAttributes.Public objectRef
+        let modifier = addType "Modifier" Reflection.TypeAttributes.Public objectRef
+
+        // `modopt(Modifier) GENERICINST CLASS <generic> 1 int32`
+        let modifiedInstantiation (generic : Reflection.Metadata.TypeDefinitionHandle) =
+            let blob = Reflection.Metadata.BlobBuilder ()
+            blob.WriteByte 0x20uy
+            blob.WriteCompressedInteger (Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef (definition modifier))
+            blob.WriteByte 0x15uy
+            blob.WriteByte 0x12uy
+            blob.WriteCompressedInteger (Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef (definition generic))
+            blob.WriteCompressedInteger 1
+            blob.WriteByte 0x08uy
+
+            metadata.AddTypeSpecification (metadata.GetOrAddBlob blob)
+            |> fun handle ->
+                (Reflection.Metadata.TypeSpecificationHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+
+        let receiver =
+            if onInterface then
+                addType "C" Reflection.TypeAttributes.Public objectRef
+            else
+                addType "C" Reflection.TypeAttributes.Public (modifiedInstantiation baseClass)
+
+        // B<T> : I<T>, spelled `GENERICINST CLASS I 1 VAR 0`.
+        let overOwnVariable =
+            let blob = Reflection.Metadata.BlobBuilder ()
+            blob.WriteByte 0x15uy
+            blob.WriteByte 0x12uy
+            blob.WriteCompressedInteger (Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef (definition iface))
+            blob.WriteCompressedInteger 1
+            blob.WriteByte 0x13uy
+            blob.WriteCompressedInteger 0
+
+            metadata.AddTypeSpecification (metadata.GetOrAddBlob blob)
+            |> fun handle ->
+                (Reflection.Metadata.TypeSpecificationHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+
+        metadata.AddInterfaceImplementation (baseClass, overOwnVariable)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        if onInterface then
+            metadata.AddInterfaceImplementation (receiver, modifiedInstantiation iface)
+            |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddGenericParameter (
+            definition iface,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        metadata.AddGenericParameter (
+            definition baseClass,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        let builder =
+            Reflection.PortableExecutable.ManagedPEBuilder (
+                Reflection.PortableExecutable.PEHeaderBuilder (
+                    imageCharacteristics =
+                        (Reflection.PortableExecutable.Characteristics.ExecutableImage
+                         ||| Reflection.PortableExecutable.Characteristics.Dll)
+                ),
+                Reflection.Metadata.Ecma335.MetadataRootBuilder metadata,
+                Reflection.Metadata.BlobBuilder ()
+            )
+
+        let output = Reflection.Metadata.BlobBuilder ()
+        builder.Serialize output |> ignore<Reflection.Metadata.BlobContentId>
+        output.ToArray ()
+
+    [<TestCase true>]
+    [<TestCase false>]
+    let ``A TypeSpec with a leading custom modifier names the instantiation it modifies`` (onInterface : bool) : unit =
+        let image = modifiedTypeSpecImage onInterface
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("modifiedTypeSpec", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let receiver = host.GetType "C"
+            // The host reads the modified spelling as `I<int>` itself, or through `B<int>`.
+            receiver.GetInterfaces ()
+            |> Array.map _.ToString()
+            |> shouldEqual [| "I`1[System.Int32]" |]
+
+            let _, failure =
+                compareReceiver [ hostCoreLib, corelib ; host, dumped ] (coreState.WithLoadedAssembly dumped) receiver
+
+            failure |> shouldEqual None
+        finally
+            context.Unload ()
+
     // ----- A generic definition -----
 
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
