@@ -977,19 +977,9 @@ module RealRuntime =
     let executeWithRealRuntime (args : string[]) (assemblyBytes : byte array) : RealRuntimeResult =
         executeWithTimeout guestTimeout args assemblyBytes
 
-    /// Not implemented yet: its tests come first.
-    let captureAssemblyInPlace
-        (configProperties : AppContextProperties)
-        (args : string[])
-        (dllPath : string)
-        : CapturedRun
-        =
-        ignore<AppContextProperties> configProperties
-        ignore<string[]> args
-
-        failwith $"TODO: RealRuntime.captureAssemblyInPlace is not implemented yet, so it cannot run %s{dllPath}."
-
-    /// Run a managed assembly that already sits on disk beside the assemblies it depends on.
+    /// Run a managed assembly that already sits on disk beside the assemblies it depends on, with
+    /// the AppContext properties `configProperties`, and report how it terminated and what it
+    /// wrote.
     ///
     /// `executeWithTimeout` owns a scratch directory holding exactly one image, so it cannot run a
     /// guest that references anything but the shared framework. This instead runs the assembly
@@ -998,34 +988,59 @@ module RealRuntime =
     /// directory of co-compiled assemblies binds by simple name with no probing logic of ours. A
     /// framework-dependent publish's `deps.json` names its dependencies in that same directory.
     ///
-    /// This replaces any `<name>.runtimeconfig.json` beside the assembly with one naming the
-    /// framework under test, so a published app runs on that framework rather than on the one it
-    /// was published for. Callers may run the same assembly concurrently.
-    let executeAssemblyInPlace (args : string[]) (dllPath : string) : RealRuntimeResult =
+    /// The guest runs on the framework under test, with `configProperties` and no others, whatever
+    /// `<name>.runtimeconfig.json` sits beside the assembly: the oracle hands the host a
+    /// runtimeconfig of its own, from a scratch directory of the call's own, and reads and writes
+    /// nothing in the assembly's directory. So callers may run one assembly concurrently, each
+    /// with different properties. The guest's working directory is the assembly's directory.
+    ///
+    /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
+    /// caller comparing them claims the same lines, not the same bytes.
+    let captureAssemblyInPlace
+        (configProperties : AppContextProperties)
+        (args : string[])
+        (dllPath : string)
+        : CapturedRun
+        =
         if not (File.Exists dllPath) then
             failwith $"Cannot run %s{dllPath} under the real runtime: the assembly does not exist."
 
         let directory = Path.GetDirectoryName dllPath
-        // The host derives the config's name from the assembly's *file* name, not from its
-        // assembly name, and the file is already on disk under a name the caller chose.
         let name = Path.GetFileNameWithoutExtension dllPath
-        let configPath = Path.Combine (directory, name + ".runtimeconfig.json")
 
-        // Written aside and renamed into place, so that a concurrent run of the same assembly reads
-        // either the old file or this one whole, never one this call has truncated. Every file
-        // renamed into place has the same contents.
-        let staging = configPath + "." + Path.GetRandomFileName () + ".tmp"
-        File.WriteAllText (staging, runtimeConfig)
-        File.Move (staging, configPath, true)
+        let scratch =
+            Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ())
 
-        runToCompletion
-            guestTimeout
-            muxerPath
-            (dllPath :: List.ofArray args)
-            directory
-            Map.empty
-            StandardStreamsConfig.piped
-            name
+        Directory.CreateDirectory scratch |> ignore<DirectoryInfo>
+
+        try
+            // The host looks for the dev runtimeconfig beside the runtimeconfig it is given
+            // (`get_runtime_config_paths_from_arg` in hostfxr's fx_muxer.cpp), so a
+            // `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
+            let configPath = Path.Combine (scratch, name + ".runtimeconfig.json")
+            File.WriteAllText (configPath, runtimeConfigFor OracleFrameworks.NetCoreApp configProperties)
+
+            runCapturing
+                guestTimeout
+                muxerPath
+                ("exec" :: "--runtimeconfig" :: configPath :: dllPath :: List.ofArray args)
+                directory
+                Map.empty
+                StandardStreamsConfig.piped
+                name
+        finally
+            try
+                deleteScratchTree scratch
+            with
+            | :? IOException
+            | :? UnauthorizedAccessException -> ()
+
+    /// `captureAssemblyInPlace` with no AppContext properties, echoing what the guest wrote on
+    /// the calling thread.
+    let executeAssemblyInPlace (args : string[]) (dllPath : string) : RealRuntimeResult =
+        let run = captureAssemblyInPlace AppContextProperties.empty args dllPath
+        echo run
+        run.Result
 
     /// Run `guests` on the real runtime at the same time, each as its own process, and report how
     /// each terminated and what it wrote, in the order of `guests`. This is the oracle for
