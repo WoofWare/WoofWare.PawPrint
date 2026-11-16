@@ -587,3 +587,258 @@ Each must turn some test red. Run each against the property tests and the guests
   `t3-rows.log`, `t3-rows.cmp`, `t4-sample.log`, `t5-extra.log`, `t5-extra.cmp`, `t5-dynclass.log`, `t5-success.log`,
   `t6-openstruct.log`, `t6-openstruct-rest.log`.
 - `2270/throwaway.diff`: the throwaway handler.
+
+## Decisions
+
+Decided 2026-11-16, by the decider the owner delegated to. Before deciding I read the QCall and everything it calls
+in both pinned runtime sources, read the PawPrint code each option touches, and spot-checked the planner's logs
+against the plan's tables. The plan's account of CoreCLR is right. Three of its claims about PawPrint are wrong or
+incomplete; they are under "Corrections to the study" below, and decisions 3 and 8 depend on them.
+
+Four issues come out of this plan: #2293,
+#2294, #2295 and
+#2296. None of them is fixed by this change.
+
+### 1. Where the rule lives: B
+
+A verdict as data, beside `isRuntimeTypeHandleTargetAssignableTo`, which the handler interprets.
+
+- The type is `InterfaceVerification`, with the plan's six cases, declared inside `IlMachineRuntimeMetadata` just
+  above the function (the module already declares types of its own there).
+- The function is `IlMachineRuntimeMetadata.verifyInterfaceIsImplemented`, with the plan's signature. Name its two
+  target parameters `receiver` and `interfaceType`, in the QCall's order. Add the alias
+  `IlMachineState.verifyInterfaceIsImplemented`, as the cast function has, and call it through the alias from the
+  handler.
+- The function takes the arms in CoreCLR's order and calls the cast function only in arm 5. Arms 1 to 4 must not
+  call it: it refuses some shapes that arms 1 to 4 answer.
+- The handler decodes both arguments, calls the function, and is then one `match` over the six cases:
+  `Implemented` completes, and each of the other five raises `ArgumentException` with its message. Write the
+  resource name beside each message in a comment.
+
+Why not A: the classification is the whole of this QCall's own logic, and under A nothing can test it against the
+host without running a guest at about 0.3 s a pair. Why not C: the measured relation is `IsAssignableFrom`, which
+`isConcreteTypeAssignableTo` already answers for closed types, so C would add a second spelling of that in the
+TypeSystem package and still leave the open half in the interpreter.
+
+The new public names (`InterfaceVerification`, `verifyInterfaceIsImplemented`, and `TypeHandleTag.isTypeDesc` from
+decision 3) are additions to the published `WoofWare.PawPrint` package. Say so in the pull request body.
+
+### 2. What answers arm 5: (i), the cast function alone
+
+I checked the reading in both runtimes. For an interface target, `ImplementsInterface` accepts nothing that
+`CanCastTo` refuses: for a target without variance `CanCastToInterface` is `ImplementsEquivalentInterface`, which
+makes the same marker check and then the same `ImplementsInterfaceInline` scan; for a variant target
+`CanCastByVarianceToInterfaceOrDelegate` accepts an identical type first and has its own shortcut for the
+special-marker entry that the second scan of `ImplementsInterfaceInline` accepts; and an array's map is
+`System.Array`'s. The sweep (184,752 pairs on .NET 10 and 197,100 on .NET 11) agrees.
+
+Put the reason in a comment at the call: CoreCLR's first check is a fast path which accepts nothing the second
+refuses, and say where that was measured. Do not model `ImplementsInterface` separately.
+
+### 3. One shared `IsTypeDesc`: yes, as `TypeHandleTag.isTypeDesc`
+
+The plan's name, `RuntimeTypeHandleTarget.isTypeDesc` defined through `TypeHandleTag.forTarget`, cannot be built:
+the `RuntimeTypeHandleTarget` module is in `ManagedPointerSource.fs`, which is compiled before `NativeIntSource.fs`,
+where `forTarget` lives. So:
+
+- Add `TypeHandleTag.isTypeDesc (target : RuntimeTypeHandleTarget) : bool`, defined as `forTarget target <> 0L`,
+  directly after `forTarget`. Its docstring says it is CoreCLR's `TypeHandle::IsTypeDesc`, and that a type variable
+  is a TypeDesc too.
+- Delete `NativeCastHelpers.isTypeDescTarget` and use the shared function there.
+- The verdict function uses it for arm 2, after arm 1 has matched the two type-variable cases by name.
+
+The two existing spellings do not agree on every case, as the plan says they do. For
+`Closed (ConcreteTypeHandle.Continuation _)`, `isTypeDescTarget` answers `false` and `forTarget` refuses with
+`ContinuationType.unasked`. The switch is still safe: in `objIsInstanceOfCore` the next step after a `false` is
+`isRuntimeTypeHandleTargetAssignableTo`, which refuses a continuation on either side with the same `unasked`
+refusal. So the switch changes which refusal a continuation cast target meets, and no answer. Check that by reading
+`objIsInstanceOfCore` again before deleting the copy, and say it in the commit message.
+
+Make this its own commit, before the commit that adds the verdict function, so that a reviewer can read it as a
+change that preserves behaviour. Do not sweep the other handlers which match the TypeDesc shapes inline, and leave
+the two private `isInterfaceTarget` copies as they are: `IlMachineRuntimeMetadata`'s own is in scope for the verdict
+function, and neither needs to become public for this change.
+
+### 4. `ReceiverIsTypeDesc` and `NotImplemented` stay separate: yes
+
+They are two arms of CoreCLR's function, and their order relative to arm 4 is observable. Since the host raises one
+message for both, no comparison with the host can tell them apart, so the plan's property test does not pin the
+distinction. Add one example test that does (under "Tests", below): without it, a verdict function that never
+returns `ReceiverIsTypeDesc` passes everything else.
+
+### 5. The guest may call the internal wrapper by reflection: yes
+
+It is the only way a guest sees arm 1 at all, and the only way it sees a pass for anything but an SZ array before
+#2289. I confirmed the wrapper's text is the same on .NET 10 and 11.
+
+- `RuntimeTypeHandle` has two methods of that name: the private static `LibraryImport` and the internal instance
+  wrapper. Look the wrapper up with `BindingFlags.NonPublic | BindingFlags.Instance`, a null binder, and the
+  parameter types `{ typeof(RuntimeTypeHandle) }`, so that the lookup is not ambiguous and a change of signature
+  returns null.
+- Split the active guest in two, so that a rename inside CoreLib breaks one guest and leaves the public contract
+  tested:
+  - `sourcesPure/TypeGetInterfaceMapRefusals.cs`: the checks which go through `Type.GetInterfaceMap` (the plan's
+    checks 2 to 21, and the additions below). It uses public API only.
+  - `sourcesPure/RuntimeTypeHandleVerifyInterfaceIsImplemented.cs`: the checks which call the wrapper (the plan's
+    checks 1 and 22 to 27, and the additions below). Its first check is that the wrapper was found.
+- Every call gets its own exit code. Do not group several calls under one code.
+
+### 6. Two parked guests
+
+- `sourcesPure/TypeGetInterfaceMapNoMethods.cs`: `CMarker.GetInterfaceMap(IMarker)` and
+  `ClassInC.GetInterfaceMap(IInC<>)`, each two empty arrays, with `TargetType` and `InterfaceType` checked. Parked on
+  #2289.
+- `sourcesPure/TypeGetInterfaceMap.cs`: `COne.GetInterfaceMap(IOne)` and
+  `List<string>.GetInterfaceMap(IEnumerable<object>)`, as the plan describes. Parked on #2289, with a reason that
+  says its next stop after #2289 is #2290. Keep it to the plan's few assertions; the plan for #2290 will design the
+  real tests of the map's contents.
+
+The first can be un-parked by #2289 alone, which is what makes that issue's change testable end to end. Each reason
+quotes the measured stop, "Unimplemented native method (PInvokeImpl
+QCall!RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals)". The suite's own test of parked cases runs both on real
+.NET, which is the check that they exit 0 there.
+
+### 7. The property test also runs over CoreLib: yes, with a measured budget
+
+The host sweep shows that CoreCLR's QCall is `IsAssignableFrom`. It does not show that PawPrint's function agrees
+with it over CoreLib: the planner's PawPrint run compared 2,691 pairs from 20 receivers. So a sweep of PawPrint's
+verdict against the host over CoreLib is a new measurement, and worth having.
+
+- Pair the two sides by metadata token over `HostImage.coreLibPath`, which is the image the host itself runs. A
+  type without type parameters is its closed target, and a generic type is its definition. Build each target the
+  way the reflection handlers do, so that it is the target a guest's `typeof` would give.
+- Receivers: every exported type which is not an interface. Targets: every exported interface. Also add a small
+  fixed set of second arguments which are not interfaces (`string`, `int`, `List<>`), so that arm 4 is reached.
+- Measure the whole sweep first, and write the time and the pass count in the pull request body. If it takes under
+  about 30 seconds on the development machine, commit the whole sweep. If it takes longer, commit every pair the
+  host passes, and every pair of a fixed stride through the rest, with the stride chosen to fit the 30 seconds. A
+  plain stride through all pairs is the wrong reduction: under 1% of the pairs pass, and those are the pairs that
+  exercise variance and inheritance.
+- Thread the state through the pairs of one receiver and start each receiver from the initial state, so that the
+  test host's memory stays bounded.
+- A pair of the shape in decision 9 is checked by decision 9's weaker property. If the sweep meets any other
+  refusal, stop and report it to the owner. Do not widen the test's exemption to cover it.
+- Assert that the host passed some pairs and raised on others, as `TestCompositeTypeVariableCasts.fs` does.
+
+### 8. File both issues: yes
+
+- #2293. I confirmed the code and the source: `RuntimeTypeHandle::
+  IsGenericVariable` is `IsTypeDesc() && ...`, which is `false` for any MethodTable without reading metadata, and
+  PawPrint's handler refuses the dynamic-methods class as a metadata query.
+- #2294. I confirmed the code and the source (`COMPlusThrow(kArgumentException,
+  W("Arg_ArgumentOutOfRangeException"))`). The planner read the message and did not measure it, and the issue says
+  so. It is close to the question #2289's body already asks about `GetMethodAt`, so the issue names #2289.
+
+Two more come from decisions 9 and "Messages" below.
+
+### 9. The open-value-type case: (a), leave the refusal, with a weaker property instead of a skip
+
+Option (b) is not small. The flag is set on a value type when `LoadExactInterfaceMap`'s first technique retries, and
+the retry has three triggers inside a six-case analysis of each inherited interface (`methodtablebuilder.cpp`, the
+loop after `#LoadExactInterfaceMap_Algorithm1`). Option (c) answers wrongly exactly when one of those triggers
+fires, and nothing has measured which types fire them. A refusal is a stop and not a wrong answer, so it stays, and
+#2295 records what a fix needs.
+
+The plan would have the property skip every pair whose receiver is an open value type and whose target is a variant
+interface definition. Do not skip them. For a pair of that shape, the property is weaker: PawPrint's function either
+returns the verdict that matches the host, or stops with the refusal whose message names
+`MayHaveOpenInterfacesInInterfaceMap`. Any other exception, and any verdict that disagrees with the host, fails.
+Count both outcomes. This keeps the common case under test (the scan finds nothing, and the answer is "not found"),
+and it means a later change which answers these pairs wrongly fails here.
+
+Keep the plan's example test: `SGenInC<>` against `IInC<>` is refused by PawPrint with that message, and the host
+raises "Interface not found." for it. Whoever resolves #2295 will see it go
+red, which is its purpose. Add the closed `SGenInC<string>` against `IInC<>` to the wrapper guest, expecting
+"Interface not found.": the planner measured `SGenInC<int>` only, and an instantiation over a reference type is the
+one whose code CoreCLR shares. Measure it on real .NET 10 and 11 before writing the expectation.
+
+### Decoding and messages (the plan's decisions 4 and 5, which had no question)
+
+- Decoding: `NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget` for both arguments. I confirmed that a null handle
+  cannot arrive: `GetNativeHandle()` throws `ArgumentNullException` in managed code for a default handle, before
+  the QCall.
+- Messages: the English text of `Strings.resx`, written in the handler. I confirmed the four texts against the
+  pinned `Strings.resx`. CoreCLR does not hold the text itself: `EEResourceException::GetThrowableMessage` asks
+  managed code (`Environment.GetResourceStringLocal`, which is `SR.GetResourceString`), so the guest's culture and
+  resource settings can change it. That gap is shared by every native raise which carries a message, and is
+  #2296. Name that issue in a comment beside the handler's messages.
+
+### Corrections to the study
+
+1. "Three spellings of one rule" for `IsTypeDesc`: two of them differ on a continuation type (decision 3).
+2. `RuntimeTypeHandleTarget.isTypeDesc` cannot be defined through `forTarget` because of compile order
+   (decision 3).
+3. The `GetMethodAt` message in question 8 was read, not measured.
+4. `TestExportedTypeSelection.fs` is on the open pull request #2292, not on `main`. Follow its use of
+   `CoverageSample` if it has merged by the time this is built; otherwise write the same shape here.
+
+### Tests: additions and changes to the plan's design
+
+Write every test and guest first, in a commit of its own, and record the failing output, as the plan says.
+
+**Example test of the six verdicts** (decision 4). In `TestInterfaceVerification.fs`, over a fixed corpus, assert
+the exact case for one pair of each: `COne` / `IOne` is `Implemented`; `List<>`'s `T` / `IComparable` is
+`ReceiverIsTypeVariable`; `int*` / `IDisposable` is `ReceiverIsTypeDesc`; `IOne` / `IOne` is `ReceiverIsInterface`;
+`COne` / `string` is `TargetIsNotInterface`; `COne` / `IMarker` is `NotImplemented`. Add `int*` / `string` as
+`ReceiverIsTypeDesc`, which is arm 2 before arm 4 at the level of the function.
+
+**The generated property.**
+
+- The generator builds valid C# by construction: no variance error (an `out` parameter never used as the argument
+  of an `in` position, and so on), no two implemented interfaces that could unify, no struct with a base, and every
+  argument within its constraint. A Roslyn error fails the test as a bug in the generator. Do not discard a case
+  that fails to compile, because that hides lost coverage.
+- Take the coverage labels from the host's side, so that they do not read the structure under test: the host's
+  message, with "Interface not found." divided by whether the host's receiver is a pointer, byref or function
+  pointer. That gives the six labels. Add three more, each with a floor: a pass where the target is not among
+  `receiver.GetInterfaces()` (a pass by variance alone); a pass where the target is a generic interface definition
+  (the special marker accepted); and a pair of decision 9's shape.
+- Pool: add the fixed non-interface targets `string` and `int`, and the type variables, pointers and arrays as
+  second arguments too (the plan's "every ordered pair" already implies it; the floors for arm 4 should be reached
+  by more than one shape of target).
+- The host's verdict comes from the wrapper invoked by reflection on the boxed `source.TypeHandle`. Unwrap the
+  `TargetInvocationException`. Assert that every inner exception is exactly `ArgumentException`, with `HResult`
+  0x80070057 and a null `ParamName`.
+- Budget: about 30 seconds on the development machine for the fixed sample and the fresh cases together. Build the
+  state that holds CoreLib once and add each generated assembly to it. If the test is over budget, lower the number
+  of cases before shrinking the pool, and write the measured time in the pull request body.
+
+**Guest checks to add.**
+
+- To the `GetInterfaceMap` guest: `COne` against `List<>`'s `T`, against `int*`, against `IOne[]` and against `int`,
+  each "Type passed must be an interface." (the planner measured these as the `target-*` rows, and the plan's guest
+  table left them out). They show that a second argument which is a type variable or a TypeDesc reaches arm 4.
+- To the wrapper guest: a type variable against `string`, "Invalid handle." (arm 1 before arm 4; measured as
+  `direct genericparam-string`); `IDerived` against `IBase`, "'this' type cannot be an interface itself." (arm 3
+  before arm 5, where arm 5 would pass); and `SGenInC<string>` from decision 9.
+- To the impure guest: if `typeof(COne).GetInterfaceMap(dynamicClass)` raises "Type passed must be an interface." on
+  real .NET 10 and 11, add it. The planner measured that pair through the wrapper only. Keep every other use of the
+  dynamic-methods class as a receiver on the wrapper, because of
+  #2293.
+
+**Controls on real .NET**, as the plan says, for all four guests.
+
+### Mutants: additions to the plan's table
+
+| mutant | killed by |
+|---|---|
+| the handler passes its two arguments in the wrong order | `COne` / `IMarker` through `GetInterfaceMap` (it then raises arm 3's message) |
+| arm 4 before arm 1 | the wrapper guest's type variable against `string`; the generated property |
+| arm 5 before arm 3 | the wrapper guest's `IDerived` / `IBase`; the generated property |
+| the verdict function returns `NotImplemented` where it should return `ReceiverIsTypeDesc` | the example test of the six verdicts only. No guest and no comparison with the host can see it. |
+| a second argument which is a type variable, a pointer or an array is treated as an interface, or refused | the four added `GetInterfaceMap` checks; the generated property |
+| `TypeHandleTag.isTypeDesc` answers `false` for a type variable, or `true` for an array | arm 1 hides the first from the verdict function, so add a small example test of `isTypeDesc` with one assertion for each shape of `RuntimeTypeHandleTarget` (a closed class, `int[]`, `int*`, `int&`, a function pointer, a definition, an open construction, a type variable, a method's type variable, `T[]`, `T*`); the second is also killed by the SZ-array guest checks |
+| decision 9's pairs answered "not found" without the refusal (the plan's option (c)) | the pinned example test of `SGenInC<>` / `IInC<>`, by design |
+| arm 3 before arm 1, or arm 3 before arm 2 | equivalent: a type variable or a TypeDesc is never an interface. Record as equivalent. |
+
+Run each mutant against the example tests, both properties and the guests, and record which test went red.
+
+### Order of work
+
+1. The tests and guests, failing, in one commit.
+2. `TypeHandleTag.isTypeDesc`, with `NativeCastHelpers` switched to it, in one commit.
+3. The verdict type and function, then the handler and its registration in `NativeQCall.fs`.
+4. The mutants.
+5. The default suite, and then each of the four Guest categories as its own invocation, since step 2 touches the
+   interpreter's cast path.
+6. Change this document's status line to "decided and built" in the same pull request.
