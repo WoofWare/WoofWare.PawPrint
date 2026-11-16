@@ -106,7 +106,8 @@ module TestInterfaceDispatchMap =
             Failures : string list
         }
 
-    /// Compare PawPrint's interface map and dispatch against the host's for one receiver.
+    /// Compare PawPrint's interface map and dispatch against the host's for one receiver. An interface
+    /// has no dispatch table, so only its map is compared.
     let private compareReceiver
         (hostAssemblies : Map<string, System.Reflection.Assembly>)
         (state : IlMachineState)
@@ -133,6 +134,15 @@ module TestInterfaceDispatchMap =
                 ]
             else
                 []
+
+        if host.IsInterface then
+            state,
+            {
+                Compared = 0
+                ClassImplemented = 0
+                Failures = mapFailures
+            }
+        else
 
         let state, _, table =
             match VirtualSlotLayout.dispatchTableOfClosed loggerFactory bct "test" state receiver with
@@ -249,7 +259,8 @@ module TestInterfaceDispatchMap =
                 + String.Join ("\n", shown)
             )
 
-    /// Every non-generic class and struct CoreLib declares, and a spread of generic instantiations.
+    /// Every non-generic class, struct and interface CoreLib declares, and a spread of generic
+    /// instantiations.
     [<Test>]
     let ``CoreLib interface dispatch agrees with the host CLR`` () : unit =
         let hostAssemblies = Map.ofList [ corelib.DefinitionFullName, typeof<obj>.Assembly ]
@@ -257,8 +268,7 @@ module TestInterfaceDispatchMap =
         let nonGeneric =
             typeof<obj>.Assembly.GetTypes ()
             |> Array.filter (fun t ->
-                not t.IsInterface
-                && not t.IsGenericTypeDefinition
+                not t.IsGenericTypeDefinition
                 && not t.ContainsGenericParameters
                 && t.GetInterfaces().Length > 0
             )
@@ -282,6 +292,11 @@ module TestInterfaceDispatchMap =
                 typeof<Tuple<int, string>>
                 typeof<Lazy<int>>
                 typeof<System.Collections.Generic.KeyValuePair<int, string>>
+                typeof<System.Collections.Generic.IList<int>>
+                typeof<System.Collections.Generic.IDictionary<string, obj>>
+                typeof<System.Collections.Generic.IReadOnlyList<Exception>>
+                typeof<System.Collections.Generic.ISet<int>>
+                typeof<obj>.Assembly.GetType("System.Numerics.INumber`1").MakeGenericType typeof<int>
             ]
 
         let mutable outcome =
@@ -336,6 +351,11 @@ module TestInterfaceDispatchMap =
         // Floors well below what the corpus yields, so that a corpus gone quietly empty is caught.
         outcome.Compared |> shouldBeGreaterThan 2000
         outcome.ClassImplemented |> shouldBeGreaterThan 1000
+
+        (nonGeneric @ generic)
+        |> List.filter (fun t -> t.IsInterface)
+        |> List.length
+        |> shouldBeGreaterThan 10
 
     /// The interfaces every generated hierarchy draws on. `IDefault`'s methods have bodies, so that a
     /// slot no class implements is legal and dispatch falls through to it.
