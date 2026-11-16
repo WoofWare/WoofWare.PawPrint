@@ -3203,12 +3203,15 @@ module TestDeterministicMath =
         |> shouldEqual (DeterministicMath.log 10.0)
 
     [<Test>]
-    let ``log10 agrees with the host libm to within one ulp`` () : unit =
+    let ``log10 agrees with the host libm to within two ulps`` () : unit =
         // A sanity check rather than a specification: the host's `log10` is not guaranteed
         // correctly rounded, so where the two disagree it is PawPrint that is expected to be right,
-        // and `log10 is correctly rounded` is what says so.
+        // and `log10 is correctly rounded` is what says so. The bound is two ulps because glibc's
+        // `log10` is that far from the correctly rounded answer on some arguments: glibc 2.41 on
+        // x86-64, against MPFR, was two ulps off on 844 of 2,000,000 doubles drawn from [1, 2), and
+        // never further. macOS/Arm's has not been seen more than one ulp off.
         let property (x : float) : bool =
-            ulpDistance (DeterministicMath.log10 x) (Math.Log10 x) <= 1.0
+            ulpDistance (DeterministicMath.log10 x) (Math.Log10 x) <= 2.0
 
         Check.One (propertyConfig, Prop.forAll (Arb.fromGen genLog10Argument) property)
 
