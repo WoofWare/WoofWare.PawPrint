@@ -1,7 +1,7 @@
 # `ldelem <type>` and `stelem <type>` in a dynamic method (issue #2308)
 
-Status: proposed. The study settles every choice; there is no structural decision to make (see "Options"). Three small
-questions remain, none of which changes the fix.
+Status: built on `fix-2308-dynamic-ldelem`, as the decisions say (see "As built"). The decisions answer the three
+questions the study left.
 
 Part of #849. Measured 2026-11-16 on `main` at `b799325a8`, with and without the throwaway fix described under "The
 change". Real .NET means 10.0.14, and 11.0.0-rc.3 reached by rolling the same build forward
@@ -489,3 +489,78 @@ Record for the plan's row "`executeLdelem` pops before the refusal" which check 
 on the stack, so a pop there may stop the run instead of failing the check; a stopped run is still a kill, but say so.
 
 If any mutant in either table survives, stop and report it before opening the PR.
+
+### As built
+
+Built 2026-11-16 on `fix-2308-dynamic-ldelem`, from the decisions above, with no structural change from them.
+
+**The fix** is the two arms under "The change". `IlDecoding.scopeOperandKind` gives `Ldelem` and `Stelem`
+`ScopeOperandKind.Type`; their `NotYetSupported` arm and the heading comment above it are gone (`constrained.`
+keeps its own comment). `elementTypeOperand` matches on `ctx.TypeOperand` and returns the handle in its
+`FromScope` arm; its metadata arm is the old body, reading the assembly and token from the match. The comments
+that counted "eleven" type-consuming ops now say "each such op". `docs/divergences.md` names the new guest beside
+`DynamicMethodTypeToken.cs`. No public API changed.
+
+**Unit tests**, in `TestIlDecoding.fs`:
+
+- "each opcode's scope operand kind is the one its operand type names" is exhaustive over the 31 cases. The
+  pinned refusal set is a `Set<UnaryMetadataTokenIlOp>`, and the failure names the difference both ways.
+- "a dynamic-scope token decodes to the scope index when its opcode's operand kind admits it" is the property of
+  unit test 2. Its expected kind comes from the same `OpCodes` oracle as unit test 1, not from `scopeOperandKind`:
+  a property that took the classifier's word would hold before the fix, since the decoder obeyed the classifier's
+  refusal then too. The `ldtoken` expectation is the decoder's present rule (TypeDef and TypeRef tags admitted,
+  every other tag refused, TypeSpec included), and a refusal must name the opcode and the masked index. Over the
+  fixed sample of 2000: Type 690, Field 309, Method 149, refused 397, `ldtoken` 455, an admitted operand under a
+  tag naming no type 586, and `ldtoken` under TypeDef 80, TypeRef 76, TypeSpec 70 and other tags 229.
+
+**The guest**, `sourcesImpure/DynamicMethodArrayElementToken.cs`, holds checks 1 to 70 of the table (without the
+bare `stelem`, as decided) and the decisions' additions as 71 to 76: `ldelem int64; ldc.i8; add` (71),
+`ldelem float64; ldc.r8; add` (72), `ldelem Big; ldfld C` in the direct form, which is legal IL (73), `ldelem
+int[]; ldlen` (74), `stelem int[]` (75), and `stelem string` of `ldnull` into a non-null array (76). Check 70
+initialises its array from two different `Big`s rather than one twice, so that it tells the elements apart.
+Exceptions are compared by exact type, with a wrong exception failing the check rather than escaping it.
+
+It exits 0 on real .NET 10.0.14 and on 11.0.0-rc.3 by roll-forward. As controls, each check was perturbed on its
+own (the expectation changed, or the expected exception type swapped), and 31's and 56's messages and 69's
+declaring-type test were perturbed as well: all 80 variants exit with their own check's number on both runtimes.
+Under PawPrint on `main` it stops with the TODO, at check 1's `ldelem`; with the fix it passes in 13 s, so checks
+69 and 70 stay in it.
+
+**Mutants**, each run against TestIlDecoding and the guest. "Stop" means the run halted on a host failure rather
+than a check failing; it is still a kill.
+
+| mutant | killed by |
+|---|---|
+| both left `NotYetSupported` | unit tests 1 and 2; guest stop (the TODO) |
+| only `Ldelem` moved; only `Stelem` moved | unit tests 1 and 2; guest stop (the TODO for the other) |
+| `Ldelem` or `Stelem` classified `AnyType` | unit tests 1 and 2; guest stop (`TypeOperand`'s BUG) |
+| `Ldelem` or `Stelem` classified `Field` or `Method` (all four) | unit tests 1 and 2; guest: unhandled `BadImageFormatException` in check 1 |
+| `FromScope` arm returns `int32` | guest stop in check 1 (`stelem object` coerced to `int32`) |
+| `FromScope` arm returns `object` | guest stop at check 5 |
+| `FromScope` arm returns the array type of the handle | guest stop at check 5, before the jagged checks |
+| `FromScope` arm returns the element type of an array handle | guest stop at check 75 |
+| `refuseTypeOperand` skipped for a scope operand in `ldelem`; in `stelem` | guest exits 31; 33 |
+| `closedType`'s narrowing bypassed (a target that is not closed read as `object`) | guest exits 37 |
+| `executeLdelem` pops before the refusal | guest stop at check 53 (pop of an empty stack) |
+| `executeLdelem` pops and checks the array before the refusal | guest exits 31 |
+| `executeStelem` pops before the refusal | survives: equivalent (below) |
+| `executeStelem` pops and checks the array before the refusal | guest exits 33 |
+| the decoder keeps the tag in the index for these opcodes | unit test 2; guest: unhandled `InvalidProgramException` in check 1 |
+| the scope handle taken in `executeLdelem` alone | guest stop in check 1 (`ActiveAssembly` for the `stelem`) |
+| `dynamicTokenShape`'s `Ldelem` arm skips `TypeOperand.refusal` | guest stop at check 53 (`StackUnderflow`) |
+| `dynamicTokenShape`'s `Ldelem` arm answers a fixed shape (`SlotShape.Other`) | guest stop at check 11 (the shape check sees a float where the analysis says `Other`), before 71 to 73 |
+
+`executeStelem` popping before the refusal, with nothing else moved, is equivalent: the refusal still comes
+before the null and bounds checks; the stack-shape analysis refuses any `stelem` body with fewer than three
+values before it runs, so `executeStelem` never runs with a short stack; and a raised exception empties the
+evaluation stack anyway. The decisions' row predicted a `NullReferenceException` from a null array, which is the
+shape of the variant that also moves the array check, and the guest kills that one at 33. The `ldelem`
+counterpart dies only because a refused `ldelem` operand leaves the instruction untyped, so check 53's bare
+`ldelem` reaches `executeLdelem`, where the pop stops the run rather than failing a check. The plan's own
+equivalent mutant, `stelem` coercing to the array's element type, was not run.
+
+**Suites**, after a whole-solution build with the reference assemblies deleted:
+the default suite passed 5835 of 5874 with 39 skipped; `Guest` 234 of 234;
+`GuestSolo` 2 of 2; `GuestPure` 1206 of 1206; `GuestImpure` 304 of 304, the new guest among them. Each ran as its
+own invocation, on macOS with the linux-x64 CoreLib for the guests. Fantomas, the docstring-attachment check and
+`footprint.py generate` changed nothing.
