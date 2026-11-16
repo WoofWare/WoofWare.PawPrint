@@ -479,3 +479,316 @@ with #2290's `callto` and `mhhfail` FakeItEasy scenarios added) and a project na
 throwaway fixture ran it with `BoundedRun.runWith` at a 400,000,000-step bound on both flavours and wrote each run's
 stdout, ending, step count and wall time; a script compared the stdout with real .NET's. None of it is committed; the
 guest's scenarios are reused in PR 2.
+
+## Decisions
+
+Decided 2026-11-16 by the delegated decider, against `origin/main` at `418a1b8df`. The numbers match the questions
+above. Three things were checked or measured while deciding, and the decisions lean on them:
+
+* **The claim that nothing in CI sees a package dependency holds** (read from `.github/workflows/ci.yaml` and
+  `scripts/footprint.py`). `expected-pack` has no checkout and only counts nupkgs. `footprint.py` deals in repository
+  paths, and its docstring lists NuGet packages under "what this cannot see"; `verify packages` packs the same project
+  twice, so both packs carry the same new dependency. One nuance the study missed: today a new external package in a
+  published project at least forces a refresh of `nix/deps.json`, which a reviewer can see. Once the guest project has
+  put Moq and the others into `nix/deps.json`, a published project that references one of them needs no refresh, so
+  even that hint is gone. That is a second reason the nuspec check must merge before the guest project does.
+* **The six nupkgs of the merge-queue run for `418a1b8df` were read** (measured). Each has one `net8.0` dependency
+  group. Every dependency on a sibling package carries exactly the version of the sibling's own nupkg from the same run
+  (for example `WoofWare.PawPrint.Domain` at `0.12.67-g418a1b8dff` in all five packages that depend on it). Every
+  dependency has `exclude="Build,Analyzers"`. No nuspec has `frameworkReferences` or `frameworkAssemblies`. Each
+  package's `lib/` holds its own DLL and XML file, except `WoofWare.PawPrint`, which ships no XML file. So the rule for
+  sibling versions passes on today's packages.
+* **`dotnet exec --runtimeconfig <file> <dll> <args>` was run on real .NET 10.0.14 against the study's publish**
+  (measured). With a config outside the publish directory naming `IsDynamicCodeSupported` as `true`, `moq-basic`
+  printed its expected output and exited 0. With the same config naming `false`, Moq failed with
+  `PlatformNotSupportedException`, although the publish's own `runtimeconfig.json` says `true`. The publish's own file
+  was byte-identical afterwards. So the oracle can be given its properties without writing into the publish directory.
+
+### 1. Where the packages live: option A
+
+A sibling C# guest project, `WoofWare.PawPrint.Test.ConsumerCases`, in the solution, referenced by no project, named
+by the test project as a `FootprintInput`, and published by the fixture.
+
+Option B puts third-party libraries into the test host's own closure and makes the guest something other than the
+real publish which was measured. Option C gives up building from source. Option A is the only one in which the
+repository's existing checks do part of the work: the packable check in `footprint.py`, the Nix restore's demand for
+`nix/deps.json`, and (after PR 1) the nuspec check.
+
+Requirements on the project:
+
+* `IsPackable` false, `PlatformTarget` AnyCPU, `net10.0`, `OutputType` Exe.
+* It keeps `TreatWarningsAsErrors` from `Directory.Build.props`. Do not copy `CSharpExample`'s opt-out.
+* Every `PackageReference` names an exact version. No floating versions and no ranges.
+* A comment at the top of the project file states the owner's rule and says that no project may reference this one.
+
+### 2. The nuspec check lands first, as its own pull request: yes
+
+It closes #2323, which exists whether or not the guest project lands. PR 3
+must not merge before it. The design follows.
+
+**What it compares.** For every nupkg it is given, three things read from the package itself:
+
+1. The nuspec's dependency groups: for each `targetFramework`, the set of dependencies, each with its `id`, its
+   `version` string, and its `include` and `exclude` attributes exactly as written. Order is ignored. The groups must
+   be exactly the expected ones: an extra or missing group is a difference.
+2. The entries of the nupkg whose path begins `lib/`, as a set. A third-party DLL packed beside ours is a way into
+   prod which the dependency list does not show, and this also turns the existing comment in `expected-pack` ("the
+   assembly would simply be missing from lib/") into a check.
+3. The set of packages. The package ids found must be exactly the expectation's keys, each found once. The
+   expectation's keys must also be exactly the names of the top-level directories which hold a `version.json` (today a
+   package's directory name is its `PackageId`; the script says so if that ever stops being true). So a new package
+   which someone forgot to upload from `nuget-pack`, or forgot to add to the expectation, fails here.
+
+A nuspec which has a `frameworkReferences` or `frameworkAssemblies` element, or a `dependency` outside a `group`, is
+reported as a difference: the expectation has no way to state one, and none exists today. Read the nuspec by local
+element names, because its XML namespace varies with the features a package uses. Take the package's id and version
+from the nuspec, and require the file to be named `<id>.<version>.nupkg`, since `github-release-dry-run` computes a
+tag from the file name.
+
+**Sibling packages.** A dependency whose id is itself a key of the expectation is a sibling. The expectation gives it
+no version (giving one makes the expectation malformed). The check requires its version in the nuspec to equal the
+version of the sibling's own nupkg among the packages given. Every other dependency is external and the expectation
+must give its version (question 3).
+
+**The expectation file.** `scripts/package-dependencies.json`, beside the script. Not under `.github/` and not at the
+repository root: `.github` is in the test footprint and every root file is in every package's footprint, so an edit
+there would run the whole suite or move every package's version. A file under `scripts/` is in no footprint, and
+`expected-pack` runs on every pull request regardless. Its shape:
+
+```json
+{
+  "WoofWare.PawPrint.Loader": {
+    "lib": ["lib/net8.0/WoofWare.PawPrint.Loader.dll", "lib/net8.0/WoofWare.PawPrint.Loader.xml"],
+    "dependencies": {
+      "net8.0": [
+        {"id": "FSharp.Core", "version": "10.1.203", "exclude": "Build,Analyzers"},
+        {"id": "WoofWare.PawPrint.Domain", "exclude": "Build,Analyzers"}
+      ]
+    }
+  }
+}
+```
+
+The expected contents today, from the measured artifacts (confirm them against the pull request's own
+`nuget-pack` output): every package depends on `FSharp.Core` 10.1.203. `Domain` also depends on
+`Microsoft.Extensions.Logging.Abstractions` 9.0.2. `Loader` and `Semantics` also depend on `Domain`. `TypeSystem` also
+depends on `Domain` and `Loader`. `Analysis` also depends on `Domain`, `Loader`, `Semantics` and `TypeSystem`.
+`WoofWare.PawPrint` also depends on those four, on `Microsoft.Extensions.Logging.Abstractions` 9.0.2 and on
+`WoofWare.PosixKernel` 0.1.424.
+
+**How it is maintained: by hand, with no mode that writes it.** The file is a statement of policy, not something
+derived. With a `generate` command, "run generate and commit" becomes a reflex, and the reflex would add Moq as
+readily as it adds a wanted dependency. A hand edit of a file whose only subject is "what consumers must install" is
+one line, in the same commit as the change to the project, and a reviewer reads it as what it is. To make the edit
+easy, a failing run prints the actual entry of each differing package in the file's own format.
+
+**What failure looks like.** One line for each difference, naming the package, its version, the target framework and
+the dependency or `lib/` entry, and saying which way it differs (unexpected, missing, or a changed attribute with
+both values). Then the actual entry, then this paragraph or one like it:
+
+> A published package's dependencies are what its consumers must install, and a dependency used only by tests must
+> never become one. If this change is meant for consumers, edit scripts/package-dependencies.json in the same
+> commit. Otherwise remove the reference from the project.
+
+Exit status follows `footprint.py`: 0 when everything matches; 1 when the packages were read and differ from the
+expectation (including an unexpected or missing package); 2 when the question could not be answered (a file that is
+not a zip, a nupkg with no nuspec or with two, two nupkgs with one id, a malformed expectation).
+
+**Where it runs.** `expected-pack` gains a checkout, downloads every `nuget-package-*` artifact with one pattern, and
+runs `python3 -I scripts/check-package-dependencies.py` over the download directory. The script uses only the
+standard library, so the job needs no Nix. The six "exactly one nupkg" steps are deleted, because the script's third
+comparison says the same thing; keep their comments about why a missing sibling package matters, on the new step.
+The same command works locally over `dotnet pack --configuration Release -o <dir>`.
+
+**The script's own tests.** The script decides whether the owner's rule holds, so it gets an oracle, run as a flake
+check beside `footprint` (which already has a Python with hypothesis). Write the comparison as a pure function from
+an expectation and a list of parsed packages to a list of differences, with the zip and XML reading around it. The
+properties, written before the script:
+
+* For any generated set of packages, the expectation rendered from them yields no difference.
+* Any single mutation of the packages or of the expectation is reported, and the report names the package: a
+  dependency added, removed, or with one attribute changed; a group added or removed; a `lib/` entry added or
+  removed; a sibling's version changed in one place; a package added or removed.
+* Through real zip files built with `zipfile`: each unreadable shape listed above exits 2.
+
+The pull request also shows, in its body, the script passing on its own CI artifacts and failing on a local pack of
+`WoofWare.PawPrint` with a `PackageReference` to Moq temporarily added.
+
+**What the check cannot see**, to be stated in the script's docstring: a `PackageReference` with
+`PrivateAssets="all"` whose assembly our code then references. It is absent from the nuspec, and the shipped DLL
+still needs it. That is #2324, and it is not part of this plan.
+
+**Documentation in the same pull request.** The root `AGENTS.md` sentence about a new published package now says
+that it needs an entry in `scripts/package-dependencies.json` and in the `nuget-pack` and `github-release-dry-run`
+jobs (no longer in `expected-pack`). Its sentence about bumping `WoofWare.PosixKernel`, and the
+`emulated-posix-kernel` skill's, gain "and its version in `scripts/package-dependencies.json`".
+
+### 3. External packages are pinned by version: yes
+
+By exact version string. The nuspec's version is the floor every consumer must meet, so a change to it is a change
+to the published contract, and it should be visible in review. The cost is one line on each `WoofWare.PosixKernel`
+bump, and a bump that forgets it fails `expected-pack` with a message naming the line.
+
+### 4. One guest project for every library: yes, and Microsoft.Extensions.DependencyInjection joins it
+
+Do not re-decide this when #2314 arrives. Both PawPrint and the oracle run the same publish, so a library that
+notices another library's DLL beside it changes both sides alike; it cannot make the comparison fail falsely. A
+difference that appears only under PawPrint when a package is added is an interpreter bug, which is what the fixture
+is for. Split the project only if two libraries need different versions of one dependency, since one publish cannot
+hold both.
+
+Two guards against a scenario that passes without running:
+
+* The guest returns a distinct non-zero exit code for a scenario name it does not know, and the fixture states the
+  expected ending of every scenario (0 unless its table says otherwise), as `endingsEverywhere` does for the F#
+  cases. Agreement with the oracle alone would pass a misspelt name, because both sides would refuse it alike.
+* The guest prints its scenario names for the argument `list`. A test runs that on real .NET and requires the list
+  to equal the fixture's, so a scenario added to the guest and not to the fixture is noticed.
+
+### 5. The thirteen scenarios, on the Linux pack, in category `Guest`: yes
+
+The thirteen in the study's table, along `FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform`,
+through `BoundedRun` at its default bound. The two flavours agreed on every scenario measured, so the macOS pack would
+double the cost to no purpose. Both the Net10 and Net11 legs run the fixture, as they run every guest fixture.
+
+The other fourteen scenarios are not staged. There is no PR for them. Add a scenario when a bug shows that the
+thirteen missed a path, and re-measure the category from the TRX files when #2314's modes join.
+
+Two things to measure in PR 3 before trusting the fixture, because the study did not:
+
+* **Real .NET 11.** The study compared PawPrint on .NET 11 with real .NET 10's output. The fixture compares with the
+  framework under test, so run all thirteen with `PAWPRINT_TEST_RUNTIME=Net11` first, and park per runtime if a
+  library prints something different there.
+* **That the oracle's output is stable.** Real .NET randomises string hashing in each process and PawPrint does not.
+  Run each scenario twenty times on real .NET and confirm that its stdout never varies. A scenario whose output
+  varies is rewritten until it does not, or left out.
+
+### 6. The AppContext properties are stated in the fixture and handed to both sides: yes
+
+One value in `TestConsumerCases.fs`, of two properties:
+
+* `System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported` = `true`
+* `System.Globalization.Invariant` = `true`
+
+The second is there because PawPrint's kernel seeds `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` by default, while the
+oracle's process inherits the test host's environment and would otherwise use the host's ICU and the developer's
+locale. The property takes precedence over the environment variable in CoreLib, so stating it on both sides makes
+them agree whatever the machine.
+
+The same value goes to `GuestConfig.AppContext` and to the oracle. A reader of the fixture can then see what both
+sides ran with, which they could not if it came from the guest project's MSBuild.
+
+The guest project also declares both (`RuntimeHostConfigurationOption` for the first, `InvariantGlobalization` for
+the second), so that someone debugging a scenario can run the publish by hand, or through `WoofWare.PawPrint.App`
+(which does read the `runtimeconfig.json`), and get the same behaviour. To stop the two from drifting, the fixture
+parses the publish's `runtimeconfig.json` with `RuntimeConfig.parse` and fails unless each property the fixture
+states has the same value there. The publish's file carries other properties which the SDK writes by default;
+neither side is given those, and that is deliberate.
+
+**The oracle (PR 2).** `RealRuntime` gains a capturing form for an assembly on disk, taking the
+`AppContextProperties` and returning `CapturedRun`. Requirements:
+
+* It runs the guest as its own process, through `runCapturing` and the muxer of the framework under test, as every
+  other entry of `RealRuntime` does. Nothing here may run a guest inside the test host;
+  `WoofWare.PawPrint.Test/AGENTS.md` says why.
+* It passes the generated runtimeconfig as `dotnet exec --runtimeconfig <file> <dll> <args>`, with the file in a
+  scratch directory of the call's own, removed afterwards. It does not write into the assembly's directory. The
+  present mechanism replaces `<name>.runtimeconfig.json` beside the assembly and is safe under concurrency only
+  because every caller writes identical contents; with properties as a parameter that would no longer be true, and
+  two runs of one publish with different properties would read each other's file.
+* `executeAssemblyInPlace` becomes this function with no properties, echoing its output, so that there is one
+  mechanism and not two. Its docstring stops saying that it replaces the file. Its fourteen callers do not change.
+* Tests, in the default suite, written first: a Roslyn-compiled guest which prints `AppContext.GetData` for the names
+  it is given. (a) It prints the values passed. (b) A `runtimeconfig.json` placed beside the assembly, naming other
+  values and a framework that does not exist, is not used and is byte-identical afterwards. (c) Two concurrent runs
+  of one assembly with different properties each print their own. A small FsCheck property over generated property
+  maps covers (a); keep its case count low, since each case starts a process.
+* PR 2 changes how fourteen existing callers start their guests, so it runs the default suite and all four guest
+  categories on both runtimes.
+
+**What the fixture compares.** `CapturedRun.Stdout` is text rebuilt from lines, each ended by the host's newline,
+not the bytes the guest wrote. So decode PawPrint's stdout as UTF-8 (failing on invalid input) and put it in the same
+form before comparing, as `TestAspNetTwoProcess` does. The claim is "the same lines"; the comparison cannot see a
+missing final newline, and the fixture's docstring should say so. Also require stderr to be empty on both sides for a
+scenario that exits 0: every scenario measured writes nothing there, and a guest exception is printed to stdout by
+the guest's own `Main`.
+
+### 7. Share the publish code with `TestFSharpPureCases`: yes, in PR 3
+
+Move the repository walk, the publish, and the check for files named as the framework's into a helper module, in the
+pull request that adds the second user. `TestFSharpPureCases` keeps its behaviour; moving it onto `runtimeDirsFor`
+and `BoundedRun` stays out of this plan. Hold the move to `scripts/check-docstring-attachment-branch.sh`.
+
+The check that the publish holds the expected assemblies goes in the helper's caller for the consumer cases, inside
+the `Guest` fixture, not in the default suite: a default-suite test that publishes would make a bare `dotnet test`
+restore third-party packages. It asserts the exact set of top-level files in the publish directory, and each package
+assembly's version.
+
+### 8. The test step should not download packages: restore in the Build step
+
+The `test-guest` job's Build step also runs `dotnet restore` on the guest project, in the footprint checkout, with a
+comment saying why. The fixture's own `dotnet publish` then finds the restore up to date and fetches nothing, and a
+nuget.org outage fails the Build step, where it reads as what it is.
+
+The fixture keeps restore on (no `--no-restore`). With `--no-restore`, a fresh worktree running the guest category
+as the root `AGENTS.md` says would fail thirteen tests until someone restored the guest project by hand, and that
+cost falls on every local run to guard against a rare event on CI. The price of this choice is that nothing asserts
+the test step made no network request; if the restore line is ever removed, the fixture quietly goes back to
+fetching at test time. That is accepted.
+
+**The offline devshell.** The fixture's `dotnet publish` is a child of the test host and inherits its environment,
+so in the offline devshell it restores from the Nix store, provided `nix/deps.json` has the packages. Being in the
+solution guarantees the refresh is demanded. To have a machine confirm that the fixture's exact publish works with no
+network, PR 3 adds that publish command to the flake's `offline-restore` check, beside the `CSharpExample` publishes.
+
+### 9. `NuGetAudit` false in the guest project alone: yes
+
+With a comment in the project file. The audit reads an advisory feed at restore time, so with
+`TreatWarningsAsErrors` a new advisory against a pinned package would fail every pull request with no change in the
+repository. The SDK in use audits transitive packages too for a `net10.0` project, so `System.Diagnostics.EventLog`
+6.0.0 counts. The guest is never shipped, and it pins these versions on purpose. The property is per project, so it
+also covers the solution-wide restore in `nuget-pack`.
+
+Leave the audit on everywhere else. The published projects are exposed to the same failure today, and there it is
+arguably wanted.
+
+### What the plan missed
+
+Collected here; each is also in the decision it belongs to.
+
+* Once the guest's packages are in `nix/deps.json`, a published project can reference one of them without any
+  refresh (first bullet at the top).
+* `PrivateAssets="all"` hides a package from the nuspec while the shipped DLL still needs it
+  (#2324).
+* A third-party DLL can be packed into `lib/` without being a dependency; the check compares `lib/` too.
+* Agreement with the oracle passes a misspelt scenario name; the fixture must state each expected ending.
+* The oracle's stdout is line-normalised text, so "byte-identical" is not what the fixture can claim.
+* PawPrint runs with invariant globalisation by default and the oracle does not; state the property on both sides.
+* The in-place oracle is safe under concurrency only while every caller writes the same runtimeconfig; pass the file
+  with `dotnet exec --runtimeconfig` instead.
+* Real .NET 11 was never run on these scenarios, and the stability of real .NET's output across processes was never
+  measured.
+* The publish and release jobs in `ci.yaml` (all disabled) name two of the six packages
+  (#2325). Not part of this plan.
+
+### Staging
+
+Three pull requests. PR 1 and PR 2 are independent of each other; PR 3 needs both merged. Put one in flight at a
+time.
+
+**PR 1: the published packages' dependency check.** `scripts/check-package-dependencies.py`, its tests and flake
+check, `scripts/package-dependencies.json`, the `expected-pack` job rewritten around it, and the `AGENTS.md` and skill
+sentences. No project and no test changes. Closes #2323.
+
+**PR 2: the capturing in-place oracle.** `RealRuntime` as in decision 6, with its tests. No guest project yet.
+
+**PR 3: the consumer guest project and its fixture.** The project and its thirteen scenarios; the solution entry; the
+`FootprintInput`; `nix/deps.json` refreshed; `footprint.py generate` output; the shared publish helper;
+`TestConsumerCases.fs` with its per-runtime parking table, the vacuity guards and the two scenario-list guards; the
+restore line in `test-guest`; the publish line in `offline-restore`; a short paragraph in
+`WoofWare.PawPrint.Test/AGENTS.md` naming the mechanism and the file. Its body records the study's one-off leak
+checks, the three mutation checks, the two measurements of decision 5, and each scenario's wall time from the CI TRX.
+It refers to #2092 and does not close it.
+
+There is no PR for the remaining mocking scenarios. Microsoft.Extensions.DependencyInjection (#2314) follows as its
+own pull request into the same project.
