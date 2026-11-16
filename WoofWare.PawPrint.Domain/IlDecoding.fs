@@ -87,7 +87,9 @@ module IlDecoding =
         | UnaryMetadataTokenIlOp.Stobj
         | UnaryMetadataTokenIlOp.Ldobj
         | UnaryMetadataTokenIlOp.Sizeof
-        | UnaryMetadataTokenIlOp.Ldelema -> ScopeOperandKind.Type
+        | UnaryMetadataTokenIlOp.Ldelema
+        | UnaryMetadataTokenIlOp.Ldelem
+        | UnaryMetadataTokenIlOp.Stelem -> ScopeOperandKind.Type
 
         | UnaryMetadataTokenIlOp.Call
         // Every method entry, a DynamicMethod included: real .NET answers a `callvirt` of any static
@@ -133,11 +135,6 @@ module IlDecoding =
         | UnaryMetadataTokenIlOp.Ldsflda
         | UnaryMetadataTokenIlOp.Stsfld -> ScopeOperandKind.Field
 
-        // Type operands, but not resolvable against a scope yet, each for its own reason.
-        | UnaryMetadataTokenIlOp.Ldelem
-        | UnaryMetadataTokenIlOp.Stelem ->
-            ScopeOperandKind.NotYetSupported
-                "ldelem/stelem resolve their element type through a separate path that yields a TypeInfo rather than a ConcreteTypeHandle; note that the nullary forms (ldelem.i4 and friends) need no operand at all"
         // `ldtoken` also accepts field and method entries when its token is tagged as one, which the
         // decoder refuses by that tag: real .NET resolves both, so they are gaps, not errors.
         | UnaryMetadataTokenIlOp.Ldtoken -> ScopeOperandKind.AnyType
