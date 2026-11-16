@@ -728,8 +728,10 @@ module AbstractMachine =
             // A synchronized method's call of a monitor helper is a step of its own too, and comes
             // before the type-initialisation check: CoreCLR's JIT inserts the check into the body
             // (`fgMorphInit`) before it wraps the body in the region the monitor guards
-            // (`fgAddSyncMethodEnterExit`). No frame is both synchronized and runtime-async, which
-            // frame creation refuses.
+            // (`fgAddSyncMethodEnterExit`). The same holds for an async version, which the JIT wraps
+            // the same way and whose entry calls no context helper. Frame creation refuses a
+            // synchronized frame that runs a VM stub or has runtime async's calling convention
+            // other than as an async version, so no frame both holds a monitor and saves contexts.
             match SynchronizedMethodMonitor.beforeInstruction loggerFactory baseClassTypes thread state with
             | Some result -> result
             | None ->
