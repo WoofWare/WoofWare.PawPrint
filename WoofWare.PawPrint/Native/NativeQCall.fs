@@ -258,6 +258,7 @@ module NativeQCall =
             NativeRuntimeAssembly.tryExecuteQCall "AssemblyNative_GetLoadedAssemblies"
             "AssemblyNative_GetLocation", NativeRuntimeAssembly.tryExecuteQCall "AssemblyNative_GetLocation"
             "AssemblyNative_GetModules", NativeRuntimeAssembly.tryExecuteQCall "AssemblyNative_GetModules"
+            "AssemblyNative_GetExportedTypes", NativeRuntimeAssembly.tryExecuteQCall "AssemblyNative_GetExportedTypes"
             "AssemblyNative_GetPublicKey", NativeRuntimeAssembly.tryExecuteQCall "AssemblyNative_GetPublicKey"
             "AssemblyNative_GetReferencedAssemblies",
             NativeRuntimeAssembly.tryExecuteQCall "AssemblyNative_GetReferencedAssemblies"

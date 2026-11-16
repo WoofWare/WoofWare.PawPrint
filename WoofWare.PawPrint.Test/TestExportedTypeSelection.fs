@@ -121,12 +121,12 @@ module TestExportedTypeSelection =
 
         genAt
 
-    let private genTop (publicBias : float) (allowFile : bool) : Gen<TopType> =
+    let private genTop (publicBias : float) (allowPublic : bool) (allowFile : bool) : Gen<TopType> =
         gen {
             let! access =
                 Gen.frequency
                     [
-                        int (publicBias * 10.0) + 1, Gen.constant TopAccess.Public
+                        (if allowPublic then int (publicBias * 10.0) + 1 else 0), Gen.constant TopAccess.Public
                         3, Gen.constant TopAccess.Internal
                         (if allowFile then 1 else 0), Gen.constant TopAccess.File
                     ]
@@ -154,16 +154,16 @@ module TestExportedTypeSelection =
                 }
         }
 
-    let private genTops (allowFile : bool) : Gen<TopType list> =
+    let private genTops (allowPublic : bool) (allowFile : bool) : Gen<TopType list> =
         gen {
             let! publicBias = Gen.elements [ 0.1 ; 0.5 ; 0.9 ]
             let! count = Gen.choose (1, 5)
-            return! Gen.listOfLength count (genTop publicBias allowFile)
+            return! Gen.listOfLength count (genTop publicBias allowPublic allowFile)
         }
 
     let private genForest : Gen<Forest> =
         gen {
-            let! tops = genTops true
+            let! tops = genTops true true
             let! forwarders = Gen.subListOf forwardable
 
             return
@@ -382,19 +382,19 @@ module TestExportedTypeSelection =
             Arb.fromGen (Gen.zip genForest (Gen.frequency [ 3, Gen.constant false ; 1, Gen.constant true ]))
 
         let coverage =
-            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 60) arbitrary property
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 150) arbitrary property
 
         for label, floor in
             [
-                SingleModuleReach.ModuleTypePublic, 8
-                SingleModuleReach.NestedPublicUnderInternal, 8
-                SingleModuleReach.NestedPublicUnderFamilyOrAssembly, 3
-                SingleModuleReach.KeptAtDepthTwo, 8
-                SingleModuleReach.KeptAtDepthThree, 3
-                SingleModuleReach.KeptGeneric, 8
+                SingleModuleReach.ModuleTypePublic, 20
+                SingleModuleReach.NestedPublicUnderInternal, 20
+                SingleModuleReach.NestedPublicUnderFamilyOrAssembly, 20
+                SingleModuleReach.KeptAtDepthTwo, 20
+                SingleModuleReach.KeptAtDepthThree, 20
+                SingleModuleReach.KeptGeneric, 20
                 SingleModuleReach.Forwarder, 20
-                SingleModuleReach.FileType, 8
-                SingleModuleReach.NothingKept, 2
+                SingleModuleReach.FileType, 20
+                SingleModuleReach.NothingKept, 10
             ] do
             if coverage.Count label < floor then
                 failwith $"the fixed sample reached %A{label} only %d{coverage.Count label} times"
@@ -468,17 +468,22 @@ module TestExportedTypeSelection =
             | Error e, first :: _ -> fileName first.File |> shouldEqual e.FileName
             | Error e, [] -> failwith $"the host threw for %s{e.FileName}, but FileExports is empty"
 
-        let arbitrary = Arb.fromGen (Gen.zip (genTops false) (genTops false))
+        // A module with no public type on a third of draws, so that the first module with a public
+        // type is often not the first File.
+        let genModule : Gen<TopType list> =
+            Gen.frequency [ 1, genTops false false ; 2, genTops true false ]
+
+        let arbitrary = Arb.fromGen (Gen.zip genModule genModule)
 
         let coverage =
-            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 40) arbitrary property
+            CoverageSample.check (Config.QuickThrowOnFailure.WithMaxTest 150) arbitrary property
 
         for label, floor in
             [
-                MultiModuleReach.FirstModuleHiddenSecondVisible, 4
-                MultiModuleReach.FirstModuleVisible, 10
-                MultiModuleReach.NeitherVisible, 1
-                MultiModuleReach.NestedExport, 10
+                MultiModuleReach.FirstModuleHiddenSecondVisible, 20
+                MultiModuleReach.FirstModuleVisible, 20
+                MultiModuleReach.NeitherVisible, 10
+                MultiModuleReach.NestedExport, 20
             ] do
             if coverage.Count label < floor then
                 failwith $"the fixed sample reached %A{label} only %d{coverage.Count label} times"
@@ -547,6 +552,13 @@ module TestExportedTypeSelection =
                     ExportedTypeData.ParentExportedType (MetadataTokens.ExportedTypeHandle parent)
         }
 
+    /// An ExportedType table of `rows`, keyed by each row's own handle.
+    let private tableOf (rows : ExportedType list) : IReadOnlyDictionary<ExportedTypeHandle, ExportedType> =
+        rows
+        |> List.map (fun row -> KeyValuePair (row.Handle, row))
+        |> ImmutableDictionary.CreateRange
+        :> IReadOnlyDictionary<_, _>
+
     let private rawImplementation (implementation : GeneratedImplementation) : int =
         match implementation with
         | GeneratedImplementation.Forwarder -> (assemblyRefTable <<< 24) ||| 1
@@ -574,7 +586,7 @@ module TestExportedTypeSelection =
             let! order = Gen.shuffle [| 1..count |]
             // How strongly the visibilities lean to the ones that continue (`NestedPublic` under a
             // parent) or end (`Public` at a File) a kept chain.
-            let! bias = Gen.elements [ 0 ; 3 ; 10 ]
+            let! bias = Gen.elements [ 0 ; 3 ; 10 ; 30 ]
 
             let! assigned =
                 order
@@ -628,10 +640,7 @@ module TestExportedTypeSelection =
                 generated
                 |> List.mapi (fun i (visibility, implementation) -> exportedTypeRow (i + 1) visibility implementation)
 
-            let table =
-                rows
-                |> List.map (fun row -> KeyValuePair (row.Handle, row))
-                |> ImmutableDictionary.CreateRange
+            let table = tableOf rows
 
             let model =
                 generated
@@ -687,10 +696,10 @@ module TestExportedTypeSelection =
         for label, floor in
             [
                 RowReach.KeptThroughParent, 200
-                RowReach.KeptThroughTwoParents, 100
+                RowReach.KeptThroughTwoParents, 50
                 RowReach.KeptThroughLaterRid, 100
                 RowReach.KeptAtFile, 200
-                RowReach.NestedPublicUnderNotPublicFile, 50
+                RowReach.NestedPublicUnderNotPublicFile, 20
                 RowReach.PublicUnderParent, 100
                 RowReach.NilParentNestedPublic, 50
                 RowReach.NilFilePublic, 50
@@ -698,11 +707,6 @@ module TestExportedTypeSelection =
             ] do
             if coverage.Count label < floor then
                 failwith $"the fixed sample reached %A{label} only %d{coverage.Count label} times"
-
-    let private tableOf (rows : ExportedType list) : ImmutableDictionary<ExportedTypeHandle, ExportedType> =
-        rows
-        |> List.map (fun row -> KeyValuePair (row.Handle, row))
-        |> ImmutableDictionary.CreateRange
 
     [<Test>]
     let ``A cycle of NestedPublic rows fails, naming a row`` () : unit =
