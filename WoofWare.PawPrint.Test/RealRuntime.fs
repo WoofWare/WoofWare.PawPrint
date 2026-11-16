@@ -977,6 +977,18 @@ module RealRuntime =
     let executeWithRealRuntime (args : string[]) (assemblyBytes : byte array) : RealRuntimeResult =
         executeWithTimeout guestTimeout args assemblyBytes
 
+    /// Not implemented yet: its tests come first.
+    let captureAssemblyInPlace
+        (configProperties : AppContextProperties)
+        (args : string[])
+        (dllPath : string)
+        : CapturedRun
+        =
+        ignore<AppContextProperties> configProperties
+        ignore<string[]> args
+
+        failwith $"TODO: RealRuntime.captureAssemblyInPlace is not implemented yet, so it cannot run %s{dllPath}."
+
     /// Run a managed assembly that already sits on disk beside the assemblies it depends on.
     ///
     /// `executeWithTimeout` owns a scratch directory holding exactly one image, so it cannot run a

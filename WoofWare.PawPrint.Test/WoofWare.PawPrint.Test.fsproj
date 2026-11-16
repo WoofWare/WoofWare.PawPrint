@@ -177,6 +177,7 @@
     <Compile Include="TestSeedForOracle.fs" />
     <Compile Include="TestRealRuntimeCleanup.fs" />
     <Compile Include="TestRealRuntimeConcurrent.fs" />
+    <Compile Include="TestRealRuntimeInPlace.fs" />
     <Compile Include="TestRealRuntimeStandardInput.fs" />
     <Compile Include="TestRuntimeConfig.fs" />
     <Compile Include="TestDynamicCodeSupport.fs" />
