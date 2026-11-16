@@ -310,6 +310,7 @@
     <Compile Include="TestInterfaceVerification.fs" />
     <Compile Include="InterfaceCorpusGenerator.fs" />
     <Compile Include="TestNumVirtualsAndStaticVirtuals.fs" />
+    <Compile Include="TestInterfaceMethodImplementation.fs" />
     <Compile Include="TestGcHandleRegistry.fs" />
     <Compile Include="TestSha256.fs" />
     <Compile Include="TestEvpDigestRegistry.fs" />
