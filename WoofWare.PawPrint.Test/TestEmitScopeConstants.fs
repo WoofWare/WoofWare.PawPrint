@@ -477,11 +477,11 @@ module TestEmitScopeConstants =
             | ConstantValue.Single bits, (:? single as r) -> BitConverter.SingleToInt32Bits r |> shouldEqual bits
             | ConstantValue.Double bits, (:? double as r) -> BitConverter.DoubleToInt64Bits r |> shouldEqual bits
             | ConstantValue.String s, (:? string as r) ->
-                // SRM decodes through `Encoding.Unicode`, which replaces a lone surrogate; compare where it cannot.
-                if s |> Seq.forall (fun c -> not (Char.IsSurrogate c)) then
-                    r |> shouldEqual s
-                else
+                // SRM reads code units as they are, a lone surrogate included.
+                if s |> Seq.exists Char.IsSurrogate then
                     cover "lone or paired surrogate"
+
+                r |> shouldEqual s
             | ConstantValue.NullReference, r -> r |> shouldEqual null
             | _, r -> r |> shouldEqual (boxed value).Value
 
@@ -827,9 +827,9 @@ module TestEmitScopeConstants =
         let typeOf (owner : HasConstant) =
             EmitScope.typeOfConstantOwner owner scope
 
-        let finalScope, finalModel, _ =
-            ((scope, [], None), steps)
-            ||> List.fold (fun (scope, model : Model, last : HasConstant option) step ->
+        let finalScope, finalModel =
+            ((scope, []), steps)
+            ||> List.fold (fun (scope, model : Model) step ->
                 let owner, kind = owners.[step.Owner % owners.Length]
 
                 match EmitScopeDefinitions.defineConstant owner step.Value scope with
@@ -838,7 +838,7 @@ module TestEmitScopeConstants =
                     | OwnerKind.Property (PropertyKind.Getter as k)
                     | OwnerKind.Property (PropertyKind.Setter as k) ->
                         cover (ModelReach.Detaches k)
-                        scope, model, last
+                        scope, model
                     | other -> failwith $"%A{owner}, a %A{other}, has no accessor row, but defineConstant says it has"
                 | ConstantDefinition.Defined after ->
                     match kind with
@@ -893,7 +893,7 @@ module TestEmitScopeConstants =
 
                     othersUnchanged scope after
                     typeOf owner |> ignore<TypeDefRid>
-                    after, model, Some owner
+                    after, model
             )
 
         finalScope, finalModel, owners, initial
