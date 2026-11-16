@@ -2825,9 +2825,9 @@ public static class StreamVersionLibrary
         // is no escape from a resource-only `File` row, which is what CoreCLR's function body
         // says too: it never reads that parameter.
         //
-        // PawPrint refuses rather than reproducing that exception. Its `FileName` is the *row's*
-        // name and its `HResult` is 0x8013101E, neither of which a native handler's raise
-        // machinery can set — it calls the parameterless ctor and overwrites only the message.
+        // PawPrint refuses rather than reproducing that exception (#2287). Its `FileName` is the
+        // *row's* name, which a native handler's raise machinery cannot set, and its message needs
+        // two QCalls PawPrint does not implement.
         let _messages, loggerFactory = LoggerFactory.makeTest ()
         use _loggerFactoryResource = loggerFactory
 
@@ -2865,6 +2865,132 @@ public static class StreamVersionLibrary
                 invokeGetModules loggerFactory prepared prepared.State guest.Name.FullName false getResourceModules
 
             soleModule state written |> ignore<ManagedHeapAddress * ManagedHeapAddress>
+
+    /// Runs `AssemblyNative_GetExportedTypes` for `assemblyFullName` and returns the heap address
+    /// the handler wrote into the `ObjectHandleOnStack` (None if it left the slot at null).
+    let private invokeGetExportedTypes
+        (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory)
+        (prepared : Program.PreparedProgram)
+        (state : IlMachineState)
+        (assemblyFullName : string)
+        : IlMachineState * ManagedHeapAddress option
+        =
+        let baseClassTypes = prepared.BaseClassTypes
+
+        let qCallAssembly, state =
+            qCallAssemblyValue loggerFactory baseClassTypes assemblyFullName state
+
+        let objectHandle, target, state =
+            objectHandleOnStackValue loggerFactory baseClassTypes state
+
+        let state =
+            invokeQCall
+                loggerFactory
+                prepared
+                runtimeAssembly
+                "AssemblyNative_GetExportedTypes"
+                [ qCallAssembly ; objectHandle ]
+                state
+
+        let written =
+            match
+                IlMachineState.readManagedByref baseClassTypes state (ManagedPointerSource.requireAddressed target)
+            with
+            | CliType.ObjectRef maybeAddr -> maybeAddr
+            | other -> failwith $"expected ObjectHandleOnStack target to contain an object ref, got %O{other}"
+
+        state, written
+
+    /// A netmodule of `source`, and the reference through which a manifest compiled against it
+    /// takes it as a File of its assembly. Roslyn names a netmodule after its assembly name.
+    let private netModule (name : string) (source : string) : MetadataReference =
+        let image = Roslyn.compileAssembly name OutputKind.NetModule [] [ source ]
+
+        MetadataReference.CreateFromImage (image, MetadataReferenceProperties.Module, filePath = $"%s{name}.netmodule")
+        :> MetadataReference
+
+    let private manifestSource : string =
+        guestSource
+        + "\npublic class ManifestPublic { }\ninternal class ManifestInternal { }\n"
+
+    [<Test>]
+    let ``GetExportedTypes refuses a public File export, naming the File that export names`` () : unit =
+        // CoreCLR loads the manifest's exported TypeDefs, then the first public File export, which
+        // throws `FileLoadException` naming that export's File (`ModuleBase::LoadModule`,
+        // vm/ceeload.cpp:2573). PawPrint refuses there instead (#2287). The first File row has no
+        // public type, so a refusal naming File row 1 names the wrong file.
+        let _messages, loggerFactory = LoggerFactory.makeTest ()
+        use _loggerFactoryResource = loggerFactory
+
+        let image =
+            Roslyn.compileAssembly
+                guestAssemblyName
+                OutputKind.ConsoleApplication
+                [
+                    netModule "Hidden" "internal class HiddenOnly { public class HiddenNested { } }"
+                    netModule "Shown" "public class ShownPublic { public class ShownNested { } }"
+                ]
+                [ manifestSource ]
+
+        use pe = new PEReader (new MemoryStream (image))
+        let metadata = pe.GetMetadataReader ()
+
+        metadata.AssemblyFiles
+        |> Seq.map (fun file -> metadata.GetString (metadata.GetAssemblyFile file).Name)
+        |> List.ofSeq
+        |> shouldEqual [ "Hidden.netmodule" ; "Shown.netmodule" ]
+
+        let prepared = prepareGuest loggerFactory image
+        let guest = prepared.State.ActiveAssembly prepared.EntryThread
+
+        let exn =
+            Assert.Throws<System.Exception> (fun () ->
+                invokeGetExportedTypes loggerFactory prepared prepared.State guest.Name.FullName
+                |> ignore<IlMachineState * ManagedHeapAddress option>
+            )
+
+        exn.Message |> shouldContainText "Shown.netmodule"
+        exn.Message |> shouldContainText "ShownPublic"
+        exn.Message |> shouldContainText "#2287"
+        exn.Message |> shouldNotContainText "Hidden.netmodule"
+
+    [<Test>]
+    let ``GetExportedTypes answers with a Type array when no File export is public`` () : unit =
+        // A File row alone is not refused: CoreCLR loads a File's module only for a public export,
+        // and this one exports nothing.
+        let _messages, loggerFactory = LoggerFactory.makeTest ()
+        use _loggerFactoryResource = loggerFactory
+
+        let image =
+            Roslyn.compileAssembly
+                guestAssemblyName
+                OutputKind.ConsoleApplication
+                [
+                    netModule "Hidden" "internal class HiddenOnly { public class HiddenNested { } }"
+                ]
+                [ manifestSource ]
+
+        let prepared = prepareGuest loggerFactory image
+        let guest = prepared.State.ActiveAssembly prepared.EntryThread
+
+        let state, written =
+            invokeGetExportedTypes loggerFactory prepared prepared.State guest.Name.FullName
+
+        let arrayAddr =
+            written
+            |> Option.defaultWith (fun () -> failwith "handler left the ObjectHandleOnStack at null")
+
+        let shape = ManagedHeap.getArrayShape arrayAddr state.ManagedHeap
+
+        let typeHandle =
+            AllConcreteTypes.getRequiredNonGenericHandle
+                state.TypeSystem.ConcreteTypes
+                (requiredTopLevelType prepared.BaseClassTypes.Corelib "System" "Type")
+
+        shape.ConcreteType
+        |> shouldEqual (ConcreteTypeHandle.OneDimArrayZero typeHandle)
+        // `Entry` and `ManifestPublic`.
+        shape.Length |> shouldEqual 2
 
     /// The type declaring `AssemblyNative_GetLoadedAssemblies`. Unlike the rest of this file's
     /// entry points it hangs off the load context rather than off an assembly, because the
