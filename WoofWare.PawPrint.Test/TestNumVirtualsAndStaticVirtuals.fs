@@ -1054,6 +1054,7 @@ public interface IReabs : IBase { abstract void IBase.M(); }
 public interface IStaticReabs : IBase { static abstract int IBase.S(); }
 public interface IStatOrder { void I1(); static abstract int S1(); void I2(); static abstract int S2(); }
 public interface IG<T> { T Get(); static abstract T Make(); }
+public interface IStatInit { static int F = 3; static abstract int S(); }
 public struct SStat : IStat { public static int S() => 1; public void I() { } }
 public class HasT<T> { }
 """
@@ -1096,6 +1097,8 @@ public class HasT<T> { }
                 fixedType "IStatOrder", 4
                 (fixedType "IG`1").MakeGenericType hasT, 2
                 fixedType "SStat", 5
+                // The field initialiser gives it a class constructor, which is static and not virtual.
+                fixedType "IStatInit", 1
                 // An array's count is `System.Array`'s, not its element's.
                 (fixedType "IStat").MakeArrayType (), 24
             ]
