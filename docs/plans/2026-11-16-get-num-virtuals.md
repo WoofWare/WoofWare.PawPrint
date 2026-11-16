@@ -580,3 +580,264 @@ static int Nvs(Type t) => (int)NvsM.Invoke(null, new object[] { t });
 ```
 
 The throwaway handler was decision 1's option A.
+
+## Decisions
+
+Decided 2026-11-16, by the decider the owner delegated to. Before deciding I read the QCall, `RuntimeTypeHandle_GetMethodAt`,
+the `GetNumVirtuals` FCall, `TypeHandle::GetMethodTable`, `TypeDesc::GetMethodTable`, the managed wrappers and
+`RuntimeType.GetInterfaceMap` in both pinned runtime sources; read the PawPrint code each option touches
+(`VirtualSlotLayout.numVirtuals` and `methodAt`, `ConcreteMethodTable`, `MethodTableLayout.slotsBeyondVtableOfDefinition`,
+`TypeHandleTag.forTarget`); read decision 19 of the runtime-async plan and its entry in `docs/divergences.md`; and
+spot-checked the planner's logs against the plan's tables (the row dumps on both runtimes, the rule's sweep, the slot
+sweep, the TypeDesc rows, the out-of-range message, and PawPrint's rows on .NET 11's CoreLib).
+
+The plan's account of CoreCLR is right, and so are its tables. The QCall and `GetMethodAt` are the same text on .NET 10
+and .NET 11. The corrections and additions are under "Corrections to the study" and "Additions" below; decisions 1, 2, 4
+and 5 depend on them.
+
+One issue comes out of this plan: #2299. It is not fixed by this change. Two comments go
+on existing issues: the measurement on #2294, and what this study learned about the map's contents on #2290.
+
+### 1. How the count relates to `GetMethodAt`: B, one shared tail
+
+The count is `numVirtuals` plus the length of the list of static virtuals, and `methodAt` indexes that same list past
+the vtable. This is how CoreCLR writes both functions (`GetNumVirtuals()`, then the same loop), and the rule is then
+written once.
+
+- Add `VirtualSlotLayout.numVirtualsAndStaticVirtuals`, with `numVirtuals`' parameters and return type
+  (`IlMachineState * int`).
+- `methodAt` and the new function must obtain the tail from one function in `VirtualSlotLayout`, which answers over a
+  `RuntimeTypeHandleTarget`. Delete the local `staticVirtualsOf` inside `methodAt`.
+- The handler in `Native/NativeRuntimeTypeQCall.fs` decodes its one argument with
+  `NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget` (the wrapper asserts a non-null type, so the variant that
+  tolerates a null handle is not wanted), calls the function, and pushes an `Int32`. Register it in
+  `Native/NativeQCall.fs` beside `RuntimeTypeHandle_GetMethodAt`.
+- Make the change to `methodAt` a commit of its own which preserves behaviour, after the commit that adds the tests and
+  before the commit that adds the count. `TestMethodAtSlotShapes.fs`, `TestVirtualMethodSlots.fs` and
+  `sourcesPure/ReflectionMethodAtSlot.cs` must stay green across it without edits.
+
+Why not A: the count would be the side effect of probing a lookup until it fails, it rebuilds the slot table once for
+each static virtual, and a reader cannot see what is counted. Why not C: it is a second spelling of the tail which has to
+agree with `methodAt`'s, and the only thing a disagreement can do is make `GetInterfaceMap` throw.
+
+One limit of B, which the tests must cover. B shares the tail, but the two functions still find the *boundary*
+separately: the count's first half is the length of the placement vtable (`numVirtuals`), and `methodAt` takes its
+boundary from the length of the content vtable (`dispatchTableOfClosed`'s occupants, or `contentVtableOfDefinition`).
+Those two lengths are equal today and nothing in this change states it. So the property test checks the boundary for
+every type, not only for interfaces (under "Tests").
+
+### 2. Where the tail's rule lives: `WoofWare.PawPrint.TypeSystem`, and without a `bool` parameter
+
+Agreed that it goes in `MethodTableLayout`, beside `slotsBeyondVtableOfDefinition`, which is `internal` to that project
+and places the slots the rule filters. I overrule the proposed signature. `staticVirtuals (isInterface : bool) (table :
+MethodSlotTable)` lets a caller pass a flag which does not describe the table, and it asks for a whole `MethodSlotTable`
+when only the part past the vtable is read. Instead:
+
+```fsharp
+/// The static virtual methods a type declares, in slot order: the slots CoreCLR numbers on from
+/// `GetNumVirtuals()` for an interface. Empty for every type that is not an interface.
+let staticVirtualsOfDefinition
+    (operation : string)
+    (owner : SlotOwner)
+    (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>)
+    : VtableSlot list
+```
+
+- It answers `[]` when `typeInfo.IsInterface` is false, and otherwise `slotsBeyondVtableOfDefinition operation owner
+  typeInfo` filtered to `IsVirtual && IsStatic`.
+- It is a function of the definition's metadata alone. It needs no concretisation and no vtable, so it returns a plain
+  list and threads no state. Today `methodAt` calls `slotTableOfClosed` or `slotTableOfDefinition` only to read
+  `BeyondVtable`, which also builds the vtable a second time; the new function removes that. A closed interface's tail
+  is its definition's (`ConcreteMethodTable.slotTableOfClosed` already takes it from the definition's identity).
+- Put two facts in a comment at the `IsInterface` test, because the two CoreCLR functions differ there and the
+  difference is easy to "fix" wrongly. `RuntimeTypeHandle_GetMethodAt` tests `IsInterface()` before it searches;
+  `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals` does not, and counts for any type whose
+  `HasVirtualStaticMethods` flag is set, which includes a class that implements such an interface. The two agree
+  because no type but an interface can declare a static virtual: the method table builder refuses the type
+  (`IDS_CLASSLOAD_STATICVIRTUAL`), and `MethodTableLayout.declaredMethodsOf` already refuses it in the same place.
+- In `VirtualSlotLayout`, the function over a target answers: a closed nominal type and a generic definition or open
+  construction from the definition's metadata; an array `[]`, because its method table's slots are `System.Array`'s
+  and that is a class. Do **not** route an array through `slotTableOfClosed`: that function refuses an array on
+  purpose (the array's own methods past the vtable are not modelled). The static-virtual tail of an array is empty
+  whatever those methods are, since none of them is virtual; say so in a comment.
+
+`staticVirtualsOfDefinition` is a new public function in the published `WoofWare.PawPrint.TypeSystem` package, and
+`numVirtualsAndStaticVirtuals` is a new public function in `WoofWare.PawPrint`. Say both in the pull request body.
+
+### 3. .NET 11's async variants: (i), the count excludes them
+
+I checked this against both sources and the logs. On .NET 11 the real count for `ITask` is 8 and real `GetMethodAt`
+answers null at slots 1, 4 and 6; PawPrint on .NET 11's CoreLib answers 5 and five methods. `GetInterfaceMap` skips a
+null handle and shrinks its arrays, so the map is the same five pairs either way. What must hold is that the count and
+PawPrint's own `GetMethodAt` agree, and under decision 19 of the runtime-async plan PawPrint's tables have no variant
+slots. Option (iii) would make `GetInterfaceMap` throw `ArgumentException` on .NET 11 for `IAsyncDisposable`,
+`IAsyncEnumerator<T>` and every user interface with a `Task`-returning method, where real .NET returns a map. Option
+(ii) is decision 19's option (a), which was decided against five days ago for reasons this QCall does not change: the
+count is one more number that only indexes the same table.
+
+What the implementer does:
+
+- Extend the entry "A runtime-async method's async variant has no virtual slot of its own" in `docs/divergences.md`.
+  Add to its "Observable example" that `RuntimeTypeHandle.GetNumVirtualsAndStaticVirtuals` and
+  `RuntimeTypeHandle.GetMethodAt`, reached by reflecting over CoreLib's internals, show it too, with the measurement:
+  on .NET 11.0.0-rc.3, `interface ITask { Task<int> A(); int B(); ValueTask C(); static abstract Task S(); static
+  abstract int T(); }` has a count of 8 and `GetMethodAt` answers `A`, null, `B`, `C`, null, `S`, null, `T`; PawPrint
+  answers 5 and `A`, `B`, `C`, `S`, `T`, and never a null handle. Add one sentence that `Type.GetInterfaceMap`, the
+  only caller in CoreLib, returns the same map, because it skips null handles.
+- Add a sentence to `numVirtualsAndStaticVirtuals`' docstring: on .NET 11 the number is CoreCLR's less its async
+  variant slots, and it names the divergence entry. A caller needs to know that.
+- Pin it with a test that does not need a .NET 11 host (under "Tests"). The plan's property is conditional on the
+  host's null slots, and the test host is .NET 10, so as planned nothing in CI would read .NET 11's CoreLib at all.
+
+### 4. A byref, pointer, function pointer or type variable: (b), refuse
+
+`Type.GetInterfaceMap` cannot pass one: #2270's verdict has already raised for anything that is not an interface. Only
+reflection over CoreLib's internals reaches this arm, and the right answer for a pointer needs something PawPrint does
+not have (decision 5).
+
+- `numVirtualsAndStaticVirtuals` tests `TypeHandleTag.isTypeDesc target` **first**, and refuses with a `failwith` whose
+  message begins `TODO:`, names the operation and the target, says that CoreCLR answers the count of
+  `TypeHandle::GetMethodTable()` (`UIntPtr`'s for a pointer and a function pointer, 0 for a byref and a type variable),
+  and names #2299.
+- The order matters, and the plan does not say so. If the new function simply added the tail to `numVirtuals`, a
+  *closed* pointer, function pointer or byref would not be refused: `numVirtuals` sends
+  `Closed (ConcreteTypeHandle.Pointer _)` to `ConcreteMethodTable.vtableOfClosed`, which answers an empty vtable, and
+  the QCall would push 0. That is option (c), the wrong answer for a pointer, reached by accident. `numVirtuals`
+  refuses only the composites over a type variable.
+- Do not call `methodAt` for these either. Its failure message says the managed wrapper throws before the QCall, which
+  is true of `GetMethodAt`'s wrapper and false of this one.
+- `isTypeDesc` answers false for the dynamic-methods class, which `numVirtuals` then refuses with
+  `refuseMetadataQuery`; keep that. It refuses a continuation type with `ContinuationType.unasked`; keep that too.
+- A byref's 0 is right today, and I still refuse it: one test (`isTypeDesc`) with one refusal is easier to check than a
+  rule with an exception, and #2299 answers all four kinds together.
+
+### 5. File the issue: yes, #2299
+
+I confirmed the measurement in the logs (`int*` and `delegate*<void>` are 15 from both the FCall and this QCall on
+both runtimes; PawPrint's FCall prints 0 for both) and the reading (`TypeDesc::GetMethodTable` answers
+`CoreLibBinder::GetElementType(ELEMENT_TYPE_U)` for `ELEMENT_TYPE_PTR` and `ELEMENT_TYPE_FNPTR`, and `NULL` otherwise,
+on both runtimes).
+
+I disagree with the plan about where the fix goes, and the issue says so. `vtableOfClosed`'s comment, "TypeDescs in
+CoreCLR with no MethodTable", is true: a pointer has no method table of its own. What is missing is the step CoreCLR's
+two functions take before they count, `TypeHandle::GetMethodTable()`, which *substitutes* `UIntPtr`'s method table for
+a pointer or function pointer. Giving a pointer `UIntPtr`'s vtable inside `ConcreteMethodTable` would tell every reader
+of the vtable, dispatch included, that a pointer has slots. The issue proposes a function from a target to the target
+whose method table CoreCLR reads, used by the FCall and by this QCall, and leaves the choice to that issue's plan. It
+also covers the FCall's failure on a type variable (a release CoreCLR answers 0), and the comment on the FCall's arm
+which says a pointer has no method table.
+
+### 6. The guest may call the wrapper by reflection: yes
+
+It is the only way a guest sees a non-zero count before #2290. I confirmed the declarations, the same on both runtimes:
+`private static partial int GetNumVirtualsAndStaticVirtuals(QCallTypeHandle)` is the `LibraryImport`, and
+`internal static int GetNumVirtualsAndStaticVirtuals(RuntimeType)` is the wrapper (the plan calls the wrapper private;
+it is internal, which changes nothing about the lookup).
+
+- Look it up with `BindingFlags.NonPublic | BindingFlags.Static`, a null binder and the parameter types
+  `{ typeof(object).GetType() }` (that is `System.RuntimeType`), so the lookup is not ambiguous and a change of
+  signature returns null. Check 1 is that the method was found.
+- Every call gets its own exit code.
+- The public contract stays tested without the wrapper by `TypeGetInterfaceMapNoMethods.cs`, so a rename inside CoreLib
+  breaks one guest and not the other. Keep the two apart; do not add wrapper calls to the public guest.
+- No `Task`-returning member and no CoreLib type whose shape differs between runtimes in this guest. The logs show
+  delegates differ too (`System.Action` is 15 on .NET 10 and 11 on .NET 11), so no delegate either.
+
+### 7. The property also compares `GetMethodAt`'s slots: yes, and the boundary for every type
+
+For an interface: PawPrint's `methodAt` over slots 0 up to its count names, in order, the methods the host's
+`GetMethodAt` names at its non-null slots, compared by metadata token and declaring type.
+
+For **every** type in the corpus, interface or not: `methodAt` at PawPrint's count is `OutOfRange`, and when the count
+is above 0, `methodAt` at the count less one is a method. This is the check of the boundary that decision 1 asks for.
+It costs two calls a type.
+
+### 8. #2294's message does not ride along: agreed
+
+`GetInterfaceMap` never asks for the slot at the count, and the owner asks for one feature in a change. The
+measurement goes on #2294 as a comment, which removes that issue's first step. I confirmed it in the logs on both
+runtimes: `System.ArgumentException`, `HResult` 0x80070057, `ParamName` null, "Specified argument was out of the range
+of valid values."; PawPrint raises the same with "Value does not fall within the expected range.".
+
+### Corrections to the study
+
+- **"The right fix is in `ConcreteMethodTable`."** See decision 5: the vtable of a pointer is empty in CoreCLR too, and
+  the missing piece is `TypeHandle::GetMethodTable`'s substitution.
+- **Option 4 (b) as written does not refuse a closed pointer** unless the TypeDesc test comes first. See decision 4.
+- **"The function is three lines"** with a `bool` and a `MethodSlotTable`. See decision 2 for the signature.
+- **The property's .NET 11 half never runs in CI.** The host is .NET 10 unless someone rolls it forward by hand, so
+  "the count is the host's less its null slots" is plain equality there, and no test as planned reads .NET 11's
+  CoreLib. See the per-runtime test below.
+- **The wrapper is `internal`, not private.**
+- **The mutant "the tail filter loses `IsStatic`" is equivalent**, and is absent from the plan's table for that reason
+  or by luck. Everything past an interface's vtable is static or not virtual, because `PlaceVirtualMethods` has already
+  taken every instance virtual. So `IsVirtual` alone selects the same slots. Keep both conjuncts, since that is
+  CoreCLR's text, and do not spend time trying to kill this mutant. Say it in a comment at the filter.
+
+### Additions
+
+#### Tests
+
+In the order to write them. The first commit holds the tests and guests only, with their failing output recorded in
+the commit message (the compile failure of the new F# tests, and the unimplemented-QCall stop of the guests).
+
+1. **Lift the helper first.** Move `TestInterfaceVerification.fs`' private `build`, `target` and what they need into a
+   shared test module, in a commit of its own that changes no test.
+2. **The plan's property over the host's CoreLib and over generated corpora**, as designed, with decision 7's two
+   halves. Keep the plan's coverage floors and its check that some type in each corpus has a non-empty tail.
+3. **A per-runtime law which needs no host** (new). With `FrameworkUnderTest.everyRuntime` and
+   `FrameworkUnderTest.requireCoreLibPathOf`, read each supported runtime's CoreLib and, for every interface
+   definition in it, assert that PawPrint's count equals the number of the interface's MethodDef rows which have the
+   `Virtual` attribute, read with `System.Reflection.Metadata` directly and not through PawPrint's reader. An
+   interface has no parent, so its vtable is its own instance virtuals and its tail is its own static virtuals; the
+   plan's sweep measured this rule on the host over 144 interfaces. On .NET 11's CoreLib this is the test that
+   PawPrint's count has no variant slots. Assert that the corpus is not trivial: at least 40 interfaces with a static
+   virtual on each runtime (43 and 44 measured, among exported types). If an interface breaks the law, stop and report
+   it; do not weaken the law to pass.
+4. **Named examples on each runtime's CoreLib** (new): `System.IAsyncDisposable` is 1 and
+   `System.Collections.Generic.IAsyncEnumerator<>` is 2 on both, and `methodAt` at that count is `OutOfRange`. Real
+   .NET 11 answers 2 and 3. A comment names the divergence entry.
+5. **The plan's example tests** over the fixtures, and the refusals of decision 4: `int*`, `delegate*<void>`, `int&`,
+   `List<>`'s `T`, and also `T*` and `T&` over `List<>`'s `T`. Each asserts the `TODO:` message names
+   #2299. The closed `int*` case is the one that fails if the TypeDesc test is missing
+   or late.
+6. **Guests**, as the plan lists them, with these changes:
+   - `sourcesPure/RuntimeTypeHandleGetNumVirtualsAndStaticVirtuals.cs`: the plan's 23 checks. Add `IDim` (1), an
+     abstract class implementing `IOne` with an abstract method (5), `int[,]` (24), and an interface with a static
+     field initialiser and one `static abstract` method (1: the class constructor is static, past the vtable, and not
+     virtual). No TypeDesc checks, since decision 4 refuses them. `IDim`, the abstract class and `int[,]` were
+     measured by the planner; the static-initialiser interface, and `IStat[]` in the mutant table below, are expected
+     from the rule and were not measured, so measure them on real .NET 10 and 11 before relying on them (the guest's
+     controls do this for the first).
+   - Un-park `sourcesPure/TypeGetInterfaceMapNoMethods.cs` on every runtime.
+   - Re-park `sourcesPure/TypeGetInterfaceMap.cs` on #2290 on every runtime, with the measured stop quoted.
+   - The `TypeBuilder` checks go in a new guest of their own, `sourcesImpure/TypeBuilderGetNumVirtualsAndStaticVirtuals.cs`,
+     not in `TypeBuilderVerifyInterfaceIsImplemented.cs`: a guest for each QCall keeps one QCall's regression from
+     hiding the other's.
+   - Run the controls on real .NET 10 and 11 that the plan describes, and record them in the pull request body.
+
+#### Mutants
+
+Run the plan's table, and add:
+
+| mutant | killed by |
+|---|---|
+| `numVirtualsAndStaticVirtuals` loses its TypeDesc test, or makes it after calling `numVirtuals` | the closed `int*` refusal test |
+| the tail is taken for an array from its element (`IStat[]` counted as `IStat`) | add `IStat[]` (24) to the example tests; guests 22 and 23 do not have an interface element |
+| a closed instantiation's tail is empty (only definitions answered) | guest 12; the generated property |
+| `methodAt`'s boundary moved by one against the count's | decision 7's boundary check, on a class |
+| on .NET 11's CoreLib, one more counted for each `Task`-returning virtual | tests 3 and 4 above, on the .NET 11 case (the plan's CoreLib property cannot see this on a .NET 10 host) |
+| the class constructor counted | the new guest check with a static field initialiser |
+
+The mutant "the tail filter loses `IsStatic`" is equivalent (see the corrections); record it as such.
+
+#### Before starting
+
+This plan was written on top of #2298, which was still open when this was decided. Before writing code, check whether
+it has merged, and rebase onto `origin/main` if it has; `TypeHandleTag.isTypeDesc` and both parked guests come from it.
+
+#### Out of scope, on purpose
+
+`RuntimeTypeHandle_GetInterfaceMethodImplementation` (#2290), the message of #2294, and the TypeDesc answers of
+#2299. If un-parking `TypeGetInterfaceMapNoMethods.cs` meets a stop the plan did not
+measure, park it on that stop and report it; do not implement the dependency in this change.
