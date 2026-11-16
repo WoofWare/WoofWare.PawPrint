@@ -1,16 +1,17 @@
 # `RuntimeTypeHandle_VerifyInterfaceIsImplemented` (issue #2270)
 
-Status: planned, not decided. The study below was measured 2026-11-16 on `origin/main` at `a66b75274`.
+Status: decided and built ("As built", at the end). The study below was measured 2026-11-16 on `origin/main` at
+`a66b75274`.
 
 Scope is this one QCall, as the comment on #2270 decided while planning #2269. `Type.GetInterfaceMap` makes two more
 unimplemented QCalls after it: `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals` (#2289), then
 `RuntimeTypeHandle_GetInterfaceMethodImplementation` (#2290). A guest of the success path is parked on #2289.
 
-Every probe, throwaway and log named below is in this session's scratchpad,
-`/private/tmp/claude-501/-Users-patrick-Documents-GitHub-WoofWare-PawPrint--claude-worktrees-test-pipeline-performance-724897/ba89fbb1-81d8-460f-a9be-c4df3a5bd899/scratchpad/2270/`
-(written `2270/` below). Real .NET means 10.0.14, and 11.0.0-rc.3 reached by rolling the same build forward
+The probes were throwaway C# console programs, not kept (see "Probe files" at the end). Each printed one line per row
+named below: what `Type.GetInterfaceMap`, or the QCall's managed wrapper called by reflection (a `direct` row), returned
+or raised. Real .NET means 10.0.14, and 11.0.0-rc.3 reached by rolling the same build forward
 (`DOTNET_ROLL_FORWARD=LatestMajor`, `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`). Every real-.NET result below is the same on
-both runtimes; each log pair was diffed and differs only in its `runtime` line. PawPrint runs used the Release App
+both runtimes; each pair of outputs was diffed and differs only in its `runtime` line. PawPrint runs used the Release App
 built from `a66b75274`, on .NET 10's CoreLib, with the probe published self-contained for osx-arm64. Each claim is
 marked *measured* or *read*.
 
@@ -48,7 +49,7 @@ Three things follow for testing.
   interface: the managed `Argument_ArrayGetInterfaceMap` raise after it proves it returned.
 - The wrapper can be called directly by reflection, without the rest of `GetInterfaceMap`. That reaches every arm,
   the type-variable arm included, and shows a pass as "no exception" (measured on real .NET, the `direct` rows; and
-  under PawPrint, which reaches the QCall that way: `2270/main-one-direct.log`, "Unimplemented native method
+  under PawPrint, which reaches the QCall that way: "Unimplemented native method
   (PInvokeImpl QCall!RuntimeTypeHandle_VerifyInterfaceIsImplemented)", 9 frames out from the probe's `Verify`).
 
 `RuntimeTypeBuilder.GetInterfaceMap` throws `NotSupportedException` before the type is created, and afterwards calls
@@ -105,14 +106,24 @@ never reaches (read, by diffing them).
 **Measured**: over every pair of an exported CoreLib type (and the probe's fixtures) that is neither a TypeDesc nor an
 interface, against every exported CoreLib interface (and the probe's), the QCall passes exactly when
 `interfaceType.IsAssignableFrom(type)`. 184,752 pairs on .NET 10 (1,476 pass) and 197,100 on .NET 11 (1,520 pass),
-with no disagreement and no message other than "Interface not found." from arm 5 (`2270/probe/sweep-10.log`,
-`sweep-11.log`). `RuntimeType.IsAssignableFrom` of two `RuntimeType`s is `RuntimeTypeHandle.CanCastTo`
+with no disagreement and no message other than "Interface not found." from arm 5. The sweep's comparison, for each
+receiver `s` and interface `i` (`Verify` is the direct call, null when the QCall passed):
+
+```csharp
+var e = Verify(s, i);
+if (e != null && !(e is ArgumentException && e.Message == "Interface not found."))
+    disagreements.Add($"{s} / {i}: unexpected {Describe(e)}");
+else if (i.IsAssignableFrom(s) != (e == null))
+    disagreements.Add($"{s} / {i}: verify={(e == null ? "passes" : "raises")}");
+```
+
+`RuntimeType.IsAssignableFrom` of two `RuntimeType`s is `RuntimeTypeHandle.CanCastTo`
 (`RuntimeType.cs:279-291`, read), which is `TypeHandle.CanCastToForReflection` (`RuntimeHandles.cs:683-685`,
 `RuntimeHelpers.CoreCLR.cs:1191-1202`, read): `TypeHandle::CanCastTo` plus the `T` to `Nullable<T>` rule, which an
 interface target cannot meet. So the relation arm 5 asks is reflection's `IsAssignableFrom`, and
 nothing narrower.
 
-### Measurements on real .NET (`2270/probe/Verify.cs`, `rows-10.log`, `rows-11.log`; `2270/probe2/`, `extra-*.log`, `dynclass-*.log`)
+### Measurements on real .NET
 
 The issue's five rows, as the comment on #2270 gives them, measured again: identical.
 
@@ -176,30 +187,30 @@ variant interface definition can be the second argument of a map that real .NET 
 ### PawPrint on `main`
 
 Both `GetInterfaceMap` and the direct call stop at "Unimplemented native method (PInvokeImpl
-QCall!RuntimeTypeHandle_VerifyInterfaceIsImplemented)" (measured, `2270/main-one-map.log`, `main-one-direct.log`).
+QCall!RuntimeTypeHandle_VerifyInterfaceIsImplemented)" (measured).
 Nothing before it stops for an ordinary class.
 
-### PawPrint with a throwaway of the rule (`2270/throwaway.diff`, reverted)
+### PawPrint with a throwaway of the rule (reverted)
 
 The throwaway added a handler in `Native/NativeRuntimeTypeQCall.fs` which decodes both arguments with
 `NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget`, takes the arms in CoreCLR's order, answers arm 5 with
 `IlMachineState.isRuntimeTypeHandleTargetAssignableTo`, and raises with `NativeHandlerResult.raiseExceptionWithMessage`.
 
 - Every row of `rows-nosuccess` (the rows above without the three successes, 106 lines) prints the same as on real
-  .NET 10 (`2270/t3-rows.log`, compared in `t3-rows.cmp`, whose only differences are the App's own `info:` log lines).
-- Every row of `extra` likewise (`2270/t5-extra.log`, `t5-extra.cmp`).
-- The direct rows over the dynamic-methods class likewise (`2270/t5-dynclass.log`). Its `GetInterfaceMap` row does not
+  .NET 10 (compared line by line; the only differences are the App's own `info:` log lines).
+- Every row of `extra` likewise.
+- The direct rows over the dynamic-methods class likewise. Its `GetInterfaceMap` row does not
   reach the QCall under PawPrint: `RuntimeType.GetInterfaceMap`'s first line asks `IsGenericParameter`, and
   `RuntimeTypeHandle.IsGenericVariable` (`Native/NativeRuntimeTypeFCall.fs:415`) refuses the dynamic-methods class as a
   metadata query. CoreCLR answers `false` there without metadata (`IsGenericVariable` is `IsTypeDesc() && ...`, and the
   class is a MethodTable). That refusal is not this issue's; see question 8.
 - The success path stops at the next QCall, as the issue says: "Unimplemented native method (PInvokeImpl
-  QCall!RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals)" (`2270/t5-success.log`, at row `list-variant`).
+  QCall!RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals)" (at row `list-variant`).
 - A sampled sweep (`sample 40`: every 40th visible CoreLib non-interface type, then the probe's fixtures, against 159
   interfaces; one line per pair) was stopped after 802 s, at 2,691 of its 8,037 pairs: the first 20 CoreLib receivers
   (`System.Byte`, `Action<,>`, `Func<...>` definitions, `ValueTuple<,,>`, enums, static classes, exception types and so
-  on), 30 of them passing. Every one of the 2,691 lines is the same as real .NET 10's (`2270/t4-sample.log` against
-  `2270/probe/sample-10.log`, compared by `cmp-sample.py`). The fixtures at its end were already covered by the rows
+  on), 30 of them passing. Every one of the 2,691 lines is the same as real .NET 10's (compared line by line by a
+  script). The fixtures at its end were already covered by the rows
   above. It also gives a cost: about 0.3 s per pair inside a guest, almost all of it the reflection call and the raise,
   which is why the property tests below call the verdict function directly instead.
 - **The one divergence: a refusal.** `SGenInC<>`, a generic struct *definition* implementing the closed `IInC<object>`,
@@ -207,8 +218,8 @@ The throwaway added a handler in `Native/NativeRuntimeTypeQCall.fs` which decode
   `isRuntimeTypeHandleTargetAssignableTo` with "TODO: isRuntimeTypeHandleTargetAssignableTo: the open value type or
   interface ... has an interface that casts to the variant interface definition ..., but whether CoreCLR scans for it
   depends on its MayHaveOpenInterfacesInInterfaceMap flag, which PawPrint does not model for open types"
-  (`2270/t6-openstruct.log`; real, `2270/probe2/openstruct-10.log`, `-11.log`, where `IsAssignableFrom` agrees). The
-  closed `SGenInC<int>` and both `CGenInC` rows agree (`t6-openstruct-rest.log`). CoreCLR sets the flag on every class,
+  (measured; on real .NET 10 and 11 `IsAssignableFrom` agrees with the QCall). The closed `SGenInC<int>` and both
+  `CGenInC` rows agree (measured). CoreCLR sets the flag on every class,
   on a type shared by generic instantiations, and on a value type or interface only when exact interface loading had to
   retry for an ambiguity (`methodtablebuilder.cpp:9611-9617`, `:9809-9813`, read). So for an open value type the
   flag is unset unless that retry happened, and with it unset the answer is "not found" (measured for `SGenInC<>`). The refusal is shared with `IsAssignableFrom`
@@ -256,7 +267,7 @@ on any measured pair.
 - **The interface map.** The `RuntimeTypeHandle_GetInterfaces` handler (`NativeRuntimeTypeQCall.fs:2466-2751`) builds
   the map, but refuses a generic type definition whose interface rows mention its parameters: `typeof(List<>)
   .GetInterfaces()` stops with "TODO: RuntimeTypeHandle.GetInterfaces for open generic typedef ... only fully-closed
-  interface rows are supported today" (measured, `2270/t1-rows.log`). `isRuntimeTypeHandleTargetAssignableTo` builds
+  interface rows are supported today" (measured). `isRuntimeTypeHandleTargetAssignableTo` builds
   its own map through `declaredInterfaceTargets` and answers `List<>` (measured).
 - **IsTypeDesc.** Three spellings of one rule: `TypeHandleTag.forTarget` (`NativeIntSource.fs:602`, the tag bit, which
   others call "the classifier"), `NativeCastHelpers.isTypeDescTarget` (private, "must stay consistent with it"), and
@@ -493,7 +504,7 @@ verdict maps to the host's message, and every exception the host raises is an `A
 **`sourcesPure/TypeVerifyInterfaceIsImplemented.cs`**: each check returns its own exit code, and each runs without the
 success path (no check can stop at #2289). A check through `GetInterfaceMap` catches the exception and compares its
 exact type, `HResult`, `Message` and `ParamName`; a direct check calls the wrapper by reflection and compares the inner
-exception the same way, or expects none. The fixture types are the probe's (`2270/probe/Verify.cs`).
+exception the same way, or expects none. The fixture types are the probe's.
 
 | # | check | expected |
 |---|---|---|
@@ -577,16 +588,25 @@ Each must turn some test red. Run each against the property tests and the guests
 
 ## Probe files
 
-- `2270/probe/Verify.cs`, `Verify.csproj`, `real.sh`, `publish.sh`: the probe, with modes `rows`, `rows-nosuccess`,
-  `sweep`, `sample <k>`, `one-direct`, `one-map`. Logs: `rows-10.log`, `rows-11.log`, `rows-nosuccess-*.log`,
-  `sweep-10.log`, `sweep-11.log`, `sample-10.log`, `sample-11.log`.
-- `2270/probe2/`: the same probe with modes `extra`, `dynclass`, `openstruct` and `openstruct-rest`. Logs:
-  `extra-*.log`, `dynclass-*.log`, `openstruct-*.log`, `openstruct-rest-*.log`.
-- `2270/pp.sh`, `pp2.sh`, `build-app.sh`, `main-runs.sh`, `t1.sh` to `t5.sh`, `cmp-sample.py`: runners and the sweep
-  comparison. Logs: `main-one-direct.log`, `main-one-map.log`, `t1-rows.log` (the `GetInterfaces` stop),
-  `t3-rows.log`, `t3-rows.cmp`, `t4-sample.log`, `t5-extra.log`, `t5-extra.cmp`, `t5-dynclass.log`, `t5-success.log`,
-  `t6-openstruct.log`, `t6-openstruct-rest.log`.
-- `2270/throwaway.diff`: the throwaway handler.
+The probes were not kept. One console program, built for .NET 10 and run as is and rolled forward to .NET 11, and
+published self-contained for PawPrint's runs, had a mode per group of rows: `rows` (and `rows-nosuccess`, without the
+three rows that pass), `extra`, `dynclass`, `openstruct`, `sweep` (the comparison quoted under "What arm 5 asks"),
+`sample <k>`, `one-direct` and `one-map`. Its fixture types are the ones the guests built from this plan declare, and its
+direct call is their `Verify` helper:
+
+```csharp
+static readonly MethodInfo VerifyMethod = typeof(RuntimeTypeHandle).GetMethod(
+    "VerifyInterfaceIsImplemented", BindingFlags.Instance | BindingFlags.NonPublic,
+    null, new[] { typeof(RuntimeTypeHandle) }, null);
+
+static Exception Verify(Type t, Type i)
+{
+    try { VerifyMethod.Invoke(t.TypeHandle, new object[] { i.TypeHandle }); return null; }
+    catch (TargetInvocationException e) { return e.InnerException; }
+}
+```
+
+The throwaway handler was option A of decision 1, below.
 
 ## Decisions
 
@@ -842,3 +862,137 @@ Run each mutant against the example tests, both properties and the guests, and r
 5. The default suite, and then each of the four Guest categories as its own invocation, since step 2 touches the
    interpreter's cast path.
 6. Change this document's status line to "decided and built" in the same pull request.
+
+## As built
+
+Built 2026-11-16 in the order above: the tests and guests first (their failing output is in that commit's message),
+then `TypeHandleTag.isTypeDesc` with `NativeCastHelpers` switched to it, then the verdict type and function and the
+handler.
+
+### What was built
+
+- `IlMachineRuntimeMetadata.InterfaceVerification` and `IlMachineRuntimeMetadata.verifyInterfaceIsImplemented`, with
+  the alias `IlMachineState.verifyInterfaceIsImplemented`, as decision 1 says; arm 5 is
+  `isRuntimeTypeHandleTargetAssignableTo` alone, with the reason at the call (decision 2).
+- `TypeHandleTag.isTypeDesc` in `NativeIntSource.fs`; `NativeCastHelpers.isTypeDescTarget` is deleted (decision 3).
+- The handler in `Native/NativeRuntimeTypeQCall.fs`, registered in `Native/NativeQCall.fs`: both arguments through
+  `NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget`, one `match` over the six cases, each message with its resource
+  name, and #2296 named beside them.
+- New public API in the published `WoofWare.PawPrint` package: `IlMachineRuntimeMetadata.InterfaceVerification`,
+  `IlMachineRuntimeMetadata.verifyInterfaceIsImplemented`, `IlMachineState.verifyInterfaceIsImplemented` and
+  `TypeHandleTag.isTypeDesc`.
+- Guests: `sourcesPure/TypeGetInterfaceMapRefusals.cs` (32 checks, public API only),
+  `sourcesPure/RuntimeTypeHandleVerifyInterfaceIsImplemented.cs` (17 checks through the wrapper, the first that it was
+  found), `sourcesImpure/TypeBuilderVerifyInterfaceIsImplemented.cs` (7 checks), and the parked
+  `sourcesPure/TypeGetInterfaceMapNoMethods.cs` and `sourcesPure/TypeGetInterfaceMap.cs`, both on #2289, the second
+  naming #2290 as its next stop. Both parked guests stop at "Unimplemented native method (PInvokeImpl
+  QCall!RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals)" (measured).
+- `TestInterfaceVerification.fs`: the example test of the six verdicts (with `int*` / `string`), the example test of
+  `isTypeDesc` over sixteen target shapes, the pinned refusal of `SGenInC<>` / `IInC<>`, the generated property and the
+  CoreLib sweep.
+
+### Measurements
+
+- **Controls on real .NET.** Every guest exits 0 on .NET 10.0.14 and on 11.0.0-rc.3 rolled forward. Each perturbed
+  expectation (each message changed to the next arm's, each pass expected as a raise, each raise expected as a pass, a
+  non-null `ParamName` expected of each `ArgumentException`, the managed `InvalidOperationException` and
+  `NotSupportedException` each expected as an `ArgumentException`, the wrapper lookup inverted, each comparison of the
+  parked guests and of the active guests' helpers inverted): 160 perturbations, each exiting with its own check's
+  number on both runtimes.
+- **`SGenInC<string>` / `IInC<>`** (decision 9's addition) raises "Interface not found." on both runtimes, and PawPrint
+  answers it without refusing.
+- **`typeof(COne).GetInterfaceMap(dynamicClass)`** raises "Type passed must be an interface." on both runtimes, so the
+  impure guest has it (check 7).
+- **The CoreLib sweep** (decision 7) fits the budget whole, so the whole sweep is committed: 1,252 exported
+  non-interface receivers against 126 exported interfaces and `string`, `int` and `List<>`, 161,508 pairs, 1,396 of
+  them passing, no disagreement and no refusal. 1,050 of the pairs are of decision 9's shape, and PawPrint answers
+  every one of them. It takes 21 s alone on the development machine. (The planner's host sweep counted 184,752 pairs
+  because it added its fixtures and some closed instantiations; this one is the exported types only, as decision 7
+  says.)
+- **The generated property** runs 150 cases from `CoverageSample`'s fixed sample and 150 fresh ones, in 27.9 s alone.
+  The fixed sample reaches: a pass 2,280 times, of which 442 by variance alone and 22 on a generic interface
+  definition; "Invalid handle." 8,356; "Interface not found." on a TypeDesc 8,560 and otherwise 20,135; "'this' type
+  ..." 47,817; "Type passed ..." 40,138; decision 9's shape 110, of which PawPrint refused 3. Each floor is about half
+  of its count; decision 9's floor (55) is on the shape, whichever way PawPrint takes it.
+
+### Where the decisions were silent, and deviations
+
+1. **Decision 3's reading of `objIsInstanceOfCore`** is right with one exception, recorded in that commit's message:
+   `isRuntimeTypeHandleTargetAssignableTo` answers `true` for two equal targets before it refuses a continuation, so
+   for an object whose own type is a continuation, cast to that same type, the switch turns a `true` into a refusal.
+   It cannot be reached: no token, signature or reflection object names a continuation type, and PawPrint refuses
+   `GetType()` on an object of one.
+2. **The guests' numbering** differs from the plan's table, because decision 5 gives every call its own exit code and
+   adds checks. The map guest's checks 1 to 28 are the plan's checks 2 to 21, one call per code; 29 to 32 are decision
+   5's four second arguments. The wrapper guest's 1 is the lookup, 2 to 12 the plan's 22 to 26, 13 to 15 arm 1 (the
+   third against `string`), 16 `IDerived` / `IBase`, and 17 `SGenInC<string>`.
+3. **The generator is valid by repair, not by discard.** It draws freely and then, deterministically, replaces an
+   argument which breaks a `class` constraint, or which makes a base interface not output-safe, with `object`, and
+   drops a declared interface which repeats one already declared or could unify with another (CS0695). It judges
+   "could unify" conservatively, and counts the interfaces a class inherits from its base classes too, which C# does
+   not require. A Roslyn error fails the test; every corpus generated so far has compiled.
+4. **Coverage labels** are the host's, as decision 7 says, plus one of PawPrint's side, the refusals of decision 9's
+   shape, which is counted and not floored: the fixed sample reaches it three times, and the pinned example test
+   covers it.
+5. **#2292 merged** before the rebase (the decisions' correction 4): its `TestExportedTypeSelection.fs` uses
+   `CoverageSample.check` with floors asserted over the fixed sample, the same shape as this plan's generated property.
+6. **The test builds no function pointer from a host type.** The pools hold none; the `isTypeDesc` example builds both
+   kinds directly, and the map guest's check 9 covers `delegate*<void>` as a receiver.
+
+### Mutants
+
+Each was run against the five tests of `TestInterfaceVerification` and the three active guests, then restored from a
+copy and rebuilt. "map" is `TypeGetInterfaceMapRefusals.cs`, "wrapper" is
+`RuntimeTypeHandleVerifyInterfaceIsImplemented.cs`, "impure" is `TypeBuilderVerifyInterfaceIsImplemented.cs`, and a
+number after a guest is its exit code.
+
+| mutant | killed by |
+|---|---|
+| do nothing (the registration removed) | all three guests stop at the unimplemented QCall |
+| arm 1 folded into arm 2 | six verdicts; generated; wrapper 13 |
+| arms 3 and 4 swapped | generated; map 6 |
+| arm 4 before arm 2 | six verdicts; generated; map 6 |
+| arm 4 before arm 1 | six verdicts; generated; map 6; wrapper 15 |
+| arm 5 before arm 3 | six verdicts; generated; wrapper 16; map stops at #2289's QCall (check 3 passes the QCall) |
+| arm 3 before arm 1; arm 3 before arm 2 | survive: equivalent, as decided (a type variable or a TypeDesc is never an interface) |
+| arm 2 removed | six verdicts; generated; map 7 |
+| `ReceiverIsTypeDesc` returned as `NotImplemented` | six verdicts only, as decision 4 predicted |
+| arrays treated as TypeDescs | generated; map 5 |
+| an open definition or construction treated as not an interface, on either side | pinned refusal; generated; CoreLib; wrapper 9; map stops at #2289 |
+| an open definition receiver treated as a TypeDesc | pinned refusal; generated; CoreLib; map 12; wrapper 10 |
+| an open definition receiver refused (what decision 2 (ii)'s `GetInterfaces` walk does for `List<>`) | pinned refusal; generated; CoreLib; map and wrapper stop at the refusal |
+| a second argument which is a type variable, pointer or array treated as an interface | generated; map 29 |
+| arm 5 as an exact match on the declared interfaces | pinned refusal; generated; CoreLib; wrapper 3; map and impure stop where that walk refuses an array and the dynamic-methods class |
+| arm 5 through `isConcreteTypeAssignableTo` only (open pairs refused) | pinned refusal; generated; CoreLib; all three guests stop at the refusal |
+| arm 5 through the object-cast path (closed only, `IDynamicInterfaceCastable` refused) | the same |
+| arm 5 without variance (the closed and the open rule) | pinned refusal; generated; wrapper 6 |
+| arm 5 as `ImplementsInterface` alone (no variance, no implicit array interfaces) | pinned refusal; generated; map 5; wrapper 6; impure (the interpreter's own call verification) |
+| variance over value-type arguments (the closed and the open rule) | generated; CoreLib; map stops at #2289 (a check that must raise passes) |
+| the special marker accepted on a struct | pinned refusal; generated; wrapper 17; map stops at #2289 |
+| the special marker never accepted | pinned refusal; generated; wrapper 9 |
+| decision 9's pairs answered "not found" without the refusal | pinned refusal only, by design |
+| `isTypeDesc` false for a type variable | the `isTypeDesc` example only, as the decisions' table predicted |
+| `isTypeDesc` true for an array | `isTypeDesc` example; generated; map 5 |
+| the handler passes its arguments in the wrong order | map 1; wrapper 2; impure |
+| no message | map 1; wrapper 13; impure |
+| `InvalidOperationException` instead of `ArgumentException` | map 1; wrapper 13; impure |
+| `TypeLoadException` instead of `ArgumentException` | map 1; wrapper 13; impure |
+| `ReceiverIsTypeDesc` raising "Type passed must be an interface." | map 4 |
+| `ParamName` set | not constructed: `raiseExceptionWithMessage` cannot set `ParamName`. The real-.NET controls show that every raise check fails when a non-null `ParamName` is expected. |
+| `ImplementsInterface` in front of `CanCastTo`, with its own half removed | equivalent by construction: `ImplementsInterface` is not modelled |
+
+### Suites
+
+After a whole-solution build with the reference assemblies deleted, each its own invocation, on the branch rebased
+onto `origin/main` at `4ef328514` (which brought in #2292 and #2297):
+
+| suite | total | passed | skipped |
+|---|---|---|---|
+| default | 5,846 | 5,807 | 39 |
+| `TestCategory=Guest` | 234 | 234 | 0 |
+| `TestCategory=GuestSolo` | 2 | 2 | 0 |
+| `TestCategory=GuestPure` | 1,202 | 1,202 | 0 |
+| `TestCategory=GuestImpure` | 301 | 301 | 0 |
+
+Before the rebase, on `a66b75274`, the same five were 5,827 (5,788 passed, 39 skipped), 234, 2, 1,200 and 300, all
+passing.
