@@ -770,6 +770,7 @@ public struct S<T> : IC<T>, ID { }
 public interface IF<T> : IC<T>, ID { }
 public class Der<T> : LBase<T>, ID { }
 public class CClosed : IC<int>, ID { }
+public class CClosedG<T> : IC<int>, ID { }
 public class C2<T> : IC<T>, IA<T> { }
 public class Der2<T> : BaseA<T>, IC<T> { }
 public class D2<T, U> : IC<T>, IA<U> { }
@@ -795,7 +796,8 @@ public struct S2<T> : IC<T[]> { }
                 [ MetadataReference.CreateFromImage expansionLibraryBefore.Value ]
                 [ expansionClasses ])
 
-    /// Each closed receiver of the classes, from the classes' host assembly.
+    /// Each closed receiver of the classes, and one generic definition, from the classes' host
+    /// assembly.
     let private expansionReceivers : (string * Type list) list =
         [
             "C`1", [ typeof<int> ]
@@ -805,6 +807,8 @@ public struct S2<T> : IC<T[]> { }
             "IF`1", [ typeof<int> ]
             "Der`1", [ typeof<int> ]
             "CClosed", []
+            // A generic definition whose rows are all closed, answered by the definition arm.
+            "CClosedG`1", []
             "C2`1", [ typeof<int> ]
             "Der2`1", [ typeof<int> ]
             "D2`2", [ typeof<int> ; typeof<string> ]
