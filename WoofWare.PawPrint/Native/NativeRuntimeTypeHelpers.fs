@@ -55,6 +55,15 @@ type GenericConstraintViolation =
         Argument : RuntimeTypeHandleTarget
     }
 
+/// The element type of the array of types that a reflection QCall allocates, which a guest sees
+/// through the array's `GetType()`.
+[<RequireQualifiedAccess>]
+type TypeArrayElement =
+    /// `System.RuntimeType`, CoreCLR's `CLASS__CLASS`.
+    | RuntimeType
+    /// `System.Type`, CoreCLR's `CLASS__TYPE`.
+    | Type
+
 module NativeRuntimeTypeHelpers =
     let primitiveCorElementType (primitive : PrimitiveType) : int32 =
         match primitive with
@@ -1116,6 +1125,99 @@ module NativeRuntimeTypeHelpers =
                 (TypeDefn.FromDefinition (typeInfo.Identity, stk))
 
         state, typeInfo, typeHandle
+
+    /// <summary>
+    /// The <c>RuntimeType</c> object of each of <paramref name="rows"/>, TypeDef rows of
+    /// <paramref name="assembly"/>, in the same order: the object <c>typeof</c> gives, loaded as CoreCLR's
+    /// <c>ClassLoader::LoadTypeDefThrowing</c> loads a row under <c>PermitUninstDefOrRef</c>, so a generic
+    /// row is its open definition. Nothing is initialised. A row PawPrint cannot load stops the run.
+    /// </summary>
+    let loadTypeDefRuntimeTypes
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (assembly : DumpedAssembly)
+        (rows : System.Reflection.Metadata.TypeDefinitionHandle list)
+        (state : IlMachineState)
+        : IlMachineState * ManagedHeapAddress list
+        =
+        // `PermitUninstDefOrRef` is what `allowOpenGenericDefinition = true` says here: a
+        // generic row comes back as the open generic definition rather than as any
+        // instantiation of it, which is also true of a row nested inside a generic, since it
+        // inherits its enclosing type's formals. The empty type and method instantiations are
+        // the same thing said again — a TypeDef row carries no caller-supplied generic
+        // context. This is the call `ModuleHandle_ResolveType` makes for a TypeDef token, so
+        // the two agree by construction.
+        let state, typeAddresses =
+            ((state, []), rows)
+            ||> List.fold (fun (state, acc) handle ->
+                let state, typeDefn =
+                    IlMachineState.lookupTypeDefn loggerFactory baseClassTypes state assembly handle
+
+                let typeDefn =
+                    TokenBindingStop.typeToken assembly (MetadataToken.TypeDefinition handle) typeDefn
+
+                let state, target =
+                    IlMachineState.runtimeTypeHandleTargetForTypeToken
+                        loggerFactory
+                        baseClassTypes
+                        assembly
+                        true
+                        ImmutableArray.Empty
+                        ImmutableArray.Empty
+                        typeDefn
+                        state
+
+                let addr, state =
+                    IlMachineState.getOrAllocateType loggerFactory baseClassTypes target state
+
+                state, addr :: acc
+            )
+
+        state, List.rev typeAddresses
+
+    /// <summary>
+    /// Allocates a fresh array of <paramref name="element"/> holding <paramref name="types"/> in order,
+    /// and writes it through <paramref name="target"/>, the QCall's <c>ObjectHandleOnStack</c>. Writes an
+    /// empty array for an empty list.
+    /// </summary>
+    let writeTypeArray
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (element : TypeArrayElement)
+        (types : ManagedHeapAddress list)
+        (target : ManagedPointerSource)
+        (state : IlMachineState)
+        : IlMachineState
+        =
+        let state, _, elementHandle =
+            match element with
+            | TypeArrayElement.RuntimeType ->
+                concretizeNonGenericCorelibType loggerFactory baseClassTypes state "System" "RuntimeType"
+            | TypeArrayElement.Type ->
+                concretizeNonGenericCorelibType loggerFactory baseClassTypes state "System" "Type"
+
+        let arrayAddr, state =
+            IlMachineState.allocateArray
+                (ConcreteTypeHandle.OneDimArrayZero elementHandle)
+                (fun () -> CliType.ObjectRef None)
+                (List.length types)
+                state
+
+        let state =
+            ((state, 0), types)
+            ||> List.fold (fun (state, index) typeAddr ->
+                let state =
+                    IlMachineState.setArrayValue arrayAddr (CliType.ObjectRef (Some typeAddr)) index state
+
+                state, index + 1
+            )
+            |> fst
+
+        IlMachineState.writeManagedByrefWithBase
+            baseClassTypes
+            state
+            (ManagedPointerSource.requireAddressed target)
+            (CliType.ObjectRef (Some arrayAddr))
 
     /// The types a generic parameter is constrained to be assignable to, in metadata row order.
     /// This is exactly what <c>RuntimeType.GetGenericParameterConstraints</c> reports, and the list

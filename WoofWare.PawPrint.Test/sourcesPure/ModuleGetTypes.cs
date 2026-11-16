@@ -217,6 +217,13 @@ namespace ModuleGetTypes
                 }
             }
 
+            // A `RuntimeType[]`, which the managed caller declares, and not the `Type[]` that
+            // `GetExportedTypes` returns.
+            if (types.GetType().GetElementType().FullName != "System.RuntimeType")
+            {
+                return 18;
+            }
+
             // A fresh array each call, so a caller cannot mutate what the next caller sees.
             if (object.ReferenceEquals(module.GetTypes(), module.GetTypes()))
             {

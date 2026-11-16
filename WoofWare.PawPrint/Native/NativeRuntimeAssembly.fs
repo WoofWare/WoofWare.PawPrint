@@ -2455,12 +2455,11 @@ module NativeRuntimeAssembly =
             // that override is `final` on `NativeManifestModule` — the synthetic metadata module of
             // a composite ReadyToRun image, never what `pAssembly->GetModule()` returns.
             //
-            // Refused here rather than reproduced as a guest-catchable `FileLoadException`. That
-            // exception carries a `FileName` (the *row's* name, not the assembly's) and
-            // `HResult = 0x8013101E`, and the raise machinery available to a native handler can
-            // set neither: it calls the parameterless ctor and overwrites `_message`, which would
-            // leave a guest reading `null` and `0x80131621`. Two silently wrong guest-readable
-            // values is a worse trade than a loud stop.
+            // Refused here rather than reproduced as a guest-catchable `FileLoadException` (#2287).
+            // That exception carries a `FileName` (the *row's* name, not the assembly's), which the
+            // raise machinery available to a native handler cannot set, so a guest would read
+            // `null`; and CoreCLR's message for it comes from two QCalls PawPrint does not
+            // implement. A silently wrong guest-readable value is a worse trade than a loud stop.
             if loadIfNotFound then
                 let metadataReader =
                     System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader assembly.PeReader
@@ -2477,7 +2476,7 @@ module NativeRuntimeAssembly =
                         |> metadataReader.GetAssemblyFile
 
                     failwith
-                        $"%s{operation}: assembly %s{assembly.DefinitionFullName} has %d{files.Count} File row(s), the first naming %s{metadataReader.GetString firstFile.Name}, and loadIfNotFound was set; multi-module and linked-file assemblies are not supported"
+                        $"%s{operation}: assembly %s{assembly.DefinitionFullName} has %d{files.Count} File row(s), the first naming %s{metadataReader.GetString firstFile.Name}, and loadIfNotFound was set; multi-module and linked-file assemblies are not supported (#2287)"
 
             let moduleAddr, state =
                 NativeRuntimeType.getOrAllocateRuntimeModule
@@ -2520,6 +2519,91 @@ module NativeRuntimeAssembly =
                     state
                     (ManagedPointerSource.requireAddressed retModules)
                     (CliType.ObjectRef (Some arrayAddr))
+
+            NativeHandlerResult.completed state |> Some
+        | "AssemblyNative_GetExportedTypes",
+          "System.Private.CoreLib",
+          "System.Reflection",
+          "RuntimeAssembly",
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallAssembly",
+                                                        qCallAssemblyGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "ObjectHandleOnStack",
+                                                        objectHandleGenerics) ],
+          MethodReturnType.Void when qCallAssemblyGenerics.IsEmpty && objectHandleGenerics.IsEmpty ->
+            // `AssemblyNative_GetExportedTypes` (coreclr/vm/assemblynative.cpp:806 on .NET 10, :819
+            // on .NET 11), behind `Assembly.GetExportedTypes()` and `Assembly.ExportedTypes`. CoreCLR
+            // loads the externally visible TypeDefs in row order, then each public ExportedType row
+            // implemented by a File, and writes back an array of each loaded type's
+            // `GetManagedClassObject()`. `ExportedTypeSelection` is that selection.
+            //
+            // CoreCLR catches nothing: the first load that throws ends the QCall, and the
+            // exception reaches the caller unwrapped. A row PawPrint cannot load stops the run
+            // instead (#2288), which cannot hand the guest a short array either.
+            let operation = "AssemblyNative_GetExportedTypes"
+
+            if instruction.Arguments.Length <> 2 then
+                failwith $"%s{operation}: expected two native arguments, got %d{instruction.Arguments.Length}"
+
+            let assemblyFullName =
+                instruction.Arguments.[0]
+                |> NativeCall.qCallAssemblyToAssemblyFullName operation state
+
+            let retTypes =
+                NativeCall.objectHandleOnStackTarget operation state "retTypes" instruction.Arguments.[1]
+
+            let assembly =
+                state.LoadedAssembly assemblyFullName
+                |> Option.defaultWith (fun () -> failwith $"%s{operation}: assembly %s{assemblyFullName} is not loaded")
+
+            let selection = ExportedTypeSelection.ofAssembly assembly
+
+            let state, typeAddresses =
+                NativeRuntimeTypeHelpers.loadTypeDefRuntimeTypes
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    assembly
+                    selection.Definitions
+                    state
+
+            // Loading a File export loads its File's module, and `ModuleBase::LoadModule`
+            // (vm/ceeload.cpp:2573 on .NET 10, :2584 on .NET 11) always throws
+            // `FileLoadException` naming that File, so the first File export ends the call, after
+            // every TypeDef has loaded. Refused rather than raised, for the reason
+            // `AssemblyNative_GetModules` gives for its File rows (#2287).
+            match selection.FileExports with
+            | [] -> ()
+            | first :: _ ->
+                let metadataReader =
+                    System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader assembly.PeReader
+
+                let export = assembly.ExportedTypes.[first.Export]
+
+                let exportName =
+                    match export.Namespace with
+                    | Some ns when ns <> "" -> $"%s{ns}.%s{export.Name}"
+                    | _ -> export.Name
+
+                let fileName =
+                    metadataReader.GetString (metadataReader.GetAssemblyFile first.File).Name
+
+                failwith
+                    $"%s{operation}: assembly %s{assembly.DefinitionFullName} exports %s{exportName} from its File %s{fileName}, whose module CoreCLR refuses to load with FileLoadException; multi-module assemblies are not supported (#2287)"
+
+            // `AllocateObjectArray(count, CoreLibBinder::GetClass(CLASS__TYPE))`, and `CLASS__TYPE`
+            // is `System.Type` (vm/corelib.h:992): a `Type[]`, where `RuntimeModule_GetTypes`
+            // allocates a `RuntimeType[]`. Written unconditionally: `RuntimeAssembly.GetExportedTypes`
+            // starts from `null` and returns `types!`, so a skipped write is a
+            // NullReferenceException in the guest.
+            let state =
+                NativeRuntimeTypeHelpers.writeTypeArray
+                    ctx.LoggerFactory
+                    ctx.BaseClassTypes
+                    TypeArrayElement.Type
+                    typeAddresses
+                    retTypes
+                    state
 
             NativeHandlerResult.completed state |> Some
         | "AssemblyNative_InternalLoad",

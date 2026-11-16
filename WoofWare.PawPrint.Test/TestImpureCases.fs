@@ -7088,6 +7088,26 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `AssemblyNative_GetExportedTypes` on a dynamic assembly, through a created type's
+                // `Assembly`, with a type defined and never created, which the QCall must not load.
+                // Dynamic-code switch overridden to true like its siblings; verified by hand to exit
+                // 0 on real .NET 10 and 11, and a control making the uncreated type public throws
+                // `TypeLoadException` on both.
+                FileName = "TypeBuilderGetExportedTypes.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `RuntimeModule_GetFullyQualifiedName` on a Reflection.Emit module, through
                 // `ModuleBuilder.Name`: `<In Memory Module>`. Dynamic-code switch overridden to
                 // true like its siblings; verified by hand to exit 0 on real .NET 10.
