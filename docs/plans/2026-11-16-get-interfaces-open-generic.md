@@ -883,7 +883,8 @@ on a call real .NET answers and no issue recorded it.
 
 ### As built (PR 1)
 
-The closed order, closing #1318. Interpreter and tests only; nothing public is added to a published package.
+The closed order, closing #1318. The interpreter and tests, and two lines of the TypeSystem (below); nothing public is
+added to a published package.
 
 **The function.** The QCall's walk moved, unchanged and in a commit of its own, into
 `RuntimeTypeInterfaces.ofReceiver` (`WoofWare.PawPrint/RuntimeTypeInterfaces.fs`, internal to the interpreter), a
@@ -906,6 +907,13 @@ A row naming the definition's variables stops as before, its message now naming 
 `interfaceMapOf` of that row, each closed handle once; with every row closed, the closed handle is the definition-level
 identity, so this is the map's order. This replaces what was left of `collectInterfaces` rather than keeping its
 recursive closed arm; the third pull request deletes it either way.
+
+**A TypeSystem fix the move needed.** Codex's review found that `interfaceMapOf` refused an InterfaceImpl row, or an
+extends clause, spelled as a TypeSpec with leading custom modifiers (`modopt(M) I<int>`), which the host loads as
+`I<int>` and the deleted walk answered. `spelledInterfaceSubstitution` and `MethodTableLayout.baseOfDefinition` now
+strip leading modifiers before decomposing the spelling, as CoreCLR passes over them when it loads the type. Dispatch
+over such a type was refused before too, and is answered now. Tested with two hand-built images, each red before the
+fix.
 
 **Tests** (`TestGetInterfacesOrder.fs`, default suite), each against the host's `GetInterfaces()` over the same images
 (for an array, `System.Array`'s), order and duplicates included:
@@ -965,5 +973,5 @@ against the library version it runs with, only reached by swapping a dependency.
 | CoreLib interfaces not expanded (decision 7's rule) | none: equivalent over CoreLib as compiled, as decision 7's check states |
 
 **Suites**, after a whole-solution build with the reference assemblies deleted, each its own invocation on a .NET 10
-host: default 5,879 (5,840 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,207 passed;
-`GuestImpure` 303 passed.
+host, at the branch's tip rebased onto `77507f161`: default 5,882 (5,843 passed, 39 skipped); `Guest` 234 passed;
+`GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 303 passed.
