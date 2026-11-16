@@ -436,3 +436,133 @@ names it (`MathFunction.Log10`).
   consumer. Logs: `fie/real10.out`, `real11.out`, `main-*.log`, `t1-*.log` to `t5-*.log`.
 - `throwaway.diff`: every throwaway handler used above.
 - `pp.sh`, `dn.sh`, `show.sh`, `cmp.sh`: helpers.
+
+### Decisions
+
+Decided 2026-11-16, against `3381ac09c`. I checked the plan's claims against the source, and measured five more things on real .NET 10.0.14 and 11.0.0-rc.3 (the same result on both, every time). The probe and its logs are in the scratchpad at `2269-decide/probe/` (`Decide.cs`, `modpublic*.log`, `loadbytes.log`, `dynhidden.log`, `arrtype.log`, `ifacemap*.log`, `log10-*.log`). Nothing was run under PawPrint; where a decision predicts PawPrint's behaviour, it says so.
+
+What was measured:
+
+| probe | real .NET |
+|---|---|
+| `Vis.dll` with TypeDef row 1 (`<Module>`) patched to `Public` | the image loads; `GetExportedTypes` is the same four types as the unpatched control, without `<Module>` |
+| the `multi`, `multibad`, `badinternalonly` and patched images, loaded from bytes into a collectible `AssemblyLoadContext` | the same results as `Assembly.LoadFrom` gave the planner, `FileName = "Mod.netmodule"` included |
+| a dynamic module with `DynPublic` created, `DynInternal` defined and never created, `DynLater` created | `GetExportedTypes` is `[DynPublic, DynLater]`; `GetTypes` throws `ReflectionTypeLoadException` for `DynInternal` |
+| the array's own type | `Module.GetTypes()` and `Assembly.GetTypes()` are `System.RuntimeType[]`; `GetExportedTypes()` is `System.Type[]` |
+| `Math.Log10(1000)` against `Math.Log(1000) / Math.Log(10)` | 3 against 2.9999999999999996; also wrong at 1e15, 1e23 and 0.001 |
+
+**1. Option B: the selection is data in Domain, and the handler interprets it.**
+
+- B is chosen. The rule reads one image and binds nothing, so Domain is the lowest project which can hold it.
+- A is rejected: under A no test reaches the File branch, because a guest cannot contain a File export.
+- C is rejected on two measurements. The planner's: `badinternalonly` returns `[Good]`. Mine: an internal dynamic type that was never created does not stop `GetExportedTypes`, and it does stop `GetTypes`. So C is wrong on a case which a guest can hold today.
+- The new file is `Domain/ExportedTypeSelection.fs`, after `TypeVisibility.fs`. It is new public API of a published package; flag that in the PR body.
+- The record is as the plan has it, with one change: `FileExports` is a list of a named record (`Export : ExportedTypeHandle`, `File : AssemblyFileHandle`), not of a tuple. The two handles are easy to swap in a tuple pattern only by position; names cost nothing.
+- `FileExports` keeps every kept row, not only the first. The interpreter acts on the first. A consumer which reports them all can.
+- The module has three functions.
+  - The TypeDef rows as CoreCLR's `EnumTypeDefInit` yields them: ascending from row 2, with row 1 skipped by its position. `RuntimeModule_GetTypes` computes the same list inline today (`NativeRuntimeModule.fs:66-72`). Both callers use the one function after this PR. It is a fact about the image, so it may sit beside `DumpedAssembly` rather than in the new module; the implementer chooses.
+  - The File-export walk, over the ExportedType rows alone (not over a `DumpedAssembly`), so that the model test can hand it generated rows.
+  - `ofAssembly`, which filters the first by `TypeVisibility.isTypeDefExternallyVisible` and calls the second.
+- The walk over ExportedType rows is total on the `ExportedTypeData` cases.
+  - `ForwardsTo`: not kept.
+  - `AssemblyFile`: kept exactly when the flags there are `Public`.
+  - `ParentExportedType`: if the flags are `NestedPublic`, continue at the parent with the parent's flags. Otherwise not kept.
+  - A nil parent handle ends the walk and the row is not kept, as CoreCLR's `mdImpl != mdExportedTypeNil` test does (read, `assemblynative.cpp:870-872`).
+- Two malformed shapes fail with a message naming the row: a parent handle that is not a row of the table, and a cycle of `NestedPublic` rows (bounded by the row count). CoreCLR throws on the first and loops for ever on the second (read). This is `TypeVisibility.nestingChain`'s policy for the TypeDef half.
+- The function throws on those shapes and does not return a `Result`. The TypeDef half already throws through `nestingChain`, so a `Result` here would promise a totality which the function does not have. Changing both halves to results is a change to `TypeVisibility`'s public API and is not this PR.
+- Docstrings say what a caller needs: the order, that row 1 is skipped by position, that nothing is loaded, and when the function throws.
+
+**2. A public File export is refused, option (a).**
+
+- The handler loads every one of `Definitions` first. Then, if `FileExports` is not empty, it stops with a `failwith`. This order is CoreCLR's (measured by the planner, `multibad`).
+- The message names the assembly, the first kept ExportedType row (namespace and name), and the File row which that export names. It does not name File row 1, as the `GetModules` refusal does: the first kept export may be implemented by a later File. CoreCLR's `FileName` is the export's File (read, `ceeload.cpp:2573`).
+- (b) is not done here. It needs a `RuntimeExceptionField` case for `FileLoadException.FileName` and CoreCLR's message written out from the resource, and it is the same change for `GetModules`. No consumer measured reaches either. A stop is a refusal, not a wrong answer.
+- `RuntimeExceptionField.HResult` exists now (`IlMachineRuntimeMetadata.fs:975`, read). So the `GetModules` comment at `NativeRuntimeAssembly.fs:2468-2473`, which says that the raise machinery can set neither `FileName` nor `HResult`, is wrong about `HResult`. This PR corrects that sentence, because it writes the sibling refusal beside it and the two must give the same true reason: `FileName` cannot be set, and the message needs two QCalls which PawPrint does not implement.
+- That is #2287. Both refusals name it.
+
+**3. A row that fails to load stops the run, option (a).**
+
+- `GetExportedTypes` never wraps a failure, so a stop cannot hand the guest a short array.
+- (b) changes `runtimeTypeHandleTargetForTypeToken`, which is named in ten places in the interpreter (counted with grep, its definition included). It is the same change which would let `GetTypes` raise its `ReflectionTypeLoadException`. It is filed once for both, as #2288.
+- A type which PawPrint loads and CoreCLR refuses (#2276, the overlapped object field) is in the array where CoreCLR throws. That wrong answer is #2276's, and this PR does not widen it: the type is equally wrong at `typeof`.
+- The uncreated public dynamic type stays with the TypeResolve TODO in `TypeConcretisation.intern`, as the plan says.
+
+**4. The shared load step moves to `NativeRuntimeTypeHelpers`, as two functions.**
+
+- Both handlers see that module, and `NativeRuntimeAssembly.fs` compiles before `NativeRuntimeModule.fs` (read, `WoofWare.PawPrint.fsproj:236,248`). The handler goes in `NativeRuntimeAssembly.fs`, beside `AssemblyNative_GetModules`.
+- The step is two functions, not one, because the File refusal of decision 2 sits between them.
+  - Load: an assembly and a list of TypeDef rows in, the `RuntimeType` addresses out in the same order. It takes rows, and never enumerates the table itself.
+  - Write: allocate a fresh array of the named element type, store the addresses, and write it through the `ObjectHandleOnStack`. It writes for an empty list too.
+- The element type is a two-case union (`RuntimeType`, `Type`), not a namespace and a name. Nothing else is legal here.
+- `getTypes` keeps its comments about `ReflectionTypeLoadException` and about `PermitUninstDefOrRef`; the second moves with the load function, since it is true of both callers.
+- I considered a file of its own for the two functions. It is cleaner than adding to a 3400-line module, and it is one more named thing for 60 lines. Either is trivially reversible; the helpers module is chosen.
+
+**5. Yes: one `sourcesImpure` guest over a dynamic module, with one type left uncreated.**
+
+- The guest defines `DynPublic`, `DynInternal` and `DynLater`. It creates `DynPublic` and `DynLater`, and never creates `DynInternal`.
+- `created.Assembly.GetExportedTypes()` is `[DynPublic, DynLater]` (measured on real .NET). Under B PawPrint never loads `DynInternal`, so it should answer the same; this is predicted, not measured under PawPrint. If PawPrint stops on something else, the implementer reports it and falls back to the plan's version, which creates all three.
+- This is the departure from the plan. It makes the guest the killer of the option-C mutant, which the plan records as surviving.
+- The guest does not call `GetTypes` on that assembly: real .NET throws there, and PawPrint stops.
+- The uncreated public type and the nested type stay out, as the plan says.
+
+**6. Yes: the guest checks `GetExportedTypes()` against `GetTypes().Where(IsVisible)` over CoreLib.**
+
+- It is the only check over a large real image which needs no expected list, so it survives a runtime bump and runs on both CoreLib flavours.
+- Its weakness is as the plan says: both sides end in `isTypeDefExternallyVisible`. The pure same-image test is what checks the predicate independently.
+- The cost is 6 s per run (the planner's measurement, not repeated).
+
+**7. Missed by the plan: row 1 is not an equivalent mutant.**
+
+- The plan records "drop the skip of TypeDef row 1" as equivalent, because Roslyn's `<Module>` is `NotPublic`.
+- A `<Module>` patched to `Public` loads on real .NET, and `GetExportedTypes` leaves it out (measured). PawPrint's reader admits that image: its visibility and its NestedClass row agree (read, `TypeInfo.fs:612-632`).
+- So the pure tests get a fixture with row 1 patched to `Public`, compared with the host as the others are. The mutant must then go red.
+
+**8. Missed by the plan: the `GetTypes` array type has no test, and the shared write function puts it at risk.**
+
+- `ModuleGetTypes.cs` does not check the array's own type. Once one function writes both arrays, passing the wrong case for `GetTypes` is a one-word mistake.
+- Add to `ModuleGetTypes.cs`: `GetTypes().GetType().GetElementType().FullName == "System.RuntimeType"` (measured on real .NET).
+
+**9. FakeItEasy's later stops: separate PRs, in this order, each with its own issue.**
+
+- #2270 is not widened. Each of the three `GetInterfaceMap` QCalls can be tested alone, so each is its own PR.
+  - #2270, `VerifyInterfaceIsImplemented`. Its five raises are all visible without the other two QCalls, and so is the managed raise for a generic interface on an array (measured, `ifacemap10.log`). The success path then stops at the next QCall; that guest is parked.
+  - `GetNumVirtualsAndStaticVirtuals` (#2289) next. With it, the map of an interface with no methods completes, with two empty arrays (measured). The count for other interfaces has a host oracle: the private static method, called by reflection.
+  - `GetInterfaceMethodImplementation` (#2290) last. It is the only one of the three with design questions (static virtuals, default interface methods, variance, an abstract class, the null result), and it gets a plan of its own. The planner's throwaway refused static methods; real .NET maps them (measured: `SStat` maps `IStat.S`).
+- `Math.Log10` gets its own issue, #2291, and has no dependency on the others. It can go at any time. The planner's throwaway quotient is not a candidate: it answers 2.9999999999999996 for 1000, so FakeItEasy would count three digits in call number 1000 where real .NET counts four (measured).
+- Filed: #2287 and #2288 (decisions 2 and 3), #2289, #2290 and #2291. A comment on #2270 says what it covers alone and what follows it, and a comment on the FakeItEasy tracking issue #2092 lists the whole chain.
+- I searched the issues, open and closed, for `GetInterfaceMap`, the two QCall names, `Log10`, `ReflectionTypeLoadException`, `FileLoadException` and `netmodule`. Only #2270 and #1322 came back, and neither covers any of the five.
+
+### Where the decisions contradict the plan
+
+- The plan records the option-C mutant as surviving, for want of a guest which holds a type that fails to load. An internal dynamic type which was never created is such a type, and the impure guest now holds one (decision 5).
+- The plan records the row-1 mutant as equivalent. It is not (decision 7).
+- The plan's `FileExports` is a list of tuples. It is a list of a named record.
+- The plan has one shared load step. It is two functions, so that the File refusal can sit between the loads and the array.
+- The plan leaves the `GetModules` comment to whoever does (b). This PR corrects its false half, since it writes the same refusal beside it.
+- The plan says the refusal should match `GetModules`. It matches in kind only: `GetModules` names File row 1, and this refusal names the File of the first kept export.
+- The plan's B section has "a new walk over `ExportedTypes`" and does not say what a cycle or an absent parent does. Decision 1 says: fail, naming the row; a nil parent is not kept.
+- The plan says `GetInterfaceMap` is "#2270 plus two QCalls". It stays three PRs, and the third needs a plan.
+
+### Additions to the test design
+
+- Write the tests and the guests first, in a commit of their own, and record the failing output (`Unimplemented native method … AssemblyNative_GetExportedTypes`, and the compile failure of the pure tests) before the selection or the handler exists.
+- Pure test 1 loads from bytes into a collectible `AssemblyLoadContext`. That works for every fixture kind used here (measured, `loadbytes.log`).
+- Pure test 1 gains the fixture of decision 7: one generated image per run, or a fixed one, with row 1's flags patched to `Public`.
+- Pure test 2 uses two netmodules, not one. The first has only internal types on some draws. The property then says that the first of `FileExports` names the File of the first module which has an externally visible type, and the host's `FileName` is that module's name. With one module, "always name File row 1" passes.
+- Pure test 3 also generates a nil parent handle. Two example tests, not properties, pin the two failures: a cycle of `NestedPublic` rows, and a parent which is not in the table.
+- `AssemblyGetExportedTypes.cs` gains the check that `ModuleGetTypes.cs` has for `GetTypes`: a public type with a static constructor which sets a witness on another type, and the witness is still false after `GetExportedTypes()`. The load function is shared, so the property is too.
+- `AssemblyGetExportedTypes.cs` does not call `GetForwardedTypes()`. It answers 0 under PawPrint and 14 on real .NET (#1322).
+- `ModuleGetTypes.cs` gains the element-type check of decision 8.
+- `TypeBuilderGetExportedTypes.cs` is as decision 5 has it. Control on real .NET: with `DynInternal`'s attributes changed to `Public` and still uncreated, the guest must fail there (real .NET throws `TypeLoadException`).
+- Run the default suite and the four Guest categories as separate invocations.
+
+### Additions to the mutants
+
+- Load every TypeDef and filter afterwards (option C): `TypeBuilderGetExportedTypes.cs` stops at the TypeResolve TODO for `DynInternal`. No longer recorded as surviving.
+- Drop the skip of row 1: the patched fixture of decision 7. No longer recorded as equivalent.
+- Name File row 1 in `FileExports` (or take the File from the wrong row): pure test 2 with two netmodules.
+- Refuse the File export before loading the TypeDefs: no test can see it, because both orders end in a stop. Record it as unobservable until (b) is done, and say so in the issue.
+- Write the `GetTypes` array as `Type[]`: the new check in `ModuleGetTypes.cs`.
+- Keep a `NestedPublic` row whose parent handle is nil: pure test 3.
+- Remove the cycle bound from the ExportedType walk: the cycle example test must fail by not terminating, so give it a timeout.
+- Have `getTypes` keep its own row enumeration and skip row 1 by name: not observable on Roslyn images. The defence is structural: `getTypes` has no enumeration of its own after this PR.
