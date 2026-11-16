@@ -1,6 +1,6 @@
 # `AssemblyNative_GetExportedTypes` (issue #2269)
 
-Status: study and options, for a decision. Nothing is implemented. Measured 2026-11-16 on `origin/main` at `3381ac09c`.
+Status: decided and implemented as option B (see "### As built" at the end). The study below was measured 2026-11-16 on `origin/main` at `3381ac09c`.
 
 Every probe, fixture, throwaway and log named below is in this session's scratchpad,
 `/private/tmp/claude-501/-Users-patrick-Documents-GitHub-WoofWare-PawPrint--claude-worktrees-test-pipeline-performance-724897/ba89fbb1-81d8-460f-a9be-c4df3a5bd899/scratchpad/2269/`
@@ -566,3 +566,114 @@ What was measured:
 - Keep a `NestedPublic` row whose parent handle is nil: pure test 3.
 - Remove the cycle bound from the ExportedType walk: the cycle example test must fail by not terminating, so give it a timeout.
 - Have `getTypes` keep its own row enumeration and skip row 1 by name: not observable on Roslyn images. The defence is structural: `getTypes` has no enumeration of its own after this PR.
+
+### As built
+
+Built 2026-11-16 on `origin/main` at `a66b75274`, in two commits after the plan's: the tests and guests first, with
+their failing output in the commit message, then the implementation.
+
+**What changed.**
+
+- `WoofWare.PawPrint.Domain/ExportedTypeSelection.fs`, after `TypeVisibility.fs`. Its public API, new in the Domain
+  package:
+  - `FileExport`, a record with `Export : ExportedTypeHandle` and `File : AssemblyFileHandle`;
+  - `ExportedTypeSelection`, a record with `Definitions : TypeDefinitionHandle list` and
+    `FileExports : FileExport list`;
+  - `ExportedTypeSelection.enumeratedTypeDefs : DumpedAssembly -> TypeDefinitionHandle list`, the TypeDef rows from
+    row 2, ascending;
+  - `ExportedTypeSelection.fileExports : IReadOnlyDictionary<ExportedTypeHandle, ExportedType> -> FileExport list`, the
+    walk over an ExportedType table alone;
+  - `ExportedTypeSelection.ofAssembly : DumpedAssembly -> ExportedTypeSelection`.
+- `NativeRuntimeTypeHelpers` gains `loadTypeDefRuntimeTypes` (rows to `RuntimeType` addresses) and `writeTypeArray`
+  (allocate, fill, write through the `ObjectHandleOnStack`, empty included), and the union `TypeArrayElement`
+  (`RuntimeType`, `Type`) beside the module. `RuntimeModule_GetTypes` calls both, over `enumeratedTypeDefs`, and has no
+  enumeration of its own.
+- The `AssemblyNative_GetExportedTypes` handler, in `NativeRuntimeAssembly.fs` beside `AssemblyNative_GetModules`, and
+  its registration in `NativeQCall.fs`. It loads every one of `Definitions`, then refuses the first of `FileExports`
+  with a message naming the assembly, the export and the export's File and #2287, then writes a `Type[]`.
+- The `GetModules` comment now gives the true reason (`FileName` cannot be set; the message needs two QCalls), and its
+  refusal names #2287. The same false claim about `HResult` was in the comment of `TestAssemblyNativeQCalls`' `GetModules`
+  File-row test, and is corrected there too.
+
+**Tests.**
+
+- `sourcesPure/AssemblyGetExportedTypes.cs`: 17 checks, each its own exit code. The expected list has 23 names, the
+  plan's 21 and `Witness` and `HasCctor`, which the witness check needs public.
+- `sourcesImpure/TypeBuilderGetExportedTypes.cs`, as decision 5 has it, registered in `TestImpureCases.fs`.
+- `ModuleGetTypes.cs` check 18.
+- `TestExportedTypeSelection.fs`: pure tests 1 to 3 and the two example tests, and a third example test (an absent
+  parent under a visibility other than `NestedPublic` is never looked up, as in CoreCLR). Pure test 1 patches
+  `<Module>` to `Public` on a quarter of its draws rather than in one fixed fixture. Each property counts its labels
+  over `CoverageSample`'s fixed sample and asserts a floor for each; the floors are about half of what the sample
+  reaches.
+- Not in the plan: two handler tests in `TestAssemblyNativeQCalls.fs`. One compiles a manifest over two netmodules, the
+  first with no public type, and checks that the handler refuses, naming the second File, the export and #2287, and
+  not the first File. The other has a File row and no public export, and checks that the handler answers with a
+  two-element `Type[]`. No guest can hold a File row, so these are the only tests of the handler's refusal.
+
+**Measurements.**
+
+- Real .NET 10.0.14 and 11.0.0-rc.3: all three guests exit 0. Twenty controls each exit with the number of the check
+  they perturb, on both runtimes: the four list perturbations of the test design (1, 1, 2, 1); `RuntimeType[]`
+  expected (3); one array expected from two calls (4); the second call's elements shifted (5); `typeof(SealedTop)` for
+  element 0 (6); `ExportedTypes` reversed (7); a non-generic definition expected (8); a forwarded `StringBuilder`
+  expected (9); a non-empty `System.Runtime` expected (11); `IsVisible` inverted (12); CoreLib's list compared with the
+  guest's (13); `HasCctor` touched first (14); in the impure guest, `DynInternal` public and uncreated (134, an
+  unhandled `TypeLoadException` "Could not load type 'DynInternal'"), three types expected (2), the two swapped (3) and
+  `RuntimeType[]` expected (5); and in `ModuleGetTypes.cs`, `System.Type` expected (18).
+- PawPrint: every guest passes on the host's CoreLib and with `PAWPRINT_TEST_RUNTIME=Net11`. Each guest takes about
+  2 s in the suite.
+- Decision 5's prediction holds: PawPrint answers `[DynPublic, DynLater]` and never loads the uncreated `DynInternal`.
+  The fallback was not needed.
+
+**Mutants.** Each was run against the selection and handler unit tests, the two pure guests and the impure guest.
+
+| mutant | killed by |
+|---|---|
+| top-level public TypeDefs only | pure test 1; guest exit 1 |
+| every `NestedPublic` TypeDef kept | pure tests 1 and 2; guest exit 1 |
+| `NestedFamORAssem` kept too | pure test 1; guest exit 1 |
+| TypeDefs sorted by name | pure test 1; guest exit 2; `ModuleGetTypes.cs` exit 2; impure guest |
+| TypeDefs in dictionary order (sort removed) | **survives**: see below |
+| forwarders kept as File exports | pure tests 1 and 3; the guest stops in the File refusal |
+| a chain followed through rows that are not `NestedPublic` | pure test 3; the example test of an absent parent under `NestedAssembly` |
+| File exports ignored by the selection | pure tests 2 and 3; the handler refusal test; the example test of an absent parent under `NestedAssembly` |
+| File exports ignored by the handler | the handler refusal test |
+| `RuntimeType[]` for `GetExportedTypes` | handler `Type[]` test; guest exit 3; impure guest |
+| the array cached between calls | guest exit 4 |
+| no write for an empty array | guest exit 10 |
+| load every TypeDef, then keep the visible ones (option C) | impure guest, at the TypeResolve TODO for `DynInternal` |
+| row 1 kept | pure test 1 (token `0x02000001` from the patched fixture); `ModuleGetTypes.cs` exit 1 |
+| File row 1 named in `FileExports` | pure tests 2 and 3; the handler refusal test |
+| the File refusal before the TypeDef loads | **survives**, as decision "Additions to the mutants" predicts: both orders stop |
+| `Type[]` for `GetTypes` | `ModuleGetTypes.cs` exit 18 |
+| a `NestedPublic` row with a nil parent kept | pure test 3 |
+| the cycle bound removed | the cycle example test, at its 30 s bound |
+| a public row at a nil File kept | pure test 3 |
+| File exports in descending row order | pure tests 2 and 3; the cycle example test (which then names row 3); the handler refusal test |
+| CoreLib's last exported type dropped (a check that check 13 runs under PawPrint) | guest exit 13 |
+
+"Have `getTypes` keep its own row enumeration and skip row 1 by name" was not run: `getTypes` has no enumeration of its
+own.
+
+**Where the decisions were wrong or silent.**
+
+- The dictionary-order mutant survives, and cannot be killed by a test. `TypeDefs` is an `ImmutableDictionary`, which
+  enumerates in the order of its keys' hash codes, and a `TypeDefinitionHandle`'s hash code is its row number. So
+  removing the sort changes nothing today; the sort guards an order the collection does not promise. The name-order
+  mutant stands in for it.
+- A nil File: decision 1 says a nil parent is not kept, and is silent on a nil File. CoreCLR's `mdImpl != mdFileNil`
+  test does not keep it, and neither does the walk. Pure test 3 generates both.
+- An absent parent is an error only where CoreCLR would read it, under a `NestedPublic` row; the walk checks presence
+  before the cycle bound, so an absent parent at the end of a chain as long as the table is reported as absent, not
+  as a cycle.
+- `fileExports` fails if a row is keyed by a handle other than its own, which a table built by `Assembly.read` never is.
+- Decision 1 left the place of `enumeratedTypeDefs` to the implementer; it is in `ExportedTypeSelection`.
+- Under option B a forwarded type can only reach the array through `FileExports`, so the guest's check 9 cannot see the
+  "keep forwarders" mutant: that mutant ends in the File refusal (on the guest, at a host `BadImageFormatException`
+  reading File row 1, which the guest does not have) rather than at exit 9.
+- The refuse-before-load mutant is unobservable until (b) is done. This PR does not comment on #2287 to say so.
+
+**Suites**, after a whole-solution build at the implementation commit rebased on `a66b75274`, each a separate
+invocation, all `Test Run Successful`: the default suite 5830 (5791 passed, 39 skipped); `TestCategory=Guest` 234;
+`GuestSolo` 2; `GuestPure` 1197; `GuestImpure` 300.
