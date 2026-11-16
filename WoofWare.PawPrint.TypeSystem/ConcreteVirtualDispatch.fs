@@ -73,6 +73,22 @@ type internal InterfaceMethodSearch =
         body : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
     | Nothing
 
+/// Which of CoreCLR's callers a search for an interface method's implementation answers for. It
+/// decides what CoreCLR's own parameter decides, which is what the search does at a conflict, and
+/// nothing else.
+[<RequireQualifiedAccess>]
+type internal InterfaceMethodCaller =
+    /// A call: `MethodTable::FindDispatchImpl` with `throwOnConflict` set, and
+    /// `MethodTable::ResolveVirtualStaticMethod` given a `uniqueResolution` pointer. An instance search
+    /// reports a conflict at the interface's exact instantiation; a static one takes the first survivor
+    /// of a conflict in the variant pass.
+    | Call
+    /// `RuntimeTypeHandle_GetInterfaceMethodImplementation`, for `Type.GetInterfaceMap`:
+    /// `throwOnConflict` false, and no `uniqueResolution`. An instance search goes on from a conflict at
+    /// the exact instantiation to the variant pass if the interface is variant, and otherwise finds
+    /// nothing; a static one reports a conflict in the variant pass.
+    | InterfaceMap
+
 /// Why a virtual call has no method to run, and throws instead of calling anything.
 [<RequireQualifiedAccess>]
 type DispatchFailure =
@@ -426,10 +442,12 @@ module ConcreteVirtualDispatch =
     /// The default-body half of `MethodTable::FindDispatchImpl` for `method`, a method of `target`
     /// (`DefaultInterfaceImplementation.search`): at `target` exactly, and only if that finds nothing
     /// and `throughVariantInterface` holds, allowing variance, where the first survivor is the answer.
+    /// At a conflict at `target` exactly, `caller` decides (`InterfaceMethodCaller`).
     let private searchDefaultBodies
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (caller : InterfaceMethodCaller)
         (receiver : ConcreteTypeHandle)
         (target : ConcreteTypeHandle)
         (throughVariantInterface : bool)
@@ -448,30 +466,38 @@ module ConcreteVirtualDispatch =
                 method
                 state
 
-        match search false state with
-        | state, Error failure -> state, Error failure
-        | state, Ok [ only ] -> state, Ok (InterfaceMethodSearch.DefaultBody only)
-        | state, Ok (_ :: _ :: _ as candidates) -> state, Ok (InterfaceMethodSearch.Conflict candidates)
-        | state, Ok [] when not throughVariantInterface -> state, Ok InterfaceMethodSearch.Nothing
-        | state, Ok [] ->
-
         // The variant search "[doesn't] look for a conflict for instance methods": it runs the first
         // survivor. `sourcesPure/VariantInterfaceDefaultBodyPrecedence.cs` and
         // `VariantInterfaceMapOrder.cs` pin its order against the real runtime.
-        match search true state with
+        let variantSearch (state : TypeSystemState) =
+            match search true state with
+            | state, Error failure -> state, Error failure
+            | state, Ok [] -> state, Ok InterfaceMethodSearch.Nothing
+            | state, Ok (first :: _) -> state, Ok (InterfaceMethodSearch.DefaultBody first)
+
+        match search false state with
         | state, Error failure -> state, Error failure
-        | state, Ok [] -> state, Ok InterfaceMethodSearch.Nothing
-        | state, Ok (first :: _) -> state, Ok (InterfaceMethodSearch.DefaultBody first)
+        | state, Ok [ only ] -> state, Ok (InterfaceMethodSearch.DefaultBody only)
+        | state, Ok (_ :: _ :: _ as candidates) ->
+            match caller with
+            | InterfaceMethodCaller.Call -> state, Ok (InterfaceMethodSearch.Conflict candidates)
+            // `FindDefaultInterfaceImplementation` with `throwOnConflict` false finds nothing at a
+            // conflict, and `FindDispatchImpl` goes on as though the exact search had found nothing.
+            | InterfaceMethodCaller.InterfaceMap when throughVariantInterface -> variantSearch state
+            | InterfaceMethodCaller.InterfaceMap -> state, Ok InterfaceMethodSearch.Nothing
+        | state, Ok [] when not throughVariantInterface -> state, Ok InterfaceMethodSearch.Nothing
+        | state, Ok [] -> variantSearch state
 
     /// What `MethodTable::FindDispatchImpl` finds for `definition`, an instance method of the interface
-    /// instantiation `iface`, on `receiver`: the dispatch map of the receiver's chain, then the default
-    /// bodies (`searchDefaultBodies`). `walkBaseTypes` false is the exact-type probe of
+    /// instantiation `iface`, on `receiver`, for `caller`: the dispatch map of the receiver's chain, then
+    /// the default bodies (`searchDefaultBodies`). `walkBaseTypes` false is the exact-type probe of
     /// `tryResolveVirtualImplementation`, which asks only whether the receiver supplies the body itself
     /// and so searches no default bodies. A type the search reaches that does not bind is the failure.
     let internal searchInstanceInterfaceMethod
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (caller : InterfaceMethodCaller)
         (receiver : ConcreteTypeHandle)
         (walkBaseTypes : bool)
         (iface : ConcreteTypeHandle)
@@ -578,6 +604,7 @@ module ConcreteVirtualDispatch =
             loggerFactory
             dotnetRuntimeDirs
             baseClassTypes
+            caller
             receiver
             iface
             throughVariantInterface
@@ -1388,6 +1415,7 @@ module ConcreteVirtualDispatch =
                     loggerFactory
                     dotnetRuntimeDirs
                     baseClassTypes
+                    InterfaceMethodCaller.Call
                     dispatchTypeHandle
                     walkBaseTypes
                     targetHandle
@@ -1423,6 +1451,7 @@ module ConcreteVirtualDispatch =
                 loggerFactory
                 dotnetRuntimeDirs
                 baseClassTypes
+                InterfaceMethodCaller.Call
                 dispatchTypeHandle
                 targetHandle
                 throughVariantInterface

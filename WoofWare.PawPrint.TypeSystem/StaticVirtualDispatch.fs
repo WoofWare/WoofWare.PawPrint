@@ -48,11 +48,10 @@ module StaticVirtualDispatch =
     /// What the default-body search finds.
     [<RequireQualifiedAccess>]
     type private DefaultBody =
-        /// The body the call runs: the only most specific one, or in the variant pass the first of
-        /// several.
+        /// The only most specific body, or, for a call, in the variant pass the first of several.
         | Unique of DefaultInterfaceImplementation.Candidate
-        /// Several equally specific bodies for exactly the call's instantiation, which the call
-        /// throws `AmbiguousImplementationException` for.
+        /// Several equally specific bodies: for exactly the call's instantiation, which the call
+        /// throws `AmbiguousImplementationException` for, or, for the interface map, in either pass.
         | Conflict of DefaultInterfaceImplementation.Candidate list
         | NotFound
 
@@ -63,11 +62,13 @@ module StaticVirtualDispatch =
 
     /// The most specific default body for `definition`, a static method of the interface instantiation
     /// `target`, among `constrained` and the interfaces of every type on its chain
-    /// (`MethodTable::FindDefaultInterfaceImplementation`).
+    /// (`MethodTable::FindDefaultInterfaceImplementation`). At a conflict in the variant pass, `caller`
+    /// decides (`InterfaceMethodCaller`).
     let private defaultBody
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (caller : InterfaceMethodCaller)
         (allowVariance : bool)
         (constrained : ConcreteTypeHandle)
         (target : ConcreteTypeHandle)
@@ -87,23 +88,28 @@ module StaticVirtualDispatch =
                 state
 
         // The survivors are distinct interfaces, so more than one is a conflict. The search for a
-        // static method finds that conflict in the variant pass too, but `ResolveVirtualStaticMethod`
-        // then runs the first survivor anyway, reporting a variant match as unique.
+        // static method finds that conflict in the variant pass too. Given a `uniqueResolution`
+        // pointer, as a call is, `ResolveVirtualStaticMethod` then runs the first survivor anyway,
+        // reporting a variant match as unique; without one, it throws.
         match candidates with
         | Error failure -> state, Error failure
         | Ok [] -> state, Ok DefaultBody.NotFound
         | Ok [ only ] -> state, Ok (DefaultBody.Unique only)
-        | Ok (first :: _) when allowVariance -> state, Ok (DefaultBody.Unique first)
+        | Ok (first :: _ as all) when allowVariance ->
+            match caller with
+            | InterfaceMethodCaller.Call -> state, Ok (DefaultBody.Unique first)
+            | InterfaceMethodCaller.InterfaceMap -> state, Ok (DefaultBody.Conflict all)
         | Ok all -> state, Ok (DefaultBody.Conflict all)
 
     /// What `MethodTable::ResolveVirtualStaticMethod` finds for `definition`, a static method of the
-    /// interface instantiation `target`, on `constrained`, in the order the module's docstring gives:
-    /// a MethodImpl of the chain, a default body, the method's own body. `constrained` must be a type
-    /// with a TypeDef row. A type the search reaches that does not bind is the failure.
+    /// interface instantiation `target`, on `constrained`, for `caller`, in the order the module's
+    /// docstring gives: a MethodImpl of the chain, a default body, the method's own body. `constrained`
+    /// must be a type with a TypeDef row. A type the search reaches that does not bind is the failure.
     let internal search
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (caller : InterfaceMethodCaller)
         (constrained : ConcreteTypeHandle)
         (target : ConcreteTypeHandle)
         (definition : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>)
@@ -227,6 +233,7 @@ module StaticVirtualDispatch =
                     loggerFactory
                     dotnetRuntimeDirs
                     baseClassTypes
+                    caller
                     allowVariance
                     constrained
                     target
@@ -351,6 +358,7 @@ module StaticVirtualDispatch =
                 loggerFactory
                 dotnetRuntimeDirs
                 baseClassTypes
+                InterfaceMethodCaller.Call
                 constrained
                 target
                 (DefaultInterfaceImplementation.definitionOf state method)
