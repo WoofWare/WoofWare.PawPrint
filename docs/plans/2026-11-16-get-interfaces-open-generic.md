@@ -1,7 +1,8 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: planned; awaiting decisions. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307), with a
-throwaway handler described under "PawPrint with a throwaway", since reverted.
+Status: decided (see "Decisions"); the first of five pull requests, the closed order (#1318), is built (see "As built
+(PR 1)"); the other four are not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
+with a throwaway handler described under "PawPrint with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
 open receivers, but the study found that the closed receivers' answer is wrong today too (in order, and in dropping
@@ -879,3 +880,90 @@ on a call real .NET answers and no issue recorded it.
   #2317, #2318.
 - A comment on #1318 with the duplicates, the measured extent, the definition case, and the fix chosen.
 - No issue for the closed order: #1318 is it.
+
+### As built (PR 1)
+
+The closed order, closing #1318. Interpreter and tests only; nothing public is added to a published package.
+
+**The function.** The QCall's walk moved, unchanged and in a commit of its own, into
+`RuntimeTypeInterfaces.ofReceiver` (`WoofWare.PawPrint/RuntimeTypeInterfaces.fs`, internal to the interpreter), a
+function from a receiver target to its ordered interfaces, callable outside a guest. The handler now reads its
+arguments, calls it, and allocates the array. This is the one function decision 4 asks the third pull request to extend;
+moving it first let the property tests call what the handler calls, and fail before the fix.
+
+**The closed arm.** A `Closed (Concrete _)` receiver answers `InterfaceDispatch.interfaceMapOf`'s entries, in order,
+duplicates kept. An array answers `System.Array`'s map, read directly rather than through the array's base type. The old
+walk (own rows first, then the base's, deduplicated by closed handle) is deleted, along with its recursion into
+structural handles. `interfaceMapOf`'s docstring now names an interface as a receiver and says the map is what
+`Type.GetInterfaces()` reports.
+
+**The definition arm.** A generic definition still answers when every row is closed, but stops with
+"TODO: RuntimeTypeHandle.GetInterfaces for the generic definition ...: a base class has interfaces, whose entries come
+first in the map; a definition's interface map is #2309" when any class on its base chain declares an InterfaceImpl row
+(which is exactly when the base's map is non-empty). The chain is walked by `resolveBaseRuntimeTypeHandleTarget`, so an
+open-constructed base with no interfaces (`G<T> : EmptyOpen<T>, IDisposable`) is now answered where it stopped before.
+A row naming the definition's variables stops as before, its message now naming #2309. Each closed row is followed by
+`interfaceMapOf` of that row, each closed handle once; with every row closed, the closed handle is the definition-level
+identity, so this is the map's order. This replaces what was left of `collectInterfaces` rather than keeping its
+recursive closed arm; the third pull request deletes it either way.
+
+**Tests** (`TestGetInterfacesOrder.fs`, default suite), each against the host's `GetInterfaces()` over the same images
+(for an array, `System.Array`'s), order and duplicates included:
+
+- CoreLib: every exported closed type with an interface, interfaces included (535 receivers on a .NET 10 host, 19 of
+  them interfaces), a spread of instantiations (generic classes, delegates, interfaces) and five arrays. Before the fix:
+  34 disagreements (every delegate through `MulticastDelegate`, `Type`, `TypeInfo` and its subclasses,
+  `CultureAwareComparer`, `OrdinalComparer`).
+- Generated hierarchies (FsCheck, 100 fixed and 100 fresh corpora, about 1.5 s): interfaces, classes, structs and
+  classes nested in a generic holder, arity 0 to 2, with base classes over the type's own variables, rows over
+  variables, arrays, other generated types and the type itself, repaired to compile by dropping rows C# would reject as
+  possibly unifying (CS0695). A fixed opening reaches `Dup<T, U> : BaseA<T>, IA<U>` and `Mix2<T> : BaseA<int>, IA<T>`.
+  Closed receivers at all-`int`, all-`string` and the two mixed. Floors at half the fixed sample: duplicates 68, rows over
+  a base with interfaces 190, value types 65, interfaces 210, nested 100. `InterfaceCorpusGenerator` was not extended: it
+  has no base classes and deliberately drops instantiations that could unify, which are what this property is about.
+- Shapes C# refuses (decision 10): `ExpansionLib` in two versions, the classes compiled against the first. Closed
+  receivers `C<int>`, `C<string>`, `CE<int>`, `S<int>`, `IF<int>`, `Der<int>`, `CClosed`, `C2<int>`, `Der2<int>`,
+  `D2<int, string>`, `S2<int>`, and the definition `CClosedG<T> : IC<int>, ID`. Before the fix `Der<int>` and
+  `Der2<int>` disagreed.
+- Decision 7's check: every CoreLib value type and interface has InterfaceImpl rows plus base interfaces equal to its
+  `GetInterfaces().Length`.
+- The definition arm: `typeof(Action<>)` and `OverClosed<T> : ClosedBase, IDisposable` are refused, with real .NET's
+  answers asserted (`ICloneable`, `ISerializable`; `IB`, `IDisposable`); definitions over `object`, a closed base and an
+  open base with no interfaces are answered, including a row with a parent (`IC`, `IB`, `IDisposable`).
+- `TestInterfaceDispatchMap`'s CoreLib comparison now includes interfaces (the map only) and five closed generic
+  interfaces.
+
+**Guest** `sourcesPure/TypeGetInterfacesOrder.cs`, 14 checks: `ClosedDerived`, `TwoDerived<int>`, `Dup<int, int>`,
+`Dup<int, string>`, `Mix2<int>`, `Redecl<int>`, `Derived<int>`, `Action`, `Type`, `IC<int>`, `IList<int>`,
+`SOwn<int>`, an enum and `Enum`. It exits 0 on real .NET 10.0.14 and 11.0.0-rc.3, and each of 14 perturbed expectations
+(entries swapped, a duplicate removed or added) exits with its own check's number on both. Under PawPrint before the fix
+it exited 1.
+
+**A measurement that corrects decision 10.** CoreCLR refuses to load `D2<int, int>` (`D2<T, U> : IC<T>, IA<U>` against
+the second version) with `TypeLoadException`: "has a contracting interface set for some instantiations". Its expanded
+`IA<T>` and declared `IA<U>` would become one entry, which `LoadExactInterfaceMap` does not allow, whereas a base's entry
+duplicated by a declared row (`Dup<int, int>`) loads with both. So `D2<int, int>` is not a receiver, and the test asserts
+the host's refusal instead. Nothing in PawPrint checks for it (read, not measured); the shape cannot be compiled by C#
+against the library version it runs with, only reached by swapping a dependency.
+
+**Mutants**, each run against `TestGetInterfacesOrder`, `TestInterfaceDispatchMap`, `TestArrayInterfaceMap` and
+`TestGetInterfaceMethodImplementation`, and separately the pure guests `TypeGetInterfacesOrder`, `ArrayGetInterfaces*`,
+`RuntimeTypeGetInterface*` and `TypeGetInterfaceMap*`:
+
+| mutant | killed by |
+|---|---|
+| base entries after the type's own (`interfaceMapOf`, today's old order) | CoreLib and generated GetInterfaces properties, shapes, both `TestInterfaceDispatchMap` tests, the guest |
+| duplicates merged (closed handle alone in `findExisting`) | generated GetInterfaces property, generated dispatch property, the guest |
+| duplicates removed by handle in the closed arm | generated GetInterfaces property, the guest |
+| no expansion of a declared row's parents | shapes |
+| breadth-first expansion (parents after all declared rows) | shapes |
+| parents expanded before the row | CoreLib and generated GetInterfaces properties, shapes, both `TestInterfaceDispatchMap` tests, the guest |
+| an array given no map | CoreLib GetInterfaces property, `ArrayGetInterfacesByName`, `Count`, `PointerElement`, `Shape` |
+| the definition arm's stop removed | the `Action<>` and `OverClosed<>` refusal tests |
+| the definition arm: parents before the row | the answered-definition test |
+| the definition arm: no expansion | shapes (`CClosedG<>`), after that receiver was added; it survived before |
+| CoreLib interfaces not expanded (decision 7's rule) | none: equivalent over CoreLib as compiled, as decision 7's check states |
+
+**Suites**, after a whole-solution build with the reference assemblies deleted, each its own invocation on a .NET 10
+host: default 5,879 (5,840 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,207 passed;
+`GuestImpure` 303 passed.
