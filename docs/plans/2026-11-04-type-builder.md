@@ -9046,3 +9046,145 @@ Built 2026-11-15 on `plan-setconstant-decided` (two plan commits on `main` at 00
 Each ended `Test Run Successful`; the logs are `suite-*.log`.
 
 **Where the decisions were wrong.** Nowhere in substance. Two small omissions: the test helper above, and `peByteRangeCharPointer`, which also loses its only user.
+
+### The Constant stage: as built
+
+Built 2026-11-15 on `constant-stage`, first on `constant-blob-pointer` (PR #2284, the pointer PR) and then then rebased onto `main` at `9cd951a58`, its squash, whose tree is the branch's (an empty diff), as
+the decisions say for the stage: the tests with the Domain types stubbed (`438713189`), and the implementation
+(`57958bfa2`), and a test fix that compares every string the encoding property reads back (`565e2e530`). Scratchpad paths here are under `constant-stage/`, a sibling of `setconstant/`.
+
+**What the implementer verified first.** No throwaway was built. The planner's first item (an image with a Constant
+table read back through `GetDefaultValue`, `MdConstant` and `NativeEnum` for a created type) was verified by the
+implementation itself: the main guest's `Values`, `Second` and `Enums` read every constant back through those three
+readers on their first run under PawPrint, on the host's CoreLib and with `PAWPRINT_TEST_RUNTIME=Net11`. The decisions'
+two items: nothing reads `Parameter.DefaultValue` at the branch's base (grep: its definition and `Parameter.readAll`
+only); and a `STRING` row with a one-byte blob reads back as `""` through `DefaultValue` and `GetRawConstantValue` under
+PawPrint (the guest's `Second` sequences 9 and 10, `(byte)2` and `true` then `""`, pass).
+
+**Measured on real .NET before any commit.** Each guest was built against net10.0 from the repository's source and run
+on .NET 10.0.14 and rolled forward to 11.0.0-rc.3 (`constant-stage/guest-work/`), with a control made by one edit of a
+copy; each also exits 0 built Debug, as the harness compiles it. Under PawPrint, "host" is the run on the test host's
+CoreLib and `Net11` the run with `PAWPRINT_TEST_RUNTIME=Net11`.
+
+| Guest | Control (exit on both) | PawPrint, host | PawPrint, `Net11` |
+|---|---|---|---|
+| `TypeBuilderSetConstant.cs` | `"abc"` then `""` expected to read `""`: 107 | 0, with its terminal-state check (42 s) | 0 (69 s) |
+| `TypeBuilderEnumLiteralWithoutConstant.cs` (parked) | `EMis`'s values expected `A:1,C:3`: 3 | stops at `EMis`'s first read: "Enum.GetValuesAndNames: static literal enum field B had no metadata constant" | not run |
+| `TypeBuilderSetConstantLongString.cs` (parked) | the equality inverted: 2 | stops in the QCall: "TypeBuilder_SetConstantValue: unterminated UTF-16 string exceeded PawPrint's 32767-char scan limit" | not run |
+
+The refusal fixture's four guests were run on real .NET as programs first (`guest-work/snip-a` to `snip-d`), each
+returning non-zero if real .NET did anything other than the plan's measurement, and each exited 0 on both runtimes.
+
+The main guest's terminal-state check (`assertSetConstantRows`) states its expected rows by hand; they agree with a
+raw dump of the same modules on both runtimes, taken through the planner's `Raw` helper before `CreateType`
+(`guest-work/dump/oracle-dump-net10.txt`, `-net11.txt`, identical): every owner's flags, element type and value,
+the `CLASS` rows' four bytes (`len=4 value=0x0`), and for the one-byte stale blobs the byte under the FCall's pointer
+(`0x02` and `0x01`).
+
+**Red, as recorded** (`438713189`'s message). Against the stubs, 44 of the 115 tests of `TestEmitScopeConstants`,
+`TestEmitScopeExtension`, `TestEmitScopeImage`, `TestEmitScopeCustomAttributes`, `TestTypeBuilderConstantRefusals` and
+the `GetDefaultValue` tests of `TestNativeMetadataImport` failed: every new test that defines a constant, the four
+refusal guests at the `failUnimplemented` stop, and the generated-scope properties of the first four fixtures, which
+draw the new SetConstant operation and so reached the stub. The fixed extension tests whose answer the rule already gave
+before the stage (a gained HasDefault without a row, a lost one) passed, as they should. The guest stopped at its first
+call at `failUnimplemented`.
+
+**What was built.**
+* Domain, the public additions to the published package:
+  * `HasConstant` (`Field`, `Param`, `Property`, with `CodedIndex` and `Token`) and `HasConstant.tryOfToken`;
+    `ConstantRow` (`Parent`, `Type : ConstantTypeCode`, `Value : BlobOffset`); `EmitScope.setConstant`, which replaces
+    an owner's row in place or appends it, `EmitScope.constants`, in the order of each owner's first constant, and
+    `EmitScope.typeOfConstantOwner`.
+  * `ConstantValue`, the fourteen cases, and `ConstantValue.typeCode`, `blob`, `fixedWidthSize` and `ofFixedWidth`;
+    `ConstantDefinition` (`Defined of EmitScope`, `DetachesAccessors`); `EmitScopeDefinitions.defineConstant`.
+  * `EmitScope`'s docstring now says the Constant table is replaced in place; `addFieldFlags`, `addParamFlags` and
+    `addPropertyFlags` name the constant's HasDefault beside the pseudo-attributes.
+* The image writes `Constant` (table 0x0B) between `MemberRef` and `CustomAttribute`, sorted by its parent's coded index;
+  `EmitScopeImage`'s docstring lists it among the sorted tables.
+* Loader: `EmitScopeExtension.violations` as the decisions state it, with `filledOrRewritten`'s fill predicate given the
+  row's RID so that a gained HasDefault is admitted only for an owner with a Constant row in the later scope. No public
+  API change; the docstrings of the rule and its violations name constants.
+* The handler, in the decisions' order: the arguments parsed (a token of a Field, Param or Property of the scope; `CLASS`
+  with a null pointer; `STRING` read to its first NUL; a fixed-width code's bytes, at the size Domain gives); the
+  created-owner TODO; `defineConstant`; for `DetachesAccessors` the property TODO, for `Defined` `WithEmitScope`.
+* Tests. `TestEmitScopeConstants` (new): the element types and sizes against `_GetSizeOfConstantBlob` with its line
+  numbers; the HasDefault bits and HasConstant tags; the measured `values` rows on each owner kind; the nine `second`
+  and six `odd` sequences on each owner kind, with the string each reads back, and two owners set alternately; the
+  `flagonly` rows; the encoding against SRM's `WriteConstant` and `ReadConstant`, with the fixed-width parse and its
+  refusals; `defineConstant` against a model over a fixed layout of two types (fields, a method's return parameter and
+  two parameters, and properties with no accessor, an Other method only, a getter, a setter), checking after each step
+  the rows in order, every owner's flags, every other table and the heaps; the image read back through SRM's search of
+  the sorted table; and the differential against the host's emitter, every owner's raw row and flags after each step.
+  `TestEmitScopeExtension`: five fixed tests of the rule, constants in `typeView`, and a "constant" category in the
+  history property. `EmitScopeGen`: `Op.SetConstant`, `constantValues`, `constantOwners`, `imageConstant`.
+  `TestNativeMetadataImport`: the dynamic-image pointer test that #2284 deferred. `TestTypeBuilderConstantRefusals`
+  (new): a created type's parameter, and properties with a getter, a setter and both. The three guests.
+
+**Corrections found in implementation, and where the decisions were not followed to the letter.**
+* No throwaway was built before the Domain code (above).
+* `TestEmitScopeImage`'s round trip asserted that an image holds no Constant row; it now reads each owner's constant
+  back. This is the one existing assertion that changed.
+* `EmitScopeGen.filledIn` admits a gained HasDefault on a Field or Param row whether or not the owner has a Constant row:
+  it compares image rows one at a time and cannot see the Constant table. The coupling is checked by the fixed tests and
+  the model property.
+* The generator's SetConstant operation is drawn at weight 2. At 4 it moved "the generator makes scopes with and without
+  pointer tables" to exactly its threshold (20, needing more than 20).
+* The differential compares each row as `GetDefaultValue` reports it, so it cannot see the odd trailing byte of a
+  one-byte stale `STRING` blob; the fixed tables and the guest's terminal-state check hold those bytes.
+* The measured `"a\0b"` row is the handler's cut, so it is in the guest only, as the decisions said.
+* The encoding property first skipped the read-back of strings with surrogates, on the belief that SRM's `ReadConstant`
+  decodes through `Encoding.Unicode`; measured (`constant-stage/srm-surrogate.fsx`), it keeps a lone surrogate, so the
+  property compares every string.
+* Nothing the decisions said about CoreCLR was contradicted. New measurements, beside the plan's: a property with only a
+  getter, or only a setter, also loses it and drops out of public `GetProperties` (the plan measured both); a detached
+  getter still runs; a created type's parameter shows its constant through `GetParameters()` when reflection had not read
+  the method's parameters before; a `char` enum formats its values as characters.
+
+**Mutants.** Each applied to the committed implementation (`57958bfa2` before the rebase, as `b6b2b814b`), the test
+project built, then the unit selection (`TestEmitScopeConstants`, `TestEmitScopeExtension`, `TestEmitScopeImage`,
+`TestTypeBuilderConstantRefusals` and the `GetDefaultValue` tests of `TestNativeMetadataImport`) and the main guest
+run (`constant-stage/mutate.py`, results in `constant-stage/mut/results-battery1.txt` and `results.txt`). A guest
+number is its exit code: `1 + 5i + k` for `Values` case i and owner k (0 the parameter), `101 + 3k + j` for `Second`'s
+sequence k, and 107 the control's. "Measured" is the measured `values` table, "second" the `second` and `odd` table,
+"sizes" the element types and sizes, "encoding" the SRM property, "model" the `defineConstant` model, "image" the SRM
+read-back, "differential" the host's emitter. Every mutant was killed.
+
+| Mutant | Killed by |
+|---|---|
+| a field's HasDefault as 0x1000 | the guest (`WithEmitScope` refuses `RowChanged (Field, 1)`); measured; model; image; differential; the appending and history properties of `TestEmitScopeExtension` and `TestEmitScopeImage` |
+| a parameter's HasDefault as `Optional` | the guest (1); measured; model; image; differential |
+| the flag set without the row | the guest (`WithEmitScope` refuses `RowChanged (Param, 1)`); measured; second; the dynamic-image pointer test; model; image; differential; the appending and history properties |
+| the row set without the flag | the guest (1); measured; model; image; differential |
+| a second constant appending a row | the guest (101); second; model; image; differential; both fixed fill tests; the image round trip and its index-width cases |
+| an empty string overwriting the blob | the guest (107, the control's number); second; model; image; differential |
+| a new row for an empty string given a one-byte blob | the guest's terminal-state check (`Values`' rows); measured; model; image; differential |
+| the old blob kept only when the old type was `STRING` | the guest (110: `(byte)2` then `""`); second; model; image; differential |
+| a string encoded through `Encoding.Unicode` | the guest (81: the lone surrogate); measured; encoding; model; image; differential |
+| `NullReference` written as the empty blob | the guest (`GetDefaultValue`: "Constant blob for token 0x0800001b has 0 bytes but element type 0x12 requires 4"); sizes; measured; second; encoding; model; image; differential |
+| a float NaN canonicalised (standing in for "a float stored through `float32`", below) | the guest (96: the quiet payload); measured; encoding; model; image; differential |
+| `I8` given a width of four bytes | the guest (41); sizes; encoding |
+| `DetachesAccessors` for any MethodSemantics row | the guest (the property TODO at the Other-only property); model; image; differential |
+| `DetachesAccessors` for a Getter row only | the setter-only refusal guest; model; image; differential (the main guest has no setter-only property) |
+| the Constant table written unsorted | the guest (SRM: "Metadata table Constant not sorted."); image; the dynamic-image pointer test; the image round trip; the appending and history properties |
+| the Constant table sorted by (table, RID) | the guest (the same); image (its coverage case); the image round trip; the appending and history properties |
+| the created-owner TODO removed | the refusal fixture's parameter guest |
+| the property TODO removed (the handler returning with the scope unchanged) | the refusal fixture's three property guests |
+| a string read past its first NUL | the guest (71: `"a\0b"`) |
+| the extension rule admitting HasDefault without a row | "a gained HasDefault is a fill only beside a Constant row for its owner"; "a flags column may gain the bits a pseudo-attribute sets" |
+| the extension rule admitting a changed constant of a created type | both fixed fill tests |
+| the extension rule admitting a Constant row whose parent changed | the parent-change test; the history property |
+| the extension rule admitting an added constant of a created type | "a constant added to or changed for an owner is a fill, refused only for a created type" |
+
+Three notes. The first build of "the property TODO removed" failed (a match rule that could never match is a warning,
+and warnings are errors); it was run again written as the handler completing for `DetachesAccessors`. "A float stored
+through `float32`" cannot be written so as to change any bit on this hardware (a float's bits survive a store), so a NaN
+canonicalised stands in for it. And "`GetDefaultValue`'s pointer keyed on the Constant handle again" was not run: #2284
+deleted that variant (`PeByteRangePointerSource.ConstantBlob`), so the mutant would be its reconstruction across eight
+files; the dynamic-image pointer test instead asserts that the owner's row has moved from RID 1 to RID 2 in the new image,
+which is where a handle-keyed pointer would read `"zz"`. As in 5z-1, the generated appending property did not kill the
+created-type mutants of the extension rule; the fixed tests do.
+
+**Suites.** At `565e2e530`, after the rebase onto `9cd951a58`, `rm -rf */obj/*/*/ref */obj/*/*/refint` and a build of
+`WoofWare.PawPrint.slnx`, each its own `--no-build` invocation (`constant-stage/logs/suite-*.log`): default 5817 tests,
+5779 passed, 38 skipped; `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1196 passed; `GuestImpure` 299 passed. No
+failures.
