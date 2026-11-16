@@ -1,7 +1,7 @@
 # `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals` (issue #2289)
 
-Status: proposed, awaiting decisions. The study below was measured 2026-11-16 on `pr-2270-verify-interface` at
-`2c334b95e` (#2298, which implements #2270 and was on the merge queue, not yet merged).
+Status: decided and built; see "As built" at the end. The study below was measured 2026-11-16 on
+`pr-2270-verify-interface` at `2c334b95e` (#2298, which implements #2270 and was on the merge queue, not yet merged).
 
 Scope is this one QCall, the second of the three that `Type.GetInterfaceMap` makes, as the comment on #2270 decided.
 The first, `RuntimeTypeHandle_VerifyInterfaceIsImplemented` (#2270), is #2298. The third,
@@ -841,3 +841,119 @@ it has merged, and rebase onto `origin/main` if it has; `TypeHandleTag.isTypeDes
 `RuntimeTypeHandle_GetInterfaceMethodImplementation` (#2290), the message of #2294, and the TypeDesc answers of
 #2299. If un-parking `TypeGetInterfaceMapNoMethods.cs` meets a stop the plan did not
 measure, park it on that stop and report it; do not implement the dependency in this change.
+
+### As built
+
+Built 2026-11-16 on top of #2298 (still open in the merge queue when this was written), in the decisions' commit
+order: the lift of the test helper, the tests with their red output, the `methodAt` refactor, then the count and the
+handler, and one later commit strengthening an example test (below).
+
+**What exists.**
+
+- `MethodTableLayout.staticVirtualsOfDefinition operation owner typeInfo` (TypeSystem, public): `[]` unless
+  `typeInfo.IsInterface`, otherwise `slotsBeyondVtableOfDefinition` filtered to `IsVirtual && IsStatic`. The two
+  comments decision 2 and the corrections ask for are at the `IsInterface` test and at the filter.
+- `VirtualSlotLayout`'s private `staticVirtualsOf operation state target`: the dispatch over a
+  `RuntimeTypeHandleTarget` decision 2 describes. `methodAt` indexes it past the vtable; its local `staticVirtualsOf`
+  and its calls to `slotTableOfClosed` and `slotTableOfDefinition` are gone.
+- `VirtualSlotLayout.numVirtualsAndStaticVirtuals` (public): `TypeHandleTag.isTypeDesc` first, refusing with a
+  `TODO:` naming #2299; then `numVirtuals` plus the length of `staticVirtualsOf`. Its docstring carries decision 3's
+  sentence.
+- The handler in `Native/NativeRuntimeTypeQCall.fs`, registered in `Native/NativeQCall.fs` beside
+  `RuntimeTypeHandle_GetMethodAt`, decodes with `NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget` and pushes an
+  `Int32`.
+- `docs/divergences.md`'s entry on async variant slots names this QCall and `GetMethodAt`, with `ITask`'s
+  measurement.
+- Tests: `HostTypeTarget.fs` (the lifted builder) and `TestNumVirtualsAndStaticVirtuals.fs` (eight tests: the
+  CoreLib property, the generated property, the per-runtime law and the named async examples on each runtime, the
+  fixed shapes, the TypeDesc refusals). Guests: `sourcesPure/RuntimeTypeHandleGetNumVirtualsAndStaticVirtuals.cs`
+  (28 checks), `sourcesImpure/TypeBuilderGetNumVirtualsAndStaticVirtuals.cs` (7 checks);
+  `TypeGetInterfaceMapNoMethods.cs` un-parked; `TypeGetInterfaceMap.cs` re-parked on #2290 with its measured stop.
+
+New public API: `MethodTableLayout.staticVirtualsOfDefinition` in the published `WoofWare.PawPrint.TypeSystem`
+package; `VirtualSlotLayout.numVirtualsAndStaticVirtuals` in `WoofWare.PawPrint`. (`HostTypeTarget` is test code.)
+
+**Measurements the decisions asked for.** Both derived expectations hold on real .NET 10.0.14 and 11.0.0-rc.3: the
+interface with a static field initialiser and one static abstract method counts 1, and `IStat[]` counts 24. The
+guests' controls compiled every perturbed copy of each guest into one program, each copy in a namespace of its own,
+and ran it on both runtimes: the guest as written returns 0, and each copy with one expectation moved by one (or one
+comparison inverted) returns its own check's number; 56 copies of the pure guest and 16 of the impure one, no mismatch
+on either runtime. The per-runtime law holds for every interface in each CoreLib, exported or not: 167 interfaces
+(50 with a static virtual) on .NET 10, 177 (57) on .NET 11. No interface breaks it.
+
+**Deviations and places the decisions were silent.**
+
+- *The CoreLib floor.* The decisions' "43 and 44 measured, among exported types" counted the planner's probe
+  fixtures too (ten of them declare a static virtual). CoreLib's own exported interfaces with a static tail are 33 on
+  the .NET 10 host, so the host property's floor is 30. The per-runtime law, over every interface, keeps the floor of
+  40. The tests commit had 40 for both; the implementation commit corrected the first, and its message says so.
+- *`IStat[]` and the static-initialiser interface are in the pure guest too* (checks 28 and 27), not only in the
+  example test, so that the controls measured them on both runtimes. The mutant that counts the class constructor
+  survived the default suite (no generated or CoreLib interface has a static field) and died only by guest check 27,
+  so `IStatInit` was added to the fixed shapes in a later commit; the mutant then also dies there.
+- *The re-park of `TypeGetInterfaceMap.cs`* went in the implementation commit, where its quoted stop first becomes
+  true, not in the tests commit.
+- *Commit 3 and the test project.* `TestNumVirtualsAndStaticVirtuals.fs` names the count, so the test project does
+  not compile at the refactor commit. The refactor was checked green with that file left out of a local build:
+  `TestMethodAtSlotShapes` and `TestVirtualMethodSlots` (113 of 113) and `ReflectionMethodAtSlot.cs`, unedited.
+- *`staticVirtualsOf` is private* to `VirtualSlotLayout`; its only callers are there. A continuation type answers
+  `[]` (its parent is a class and it has no methods of its own), as `methodAt` answered before; a closed TypeDesc
+  fails, since both callers refuse one first.
+- *The generator.* Interfaces have arity 0 or 1, no variance or constraints; members as the plan lists; overrides are
+  of methods only (an explicit body, an instance reabstraction of an instance abstract or default method, a static
+  reabstraction of a static abstract or virtual one), of any interface in the declarer's closure, and each base
+  method is overridden by at most one interface in a corpus, which rules out diamonds. No closure names one
+  interface with two arguments. Classes and structs implement every virtual member of every interface they inherit,
+  explicitly. The pool: each interface's definition, its instantiations over `int` and `string` and an open
+  construction over a class's own parameter; each class and struct, and an instantiation over `int` of a generic one;
+  and an array of every closed type among them, interfaces included. Floors are half of the fixed sample:
+  StaticTail 164 of 328, NonVirtualNotCounted 96 of 193, ImplementsStaticVirtualInterface 75 of 150,
+  OpenConstruction 64 of 128, ReabstractionCounted 12 of 25. A `NullSlot` label is counted, not floored (0 on a
+  .NET 10 host).
+- *Decision 7's boundary check* is in the shared comparison, so it runs for every type of both the CoreLib and the
+  generated corpora.
+
+**Mutants.** Each run against `TestNumVirtualsAndStaticVirtuals`, `TestMethodAtSlotShapes`, `TestVirtualMethodSlots`,
+the pure guests `RuntimeTypeHandleGetNumVirtualsAndStaticVirtuals.cs`, `TypeGetInterfaceMapNoMethods.cs` and
+`ReflectionMethodAtSlot.cs`, and the impure guest, from a committed tree, restored after each.
+
+| mutant | killed by |
+|---|---|
+| the count is `numVirtuals` alone | pure guest exit 4 (`IStat`); impure guest check 2; fixed shapes; CoreLib property; per-runtime law on both runtimes; generated property |
+| static virtuals counted for every type, through a list that includes a class's static implementations | pure guest exit 20 (`SStat`); fixed shapes (`SStat` 6); CoreLib property; generated property; `TestVirtualMethodSlots` |
+| the tail filter drops `static virtual` with a body | pure guest exit 5; fixed shapes; CoreLib property; per-runtime law on both; generated property; `TestVirtualMethodSlots` |
+| the tail filter counts every static | pure guest exit 5; fixed shapes; CoreLib property; per-runtime law on both; generated property; `TestVirtualMethodSlots` |
+| a static reabstraction not counted | pure guest exit 9; fixed shapes (`IStaticReabs` 0); generated property |
+| instance non-virtual members counted | pure guest exit 6; fixed shapes (`ISealedDim` 3); generated property |
+| base interfaces' methods counted (as one more for each InterfaceImpl row of an interface) | pure guest exit 7; fixed shapes; CoreLib property; per-runtime law and async examples on both; generated property |
+| generic methods dropped from the tail | pure guest exit 10; CoreLib property; per-runtime law on both; generated property; `TestVirtualMethodSlots` |
+| an open construction refused | pure guest (stops on the refusal, at check 13); fixed shapes (`IG<T>`); generated property |
+| a generic definition refused | pure guest (at check 11); `TypeGetInterfaceMapNoMethods.cs` (`IInC<>`); CoreLib property; per-runtime law and async examples on both; generated property |
+| an array counted as 0 | pure guest exit 22; fixed shapes (`IStat[]`); generated property |
+| `Task`-like virtuals counted twice, on every runtime | CoreLib property on the .NET 10 host; per-runtime law and async examples on both. The guests survive: none has a `Task` member |
+| `Task`-like virtuals counted twice on .NET 11's CoreLib only | per-runtime law and async examples, .NET 11 cases only |
+| `methodAt` reads the tail reversed | CoreLib property; generated property; `TestVirtualMethodSlots`. The guests survive: they only count |
+| `methodAt` reads a differently filtered tail (generic methods dropped) | CoreLib property; generated property; `TestVirtualMethodSlots` |
+| the count one past the tail | pure guest exit 4; impure guest check 2; fixed shapes; CoreLib property; per-runtime law on both; generated property |
+| the handler pushes an `Int64` | every guest that reaches the QCall: the `LibraryImport` stub reads an `Int32`, and the interpreter refuses "TODO: Int64(0)" |
+| the handler pushes a native int | every guest that reaches the QCall, likewise: "TODO: NativeInt(0)" |
+| decision 4 (b)'s refusal replaced by 0 | the TypeDesc refusal test |
+| the TypeDesc test lost | the TypeDesc refusal test, at the closed `int*` |
+| the TypeDesc test after `numVirtuals` | the TypeDesc refusal test, at `List<>`'s `T` |
+| an array's tail taken from its element | fixed shapes (`IStat[]` 25); generated property; the pure guest stops at `T[]` |
+| a closed instantiation's tail empty | pure guest exit 12; generated property; `TestVirtualMethodSlots` |
+| `methodAt`'s boundary moved up by one | async examples on both runtimes; CoreLib property; generated property; `TestVirtualMethodSlots` (`System.Object` slot 4) |
+| the class constructor counted | pure guest exit 27; fixed shapes (`IStatInit` 2), once `IStatInit` joined them |
+| the tail filter loses `IsStatic` | survives: equivalent, as the corrections say |
+
+**Suites**, after a whole-solution build with `*/obj/*/*/ref` and `refint` deleted, each its own invocation:
+
+| suite | total | passed | skipped | failed |
+|---|---|---|---|---|
+| default | 5,854 | 5,815 | 39 | 0 |
+| `TestCategory=Guest` | 234 | 234 | 0 | 0 |
+| `TestCategory=GuestSolo` | 2 | 2 | 0 | 0 |
+| `TestCategory=GuestPure` | 1,203 | 1,203 | 0 | 0 |
+| `TestCategory=GuestImpure` | 302 | 302 | 0 | 0 |
+
+The new guests also pass on .NET 11's CoreLib (`PAWPRINT_TEST_RUNTIME=Net11`), run by name.
