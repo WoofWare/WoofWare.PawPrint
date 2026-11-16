@@ -48,11 +48,10 @@ module StaticVirtualDispatch =
     /// What the default-body search finds.
     [<RequireQualifiedAccess>]
     type private DefaultBody =
-        /// The body the call runs: the only most specific one, or in the variant pass the first of
-        /// several.
+        /// The only most specific body, or, for a call, in the variant pass the first of several.
         | Unique of DefaultInterfaceImplementation.Candidate
-        /// Several equally specific bodies for exactly the call's instantiation, which the call
-        /// throws `AmbiguousImplementationException` for.
+        /// Several equally specific bodies: for exactly the call's instantiation, which the call
+        /// throws `AmbiguousImplementationException` for, or, for the interface map, in either pass.
         | Conflict of DefaultInterfaceImplementation.Candidate list
         | NotFound
 
@@ -61,15 +60,19 @@ module StaticVirtualDispatch =
         | Some (_, typeInfo) -> typeInfo.Generics |> Seq.exists (fun (_, metadata) -> metadata.Variance.IsSome)
         | None -> false
 
-    /// The most specific default body among `constrained` and the interfaces of every type on its
-    /// chain (`MethodTable::FindDefaultInterfaceImplementation`).
+    /// The most specific default body for `definition`, a static method of the interface instantiation
+    /// `target`, among `constrained` and the interfaces of every type on its chain
+    /// (`MethodTable::FindDefaultInterfaceImplementation`). At a conflict in the variant pass, `caller`
+    /// decides (`InterfaceMethodCaller`).
     let private defaultBody
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (caller : InterfaceMethodCaller)
         (allowVariance : bool)
         (constrained : ConcreteTypeHandle)
-        (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (target : ConcreteTypeHandle)
+        (definition : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>)
         (state : TypeSystemState)
         : TypeSystemState * Result<DefaultBody, TypeBindingFailure>
         =
@@ -80,18 +83,188 @@ module StaticVirtualDispatch =
                 baseClassTypes
                 allowVariance
                 constrained
-                method
+                target
+                definition
                 state
 
         // The survivors are distinct interfaces, so more than one is a conflict. The search for a
-        // static method finds that conflict in the variant pass too, but `ResolveVirtualStaticMethod`
-        // then runs the first survivor anyway, reporting a variant match as unique.
+        // static method finds that conflict in the variant pass too. Given a `uniqueResolution`
+        // pointer, as a call is, `ResolveVirtualStaticMethod` then runs the first survivor anyway,
+        // reporting a variant match as unique; without one, it throws.
         match candidates with
         | Error failure -> state, Error failure
         | Ok [] -> state, Ok DefaultBody.NotFound
         | Ok [ only ] -> state, Ok (DefaultBody.Unique only)
-        | Ok (first :: _) when allowVariance -> state, Ok (DefaultBody.Unique first)
+        | Ok (first :: _ as all) when allowVariance ->
+            match caller with
+            | InterfaceMethodCaller.Call -> state, Ok (DefaultBody.Unique first)
+            | InterfaceMethodCaller.InterfaceMap -> state, Ok (DefaultBody.Conflict all)
         | Ok all -> state, Ok (DefaultBody.Conflict all)
+
+    /// What `MethodTable::ResolveVirtualStaticMethod` finds for `definition`, a static method of the
+    /// interface instantiation `target`, on `constrained`, for `caller`, in the order the module's
+    /// docstring gives: a MethodImpl of the chain, a default body, the method's own body. `constrained`
+    /// must be a type with a TypeDef row. A type the search reaches that does not bind is the failure.
+    let internal search
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (caller : InterfaceMethodCaller)
+        (constrained : ConcreteTypeHandle)
+        (target : ConcreteTypeHandle)
+        (definition : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>)
+        (state : TypeSystemState)
+        : TypeSystemState * Result<InterfaceMethodSearch, TypeBindingFailure>
+        =
+        let slot : SlotIdentity =
+            definition.DeclaringAssemblyFullName, definition.IdentityKey
+
+        // 1. A MethodImpl on a type of the chain, exactly and then, for a variant interface, on the
+        // first variance-compatible entry of the type's interface map.
+        let rec onChain
+            (state : TypeSystemState)
+            (level : ConcreteTypeHandle)
+            : TypeSystemState * Result<InterfaceMethodSearch option, TypeBindingFailure>
+            =
+            let exactly (state : TypeSystemState) (declaredOn : ConcreteTypeHandle) = state, Ok (declaredOn = target)
+
+            match
+                DefaultInterfaceImplementation.implementationOnType
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    level
+                    slot
+                    true
+                    exactly
+                    state
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok (Some body) -> state, Ok (Some (InterfaceMethodSearch.OnChain (level, body)))
+            | state, Ok None ->
+
+            let state, variant =
+                if not (isVariant state target) then
+                    state, Ok None
+                else
+
+                match
+                    ConcreteInterfaceDispatch.interfaceMapOf
+                        loggerFactory
+                        dotnetRuntimeDirs
+                        baseClassTypes
+                        operation
+                        state
+                        level
+                with
+                | state, Error failure -> state, Error failure
+                | state, Ok map ->
+
+                let rec entries
+                    (state : TypeSystemState)
+                    (map : ConcreteInterfaceDispatch.InterfaceMapEntry list)
+                    : TypeSystemState * Result<InterfaceMethodSearch option, TypeBindingFailure>
+                    =
+                    match map with
+                    | [] -> state, Ok None
+                    | entry :: rest when
+                        entry.Interface = target
+                        || not (DefaultInterfaceImplementation.sameDefinition state entry.Interface target)
+                        ->
+                        entries state rest
+                    | entry :: rest ->
+                        match
+                            DefaultInterfaceImplementation.castsTo
+                                loggerFactory
+                                dotnetRuntimeDirs
+                                baseClassTypes
+                                target
+                                state
+                                entry.Interface
+                        with
+                        | state, Error failure -> state, Error failure
+                        | state, Ok false -> entries state rest
+                        | state, Ok true ->
+                            let onEntry (state : TypeSystemState) (declaredOn : ConcreteTypeHandle) =
+                                state, Ok (declaredOn = entry.Interface)
+
+                            match
+                                DefaultInterfaceImplementation.implementationOnType
+                                    loggerFactory
+                                    dotnetRuntimeDirs
+                                    baseClassTypes
+                                    level
+                                    slot
+                                    true
+                                    onEntry
+                                    state
+                            with
+                            | state, Error failure -> state, Error failure
+                            | state, Ok (Some body) -> state, Ok (Some (InterfaceMethodSearch.OnChain (level, body)))
+                            | state, Ok None -> entries state rest
+
+                entries state map
+
+            match variant with
+            | Error failure -> state, Error failure
+            | Ok (Some found) -> state, Ok (Some found)
+            | Ok None ->
+
+            match
+                TypeSystemState.resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state level
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok None -> state, Ok None
+            | state, Ok (Some parent) -> onChain state parent
+
+        match onChain state constrained with
+        | state, Error failure -> state, Error failure
+        | state, Ok (Some found) -> state, Ok found
+        | state, Ok None ->
+
+        // 2. A default body, exactly and then allowing variance.
+        let fromDefault
+            (state : TypeSystemState)
+            (allowVariance : bool)
+            : TypeSystemState * Result<InterfaceMethodSearch option, TypeBindingFailure>
+            =
+            match
+                defaultBody
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    caller
+                    allowVariance
+                    constrained
+                    target
+                    definition
+                    state
+            with
+            | state, Error failure -> state, Error failure
+            | state, Ok (DefaultBody.Unique candidate) -> state, Ok (Some (InterfaceMethodSearch.DefaultBody candidate))
+            | state, Ok (DefaultBody.Conflict candidates) ->
+                state, Ok (Some (InterfaceMethodSearch.Conflict candidates))
+            | state, Ok DefaultBody.NotFound -> state, Ok None
+
+        match fromDefault state false with
+        | state, Error failure -> state, Error failure
+        | state, Ok (Some found) -> state, Ok found
+        | state, Ok None ->
+
+        match fromDefault state true with
+        | state, Error failure -> state, Error failure
+        | state, Ok (Some found) -> state, Ok found
+        | state, Ok None ->
+
+        // 3. The method's own body.
+        match definition.Body with
+        | MethodBody.Abstract -> state, Ok InterfaceMethodSearch.Nothing
+        | MethodBody.Il _
+        | MethodBody.AsyncIl _
+        | MethodBody.MissingIl
+        | MethodBody.InternalCall
+        | MethodBody.PInvoke
+        | MethodBody.RuntimeProvided _ -> state, Ok (InterfaceMethodSearch.OwnBody (target, definition))
 
     /// The method a `constrained.` call of the static virtual `method` runs when the prefix names
     /// `constrained`. `method` is the interface method as the call instantiates it, so its declaring
@@ -167,8 +340,6 @@ module StaticVirtualDispatch =
         if (TypeSystemState.tryGetConcreteTypeInfo state constrained).IsNone then
             failwith $"%s{operation}: the constrained type %O{constrained} has no TypeDef row"
 
-        let slot : SlotIdentity = method.DeclaringAssemblyFullName, method.IdentityKey
-
         let found (state : TypeSystemState) (on : ConcreteTypeHandle) body =
             let typeGenerics =
                 match TypeSystemState.tryGetConcreteTypeInfo state on with
@@ -182,167 +353,46 @@ module StaticVirtualDispatch =
                     MethodGenerics = method.Generics
                 }
 
-        // 1. A MethodImpl on a type of the chain, exactly and then, for a variant interface, on the
-        // first variance-compatible entry of the type's interface map.
-        let rec onChain
-            (state : TypeSystemState)
-            (level : ConcreteTypeHandle)
-            : TypeSystemState * Result<VirtualImplementation option, TypeBindingFailure>
-            =
-            let exactly (state : TypeSystemState) (declaredOn : ConcreteTypeHandle) = state, Ok (declaredOn = target)
-
-            match
-                DefaultInterfaceImplementation.implementationOnType
-                    loggerFactory
-                    dotnetRuntimeDirs
-                    baseClassTypes
-                    level
-                    slot
-                    true
-                    exactly
-                    state
-            with
-            | state, Error failure -> state, Error failure
-            // A MethodImpl of the chain decides the call, so an order-dependent body is its answer.
-            | state, Ok (Some body) ->
-                state, Ok (Some (found state level (DefaultInterfaceImplementation.certainOrRefuse body)))
-            | state, Ok None ->
-
-            let state, variant =
-                if not (isVariant state target) then
-                    state, Ok None
-                else
-
-                match
-                    ConcreteInterfaceDispatch.interfaceMapOf
-                        loggerFactory
-                        dotnetRuntimeDirs
-                        baseClassTypes
-                        operation
-                        state
-                        level
-                with
-                | state, Error failure -> state, Error failure
-                | state, Ok map ->
-
-                let rec entries
-                    (state : TypeSystemState)
-                    (map : ConcreteInterfaceDispatch.InterfaceMapEntry list)
-                    : TypeSystemState * Result<VirtualImplementation option, TypeBindingFailure>
-                    =
-                    match map with
-                    | [] -> state, Ok None
-                    | entry :: rest when
-                        entry.Interface = target
-                        || not (DefaultInterfaceImplementation.sameDefinition state entry.Interface target)
-                        ->
-                        entries state rest
-                    | entry :: rest ->
-                        match
-                            DefaultInterfaceImplementation.castsTo
-                                loggerFactory
-                                dotnetRuntimeDirs
-                                baseClassTypes
-                                target
-                                state
-                                entry.Interface
-                        with
-                        | state, Error failure -> state, Error failure
-                        | state, Ok false -> entries state rest
-                        | state, Ok true ->
-                            let onEntry (state : TypeSystemState) (declaredOn : ConcreteTypeHandle) =
-                                state, Ok (declaredOn = entry.Interface)
-
-                            match
-                                DefaultInterfaceImplementation.implementationOnType
-                                    loggerFactory
-                                    dotnetRuntimeDirs
-                                    baseClassTypes
-                                    level
-                                    slot
-                                    true
-                                    onEntry
-                                    state
-                            with
-                            | state, Error failure -> state, Error failure
-                            | state, Ok (Some body) ->
-                                state,
-                                Ok (Some (found state level (DefaultInterfaceImplementation.certainOrRefuse body)))
-                            | state, Ok None -> entries state rest
-
-                entries state map
-
-            match variant with
-            | Error failure -> state, Error failure
-            | Ok (Some found) -> state, Ok (Some found)
-            | Ok None ->
-
-            match
-                TypeSystemState.resolveBaseConcreteType loggerFactory dotnetRuntimeDirs baseClassTypes state level
-            with
-            | state, Error failure -> state, Error failure
-            | state, Ok None -> state, Ok None
-            | state, Ok (Some parent) -> onChain state parent
-
-        match onChain state constrained with
+        match
+            search
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                InterfaceMethodCaller.Call
+                constrained
+                target
+                (DefaultInterfaceImplementation.definitionOf state method)
+                state
+        with
         | state, Error failure -> state, Error failure
-        | state, Ok (Some implementation) -> state, Ok implementation
-        | state, Ok None ->
+        // A MethodImpl of the chain decides the call, so an order-dependent body is its answer.
+        | state, Ok (InterfaceMethodSearch.OnChain (level, body)) ->
+            state, Ok (found state level (DefaultInterfaceImplementation.certainOrRefuse body))
+        | state, Ok (InterfaceMethodSearch.DefaultBody candidate) ->
+            // The surviving candidate's body is the call's answer, so an order-dependent one is refused.
+            let body = DefaultInterfaceImplementation.certainOrRefuse candidate.Body
 
-        // 2. A default body, exactly and then allowing variance.
-        let fromDefault
-            (state : TypeSystemState)
-            (allowVariance : bool)
-            : TypeSystemState * Result<VirtualImplementation option, TypeBindingFailure>
-            =
-            match defaultBody loggerFactory dotnetRuntimeDirs baseClassTypes allowVariance constrained method state with
-            | state, Error failure -> state, Error failure
-            | state, Ok (DefaultBody.Unique candidate) ->
-                // The surviving candidate's body is the call's answer, so an order-dependent one is refused.
-                let body = DefaultInterfaceImplementation.certainOrRefuse candidate.Body
+            match body.Body with
+            | MethodBody.Abstract -> state, Ok (VirtualImplementation.Reabstracted body)
+            | MethodBody.Il _
+            | MethodBody.AsyncIl _
+            | MethodBody.MissingIl
+            | MethodBody.InternalCall
+            | MethodBody.PInvoke
+            | MethodBody.RuntimeProvided _ -> state, Ok (found state candidate.Interface body)
+        | state, Ok (InterfaceMethodSearch.Conflict candidates) ->
+            // Which candidates conflict depends on their interfaces, not their bodies, so the call is
+            // ambiguous whatever an order-dependent candidate's rows give (measured on .NET 10 and 11, one
+            // and two such candidates). The bodies only name the conflict; an order-dependent candidate is
+            // named by the body a read now finds.
+            let named (candidate : DefaultInterfaceImplementation.Candidate) =
+                match candidate.Body with
+                | DefaultInterfaceImplementation.FoundBody.Certain body -> body
+                | DefaultInterfaceImplementation.FoundBody.OrderDependent body -> body.Now
 
-                match body.Body with
-                | MethodBody.Abstract -> state, Ok (Some (VirtualImplementation.Reabstracted body))
-                | MethodBody.Il _
-                | MethodBody.AsyncIl _
-                | MethodBody.MissingIl
-                | MethodBody.InternalCall
-                | MethodBody.PInvoke
-                | MethodBody.RuntimeProvided _ -> state, Ok (Some (found state candidate.Interface body))
-            | state, Ok (DefaultBody.Conflict candidates) ->
-                // Which candidates conflict depends on their interfaces, not their bodies, so the call is
-                // ambiguous whatever an order-dependent candidate's rows give (measured on .NET 10 and 11, one
-                // and two such candidates). The bodies only name the conflict; an order-dependent candidate is
-                // named by the body a read now finds.
-                let named (candidate : DefaultInterfaceImplementation.Candidate) =
-                    match candidate.Body with
-                    | DefaultInterfaceImplementation.FoundBody.Certain body -> body
-                    | DefaultInterfaceImplementation.FoundBody.OrderDependent body -> body.Now
-
-                state, Ok (Some (VirtualImplementation.Ambiguous (candidates |> List.map named)))
-            | state, Ok DefaultBody.NotFound -> state, Ok None
-
-        match fromDefault state false with
-        | state, Error failure -> state, Error failure
-        | state, Ok (Some implementation) -> state, Ok implementation
-        | state, Ok None ->
-
-        match fromDefault state true with
-        | state, Error failure -> state, Error failure
-        | state, Ok (Some implementation) -> state, Ok implementation
-        | state, Ok None ->
-
-        // 3. The method's own body.
-        let definition = DefaultInterfaceImplementation.definitionOf state method
-
-        match definition.Body with
-        | MethodBody.Abstract -> state, Ok VirtualImplementation.NotImplemented
-        | MethodBody.Il _
-        | MethodBody.AsyncIl _
-        | MethodBody.MissingIl
-        | MethodBody.InternalCall
-        | MethodBody.PInvoke
-        | MethodBody.RuntimeProvided _ -> state, Ok (found state target definition)
+            state, Ok (VirtualImplementation.Ambiguous (candidates |> List.map named))
+        | state, Ok (InterfaceMethodSearch.OwnBody (declaringType, body)) -> state, Ok (found state declaringType body)
+        | state, Ok InterfaceMethodSearch.Nothing -> state, Ok VirtualImplementation.NotImplemented
 
     /// Resolve a `constrained.`-prefixed reference to a static abstract interface member down to
     /// the implementation the constrained type supplies, or to why there is none to run.

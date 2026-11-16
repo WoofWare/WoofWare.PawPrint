@@ -85,10 +85,10 @@ module internal DefaultInterfaceImplementation =
         | Some (a, _), Some (b, _) -> a.Identity = b.Identity
         | _ -> false
 
-    /// The definition of the interface method `method` instantiates.
+    /// The definition of the interface method `method` is, or instantiates.
     let internal definitionOf
         (state : TypeSystemState)
-        (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (method : WoofWare.PawPrint.MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
         : WoofWare.PawPrint.MethodInfo<GenericParamFromMetadata, GenericParamFromMetadata, TypeDefn>
         =
         match method.TryMetadata with
@@ -303,7 +303,7 @@ module internal DefaultInterfaceImplementation =
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (allowVariance : bool)
         (target : ConcreteTypeHandle)
-        (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (method : WoofWare.PawPrint.MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
         (candidate : ConcreteTypeHandle)
         (state : TypeSystemState)
         : TypeSystemState * Result<Candidate option, TypeBindingFailure>
@@ -423,11 +423,12 @@ module internal DefaultInterfaceImplementation =
         | state, Error failure -> state, Error failure
         | state, Ok (candidates, insert) -> state, Ok (if insert then candidates @ [ Some current ] else candidates)
 
-    /// The default bodies for `method`, an interface method as the call instantiates it, which survive
+    /// The default bodies for `method`, a method of the interface instantiation `target`, which survive
     /// CoreCLR's search among `receiver` and the interfaces of every type on its chain
-    /// (`MethodTable::FindDefaultInterfaceImplementation`), in the order that search leaves them. Each
-    /// level contributes only the interfaces its parent's map does not already hold. `allowVariance` admits a
-    /// variance-compatible instantiation of `method`'s interface, whose own body runs as that
+    /// (`MethodTable::FindDefaultInterfaceImplementation`), in the order that search leaves them. Only
+    /// `method`'s identity is read, so it may be the definition or the method as a call instantiates it.
+    /// Each level contributes only the interfaces its parent's map does not already hold. `allowVariance`
+    /// admits a variance-compatible instantiation of `target`, whose own body runs as that
     /// instantiation's, and counts two instantiations of one interface as equally specific.
     ///
     /// The survivors are distinct interfaces, none of which casts to another except as variance
@@ -443,14 +444,11 @@ module internal DefaultInterfaceImplementation =
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (allowVariance : bool)
         (receiver : ConcreteTypeHandle)
-        (method : WoofWare.PawPrint.MethodInfo<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>)
+        (target : ConcreteTypeHandle)
+        (method : WoofWare.PawPrint.MethodInfo<'typeGenerics, 'methodGenerics, 'methodVars>)
         (state : TypeSystemState)
         : TypeSystemState * Result<Candidate list, TypeBindingFailure>
         =
-        match TypeSystemState.internConcreteType baseClassTypes state method.RequiredDeclaringType with
-        | state, Error failure -> state, Error failure
-        | state, Ok target ->
-
         let consider
             (state : TypeSystemState)
             (candidates : Candidate option list)

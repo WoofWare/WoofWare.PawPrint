@@ -245,9 +245,12 @@ public static class Caller
 
         EmitScopeDefinitions.methodBody false 8us code None []
 
-    /// What PawPrint's resolver gives for `IDef.M` on `C`, at the module's end and when `C` was created: the body's
-    /// name, or the refusal's message.
-    let private pawPrintAnswers (schedule : Schedule) : Result<string, string> * Result<string, string> =
+    /// What PawPrint gives for `IDef.M` on `C`, at the module's end and when `C` was created: the body's name, or the
+    /// refusal's message, from the call's resolver and then from the interface map's.
+    let private pawPrintAnswers
+        (schedule : Schedule)
+        : (Result<string, string> * Result<string, string>) * (Result<string, string> * Result<string, string>)
+        =
         let _, loggerFactory = LoggerFactory.makeTest ()
         let fixture = fixture.Value
         let corelib = corelib.Value
@@ -420,7 +423,7 @@ public static class Caller
 
         let finalScope = fill schedule.After "H" atCreationScope
 
-        let resolve (loaded : LoadedAssemblies) : Result<string, string> =
+        let resolve (loaded : LoadedAssemblies) : Result<string, string> * Result<string, string> =
             let dirs = HostImage.runtimeDirs
             let bct = bct.Value
 
@@ -463,18 +466,42 @@ public static class Caller
                     state
                 |> BindingResult.bound
 
-            match
-                (try
-                    Ok (
-                        StaticVirtualDispatch.resolve loggerFactory dirs bct constrained (fst concretized) state
-                        |> snd
-                    )
-                 with e ->
-                     Error e.Message)
-            with
-            | Error message -> Error message
-            | Ok (Ok (VirtualImplementation.Found found)) -> Ok found.Definition.Name
-            | Ok other -> failwith $"expected IDef.M to resolve to a body of C, got %A{other}"
+            let call =
+                match
+                    (try
+                        Ok (
+                            StaticVirtualDispatch.resolve loggerFactory dirs bct constrained (fst concretized) state
+                            |> snd
+                        )
+                     with e ->
+                         Error e.Message)
+                with
+                | Error message -> Error message
+                | Ok (Ok (VirtualImplementation.Found found)) -> Ok found.Definition.Name
+                | Ok other -> failwith $"expected IDef.M to resolve to a body of C, got %A{other}"
+
+            let iDef =
+                AllConcreteTypes.findExistingConcreteType
+                    state.ConcreteTypes
+                    m.RequiredDeclaringType.Identity
+                    ImmutableArray.Empty
+                |> Option.defaultWith (fun () -> failwith "IDef was concretised but is not registered")
+
+            let map =
+                match
+                    (try
+                        Ok (
+                            InterfaceMethodImplementation.resolve loggerFactory dirs bct constrained iDef m state
+                            |> snd
+                        )
+                     with e ->
+                         Error e.Message)
+                with
+                | Error message -> Error message
+                | Ok (Ok (InterfaceMapTarget.Method (body, _))) -> Ok body.Name
+                | Ok other -> failwith $"expected IDef.M to map to a body of C, got %A{other}"
+
+            call, map
 
         let atCreation = resolve loaded
         let loaded, _ = loaded.WithEmitScope loggerFactory name finalScope
@@ -500,7 +527,7 @@ public static class Caller
     let ``static virtual resolution over a dynamic module's rows agrees with real .NET's TypeBuilder`` () : unit =
         let property (cover : Reach -> unit) (schedule : Schedule) : unit =
             let hostAtCreation, hostAtEnd = hostAnswers schedule
-            let atEnd, atCreation = pawPrintAnswers schedule
+            let (atEnd, mapAtEnd), (atCreation, mapAtCreation) = pawPrintAnswers schedule
 
             // When `C` is created, PawPrint's module has the rows real .NET's had then.
             let show (answer : Result<string, string>) : string =
@@ -509,6 +536,11 @@ public static class Caller
                 | Error message -> $"refused: %s{message}"
 
             show atCreation |> shouldEqual $"runs %s{hostAtCreation}"
+
+            // The interface map reads the rows afresh, as `GetInterfaceMap` does, so it answers the host's
+            // body at both reads, the window where the call is refused included.
+            show mapAtCreation |> shouldEqual $"runs %s{hostAtCreation}"
+            show mapAtEnd |> shouldEqual $"runs %s{hostAtEnd}"
 
             let forward = $"B%d{List.head schedule.Rows}"
             let backward = $"B%d{List.last schedule.Rows}"
