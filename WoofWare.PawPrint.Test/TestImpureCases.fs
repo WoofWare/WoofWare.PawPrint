@@ -7430,6 +7430,25 @@ module TestImpureCases =
                 AssertTerminalState = None
             }
             {
+                // `RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals` over created `TypeBuilder` types: an
+                // interface counted through the QCall's wrapper, and a class through `GetInterfaceMap`.
+                // Dynamic-code switch overridden to true like the other `TypeBuilder` guests; measured to
+                // exit 0 on real .NET 10 and 11.
+                FileName = "TypeBuilderGetNumVirtualsAndStaticVirtuals.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `MetadataImport.Enum` of a dynamic module's TypeDef, which has no Event rows, then of
                 // its compiled base's, through `GetEvents` of a dynamic type deriving from a class with
                 // events. Dynamic-code switch overridden to true like its siblings; measured to exit 0
