@@ -323,6 +323,54 @@ module VirtualSlotLayout =
         | RuntimeTypeHandleTarget.Closed handle ->
             numVirtualsOfClosed loggerFactory baseClassTypes operation state handle
 
+    /// The static virtual methods in the method table of <paramref name="target"/>, in slot order:
+    /// `MethodTableLayout.staticVirtualsOfDefinition` of the definition that method table is laid out
+    /// from. Empty for every target that is not an interface. A TypeDesc has no method table and
+    /// fails, so a caller refuses one first.
+    let private staticVirtualsOf
+        (operation : string)
+        (state : IlMachineState)
+        (target : RuntimeTypeHandleTarget)
+        : VtableSlot list
+        =
+        let ofDefinition (identity : ResolvedTypeIdentity) : VtableSlot list =
+            let _, typeInfo = definitionMetadata operation state identity
+            MethodTableLayout.staticVirtualsOfDefinition operation (ownerOfDefinition operation state identity) typeInfo
+
+        let typeDesc () : VtableSlot list =
+            failwith
+                $"%s{operation}: %O{target} is a TypeDesc with no method table, which the caller refuses before asking for its static virtuals"
+
+        match target with
+        | RuntimeTypeHandleTarget.Closed handle ->
+            match handle with
+            | ConcreteTypeHandle.Concrete _ ->
+                // A closed type's slots past the vtable are its definition's, the same for every
+                // instantiation.
+                match IlMachineState.tryGetConcreteTypeInfo state handle with
+                | Some (concreteType, _) -> ofDefinition concreteType.Identity
+                | None -> failwith $"%s{operation}: concrete type handle %O{handle} is not a nominal type"
+            // An array's method table is laid out from `System.Array`'s, a class. Do not ask
+            // `slotTableOfClosed`, which refuses an array because the intrinsic methods past its
+            // vtable are not modelled: whatever they are, none is virtual, so the tail is empty.
+            | ConcreteTypeHandle.OneDimArrayZero _
+            | ConcreteTypeHandle.Array _
+            // The runtime gives a continuation type no methods of its own, and its parent is a class.
+            | ConcreteTypeHandle.Continuation _ -> []
+            | ConcreteTypeHandle.Byref _
+            | ConcreteTypeHandle.Pointer _
+            | ConcreteTypeHandle.FunctionPointer _ -> typeDesc ()
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity
+        | RuntimeTypeHandleTarget.OpenConstructed (identity, _) -> ofDefinition identity
+        // An array over a variable has `System.Array`'s slots, as a closed array does.
+        | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) -> []
+        | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
+            RuntimeTypeHandleTarget.refuseMetadataQuery operation scopeAssembly
+        | RuntimeTypeHandleTarget.GenericParameter _
+        | RuntimeTypeHandleTarget.MethodGenericParameter _
+        | RuntimeTypeHandleTarget.Composite ((CompositeShape.Byref | CompositeShape.Pointer), _)
+        | RuntimeTypeHandleTarget.FunctionPointer _ -> typeDesc ()
+
     /// What `RuntimeTypeHandle_GetMethodAt` finds at a slot of a type's method table.
     [<RequireQualifiedAccess>]
     type MethodAtSlot =
@@ -361,21 +409,15 @@ module VirtualSlotLayout =
                 $"%s{operation}: slot %d{slot} is negative; the managed wrapper throws ArgumentException before this point"
 
         // `MethodTable::HasVirtualStaticMethods() && IsInterface()`: the tail past the vtable is
-        // searched only for an interface, and only its static virtuals are counted along it.
-        let staticVirtualsOf (isInterface : bool) (beyondVtable : VtableSlot list) : VtableSlot list =
-            if isInterface then
-                beyondVtable
-                |> List.filter (fun candidate -> candidate.Method.IsVirtual && candidate.Method.IsStatic)
-            else
-                []
-
-        let answer (vtable : VtableSlot list) (staticVirtuals : VtableSlot list) : MethodAtSlot =
+        // searched only for an interface, and only its static virtuals are counted along it, which
+        // is what `staticVirtualsOf` answers.
+        let answer (state : IlMachineState) (vtable : VtableSlot list) : MethodAtSlot =
             let numVirtuals = List.length vtable
 
             if slot < numVirtuals then
                 MethodAtSlot.Method vtable.[slot]
             else
-                match List.tryItem (slot - numVirtuals) staticVirtuals with
+                match List.tryItem (slot - numVirtuals) (staticVirtualsOf operation state target) with
                 | Some found -> MethodAtSlot.Method found
                 | None -> MethodAtSlot.OutOfRange
 
@@ -390,23 +432,7 @@ module VirtualSlotLayout =
                     $"%s{operation}: %O{target} is a TypeDesc with no method table; the managed wrapper throws ArgumentException before this point"
             | Some table ->
 
-            let vtable = List.ofSeq table.Occupants
-
-            // Only an interface has a static-virtual tail, and only a nominal type can be one: an
-            // array's slots are `System.Array`'s, which is a class.
-            let state, staticVirtuals =
-                match handle with
-                | ConcreteTypeHandle.Concrete _ ->
-                    match IlMachineState.tryGetConcreteTypeInfo state handle with
-                    | Some (_, typeInfo) when typeInfo.IsInterface ->
-                        let state, slotTable =
-                            slotTableOfClosed loggerFactory baseClassTypes operation state handle
-
-                        state, staticVirtualsOf true slotTable.BeyondVtable
-                    | _ -> state, []
-                | _ -> state, []
-
-            state, answer vtable staticVirtuals
+            state, answer state (List.ofSeq table.Occupants)
         | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity
         | RuntimeTypeHandleTarget.OpenConstructed (identity, _) ->
             // An open construction's slots are its definition's, as `numVirtuals` says; only the
@@ -414,18 +440,7 @@ module VirtualSlotLayout =
             let state, vtable =
                 contentVtableOfDefinition loggerFactory baseClassTypes operation state identity
 
-            let _, typeInfo = definitionMetadata operation state identity
-
-            let state, staticVirtuals =
-                if typeInfo.IsInterface then
-                    let state, slotTable =
-                        slotTableOfDefinition loggerFactory baseClassTypes operation state identity
-
-                    state, staticVirtualsOf true slotTable.BeyondVtable
-                else
-                    state, []
-
-            state, answer vtable staticVirtuals
+            state, answer state vtable
         | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
             RuntimeTypeHandleTarget.refuseMetadataQuery operation scopeAssembly
         | RuntimeTypeHandleTarget.GenericParameter _
