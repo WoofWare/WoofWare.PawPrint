@@ -639,6 +639,13 @@ module TypeHandleTag =
             | ConcreteTypeHandle.OneDimArrayZero _
             | ConcreteTypeHandle.Array _ -> 0L
 
+    /// CoreCLR's `TypeHandle::IsTypeDesc` (`typehandle.h`): whether a handle to `target` is a
+    /// `TypeDesc` rather than a `MethodTable`. A byref, a pointer, a function pointer and a type
+    /// variable (of a type or of a method) are TypeDescs; an array of any rank, a generic type
+    /// definition, an open constructed type and the dynamic-methods class are MethodTables. This
+    /// is the tag `forTarget` carries, and refuses where it refuses.
+    let isTypeDesc (target : RuntimeTypeHandleTarget) : bool = forTarget target <> 0L
+
 [<RequireQualifiedAccess>]
 module NativeIntSource =
     let syntheticCrossStorageByteOffset
