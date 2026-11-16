@@ -262,11 +262,20 @@ type SynchronizedFrame =
     /// The enter helper has not been called, so nothing of the frame has run, not even its
     /// type-initialisation check, which the JIT puts inside the region the monitor guards.
     | AwaitingEnter
-    /// The enter helper has been called, and the body runs inside the region whose fault handler
+    /// The frame is calling the enter helper, inside the region whose fault handler calls the exit
+    /// helper but outside every clause of the method's own.
+    | Entering of SynchronizedMonitor
+    /// The enter helper has returned, and the body runs inside the region whose fault handler
     /// calls the exit helper.
     | Holding of SynchronizedMonitor
-    /// The exception `unwind` describes is leaving the body, whose fault handler calls the exit
-    /// helper next; the second pass resumes once it returns.
+    /// The frame is calling the exit helper at a `ret`, inside the region whose fault handler calls
+    /// the exit helper but outside every clause of the method's own; the `ret` runs again once it
+    /// returns.
+    | ExitingOnReturn of SynchronizedMonitor
+    /// The exception `unwind` describes is leaving the body, and the fault handler is calling the
+    /// exit helper, outside every clause of the method's own; the second pass resumes once it
+    /// returns. An exception leaving the helper replaces `unwind`, and leaves the frame without
+    /// running anything more of it.
     | ExitingOnUnwind of
         SynchronizedMonitor *
         unwind : ExceptionUnwindState<ConcreteTypeHandle, ConcreteTypeHandle, ConcreteTypeHandle>
@@ -373,9 +382,10 @@ type ExceptionEscape =
     | AsyncContextHelper
     /// The runtime calls this monitor helper for the synchronized method's frame beneath it
     /// (`SynchronizedMethodStep`). CoreCLR's JIT makes the call inside the `try` its fault handler
-    /// guards but outside every clause of the method's own, which PawPrint's search of that frame
-    /// cannot tell from the instruction the frame is at, so exception dispatch ends the run on
-    /// reaching such a frame's boundary.
+    /// guards but outside every clause of the method's own, so the frame beneath offers an
+    /// exception escaping the helper none of its clauses and runs none of its cleanup clauses. The
+    /// frame's `SynchronizedFrame` says it is making such a call, which the instruction it is at
+    /// cannot.
     | SynchronizedMethodHelper
 
 /// What a native frame PawPrint implements keeps between its entries: what a C function
