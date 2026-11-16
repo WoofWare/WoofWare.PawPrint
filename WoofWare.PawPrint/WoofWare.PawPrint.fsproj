@@ -113,6 +113,7 @@
          needs this walk too. Needs nothing after IlMachineState.fs. -->
     <Compile Include="VirtualSlotLayout.fs" />
     <Compile Include="InterfaceDispatch.fs" />
+    <Compile Include="RuntimeTypeInterfaces.fs" />
     <Compile Include="FieldRvaData.fs" />
     <Compile Include="MethodTableProjection.fs" />
     <Compile Include="RawArrayDataProjection.fs" />
