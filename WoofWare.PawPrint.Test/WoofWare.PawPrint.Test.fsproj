@@ -306,6 +306,7 @@
     <Compile Include="TestTypeVisibility.fs" />
     <Compile Include="TestIsVisibleSameImage.fs" />
     <Compile Include="TestExportedTypeSelection.fs" />
+    <Compile Include="HostTypeTarget.fs" />
     <Compile Include="TestInterfaceVerification.fs" />
     <Compile Include="TestGcHandleRegistry.fs" />
     <Compile Include="TestSha256.fs" />
