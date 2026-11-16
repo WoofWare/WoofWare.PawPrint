@@ -112,7 +112,9 @@ module ConcreteInterfaceDispatch =
             | MetadataToken.TypeDefinition _
             | MetadataToken.TypeReference _ -> ImmutableArray.Empty
             | MetadataToken.TypeSpecification handle ->
-                match spellingAssembly.TypeSpecs.[handle].Signature with
+                // A TypeSpec blob may begin with custom modifiers, which CoreCLR passes over when it
+                // loads the type the blob names.
+                match TypeDefn.stripCustomModifiers spellingAssembly.TypeSpecs.[handle].Signature with
                 | TypeDefn.GenericInstantiation (_, arguments) -> ImmutableArray.CreateRange arguments
                 | _ -> ImmutableArray.Empty
             | other ->
@@ -128,10 +130,12 @@ module ConcreteInterfaceDispatch =
 
         TypeConcretization.SubstitutionContext.forBase spellingAssembly.DefinitionFullName arguments spellingContext
 
-    /// The interface map of a class or value type, in CoreCLR's order: the parent's entries first,
-    /// then each interface the type declares followed by its own parents, depth-first, each
-    /// instantiation appearing once (`MethodTableBuilder::ExpandApproxInheritedInterfaces` and
-    /// `ExpandApproxDeclaredInterfaces`, methodtablebuilder.cpp).
+    /// The interface map of a class, value type or interface, in CoreCLR's order: the parent's
+    /// entries first, then each interface the type declares followed by its own parents,
+    /// depth-first, each instantiation appearing once (`MethodTableBuilder::ExpandApproxInheritedInterfaces`
+    /// and `ExpandApproxDeclaredInterfaces`, methodtablebuilder.cpp). This is the list
+    /// `Type.GetInterfaces()` reports, entry for entry. An interface has no parent, so its map is
+    /// its own rows, each followed by its parents.
     ///
     /// Instantiations are told apart as CoreCLR tells them apart, on the generic definition, so a
     /// type naming two instantiations that its own arguments make coincide -- `C<T, U> : I<T>, I<U>`
