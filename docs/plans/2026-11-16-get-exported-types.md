@@ -672,7 +672,8 @@ own.
 - Under option B a forwarded type can only reach the array through `FileExports`, so the guest's check 9 cannot see the
   "keep forwarders" mutant: that mutant ends in the File refusal (on the guest, at a host `BadImageFormatException`
   reading File row 1, which the guest does not have) rather than at exit 9.
-- The refuse-before-load mutant is unobservable until (b) is done. This PR does not comment on #2287 to say so.
+- The refuse-before-load mutant is unobservable until (b) is done. #2287 already says so, and asks for the test
+  once the exception is raised.
 
 **Suites**, after a whole-solution build at the implementation commit rebased on `a66b75274`, each a separate
 invocation, all `Test Run Successful`: the default suite 5830 (5791 passed, 39 skipped); `TestCategory=Guest` 234;
