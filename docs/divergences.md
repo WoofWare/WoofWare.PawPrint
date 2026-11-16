@@ -732,7 +732,7 @@ Console.WriteLine (typeof (List<string>).GetMethod ("Add")
 
 `sourcesPure/DelegateDynamicInvoke.cs` asserts handle distinctness only for pairs CoreCLR shares nothing between — a value-type instantiation against a reference-type one, and two unrelated delegate definitions — and says at the assertion why the reference/reference pair cannot join it. `sourcesImpure/DelegateInvokeHandlePerInstantiation.cs` pins PawPrint's own answer for that pair, which is what keeps this entry from being a claim nothing checks.
 
-**Where this lives in code**: `MethodHandleRegistry`, whose `MethodHandle` keys on a closed `ConcreteTypeHandle` declaring type — every minting path inherits the choice. `NativeDelegate.tryExecute`'s `Delegate.GetInvokeMethod` arm is one such path.
+**Where this lives in code**: `MethodHandleRegistry`, whose `MethodHandle` keys on a closed `ConcreteTypeHandle` declaring type — every minting path inherits the choice. `NativeDelegate.tryExecute`'s `Delegate.GetInvokeMethod` arm is one such path. The `RuntimeTypeHandle_GetInterfaceMethodImplementation` QCall, behind `Type.GetInterfaceMap`, is another: where CoreCLR answers `CGBase<__Canon>.M` for a class inheriting from `CGBase<string>`, or a value type's unboxing stub, PawPrint answers `CGBase<string>.M` or the value type's own method, and `GetMethodBase` turns either into the same `MethodInfo`.
 
 ## A field handle is per-instantiation, so `RuntimeFieldHandle.AcquiresContextFromThis` is always false
 

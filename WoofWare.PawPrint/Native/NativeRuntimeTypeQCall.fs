@@ -2372,6 +2372,115 @@ module NativeRuntimeTypeQCall =
             |> IlMachineState.pushToEvalStack (CliType.Numeric (CliNumericType.Int32 count)) ctx.Thread
             |> NativeHandlerResult.completed
             |> Some
+        // `[LibraryImport(..., EntryPoint = "RuntimeTypeHandle_GetInterfaceMethodImplementation")]`, called by
+        // the instance method `RuntimeTypeHandle.GetInterfaceMethodImplementation(RuntimeTypeHandle,
+        // RuntimeMethodHandleInternal)` with `GetNativeHandle()` of the receiver and of the interface, and an
+        // interface method's handle as `GetMethodAt` minted it. `RuntimeType.GetInterfaceMap` is its only
+        // caller, after `VerifyInterfaceIsImplemented` has accepted the pair.
+        | "RuntimeTypeHandle_GetInterfaceMethodImplementation",
+          "System.Private.CoreLib",
+          "System",
+          "RuntimeTypeHandle",
+          _,
+          [ CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        receiverGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System.Runtime.CompilerServices",
+                                                        "QCallTypeHandle",
+                                                        interfaceGenerics)
+            CorelibType state.TypeSystem.ConcreteTypes ("System", "RuntimeMethodHandleInternal", methodGenerics) ],
+          MethodReturnType.Returns (CorelibType state.TypeSystem.ConcreteTypes ("System",
+                                                                                "RuntimeMethodHandleInternal",
+                                                                                returnGenerics)) when
+            receiverGenerics.IsEmpty
+            && interfaceGenerics.IsEmpty
+            && methodGenerics.IsEmpty
+            && returnGenerics.IsEmpty
+            ->
+            let operation = "RuntimeTypeHandle_GetInterfaceMethodImplementation"
+
+            if instruction.Arguments.Length <> 3 then
+                failwith $"%s{operation}: expected three native arguments, got %d{instruction.Arguments.Length}"
+
+            let receiver =
+                instruction.Arguments.[0]
+                |> EvalStackValue.ofCliType
+                |> NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state
+
+            let interfaceType =
+                instruction.Arguments.[1]
+                |> EvalStackValue.ofCliType
+                |> NativeCall.qCallTypeHandleToRuntimeTypeHandleTarget operation state
+
+            let identity =
+                NativeRuntimeMethodHandle.resolveMetadataIdentityFromArg operation state instruction.Arguments.[2]
+
+            let receiverHandle, interfaceHandle =
+                match receiver, interfaceType with
+                | RuntimeTypeHandleTarget.Closed receiverHandle, RuntimeTypeHandleTarget.Closed interfaceHandle ->
+                    receiverHandle, interfaceHandle
+                | _ ->
+                    failwith
+                        $"TODO: %s{operation} of the interface %O{interfaceType} on the receiver %O{receiver}, one of which is not closed: real .NET answers with a method of the open receiver or of the interface, over the definition's own type variables, which ConcreteTypeHandle cannot express (#2303)"
+
+            if identity.GetDeclaringType () <> interfaceType then
+                failwith
+                    $"%s{operation}: the interface method's handle is declared by %O{identity.GetDeclaringType ()}, not by the interface %O{interfaceType} it was passed with; GetInterfaceMap asks only about a method GetMethodAt minted on that interface"
+
+            if not (List.isEmpty (identity.GetMethodGenerics ())) then
+                failwith
+                    $"%s{operation}: the interface method's handle carries a method instantiation; GetInterfaceMap asks only about a method definition, as GetMethodAt mints it"
+
+            let definition =
+                MethodHandleResolution.methodInfoOfMetadataIdentity operation state identity
+
+            let typeSystem, result =
+                InterfaceMethodImplementation.resolve
+                    ctx.LoggerFactory
+                    state.DotnetRuntimeDirs
+                    ctx.BaseClassTypes
+                    receiverHandle
+                    interfaceHandle
+                    definition
+                    state.TypeSystem
+
+            let state = state.WithTypeSystem typeSystem
+
+            let push (state : IlMachineState) (handle : CliValueType) : NativeHandlerResult option =
+                state
+                |> IlMachineState.pushToEvalStack (CliType.ValueType handle) ctx.Thread
+                |> NativeHandlerResult.completed
+                |> Some
+
+            match BindingStop.bound result with
+            | InterfaceMapTarget.Method (target, declaringType) ->
+                // The handle is declared by the type the search found the target on, at that type's
+                // instantiation, as `GetMethodAt` mints a slot's occupant. CoreCLR's would be the canonical
+                // `MethodDesc`, or a value type's unboxing stub; `GetMethodBase` resolves either to the same
+                // `MethodInfo`.
+                let handle, registry =
+                    MethodHandleRegistry.getOrAllocateInternalHandle
+                        ctx.BaseClassTypes
+                        state.TypeSystem.ConcreteTypes
+                        target.DeclaringAssemblyFullName
+                        (RuntimeTypeHandleTarget.Closed declaringType)
+                        target
+                        state.MethodHandles
+
+                push
+                    { state with
+                        MethodHandles = registry
+                    }
+                    handle
+            // `IsNullHandle()` is what the managed caller tests, and it compares `m_handle` with a verbatim zero.
+            | InterfaceMapTarget.NoTarget ->
+                push state (MethodHandleRegistry.zeroInternalHandle ctx.BaseClassTypes state.TypeSystem.ConcreteTypes)
+            // `ResolveVirtualStaticMethod` throws through `ThrowAmbiguousResolutionException`, whose message
+            // PawPrint does not render; the exception carries its parameterless constructor's message, as the
+            // call path's does.
+            | InterfaceMapTarget.Ambiguous _ ->
+                NativeHandlerResult.raiseException ctx.BaseClassTypes.AmbiguousImplementationException state
+                |> Some
         | "RuntimeTypeHandle_GetMethodAt",
           "System.Private.CoreLib",
           "System",

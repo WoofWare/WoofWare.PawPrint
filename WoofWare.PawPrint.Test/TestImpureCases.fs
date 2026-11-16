@@ -7790,6 +7790,25 @@ module TestImpureCases =
                 AssertTerminalState = Some assertInterfaceImplRows
             }
             {
+                // `Type.GetInterfaceMap` over created types: a proxy-shaped MethodImpl naming a private
+                // method, an implicit implementation by name, and an abstract class implementing nothing,
+                // whose row has no target. Dynamic-code switch overridden to true like its siblings;
+                // verified by hand to exit 0 on real .NET 10 and 11.
+                FileName = "TypeBuilderGetInterfaceMap.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `ModuleBuilder_GetTokenFromTypeSpec`, through `castclass` and `isinst` naming generic
                 // instantiations: each signature one TypeSpec row, found before it is added;
                 // `assertTypeSpecRows` reads the rows. Dynamic-code switch overridden to true like its

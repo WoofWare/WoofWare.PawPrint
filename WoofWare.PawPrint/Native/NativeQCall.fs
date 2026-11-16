@@ -143,6 +143,8 @@ module NativeQCall =
             "RuntimeTypeHandle_GetMethodAt", NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetMethodAt"
             "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals",
             NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetNumVirtualsAndStaticVirtuals"
+            "RuntimeTypeHandle_GetInterfaceMethodImplementation",
+            NativeRuntimeType.tryExecuteQCall "RuntimeTypeHandle_GetInterfaceMethodImplementation"
             "ModuleHandle_ResolveType", NativeRuntimeType.tryExecuteQCall "ModuleHandle_ResolveType"
             "ModuleHandle_ResolveMethod", NativeRuntimeType.tryExecuteQCall "ModuleHandle_ResolveMethod"
             "MethodTable_CanCompareBitsOrUseFastGetHashCode",
