@@ -937,8 +937,9 @@ public static class Program
 """
         |> refusesDefinitionOverInterfacefulBase "DefinitionOverClosedBase"
 
-    /// A definition whose base classes have no interfaces answers its own closed rows, whether its
-    /// base is `object`, a closed class, or an open construction over its own variable.
+    /// A definition whose base classes have no interfaces answers its own closed rows, each followed
+    /// by its parents, whether its base is `object`, a closed class, or an open construction over its
+    /// own variable.
     [<Test>]
     let ``A generic definition whose base classes have no interfaces is answered`` () : unit =
         {
@@ -952,11 +953,13 @@ public static class Program
 using System;
 
 public interface IB { }
+public interface IC : IB { }
 public class EmptyClosed { }
 public class EmptyOpen<T> { }
 public class OverObject<T> : IDisposable, IB { public void Dispose() { } }
 public class OverEmptyClosed<T> : EmptyClosed, IDisposable { public void Dispose() { } }
 public class OverEmptyOpen<T> : EmptyOpen<T>, IB, IDisposable { public void Dispose() { } }
+public class OverObjectWithParents<T> : IC, IDisposable { public void Dispose() { } }
 
 public static class Program
 {
@@ -968,6 +971,8 @@ public static class Program
         if (b.Length != 1 || b[0] != typeof(IDisposable)) return 2;
         Type[] c = typeof(OverEmptyOpen<>).GetInterfaces();
         if (c.Length != 2 || c[0] != typeof(IB) || c[1] != typeof(IDisposable)) return 3;
+        Type[] d = typeof(OverObjectWithParents<>).GetInterfaces();
+        if (d.Length != 3 || d[0] != typeof(IC) || d[1] != typeof(IB) || d[2] != typeof(IDisposable)) return 4;
         return 0;
     }
 }
