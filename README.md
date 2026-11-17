@@ -78,6 +78,18 @@ whole solution and the local tools restore offline with empty package, tool and 
 caches, that both tools start, and that `CSharpExample` publishes as a self-contained
 application for each supported RID.
 
+## Publishing a release
+
+Publishing is manual before 1.0. In GitHub Actions, select the **.NET** workflow, choose
+**Run workflow**, and select the `main` branch. The run builds and checks all packages,
+runs the full test suite, and then publishes all six packages to NuGet and GitHub Releases.
+Pull requests, merge-queue runs, forks and manual runs on other branches do not publish.
+
+Publishing uses the `main-deploy` GitHub environment and the `NUGET_USER` secret. The
+corresponding NuGet trusted publishing policy must allow this repository's `ci.yaml`
+workflow and `main-deploy` environment to publish these packages. Versions come from
+Nerdbank.GitVersioning; packages whose versions are already on NuGet are skipped.
+
 ## Goals
 
 * Fully deterministic, ultimately to the point of supporting time-travel debugging and fuzzing over the order of thread execution. All sources of nondeterminism must be controllable by the PawPrint user somehow, such that emulating the same program twice from the same starting state always produces the same execution history.
