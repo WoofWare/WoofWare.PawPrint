@@ -7,7 +7,7 @@
         <PackageId>WoofWare.PawPrint.Analysis</PackageId>
         <Authors>Patrick Stevens</Authors>
         <Copyright>Copyright (c) Patrick Stevens 2026</Copyright>
-        <Description>Questions about a .NET method answered without running it, starting with which exceptions can escape it. Built on WoofWare.PawPrint.Loader and WoofWare.PawPrint.Semantics, never on the interpreter.</Description>
+        <Description>Static analysis of .NET methods, e.g. tracking the exceptions which can be raised from a method.</Description>
         <RepositoryType>git</RepositoryType>
         <RepositoryUrl>https://github.com/WoofWare/WoofWare.PawPrint</RepositoryUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

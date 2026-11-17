@@ -7,7 +7,7 @@
     <PackageId>WoofWare.PawPrint</PackageId>
     <Authors>Patrick Stevens</Authors>
     <Copyright>Copyright (c) Patrick Stevens 2026</Copyright>
-    <Description>An experimental, fully-deterministic, fully-managed .NET IL interpreter written in F#. It reimplements P/Invoke in managed code and keeps all state in memory, enabling time-travel debugging and fuzzing over thread execution order. Emulates .NET 10.</Description>
+    <Description>A fully-deterministic, fully-managed .NET IL interpreter written in F#. It reimplements P/Invoke in managed code and keeps all state in memory, enabling time-travel debugging and fuzzing over thread execution order.</Description>
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/WoofWare/WoofWare.PawPrint</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

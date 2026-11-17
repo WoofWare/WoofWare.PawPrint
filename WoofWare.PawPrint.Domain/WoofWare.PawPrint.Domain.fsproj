@@ -7,7 +7,7 @@
         <PackageId>WoofWare.PawPrint.Domain</PackageId>
         <Authors>Patrick Stevens</Authors>
         <Copyright>Copyright (c) Patrick Stevens 2026</Copyright>
-        <Description>Shared domain types for WoofWare.PawPrint, an experimental fully-deterministic, fully-managed .NET IL interpreter: IL opcodes, the emulated type system, and metadata-handle wrappers.</Description>
+        <Description>Shared domain types for WoofWare.PawPrint, a fully-deterministic, fully-managed .NET IL interpreter.</Description>
         <RepositoryType>git</RepositoryType>
         <RepositoryUrl>https://github.com/WoofWare/WoofWare.PawPrint</RepositoryUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
