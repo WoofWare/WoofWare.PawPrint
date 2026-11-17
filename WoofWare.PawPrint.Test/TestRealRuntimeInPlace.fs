@@ -363,7 +363,8 @@ public static class Program
     /// Exits as its first argument says: `exit <n>`, `throw`, or `failfast`; or, given `args`,
     /// prints its command line joined by `|`, the first element by its file name alone, and exits
     /// 0; or, given `framework`, prints the last two components of the directory CoreLib was
-    /// loaded from (the framework's name and version) and exits 0.
+    /// loaded from (the framework's name and version) and exits 0; or, given `cwd`, prints the
+    /// name of its working directory and whether `EndsAsTold.dll` is in it, and exits 0.
     ///
     /// The host resolves symbolic links in both paths (`/tmp` on macOS, the Nix store's links),
     /// so the guest cannot print either as the test spells it.
@@ -400,6 +401,9 @@ public static class Program
                 var directory = Path.GetDirectoryName(typeof(object).Assembly.Location);
                 Console.WriteLine("framework: " + Path.GetFileName(Path.GetDirectoryName(directory)) + "/" + Path.GetFileName(directory));
                 return 0;
+            case "cwd":
+                Console.WriteLine("working directory: " + Path.GetFileName(Directory.GetCurrentDirectory()) + " " + File.Exists("EndsAsTold.dll"));
+                return 0;
             default:
                 return 100;
         }
@@ -428,6 +432,24 @@ public static class Program
                 | RealRuntimeResult.Aborted (ObservedFatalError.FailFast, report) ->
                     report |> shouldContainText "failed fast by the guest"
                 | other -> failwith $"expected a FailFast abort, got %A{other}"
+            )
+
+    [<Test>]
+    let ``the guest's working directory is the assembly's directory`` () : unit =
+        laidOut
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let run =
+                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "cwd" |] dllPath
+
+                (run.Result, run.Stdout)
+                |> shouldEqual (
+                    RealRuntimeResult.NormalExit 0,
+                    $"working directory: %s{Path.GetFileName (Path.GetDirectoryName dllPath)} True"
+                    + Environment.NewLine
+                )
             )
 
     [<Test>]
