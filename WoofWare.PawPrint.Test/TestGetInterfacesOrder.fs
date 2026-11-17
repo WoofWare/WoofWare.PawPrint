@@ -1067,6 +1067,194 @@ public struct S2<T> : IC<T[]> { }
         finally
             context.Unload ()
 
+    // ----- A re-declared interface whose row does not load -----
+
+    /// An image with `I<T>`, `B : I<int>` and `C : B, I<int>`, where `C`'s row spells its `I<int>`
+    /// as `GENERICINST VALUETYPE` (`asValueType`) or, correctly, as `GENERICINST CLASS`. C# never
+    /// writes the first.
+    let private respelledInterfaceImage (asValueType : bool) : byte[] =
+        let metadata = Reflection.Metadata.Ecma335.MetadataBuilder ()
+        let nil = Unchecked.defaultof<Reflection.Metadata.EntityHandle>
+
+        let definition (handle : Reflection.Metadata.TypeDefinitionHandle) : Reflection.Metadata.EntityHandle =
+            Reflection.Metadata.TypeDefinitionHandle.op_Implicit handle
+
+        metadata.AddModule (
+            0,
+            metadata.GetOrAddString "RespelledRow.dll",
+            metadata.GetOrAddGuid (Guid ("0f5b8c2a-3d61-4e7b-9a40-5c7e2d18b963")),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>
+        )
+        |> ignore<Reflection.Metadata.ModuleDefinitionHandle>
+
+        metadata.AddAssembly (
+            metadata.GetOrAddString "RespelledRow",
+            Version (1, 0, 0, 0),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>,
+            enum<Reflection.AssemblyFlags> 0,
+            Reflection.AssemblyHashAlgorithm.None
+        )
+        |> ignore<Reflection.Metadata.AssemblyDefinitionHandle>
+
+        let coreLibName = hostCoreLib.GetName ()
+
+        let coreLibRef =
+            metadata.AddAssemblyReference (
+                metadata.GetOrAddString coreLibName.Name,
+                coreLibName.Version,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddBlob (coreLibName.GetPublicKeyToken ()),
+                enum<Reflection.AssemblyFlags> 0,
+                Unchecked.defaultof<_>
+            )
+
+        let objectRef =
+            metadata.AddTypeReference (
+                Reflection.Metadata.AssemblyReferenceHandle.op_Implicit coreLibRef,
+                metadata.GetOrAddString "System",
+                metadata.GetOrAddString "Object"
+            )
+            |> fun handle ->
+                (Reflection.Metadata.TypeReferenceHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+
+        let addType
+            (name : string)
+            (attributes : Reflection.TypeAttributes)
+            (baseType : Reflection.Metadata.EntityHandle)
+            =
+            metadata.AddTypeDefinition (
+                attributes,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddString name,
+                baseType,
+                Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle 1,
+                Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle 1
+            )
+
+        addType "<Module>" Reflection.TypeAttributes.NotPublic nil
+        |> ignore<Reflection.Metadata.TypeDefinitionHandle>
+
+        let iface =
+            addType
+                "I`1"
+                (Reflection.TypeAttributes.Public
+                 ||| Reflection.TypeAttributes.Interface
+                 ||| Reflection.TypeAttributes.Abstract)
+                nil
+
+        let baseClass = addType "B" Reflection.TypeAttributes.Public objectRef
+        let receiver = addType "C" Reflection.TypeAttributes.Public (definition baseClass)
+
+        // `GENERICINST <CLASS or VALUETYPE> I 1 int32`
+        let instantiation (kind : byte) =
+            let blob = Reflection.Metadata.BlobBuilder ()
+            blob.WriteByte 0x15uy
+            blob.WriteByte kind
+            blob.WriteCompressedInteger (Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef (definition iface))
+            blob.WriteCompressedInteger 1
+            blob.WriteByte 0x08uy
+
+            metadata.AddTypeSpecification (metadata.GetOrAddBlob blob)
+            |> fun handle ->
+                (Reflection.Metadata.TypeSpecificationHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+
+        metadata.AddInterfaceImplementation (baseClass, instantiation 0x12uy)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddInterfaceImplementation (receiver, instantiation (if asValueType then 0x11uy else 0x12uy))
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddGenericParameter (
+            definition iface,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        let builder =
+            Reflection.PortableExecutable.ManagedPEBuilder (
+                Reflection.PortableExecutable.PEHeaderBuilder (
+                    imageCharacteristics =
+                        (Reflection.PortableExecutable.Characteristics.ExecutableImage
+                         ||| Reflection.PortableExecutable.Characteristics.Dll)
+                ),
+                Reflection.Metadata.Ecma335.MetadataRootBuilder metadata,
+                Reflection.Metadata.BlobBuilder ()
+            )
+
+        let output = Reflection.Metadata.BlobBuilder ()
+        builder.Serialize output |> ignore<Reflection.Metadata.BlobContentId>
+        output.ToArray ()
+
+    /// `C`'s row names the instantiation `B` already put in the map, so it adds no entry; but the
+    /// runtime loads every row's interface as the row spells it, so a row that does not load fails
+    /// the type all the same.
+    [<TestCase true>]
+    [<TestCase false>]
+    let ``A re-declared interface's own row is loaded`` (asValueType : bool) : unit =
+        let image = respelledInterfaceImage asValueType
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("respelledRow", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let hostAnswer =
+                try
+                    host.GetType("C", true).GetInterfaces () |> Array.map _.ToString() |> Ok
+                with :? TypeLoadException as e ->
+                    Error e.Message
+
+            let state = coreState.WithLoadedAssembly dumped
+
+            let state, receiver =
+                LoadedTypeInfo.typeInfoToTypeDefn'
+                    bct
+                    state.TypeSystem._LoadedAssemblies
+                    (dumped.TypeDefs.Values |> Seq.find (fun typeInfo -> typeInfo.Name = "C"))
+                |> IlMachineState.concretizeType
+                    loggerFactory
+                    bct
+                    state
+                    dumped.DefinitionFullName
+                    Collections.Immutable.ImmutableArray.Empty
+                    Collections.Immutable.ImmutableArray.Empty
+
+            let _, pawPrintAnswer =
+                ConcreteInterfaceDispatch.interfaceMapOf
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    bct
+                    "test"
+                    state.TypeSystem
+                    receiver
+
+            if asValueType then
+                match hostAnswer with
+                | Error _ -> ()
+                | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+                match pawPrintAnswer with
+                | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+                | other -> failwith $"PawPrint answered %A{other}"
+            else
+                hostAnswer |> shouldEqual (Ok [| "I`1[System.Int32]" |])
+
+                match pawPrintAnswer with
+                | Ok [ entry ] -> entry.Definition.DeclaredOnType |> shouldEqual true
+                | other -> failwith $"PawPrint answered %A{other}"
+        finally
+            context.Unload ()
+
     // ----- A generic definition -----
 
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
