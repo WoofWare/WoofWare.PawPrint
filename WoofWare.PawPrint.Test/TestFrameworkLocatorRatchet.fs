@@ -196,6 +196,13 @@ module TestFrameworkLocatorRatchet =
                     "locates the test assembly's directory, beside which MSBuild copies each referenced project's documentation file"
             }
             {
+                File = "TestRealRuntimeInPlace.fs"
+                Locator = "Location"
+                Count = 1
+                Reason =
+                    "a guest's C# source, which reports where real .NET loaded the guest's CoreLib from, so the test can check which framework the oracle ran it on"
+            }
+            {
                 File = "TestSequencePoints.fs"
                 Locator = "Location"
                 Count = 1
