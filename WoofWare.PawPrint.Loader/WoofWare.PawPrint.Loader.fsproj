@@ -7,7 +7,7 @@
         <PackageId>WoofWare.PawPrint.Loader</PackageId>
         <Authors>Patrick Stevens</Authors>
         <Copyright>Copyright (c) Patrick Stevens 2026</Copyright>
-        <Description>How the assemblies of a .NET program refer to one another: binding an assembly reference to an image, following type forwarders and base-type chains across assemblies, and matching signatures and field references across them, without running any of them.</Description>
+        <Description>How the assemblies of a .NET program refer to one another: binding an assembly reference to an image, following type forwarders and base-type chains across assemblies, and matching signatures and field references across them.</Description>
         <RepositoryType>git</RepositoryType>
         <RepositoryUrl>https://github.com/WoofWare/WoofWare.PawPrint</RepositoryUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

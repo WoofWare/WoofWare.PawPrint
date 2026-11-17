@@ -7,7 +7,7 @@
         <PackageId>WoofWare.PawPrint.TypeSystem</PackageId>
         <Authors>Patrick Stevens</Authors>
         <Copyright>Copyright (c) Patrick Stevens 2026</Copyright>
-        <Description>The CLI type system as CoreCLR lays it out, across the whole set of loaded assemblies: instantiating generic types to concrete ones, a type definition's method table, and which method a member reference names. Without running any of it.</Description>
+        <Description>The CLI type system as CoreCLR lays it out, across a whole set of loaded assemblies. The instantiation of generic types, the layout of method tables, the resolution of member references.</Description>
         <RepositoryType>git</RepositoryType>
         <RepositoryUrl>https://github.com/WoofWare/WoofWare.PawPrint</RepositoryUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

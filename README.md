@@ -12,71 +12,40 @@ Original architecture is by me, with only reference assistance from LLMs.
 Then in early 2026 I drove GPT-5.5 and Claude Opus 4.6/4.7 hard to get this to a usable state, resulting in release 0.1.1; I did review all the code during that time.
 
 Since then, as I wanted to use this to debug some real life flaky tests, I drove GPT-5.6 Sol and Claude Opus 4.8/5 and Fable 5 much harder, and gradually stopped reading the code.
-As of August 2026, it would probably qualify as fully vibe-coded, although it *is* (astonishingly) a powerful and working tool which has actually debugged three real flaky tests in extremely nontrivial projects.
+As of November 2026, it qualifies as fully vibe-coded, although it *is* (astonishingly) a powerful and working tool which has actually debugged three real flaky tests in extremely nontrivial projects.
 
 ## Description
 
-This is an *unfinished* deterministic implementation of a .NET runtime (specifically .NET 10).
+This is an *unfinished* deterministic implementation of the .NET runtime (specifically both the .NET 10 and .NET 11 runtimes).
 You give it a DLL, and it executes the entry point therein on an emulated runtime which controls all sources of nondeterminism.
+
+PawPrint additionally is increasingly becoming a static analysis ecosystem as well.
+See [WoofWare.PawPrint.Semantics](./WoofWare.PawPrint.Semantics/) and [WoofWare.PawPrint.Analysis](./WoofWare.PawPrint.Analysis/) for more.
 
 ## Current project status
 
 Even incomplete as it is, PawPrint is currently capable of automatically detecting and reproducing a number of textbook [race conditions](WoofWare.PawPrint.Test/sourcesConcurrencyBugs/), by running the input program with many different seeds for its source of randomness.
+It can also [run an ASP.NET server and client](WoofWare.PawPrint.Test/sourcesAspNet/) deterministically.
 
-Nontrivial programs will probably fail loudly, unless you're lucky enough to be using only what I've already implemented.
+Nontrivial programs may fail loudly, unless you're lucky enough to be using only what I've already implemented.
 
-The following work, at least in some minimal form:
+The following work:
 
-* `Console.WriteLine`
-* `async void Main(string[] args) { ... }`
-* `Task.Run`
-* Quite a lot of reflection
+* IO such as `Console.WriteLine` and `File.WriteAllText`
 * Many low-level synchronisation primitives like `Monitor`
+* Concurrent code such as `async void Main(string[] args) { ... }`, `Task.Run`, and `Async.RunSynchronously`, including .NET 11's runtime async
+* Enough dynamic code generation to power Moq, FakeItEasy, and friends
+* Enough reflection to power Newtonsoft.Json, System.Text.Json, and friends
 
 The following are specifically not implemented:
 
 * GC and finalizers
 
+For the underlying deterministic POSIX kernel implementation, see [WoofWare.PosixKernel](https://github.com/Smaug123/WoofWare.PosixKernel/).
+
 ## Getting started
 
 See the [run-a-program.md](./docs/user/run-a-program.md) doc for how to run a program, and [fuzz-over-thread-scheduler.md](./docs/user/fuzz-over-thread-scheduler.md) for how to automatically detect concurrency-related bugs.
-
-## Building and testing offline
-
-The default devshell (`nix develop`) restores NuGet packages from nuget.org as usual. On a
-machine or in a sandbox with no network, use the `offline` devshell instead, for example:
-
-```bash
-nix develop .#offline -c dotnet test WoofWare.PawPrint.Test/WoofWare.PawPrint.Test.fsproj
-```
-
-It resolves NuGet packages and SDK packs only from the Nix store, including
-self-contained publishing packs for `linux-x64`, `linux-arm64` and `osx-arm64`. Nix may need
-network access to populate the store on first use; once its closure is present,
-restores, builds and tests need no access to nuget.org. NuGet's writable package
-cache is the ignored `packages/` directory at the root of the checkout. Online
-vulnerability auditing is disabled in this shell.
-
-Local tools use their own NuGet configuration. Bootstrap the manifest's tools from
-the offline shell's installable feed, then run the formatter as usual:
-
-```bash
-nix develop .#offline -c sh -c 'dotnet tool restore --configfile "$PAWPRINT_TOOL_NUGET_CONFIG"'
-nix develop .#offline -c dotnet fantomas .
-```
-
-The offline shell knows only the packages pinned in `nix/deps.json`. After changing package
-references, regenerate the pins with network access:
-
-```bash
-nix build .#default.fetch-deps && ./result nix/deps.json
-```
-
-Re-enter `nix develop .#offline` to use the new closure. A package missing from the pins fails
-restore in that shell instead of falling back to nuget.org. `nix flake check` verifies that the
-whole solution and the local tools restore offline with empty package, tool and HTTP
-caches, that both tools start, and that `CSharpExample` publishes as a self-contained
-application for each supported RID.
 
 ## Goals
 
@@ -87,7 +56,7 @@ application for each supported RID.
 
 ## Non-goals
 
-* Performance. I expect this to be a *very slow* IL interpreter.
+* Performance. I expect this to be a *very slow* IL interpreter. For example, as of this writing it takes about 20 minutes to run a simple ASP.NET client/server interaction.
 * Fidelity to the optimisations performed by e.g. RyuJIT or .NET's GC. I am purely interpreting IL (and mocking out native calls). For example, it is likely that I will simply never deallocate memory (so e.g. finalisers are not run).
 * Support for any operating systems other than the ones on which I am running (currently macOS and Linux), and any fancy hardware features like SIMD.
 

@@ -7,7 +7,7 @@
         <PackageId>WoofWare.PawPrint.Semantics</PackageId>
         <Authors>Patrick Stevens</Authors>
         <Copyright>Copyright (c) Patrick Stevens 2026</Copyright>
-        <Description>Rules of the CLI execution model, as inspectable data: which exceptions each IL opcode can raise by itself, and how likely interleaving it is to matter. Facts about running a program rather than about reading one, so they are usable by an analyser that never executes anything.</Description>
+        <Description>Rules of the CLI execution model, as inspectable data, e.g. which exceptions each IL opcode can raise.</Description>
         <RepositoryType>git</RepositoryType>
         <RepositoryUrl>https://github.com/WoofWare/WoofWare.PawPrint</RepositoryUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
