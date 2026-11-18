@@ -569,10 +569,10 @@ public static class Program
             Directory.Delete (Path.Combine (linkParent, "temp"))
             Directory.Delete linkParent
 
-    /// As above, with the assembly's file itself a symbolic link to one in the temp directory:
-    /// the host runs the target, from the target's directory.
+    /// The host runs a link's target from the target's directory, which might be the temp
+    /// directory, as here; the oracle refuses a linked assembly file outright.
     [<Test>]
-    let ``an assembly that is a symbolic link to one in the temp directory is refused, not run`` () : unit =
+    let ``an assembly file that is a symbolic link is refused, not run`` () : unit =
         let target =
             Path.Combine (tempDirectory (), "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll")
 
@@ -594,7 +594,7 @@ public static class Program
                             Error e.Message
 
                     match outcome with
-                    | Error message -> message |> shouldContainText "temp directory"
+                    | Error message -> message |> shouldContainText "symbolic link"
                     | Ok run ->
                         failwith
                             $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
@@ -668,6 +668,28 @@ public static class Program
                 RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
                 |> _.Result
                 |> shouldEqual (RealRuntimeResult.NormalExit 5)
+            )
+
+    /// A final `.` names a directory to the operating system, so `EndsAsTold.dll/.` names
+    /// nothing; `Path.GetFullPath` would drop it and run the file.
+    [<Test>]
+    let ``a path with . in it is refused, not run`` () : unit =
+        laidOut
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let dotted = dllPath + string<char> Path.DirectorySeparatorChar + "."
+
+                let outcome =
+                    try
+                        Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] dotted)
+                    with e ->
+                        Error e.Message
+
+                match outcome with
+                | Error message -> message |> shouldContainText "'.'"
+                | Ok run -> failwith $"expected the oracle to refuse a path with '.' in it, but it ran: %A{run}"
             )
 
     /// A `..` after a symbolic link climbs from the link's target as the operating system walks

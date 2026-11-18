@@ -1042,12 +1042,31 @@ module RealRuntime =
 
             Path.GetFullPath path
 
+        // A `.` is refused here too, though both readings agree on it inside a path: a final one,
+        // as in `Guest.dll/.`, names a directory to the operating system, and `Path.GetFullPath`
+        // would drop it.
+        if
+            dllPath.Split (
+                [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |],
+                StringSplitOptions.RemoveEmptyEntries
+            )
+            |> Array.contains "."
+        then
+            failwith
+                $"Cannot run an assembly under the real runtime in place with the assembly path %s{dllPath}, which has '.' in it. Pass the path without it."
+
         // Absolute, because the host would resolve a relative path against the guest's working
         // directory, which is the assembly's directory.
         let dllPath = absoluteWithoutParent "the assembly path" dllPath
 
         if not (File.Exists dllPath) then
             failwith $"Cannot run %s{dllPath} under the real runtime: the assembly does not exist."
+
+        // The host runs a link's target, from the target's directory, which the checks below,
+        // asking only about the assembly's own directory, would not see.
+        if not (isNull (FileInfo(dllPath).LinkTarget)) then
+            failwith
+                $"Cannot run %s{dllPath} under the real runtime in place: it is a symbolic link, and the host would run its target from the target's directory. Pass the target itself."
 
         let directory = Path.GetDirectoryName dllPath
         let name = Path.GetFileNameWithoutExtension dllPath
@@ -1092,13 +1111,9 @@ module RealRuntime =
                     || downFrom (Path.GetDirectoryName target) (Path.GetFileName target)
                 )
 
-            // The guest's working directory, and the directory of the file the host runs, which is
-            // the target's when the assembly's file is itself a link.
-            let reachable =
-                [ directory ; Path.GetDirectoryName (FrameworkUnderTest.resolveLinks dllPath) ]
-                |> List.exists reachesScratch
-
-            if reachable then
+            // The guest's working directory, which is also the directory of the file the host runs,
+            // since a linked assembly file is refused above.
+            if reachesScratch directory then
                 failwith
                     $"Cannot run %s{dllPath} under the real runtime in place: its directory is the temp directory (%s{Path.GetDirectoryName scratch}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
 
