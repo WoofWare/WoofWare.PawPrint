@@ -1642,10 +1642,22 @@ module TypeConcretization =
             AssemblyFullName : string
         }
 
+    /// Where a substituted element context came from, which is what decides whether a comparison can
+    /// meet the same pair of elements in it more than once.
+    [<RequireQualifiedAccess>]
+    type private ContextOrigin =
+        /// A comparand's own declaring-type context, or the context of an argument the public
+        /// comparison was handed directly. Each element spelled in it is compared once.
+        | Root
+        /// The context of a `Spelled` argument that reading a type variable produced. Every
+        /// occurrence of that variable reads the same argument, so the elements spelled in it can be
+        /// compared again, against the same elements on the other side.
+        | ReadThroughVariable
+
     /// How the `!i` of one element context are read.
     type private TypeVariables =
         /// Through the declaring type's instantiation: `!i` denotes the `i`th argument.
-        | Substituted of ImmutableArray<SubstitutionArgument>
+        | Substituted of ImmutableArray<SubstitutionArgument> * ContextOrigin
         /// Not at all: `!i` is left standing and compared by index alone, whichever type it belongs
         /// to. This is `MetaSig::CompareElementType` given a null `Substitution`.
         | Unsubstituted
@@ -1667,7 +1679,7 @@ module TypeConcretization =
         | Positional of index : int
 
     /// What a substitution supplied for one `!i`, as an element of a comparison.
-    let private elementOfArgument (argument : SubstitutionArgument) : Element =
+    let private elementOfArgument (origin : ContextOrigin) (argument : SubstitutionArgument) : Element =
         match argument with
         | SubstitutionArgument.Closed handle -> Element.Substituted handle
         | SubstitutionArgument.Formal (owner, index) -> Element.Formal (owner, index)
@@ -1675,10 +1687,115 @@ module TypeConcretization =
             Element.Spelled (
                 {
                     ElementContext.AssemblyFullName = assembly
-                    ElementContext.TypeVariables = TypeVariables.Substituted context
+                    ElementContext.TypeVariables = TypeVariables.Substituted (context, origin)
                 },
                 spelling
             )
+
+    /// One side of a pair of spelled elements, by identity: the assembly whose token space the
+    /// spelling is read in, the context its `!i` are read against, and the spelling node itself.
+    ///
+    /// Two sides are the same only if they are the same objects. An `ImmutableArray` compares and
+    /// hashes by the array it wraps (`IEquatable<ImmutableArray<T>>`, not F#'s structural `=`), and
+    /// the spelling by reference, so that hashing a side costs nothing however large the type it
+    /// denotes. The assembly is part of the key because one `TypeDefn` object is not guaranteed to
+    /// belong to one image.
+    [<Struct ; CustomEquality ; NoComparison>]
+    type private SpelledSide =
+        {
+            Assembly : string
+            Context : ImmutableArray<SubstitutionArgument>
+            Spelling : TypeDefn
+        }
+
+        member this.SameAs (other : SpelledSide) : bool =
+            String.Equals (this.Assembly, other.Assembly, StringComparison.Ordinal)
+            && this.Context.Equals (other.Context : ImmutableArray<SubstitutionArgument>)
+            && obj.ReferenceEquals (this.Spelling, other.Spelling)
+
+        override this.Equals (other : obj) : bool =
+            match other with
+            | :? SpelledSide as other -> this.SameAs other
+            | _ -> false
+
+        override this.GetHashCode () : int =
+            HashCode.Combine (
+                StringComparer.Ordinal.GetHashCode this.Assembly,
+                this.Context.GetHashCode (),
+                LanguagePrimitives.PhysicalHash this.Spelling
+            )
+
+        interface IEquatable<SpelledSide> with
+            member this.Equals (other : SpelledSide) : bool = this.SameAs other
+
+    /// A pair of spelled elements a comparison has compared, left side first.
+    [<Struct ; CustomEquality ; NoComparison>]
+    type private SpelledPair =
+        {
+            Left : SpelledSide
+            Right : SpelledSide
+        }
+
+        member this.SameAs (other : SpelledPair) : bool =
+            this.Left.SameAs other.Left && this.Right.SameAs other.Right
+
+        override this.Equals (other : obj) : bool =
+            match other with
+            | :? SpelledPair as other -> this.SameAs other
+            | _ -> false
+
+        override this.GetHashCode () : int =
+            HashCode.Combine (this.Left.GetHashCode (), this.Right.GetHashCode ())
+
+        interface IEquatable<SpelledPair> with
+            member this.Equals (other : SpelledPair) : bool = this.SameAs other
+
+    /// The pairs of spelled elements that one public comparison has proved equal so far, so that a
+    /// pair it meets again through another occurrence of a type variable is answered without being
+    /// walked again.
+    ///
+    /// A pair is recorded only after comparing it has answered `true`. The values compared are
+    /// immutable, so a pair proved equal is equal however often it is met, and an assembly loaded
+    /// while proving it is already loaded when it is met again. A pair that answers `false`, refuses
+    /// or fails is never recorded, so no refusal or failure is skipped by a later meeting. (Within
+    /// one element comparison every step is a conjunction, so an unequal pair ends it; but
+    /// `methodConstraintsMatch` tries one declared constraint after another, and an unequal pair met
+    /// against one would otherwise be answered `true` against the next.)
+    ///
+    /// It lives for one call of a public comparison. Its set is allocated on the first proof.
+    [<Sealed>]
+    type private ProvedEqual () =
+        let mutable proved : HashSet<SpelledPair> = null
+
+        member _.Contains (pair : SpelledPair) : bool =
+            not (isNull proved) && proved.Contains pair
+
+        member _.Record (pair : SpelledPair) : unit =
+            if isNull proved then
+                proved <- HashSet<SpelledPair> ()
+
+            proved.Add pair |> ignore<bool>
+
+    /// The record of proved pairs for one public comparison of these two contexts, or none where no
+    /// pair can be met twice. Only reading a type variable whose argument is `Spelled` leads to
+    /// elements that can be met again (`ContextOrigin.ReadThroughVariable`), and every such argument
+    /// is reached through the two root contexts, so a comparison whose roots supply none -- every
+    /// closed comparison, and every one over a definition's own variables -- keeps no record.
+    let private provedEqualFor (left : SubstitutionContext) (right : SubstitutionContext) : ProvedEqual voption =
+        // By index rather than through `Seq`, which would box an enumerator on every comparison.
+        let rec anySpelled (arguments : ImmutableArray<SubstitutionArgument>) (index : int) : bool =
+            if index >= arguments.Length then
+                false
+            else
+                match arguments.[index] with
+                | SubstitutionArgument.Spelled _ -> true
+                | SubstitutionArgument.Closed _
+                | SubstitutionArgument.Formal _ -> anySpelled arguments (index + 1)
+
+        if anySpelled left.Arguments 0 || anySpelled right.Arguments 0 then
+            ValueSome (ProvedEqual ())
+        else
+            ValueNone
 
     /// The runtime types a context supplies, for the one comparison step that has to concretise a
     /// spelled element rather than compare it structurally.
@@ -1696,7 +1813,7 @@ module TypeConcretization =
         | TypeVariables.Unsubstituted ->
             failwith
                 $"Signature comparison in %s{assembly} met a closed runtime type on one side and a signature read with no substitution on the other; a comparison either substitutes on both sides or on neither"
-        | TypeVariables.Substituted arguments ->
+        | TypeVariables.Substituted (arguments, _) ->
 
         arguments
         |> ImmutableArray.map (fun argument ->
@@ -1714,7 +1831,7 @@ module TypeConcretization =
     let private readTypeVariable (context : ElementContext) (index : int) : Element =
         match context.TypeVariables with
         | TypeVariables.Unsubstituted -> Element.Positional index
-        | TypeVariables.Substituted arguments ->
+        | TypeVariables.Substituted (arguments, _) ->
             if index >= arguments.Length then
                 failwithf
                     "Signature comparison in %s reached generic type parameter !%d, but the declaring type's instantiation supplies only %d argument(s); the comparand was built with the wrong instantiation"
@@ -1722,7 +1839,51 @@ module TypeConcretization =
                     index
                     arguments.Length
 
-            elementOfArgument arguments.[index]
+            elementOfArgument ContextOrigin.ReadThroughVariable arguments.[index]
+
+    /// The pair `(left, right)` as a key into this comparison's proved pairs, with the record to look
+    /// it up in, if it is a pair the comparison can meet more than once: one whose either side was
+    /// reached by reading a type variable whose argument is `Spelled`.
+    let private sharedPair
+        (proofs : ProvedEqual voption)
+        (leftCtx : ElementContext)
+        (leftTy : TypeDefn)
+        (rightCtx : ElementContext)
+        (rightTy : TypeDefn)
+        : struct (ProvedEqual * SpelledPair) voption
+        =
+        match leftCtx.TypeVariables, rightCtx.TypeVariables with
+        | TypeVariables.Substituted (_, ContextOrigin.Root), TypeVariables.Substituted (_, ContextOrigin.Root)
+        | TypeVariables.Unsubstituted, TypeVariables.Unsubstituted
+        | TypeVariables.Substituted (_, ContextOrigin.Root), TypeVariables.Unsubstituted
+        | TypeVariables.Unsubstituted, TypeVariables.Substituted (_, ContextOrigin.Root) -> ValueNone
+        | TypeVariables.Substituted (_, ContextOrigin.ReadThroughVariable), TypeVariables.Unsubstituted
+        | TypeVariables.Unsubstituted, TypeVariables.Substituted (_, ContextOrigin.ReadThroughVariable) ->
+            failwith
+                $"logic error: a signature comparison in %s{leftCtx.AssemblyFullName} against %s{rightCtx.AssemblyFullName} read a substituted argument on one side and substitutes nothing on the other; a comparison either substitutes on both sides or on neither"
+        | TypeVariables.Substituted (leftArguments, _), TypeVariables.Substituted (rightArguments, _) ->
+            match proofs with
+            | ValueNone ->
+                failwith
+                    $"logic error: a signature comparison in %s{leftCtx.AssemblyFullName} against %s{rightCtx.AssemblyFullName} read a type variable as a spelled argument, but its root contexts supplied no spelled argument to read"
+            | ValueSome proofs ->
+                let pair =
+                    {
+                        Left =
+                            {
+                                Assembly = leftCtx.AssemblyFullName
+                                Context = leftArguments
+                                Spelling = leftTy
+                            }
+                        Right =
+                            {
+                                Assembly = rightCtx.AssemblyFullName
+                                Context = rightArguments
+                                Spelling = rightTy
+                            }
+                    }
+
+                ValueSome (struct (proofs, pair))
 
     /// Does this element mention a method generic parameter, so that it does not denote a single
     /// closed runtime type? Substitution never reaches an `ELEMENT_TYPE_MVAR`, so such an element
@@ -1791,9 +1952,13 @@ module TypeConcretization =
     /// signature elements are the same only if they are spelled with the same element types, so
     /// `M(object)` and `M(class System.Object)` are different signatures, and a custom modifier is
     /// part of the element rather than an annotation on it.
+    ///
+    /// `proofs` is the record of pairs this public comparison has already proved equal, if its root
+    /// contexts can lead it to any pair twice (`provedEqualFor`).
     let rec private compareElements
         (ctx : ConcretizationContext<DumpedAssembly>)
         (loadAssembly : IAssemblyLoad)
+        (proofs : ProvedEqual voption)
         (left : Element)
         (right : Element)
         : Result<bool, TypeBindingFailure> * ConcretizationContext<DumpedAssembly>
@@ -1810,9 +1975,9 @@ module TypeConcretization =
         // `carriesCustomModifier` arm below, which is what stops concretising the *other* side from
         // stripping its modifiers.
         | Element.Spelled (leftCtx, TypeDefn.GenericTypeParameter index), _ ->
-            compareElements ctx loadAssembly (readTypeVariable leftCtx index) right
+            compareElements ctx loadAssembly proofs (readTypeVariable leftCtx index) right
         | _, Element.Spelled (rightCtx, TypeDefn.GenericTypeParameter index) ->
-            compareElements ctx loadAssembly left (readTypeVariable rightCtx index)
+            compareElements ctx loadAssembly proofs left (readTypeVariable rightCtx index)
 
         | Element.Substituted leftHandle, Element.Substituted rightHandle -> Ok (leftHandle = rightHandle), ctx
 
@@ -1890,9 +2055,32 @@ module TypeConcretization =
             |> andThen (fun ctx spelledHandle -> Ok (spelledHandle = handle), ctx)
 
         | Element.Spelled (leftCtx, leftTy), Element.Spelled (rightCtx, rightTy) ->
+            match sharedPair proofs leftCtx leftTy rightCtx rightTy with
+            | ValueNone -> compareSpelled ctx loadAssembly proofs leftCtx leftTy rightCtx rightTy
+            | ValueSome (struct (record, pair)) ->
+                if record.Contains pair then
+                    Ok true, ctx
+                else
+                    match compareSpelled ctx loadAssembly proofs leftCtx leftTy rightCtx rightTy with
+                    | Ok true, ctx ->
+                        record.Record pair
+                        Ok true, ctx
+                    | answered -> answered
 
+    /// Two spelled elements, neither of them a bare type variable: `compareElements` after it has
+    /// read every `!i` at the top of either side.
+    and private compareSpelled
+        (ctx : ConcretizationContext<DumpedAssembly>)
+        (loadAssembly : IAssemblyLoad)
+        (proofs : ProvedEqual voption)
+        (leftCtx : ElementContext)
+        (leftTy : TypeDefn)
+        (rightCtx : ElementContext)
+        (rightTy : TypeDefn)
+        : Result<bool, TypeBindingFailure> * ConcretizationContext<DumpedAssembly>
+        =
         let recurse (ctx : ConcretizationContext<DumpedAssembly>) (l : TypeDefn) (r : TypeDefn) =
-            compareElements ctx loadAssembly (Element.Spelled (leftCtx, l)) (Element.Spelled (rightCtx, r))
+            compareElements ctx loadAssembly proofs (Element.Spelled (leftCtx, l)) (Element.Spelled (rightCtx, r))
 
         let recursePair (ctx : ConcretizationContext<DumpedAssembly>) (l : TypeDefn, r : TypeDefn) = recurse ctx l r
 
@@ -1993,7 +2181,7 @@ module TypeConcretization =
                 ctx
             else
 
-            compareSignatureTypes ctx loadAssembly leftCtx rightCtx false false leftSignature rightSignature
+            compareSignatureTypes ctx loadAssembly proofs leftCtx rightCtx false false leftSignature rightSignature
 
         | (TypeDefn.FromDefinition _ | TypeDefn.FromReference _), (TypeDefn.FromDefinition _ | TypeDefn.FromReference _) ->
             // Identity, not spelling: a TypeDef in the assembly that declares the type and a
@@ -2046,6 +2234,7 @@ module TypeConcretization =
     and private compareSignatureTypes
         (ctx : ConcretizationContext<DumpedAssembly>)
         (loadAssembly : IAssemblyLoad)
+        (proofs : ProvedEqual voption)
         (leftCtx : ElementContext)
         (rightCtx : ElementContext)
         (varargSentinelApplies : bool)
@@ -2064,7 +2253,7 @@ module TypeConcretization =
         else
 
         let recurse (ctx : ConcretizationContext<DumpedAssembly>) (l : TypeDefn) (r : TypeDefn) =
-            compareElements ctx loadAssembly (Element.Spelled (leftCtx, l)) (Element.Spelled (rightCtx, r))
+            compareElements ctx loadAssembly proofs (Element.Spelled (leftCtx, l)) (Element.Spelled (rightCtx, r))
 
         // A vararg call site's blob carries an ELEMENT_TYPE_SENTINEL before the `...` part, and
         // `RequiredParameterCount` is where it sits (for a signature without one it is the whole
@@ -2165,14 +2354,16 @@ module TypeConcretization =
         let implCtx : ElementContext =
             {
                 AssemblyFullName = impl.AssemblyFullName
-                TypeVariables = TypeVariables.Substituted impl.DeclaringTypeGenerics.Arguments
+                TypeVariables = TypeVariables.Substituted (impl.DeclaringTypeGenerics.Arguments, ContextOrigin.Root)
             }
 
         let declCtx : ElementContext =
             {
                 AssemblyFullName = decl.AssemblyFullName
-                TypeVariables = TypeVariables.Substituted decl.DeclaringTypeGenerics.Arguments
+                TypeVariables = TypeVariables.Substituted (decl.DeclaringTypeGenerics.Arguments, ContextOrigin.Root)
             }
+
+        let proofs = provedEqualFor impl.DeclaringTypeGenerics decl.DeclaringTypeGenerics
 
         // A constraint naming `System.Object` says nothing, and neither does one naming
         // `System.ValueType` on a parameter already constrained to a non-nullable value type.
@@ -2224,6 +2415,7 @@ module TypeConcretization =
                     compareElements
                         ctx
                         loadAssembly
+                        proofs
                         (Element.Spelled (implCtx, implConstraint))
                         (Element.Spelled (declCtx, declConstraint))
                 with
@@ -2294,12 +2486,14 @@ module TypeConcretization =
         let toElementContext (comparand : SignatureComparand) : ElementContext =
             {
                 AssemblyFullName = comparand.AssemblyFullName
-                TypeVariables = TypeVariables.Substituted comparand.DeclaringTypeGenerics.Arguments
+                TypeVariables =
+                    TypeVariables.Substituted (comparand.DeclaringTypeGenerics.Arguments, ContextOrigin.Root)
             }
 
         compareSignatureTypes
             ctx
             loadAssembly
+            (provedEqualFor caller.DeclaringTypeGenerics callee.DeclaringTypeGenerics)
             (toElementContext caller)
             (toElementContext callee)
             true
@@ -2328,9 +2522,11 @@ module TypeConcretization =
                 TypeVariables = TypeVariables.Unsubstituted
             }
 
+        // Nothing is substituted, so no variable leads anywhere and no pair can be met twice.
         compareSignatureTypes
             ctx
             loadAssembly
+            ValueNone
             (toElementContext caller)
             (toElementContext callee)
             true
@@ -2354,9 +2550,18 @@ module TypeConcretization =
         if left.Arguments.Length <> right.Arguments.Length then
             Ok false, ctx
         else
+            let proofs = provedEqualFor left right
+
             List.zip (List.ofSeq left.Arguments) (List.ofSeq right.Arguments)
             |> allEqual
-                (fun ctx (l, r) -> compareElements ctx loadAssembly (elementOfArgument l) (elementOfArgument r))
+                (fun ctx (l, r) ->
+                    compareElements
+                        ctx
+                        loadAssembly
+                        proofs
+                        (elementOfArgument ContextOrigin.Root l)
+                        (elementOfArgument ContextOrigin.Root r)
+                )
                 ctx
 
 /// High-level API for concretizing types
