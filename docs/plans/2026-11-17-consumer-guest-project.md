@@ -901,8 +901,9 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   test, in the assembly's directory. A relative path is made absolute first, against the test host's working
   directory, since the host would resolve it against the guest's (found by Codex). So is the scratch directory, since
   `Path.GetTempPath` keeps a relative `TMPDIR` (also found by Codex). The scratch directory is removed in a `finally`,
-  as the other entries remove theirs. An assembly lying directly in the temp directory is refused, since the guest
-  would see the scratch directories in its own (found by Codex). Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
+  as the other entries remove theirs. An assembly whose directory is the temp directory, or a directory above it, is
+  refused, since the guest would see the scratch directories in its tree; both paths are compared with symbolic links
+  resolved (found by Codex, in two rounds). Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
   runtimeconfig it is given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a
   `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
 * `executeAssemblyInPlace` is `captureAssemblyInPlace AppContextProperties.empty`, followed by the existing `echo`.
@@ -916,7 +917,8 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   each with its own value. Stdout, stderr and the ending are captured as lines (a `\r\n` and a missing final newline
   both come back as `Environment.NewLine`). For `executeAssemblyInPlace`: its endings (exit code, unhandled exception,
   FailFast), its command line, the guest's working directory, its echo to the test's output, and that it runs the
-  framework under test, leaving the directory unchanged, when the runtimeconfig beside the assembly names a framework
+  framework under test (CoreLib's whole directory, links resolved on both sides), leaving the directory unchanged, when
+  the runtimeconfig beside the assembly names a framework
   that does not exist. A relative path, with a directory in it, names the same assembly.
 * `runtimeConfigFor`, which writes the runtimeconfig for both `captureAssemblyInPlace` and `executeConcurrently`,
   fails on properties no runtimeconfig can deliver as given (found by Codex): a name the hosting layer populates,
@@ -952,7 +954,7 @@ Choices the decisions left open:
   `executeConcurrently` has, and have the fixture pass the variable PawPrint's kernel seeds; or clear `DOTNET_*`
   variables from every oracle child; or accept the exposure and say so in the fixture. PR 2 builds the function as
   decision 6 specifies and leaves the choice to the decider.
-* Three of Codex's findings are not addressed here. Two are properties of every oracle entry rather than of this one,
+* Four of Codex's findings are not addressed here. Two are properties of every oracle entry rather than of this one,
   and fixing them for one property would be special-casing:
   * The oracle cannot tell a host that refused to start from a guest that exited. `RuntimeConfig.combine` refuses
     the shapes PawPrint models, so the oracle and PawPrint agree on what a launchable runtimeconfig is, but Codex
@@ -966,6 +968,11 @@ Choices the decisions left open:
   hostpolicy acts on whichever spelling it visits last, and Codex ran one such config on real .NET. That conservative
   reading is `RuntimeConfig`'s documented choice for PawPrint, and the oracle refuses exactly what PawPrint refuses,
   so the two sides cannot disagree about which configurations run.
+
+  The fourth: the relative-path test lays its assembly out under the test host's working directory, so it needs that
+  directory to be writable. A layout under the temp directory cannot test the defect: the relative path from the test
+  host's working directory then climbs to the root with `..`, and resolves to the same file from the guest's working
+  directory too, which is how the first version of the test passed against the unfixed code.
 * The guest prints paths by their last components only: the host resolves symbolic links (`/tmp` on macOS, the Nix
   store's links), so the guest cannot print a path as the test spells it.
 
@@ -1019,6 +1026,7 @@ rows ran before the working-directory test existed, so against seven tests:
 | ill-formed UTF-16 not refused (the code before the refusal) | the lone-surrogate test |
 | relative path not made absolute (the code before the fix) | the relative-path test (`NormalExit 129`, the host's) |
 | assembly directly in the temp directory not refused (the code before the refusal) | the temp-directory test (`NormalExit 0`: the guest ran) |
+| refusal comparing spellings (the code before links were resolved) | the temp-directory test through a symbolic link (`NormalExit 0`) |
 | scratch directory not made absolute, with `TMPDIR=.` | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
