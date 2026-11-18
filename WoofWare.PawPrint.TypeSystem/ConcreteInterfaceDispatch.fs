@@ -282,15 +282,20 @@ module ConcreteInterfaceDispatch =
         | _ -> None
 
     /// `interfaceMapOfDefinition`'s walk, which reads on past a row whose arguments it cannot read.
+    /// `walking` holds the definitions whose walks are already under way, so that a walk begun for
+    /// one of them again, through an interface hierarchy that is a cycle, is not begun.
     let rec private walkDefinition
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (operation : string)
+        (walking : Set<ResolvedTypeIdentity>)
         (state : TypeSystemState)
         (identity : ResolvedTypeIdentity)
         : TypeSystemState * Result<WalkedDefinition, TypeBindingFailure>
         =
+        let walking = Set.add identity walking
+
         let owner = ConcreteMethodTable.ownerOfDefinition operation state identity
 
         let assembly, typeInfo =
@@ -320,7 +325,9 @@ module ConcreteInterfaceDispatch =
                         RowsLastFirst = []
                     }
             | Some (baseIdentity, arguments) ->
-                match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state baseIdentity with
+                match
+                    walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation walking state baseIdentity
+                with
                 | state, Error failure -> state, Error failure
                 | state, Ok parentMap ->
 
@@ -418,23 +425,25 @@ module ConcreteInterfaceDispatch =
                 | TypeDefn.FromReference (_, spelledKind) -> Some spelledKind
                 | _ -> None
 
+            // CoreCLR's approximate load accepts a TypeSpec here only if it spells a generic
+            // instantiation (`ClassLoader::LoadApproxTypeThrowing`), before it resolves anything the
+            // TypeSpec names. A TypeDef or TypeRef row always names a nominal type.
+            match row.InterfaceHandle, rowArguments with
+            | MetadataToken.TypeSpecification _, None ->
+                state,
+                Error (
+                    TypeBindingFailure.Unmodelled
+                        {
+                            Diagnostic =
+                                $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} is the TypeSpec %O{rowSpelling}, which is not a generic instantiation; CoreCLR refuses to load the type"
+                        }
+                )
+            | _ ->
+
             match spelledKind with
             | None ->
-                // Not a nominal type, so not an interface. CoreCLR's approximate load accepts only a
-                // generic instantiation as a TypeSpec here (`ClassLoader::LoadApproxTypeThrowing`).
-                // Reported as concretisation reports it: a variable out of scope, or a type CoreCLR
-                // refuses.
-                match firstOutOfScope spellingContext.Arguments.Length head with
-                | Some refusal -> refused state refusal
-                | None ->
-                    state,
-                    Error (
-                        TypeBindingFailure.Unmodelled
-                            {
-                                Diagnostic =
-                                    $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %O{head}, which is not an interface; CoreCLR refuses to load such a type"
-                            }
-                    )
+                failwith
+                    $"BUG: %s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} named %O{head}, which is not nominal, although only a TypeSpec can spell such a type and a TypeSpec here is a generic instantiation"
             | Some spelledKind ->
 
             let state, interfaceIdentity =
@@ -487,27 +496,43 @@ module ConcreteInterfaceDispatch =
                     state._LoadedAssemblies
                     interfaceIdentity
                     spelledKind
-                && (rowArguments.IsSome
-                    || not (TypeResolution.overlooksNominalSpelling rowResolvedAssembly))
 
             // A TypeDef or TypeRef row has no instantiation of its own: `resolveTypeMetadataToken`
             // reads a generic one at the definition's own variables.
-            let uninstantiated =
-                not interfaceTypeInfo.Generics.IsEmpty
-                && (not isTypeSpec || rowArguments.IsNone)
+            let uninstantiated = not interfaceTypeInfo.Generics.IsEmpty && not isTypeSpec
+
+            // The approximate load loads the type a row names, its own interfaces included, before
+            // it asks whether that type is an interface or names it bare; a failure there comes
+            // first.
+            let walkHead (state : TypeSystemState) (refusal : TypeBindingFailure) =
+                if walking.Contains interfaceIdentity then
+                    state, Error refusal
+                else
+                    match
+                        walkDefinition
+                            loggerFactory
+                            dotnetRuntimeDirs
+                            baseClassTypes
+                            operation
+                            walking
+                            state
+                            interfaceIdentity
+                    with
+                    | state, Error headFailure -> state, Error headFailure
+                    | state, Ok _ -> state, Error refusal
 
             match rowArguments with
-            | _ when uninstantiated -> refused state (TypeLoadRefusal.UninstantiatedDefinition interfaceIdentity)
             | _ when kindMismatch -> refused state (TypeLoadRefusal.KindMismatch (interfaceIdentity, spelledKind))
+            | _ when uninstantiated ->
+                walkHead state (TypeBindingFailure.Refused (TypeLoadRefusal.UninstantiatedDefinition interfaceIdentity))
             | _ when not interfaceTypeInfo.IsInterface ->
-                state,
-                Error (
-                    TypeBindingFailure.Unmodelled
+                walkHead
+                    state
+                    (TypeBindingFailure.Unmodelled
                         {
                             Diagnostic =
                                 $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %s{interfaceTypeInfo.Namespace}.%s{interfaceTypeInfo.Name}, which is not an interface; CoreCLR refuses to load the type (IDS_CLASSLOAD_NOTINTERFACE)"
-                        }
-                )
+                        })
             | _ ->
 
             let outOfScope =
@@ -521,11 +546,18 @@ module ConcreteInterfaceDispatch =
             // still expands the interface's own parents, in the interface's own vocabulary, and a
             // parent that does not resolve fails there first.
             let unreadableRow (state : TypeSystemState) (failure : TypeBindingFailure) =
-                if not expandParents then
+                if not expandParents || walking.Contains interfaceIdentity then
                     unreadable state failure
                 else
                     match
-                        walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state interfaceIdentity
+                        walkDefinition
+                            loggerFactory
+                            dotnetRuntimeDirs
+                            baseClassTypes
+                            operation
+                            walking
+                            state
+                            interfaceIdentity
                     with
                     | state, Error parentFailure -> state, Error parentFailure
                     | state, Ok _ -> unreadable state failure
@@ -660,7 +692,7 @@ module ConcreteInterfaceDispatch =
         (identity : ResolvedTypeIdentity)
         : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
         =
-        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state identity with
+        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation Set.empty state identity with
         | state, Error failure -> state, Error failure
         | state, Ok walked ->
 
@@ -736,7 +768,7 @@ module ConcreteInterfaceDispatch =
         | state, Error failure -> state, Error failure
         | state, Ok () ->
 
-        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state ty.Identity with
+        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation Set.empty state ty.Identity with
         | state, Error failure -> state, Error failure
         | state, Ok walked ->
 
