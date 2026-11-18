@@ -249,6 +249,57 @@ public static class Program
                 directoryContents dllPath |> shouldEqual before
             )
 
+    /// Run `printsPropertiesImage` with `properties`, and return the message of the exception the
+    /// oracle raises, failing if it raises none.
+    let private refusal (properties : Map<string, string>) : string =
+        laidOut
+            "PrintsProperties"
+            printsPropertiesImage.Value
+            None
+            (fun dllPath ->
+                let names = properties |> Map.toList |> List.map fst |> Array.ofList
+
+                let outcome =
+                    try
+                        Ok (RealRuntime.captureAssemblyInPlace (AppContextProperties.ofMap properties) names dllPath)
+                    with e ->
+                        Error e.Message
+
+                match outcome with
+                | Error message -> message
+                | Ok run ->
+                    failwith $"expected the oracle to refuse the properties %A{properties}, but it ran: %A{run}"
+            )
+
+    /// A real host refuses a runtimeconfig naming one of these before the guest starts, with an
+    /// exit code that would otherwise read as the guest's.
+    [<TestCase "TRUSTED_PLATFORM_ASSEMBLIES">]
+    [<TestCase "HOST_RUNTIME_CONTRACT">]
+    let ``a property the hosting layer populates is refused, not run`` (name : string) : unit =
+        refusal (Map.ofList [ name, "value" ]) |> shouldContainText name
+
+    [<Test>]
+    let ``APP_PATHS alongside the switch that makes the host set it is refused, not run`` () : unit =
+        refusal (
+            Map.ofList
+                [
+                    "APP_PATHS", "value"
+                    "Microsoft.NETCore.DotNetHostPolicy.SetAppPaths", "true"
+                ]
+        )
+        |> shouldContainText "APP_PATHS"
+
+    /// A lone surrogate has no UTF-8 encoding, so no runtimeconfig can carry it as given.
+    [<Test>]
+    let ``a property name or value that is not well-formed UTF-16 is refused, not run`` () : unit =
+        let loneSurrogate = string (char 0xD800)
+
+        refusal (Map.ofList [ "WoofWare.Test.Value", "a" + loneSurrogate ])
+        |> shouldContainText "WoofWare.Test.Value"
+
+        refusal (Map.ofList [ "WoofWare.Test." + loneSurrogate, "value" ])
+        |> shouldContainText "UTF-16"
+
     [<Test>]
     let ``concurrent runs of one assembly each see their own properties`` () : unit =
         // More than two, started together, and several rounds of them: two runs that read each
@@ -287,6 +338,17 @@ public static class Program
 
                                 value, task
                             )
+
+                    // Every run is awaited before any failure is reported, so that none is still
+                    // running when `laidOut` removes the assembly's directory.
+                    (try
+                        runs
+                        |> List.map snd
+                        |> Seq.cast<Tasks.Task>
+                        |> Seq.toArray
+                        |> Tasks.Task.WaitAll
+                     with _ ->
+                         ())
 
                     runs
                     |> List.map (fun (value, task) ->
