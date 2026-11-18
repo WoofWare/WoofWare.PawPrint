@@ -2138,6 +2138,62 @@ public struct S2<T> : IC<T[]> { }
         TestContext.Progress.WriteLine $"pair chain: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
         Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
 
+    /// `L0<A> : I<A>`, `Lk<A> : L(k-1)<Pair<A, A>>` up to `depth`, the same for `R`, under
+    /// `C : L<depth><int>, R<depth><int>`. Each interface's row names its one direct parent, so the
+    /// image holds spellings of constant size, linear in the depth; the two chains' `I<_>` rows close
+    /// to one handle, and their substitutions, equal and shared `depth` deep, are compared.
+    let private pairDiamond (depth : int) : Sketch list =
+        let chain (side : string) =
+            [
+                yield sketch $"%s{side}0`1" SketchKind.Interface 1 [ Spelling.Named ("I`1", [ Spelling.Var 0 ]) ]
+                for k in 1..depth do
+                    yield
+                        sketch
+                            $"%s{side}%d{k}`1"
+                            SketchKind.Interface
+                            1
+                            [
+                                Spelling.Named (
+                                    $"%s{side}%d{k - 1}`1",
+                                    [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ; Spelling.Var 0 ]) ]
+                                )
+                            ]
+            ]
+
+        [
+            yield sketch "I`1" SketchKind.Interface 1 []
+            yield sketch "Pair`2" SketchKind.Class 2 []
+            yield! chain "L"
+            yield! chain "R"
+            yield
+                sketch
+                    "C"
+                    SketchKind.Class
+                    0
+                    [
+                        Spelling.Named ($"L%d{depth}`1", [ Spelling.Int32 ])
+                        Spelling.Named ($"R%d{depth}`1", [ Spelling.Int32 ])
+                    ]
+        ]
+
+    /// The diamond of two chains of shared contexts agrees with the host, and costs at most 32 times
+    /// at sixteen levels what it does at eight: the image is linear in its depth, so linear work gives
+    /// about 2, and comparing the two equal substitutions unshared about 256.
+    [<Test>]
+    let ``A diamond of two chains passing Pair<A, A> on agrees with the host, in work linear in its depth`` () : unit =
+        let warm, _, _ = sketchOutcome (pairDiamond 2) "C"
+        warm |> Result.isOk |> shouldEqual true
+
+        let host8, pawPrint8, allocated8 = sketchOutcome (pairDiamond 8) "C"
+        agreeWithHost host8 pawPrint8
+
+        let host16, pawPrint16, allocated16 = sketchOutcome (pairDiamond 16) "C"
+        agreeWithHost host16 pawPrint16
+        host16 |> Result.map Array.length |> shouldEqual (Ok 35)
+
+        TestContext.Progress.WriteLine $"pair diamond: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
     /// Shapes whose interface hierarchy reaches a definition already being loaded, which CoreCLR
     /// refuses as a recursive load (`IDS_CLASSLOAD_GENERAL`). A row naming a class whose base chain
     /// is a cycle (`K : K2`, `K2 : K`) is not here: the Loader's base-chain loading, which reading the
