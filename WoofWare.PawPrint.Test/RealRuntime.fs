@@ -163,7 +163,27 @@ module RealRuntime =
     /// framework reference), which a real guest process would not have. Roll-forward is disabled
     /// because each version is by construction the framework under test's, the one PawPrint runs
     /// the guest on, so any roll-forward would silently be a mismatch rather than a convenience.
+    ///
+    /// Fails on properties that no runtimeconfig can deliver to the guest as given: a name the
+    /// hosting layer populates for itself, which the host refuses before the guest starts (with
+    /// an exit code that would read as the guest's), and a name or value that is not well-formed
+    /// UTF-16, which has no UTF-8 encoding.
     let private runtimeConfigFor (frameworks : OracleFrameworks) (configProperties : AppContextProperties) : string =
+        match RuntimeConfig.combine AppContextProperties.empty configProperties with
+        | Ok _ -> ()
+        | Error error ->
+            failwith $"RealRuntime: the oracle cannot run a guest with these AppContext properties: %s{error.Message}"
+
+        let strictUtf8 = UTF8Encoding (false, true)
+
+        for KeyValue (key, value) in AppContextProperties.toMap configProperties do
+            for text in [ key ; value ] do
+                try
+                    strictUtf8.GetByteCount text |> ignore<int>
+                with :? EncoderFallbackException ->
+                    failwith
+                        $"RealRuntime: the AppContext property %A{key} has a name or value that is not well-formed UTF-16 (%A{text}), which a runtimeconfig, being UTF-8, cannot carry; the guest would see U+FFFD in its place."
+
         // Derived rather than hardcoded so this does not quietly start lying when the projects move
         // to a later target framework.
         let tfm =
