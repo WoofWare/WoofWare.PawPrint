@@ -1208,3 +1208,279 @@ The machine was shared with other runs, and the differences go both ways by more
 explain (`GuestImpure` took 505 to 560 s in PR 1's runs; `GuestSolo`, two tests, ranged from 545 to 1,193 s here), so
 these runs show no slowdown that stands out from that noise, and nothing asks for memoising the definition map. A
 quieter machine would be needed to see a difference of a few per cent.
+
+#### Decisions after Codex's fifth review
+
+Decided 2026-11-18 by the delegated decider, after reading the branch at `2c9dc9c13`, `origin/main` at `3a6d1c53c`,
+and the pinned .NET 10 source. "Read" below means read in the code; nothing was built or run for these decisions, so
+each claim marked *read, not measured* is for the implementer to confirm with the test named beside it.
+
+**In brief.**
+
+| finding | decision |
+|---|---|
+| 1. exponential comparison | Share work inside the comparison itself (option A below). It lands **first, as its own pull request against `main`**; this pull request is rebased onto it. |
+| 2. `I<T> : I<T*>` never ends | Fix here: one "load in progress" set, checked wherever a definition's walk is entered. |
+| 3. a TypeSpec head that is not nominal | Fix the `failwith` here. The `VALUETYPE Missing` half is filed. |
+| 4. a class head's approximate instantiation | Filed, not fixed here. The diagnostic is corrected and the shapes are pinned as refusals. |
+| 5. `baseOfDefinition`'s arity `failwith` | Fix here: it becomes `Refused (WrongArity ...)`. |
+| sixth Codex round | Yes, one, with a stated rule for what it may reopen; a seventh at most. |
+
+##### 1. The comparison
+
+**The claim, checked.** It is right, and the comparison is the whole of it.
+
+- `compareElements` (TypeConcretisation.fs) resolves a spelled `!i` through `readTypeVariable` to the context's
+  `i`th argument, itself a `Spelled` carrying its own context, and recurses. Nothing remembers a pair it has already
+  compared. A spelling that mentions a variable twice (`Pair<!0, !0>`) therefore walks the context below it twice, and
+  a chain of `n` such levels is walked as a tree of `2^n` leaves although it is held as `n` shared arrays.
+- Codex's chain compares `I<X16>` with `I<Y16>`, where `X(n) = Pair<X(n-1), X(n-1)>` and
+  `Y(n) = Pair<X(n-1), Y(n-1)>`. The first arguments are equal, which costs the full `2^(n-1)`, and the second differ
+  only at the bottom, so the total is about `2^n` element comparisons. 173 MB over `2^16` is roughly 2.6 kB a step,
+  which is what `allEqual`, `List.zip` and the token comparison allocate.
+- The walk itself is not at fault: `rebaseMap` and the closing in `interfaceMapOf` each keep one result per shared
+  context already.
+- **Why the old walk avoided this input.** Its filter was the closed handle. Handles are interned, so `I<X16>` and
+  `I<Y16>` have different handles and were never compared. It called `substitutionsEquivalent` only for two rows that
+  close to one handle.
+- **The old walk is exponential on a different valid input** (*read, not measured*): two rows that do close to one
+  handle through two deep paths, such as `C : L16<int>, R16<int>` where both chains pass `Pair<A, A>` down to `I<A>`.
+  There the handles agree, `substitutionsEquivalent` runs on two equal substitutions, and equality is the expensive
+  answer. So the defect is in the comparison and predates this branch; the branch widened the set of inputs that
+  reach it. Test W2 below measures this on `main`.
+- **CoreCLR compares the same way, and is exponential too** (*read, not measured*). `ExpandApproxInterface`
+  (methodtablebuilder.cpp:347) calls `MetaSig::CompareTypeDefsUnderSubstitutions` in the *approximate* pass: same
+  TypeDef, then `CompareElementType` on each argument blob under the substitution chain (siginfo.cpp:4391).
+  `CompareElementType` follows the chain afresh at every `ELEMENT_TYPE_VAR` (siginfo.cpp:3815-3862) and keeps no
+  record of pairs. It does not compare approximate types by identity and leave exactness to a later pass:
+  `ExpandExactInterface` (:10252) makes the same comparison again. The exact pass does have a handle filter
+  (`InsertMethodTable`, "technique 1", :9618-9666), which is what the old walk's filter resembled, but it decides only
+  whether the substitution comparison is needed for a closed type, never the definition's map. So the duplicate rule
+  is settled, PawPrint's statement of it is already CoreCLR's, and only its cost is open. A chain deep enough hangs
+  real .NET as well; PawPrint's step is about a thousand times dearer, which is why sixteen levels already hurts.
+
+**Options.**
+
+- **A. Share work inside the comparison.** `compareElements` keeps, for the length of one public comparison, the set
+  of pairs it has already proved equal, and answers `true` for a pair in it. Every recursive step of the comparison is
+  a conjunction (`allEqual`), so a `false` or an `Error` ends the whole comparison, and the only result that can ever
+  be reused is `true`: the "memo" is a set, not a table.
+  - *Correctness:* unchanged by construction. A pair enters the set only after the unshared comparison answered
+    `true` for it without throwing, and the values are immutable, so a hit returns what recomputing would. Assembly
+    loads made while proving a pair are made the first time and are idempotent after. No `failwith` or refusal is
+    skipped, since a pair that throws or refuses never enters the set.
+  - *Blast radius:* a private function of a published package changes; no signature, no public type, no answer.
+    The risk is a wrong key. It is bounded by keeping the set out of closed comparisons altogether (below) and by the
+    oracle property T2.
+  - *Reversibility:* one private function and a local set; reverting it restores today's code exactly.
+  - *For PR 3:* nothing changes. A definition entry's `Substitution` stays what it is, CoreCLR's own
+    `Substitution` chain, which is what decision 4's conversion to targets reads.
+- **B. A canonical, interned form of definition-level types in the walk,** compared by identity. To agree with
+  CoreCLR it would have to restate everything `compareElements` decides: that `object` and `class System.Object` are
+  different spellings, modifier order, the refusal of two GENERIC function pointers, the mixed-world `failwith`s, and
+  the order in which TypeRefs are resolved (canonicalising resolves every TypeRef up front, where the comparison
+  resolves them as it meets them and stops at the first difference, so assembly load order and the failure reported
+  can both move). That is a second statement of the duplicate rule, held to the first by a property test, which is
+  the arrangement "Staging" rejected for the walk itself. It adds a representation PR 3 would have to convert from or
+  ignore, and it leaves `substitutionsEquivalent` exponential for `ownDispatchMapOf` and for every signature
+  comparison through a deep base chain. Rejected.
+- **C. A cheaper necessary condition before the comparison** (a fingerprint of the substituted type computed once per
+  shared context, or the closed handle put back as a filter where a closed receiver exists). It removes Codex's
+  example and nothing else: two equal instantiations pass any sound filter and then cost `2^n`, which is the input the
+  old walk already mishandles. It bounds nothing. Rejected. A closed-handle filter would also give the closed path a
+  rule the definition path lacks, against decision 3.
+- **D. Leave it, since CoreCLR is exponential too.** Rejected: this branch takes a valid input from 0.36 MB to
+  173 MB, and "no slower than the host asymptotically" is not a guarantee anyone can use at 2.6 kB a step.
+
+**Chosen: A, as its own pull request against `main`, landing before this one.** It is a change to published code
+that every signature comparison runs through, it is independent of the interface map, it fixes an input `main`
+already mishandles, and its tests need no metadata image. Reviewed alone it is a few dozen lines; inside this pull
+request it would be the one hunk a reviewer most needs to see and is least likely to find. Branch it from
+`origin/main`, do not stack it. This pull request is rebased onto `main` once it merges, and changes nothing in
+`TypeConcretisation.fs`.
+
+Constraints on the implementation:
+
+- The set lives for one call of a public comparison (`substitutionsEquivalent`, `signaturesEquivalent` and their
+  siblings), as a local in that call. Nothing outlives the call and no signature changes. One mode for every entry
+  point: a second, unshared mode would be a second comparison to keep in step.
+- A pair is recorded only where sharing can arise: when at least one side was reached by reading a variable whose
+  argument is `Spelled`. A closed comparison (every argument `Closed`) and an unsubstituted one must never allocate
+  or consult the set, so that what the interpreter does for live objects runs exactly the code it runs today. Create
+  the set lazily.
+- The key is identity, never structure: on each side the assembly name, the context array (an `ImmutableArray`
+  compares and hashes by the array it wraps, as `rebaseMap` already relies on) and the spelling node by reference
+  (`HashIdentity.Reference`). The assembly is part of the key because one `TypeDefn` object is not guaranteed to
+  belong to one image. Do not key on a `SubstitutionArgument` or `TypeDefn` by `=`.
+- Do not add "the same object on both sides is equal" as a shortcut. `compareElements x x` is not always `true`: it
+  can refuse (two GENERIC function pointers) or fail to resolve a TypeRef, and a shortcut would turn those into an
+  answer.
+- Record a pair after it is proved, not before.
+
+**Tests for that pull request, written first and run on `main`.**
+
+- **T1, red on `main`.** No image: build contexts with `SubstitutionContext.forDefinition` and repeated `forBase`
+  over a two-parameter CoreLib generic (`KeyValuePair<!0, !0>` and `KeyValuePair<!0, !1>` at each level), in the two
+  shapes above: Codex's (differing at the bottom of the last argument) and two equal substitutions built separately,
+  so that no array is shared between the sides. Assert the answer, and that the bytes allocated by one comparison
+  (`GC.GetAllocatedBytesForCurrentThread`, after one untimed warm-up call) at depth 16 are at most 8 times those at
+  depth 8. Exponential work gives a ratio near 256 and linear work near 2, so the assertion has a factor of thirty on
+  either side and no clock in it. Record the two ratios measured on `main` in the commit message.
+- **T2, the oracle; green before and after.** For generated pairs of small substitutions (depth at most 6, contexts
+  of one to three arguments, spellings drawn from `!i`, `KeyValuePair<!i, !j>`, `!i[]`, `!i*` and one level of nesting,
+  all in one assembly with no TypeRefs and no modifiers), `substitutionsEquivalent` agrees with a reference written in
+  the test: expand each side to a tree by substituting every variable, and compare the trees structurally. Within that
+  fragment structural equality of the expansions *is* the rule. Generate both sides from a small alphabet so that
+  equal pairs are common, and assert with `Prop.cover` (or a counted classification) that each answer occurs in at
+  least a fifth of cases, so the property cannot pass on `false` alone.
+- **T3, the bound.** Over generated chains of depth 1 to 20 (same spelling alphabet, the two sides either built
+  separately from one recipe or differing in one leaf of the last argument at the bottom), the bytes allocated by one
+  comparison are at most `K * depth * (1 + s)^2`, where `s` is the largest number of nodes in one level's spellings
+  and `K` is twenty times the largest constant measured after the fix. That is quadratic in what the metadata holds
+  and independent of how often it is shared. At depth 20 unshared work allocates gigabytes, so a regression fails by
+  three orders of magnitude and still finishes in seconds; the depth is capped at 20 so that a red run ends. A step
+  counter would be exact, but it would put a parameter into published code for the tests' sake alone, so allocation
+  is the measure.
+- **Mutants T2 must kill:** the key without the right-hand side; the key without the context (spelling node alone);
+  a `false` or unproved pair recorded. T1 or T3 must kill "the set never consulted".
+
+**Tests added to this pull request after the rebase.**
+
+- **W1.** Codex's sixteen-level chain as an image, through `interfaceMapOf`, against the host's `GetInterfaces()`
+  (19 entries), with the allocation of one map at sixteen levels at most 32 times that at eight. Run it on this
+  branch *before* the rebase and record the failure: that is the red run.
+- **W2.** The diamond `C : L16<int>, R16<int>` described above, same two assertions. Run it on `origin/main` before
+  the comparison pull request and record what it does. If it is not exponential there, say so in the body of the
+  comparison pull request and strike the "predates this branch" sentence above; the decision does not change.
+- The map's *size* can be exponential in depth legitimately (each level passing two distinct instantiations on), and
+  CoreCLR builds that map too. So any bound over generated hierarchies is stated in rows read and entries produced,
+  not in depth alone.
+
+##### 2. An interface that reaches itself: fix here
+
+`origin/main` ends on `I<T> : I<T*>`, by accident: closing refuses a pointer argument. This branch never ends, so it
+is this pull request's to fix. The accident does not cover `I<T> : I<List<T>>`, on which the old walk also expands
+without end (*read, not measured*), and both walks *answer* the plain cycle `I<T> : J<T>`, `J<T> : I<T>` (the second
+visit is a duplicate, so the expansion stops and a map comes back).
+
+CoreCLR has one rule for all of them (*read, not measured*). The approximate load of a row loads the interface's
+generic *definition* to `CLASS_LOAD_APPROXPARENTS` (`LoadApproxTypeThrowing`, clsload.cpp:2398), which loads that
+definition's own rows. A definition whose load is already in progress on the thread is a recursive load, refused with
+`IDS_CLASSLOAD_GENERAL` (clsload.cpp:3222-3226). Arguments are not loaded in that pass, which is why
+`struct V : I<V>` and `class C<T> : I<C<T>>` are legal and `I<T> : I<anything>` is not.
+
+So: **one set of definitions whose load is in progress, and entering the walk of a member of it is the refusal.**
+It replaces today's `walking` set and its two special cases (`walkHead` returning the other refusal on re-entry,
+`unreadableRow` silently not walking). It is checked in one place that both `walkDefinition` and the recursion of
+`expand` into an interface's rows pass through, immediately after the row's head resolves and before its kind, arity
+or arguments are looked at. It is local to the path, so a diamond is unaffected. The refusal is
+`TypeBindingFailure.Unmodelled` with a diagnostic naming the definition and `IDS_CLASSLOAD_GENERAL`, like this
+branch's other approximate-load refusals; a new `TypeLoadRefusal` case would be a public addition to a published
+package, and making the refusal catchable by a guest is a feature of its own.
+
+Checking at entry to `walkDefinition` also closes a hole nobody has reported: a base-class cycle reached through a
+TypeDef or TypeRef row head (`K : K2`, `K2 : K`, no base chain loaded first) recurses through `baseOfDefinition`
+with nothing to stop it (*read, not measured*).
+
+Red first, each against the host, each run under an external time limit (NUnit's `Timeout` cannot stop a loop, and
+the last cycle test overflowed the host's stack):
+
+- `I<T> : I<T*>`: does not end on this branch.
+- `I<T> : I<List<T>>`, and the indirect `I<T> : J<T[]>`, `J<T> : I<T>`: expected not to end on `main` either.
+- `I<T> : J<T>`, `J<T> : I<T>` under `C : I<int>`: expected to be answered today where the host refuses.
+- A row naming class `K` by TypeDef, with `K : K2`, `K2 : K`.
+- Green throughout: a diamond (`C : L, R`, both over `I`), `struct V : I<V>`, `class C<T> : I<C<T>>`,
+  `I<T> : J<I<T>>`.
+
+`A cycle through an unreadable row is refused` expects `WrongArity` today. Under this rule the cycle is found first,
+as CoreCLR finds it before any arity, so its expectation becomes the cycle refusal. That edit to an existing test is
+intended; say so in the commit.
+
+If the host answers any of the shapes above, stop and report: the rule as read is then wrong.
+
+##### 3. A TypeSpec head that is not nominal: fix the `failwith` here
+
+`main` returns `Error (Unmodelled ...)` for a row such as `GENERICINST int32 1 int32`; this branch throws. Fix it by
+parsing rather than checking: classify the row once into "a TypeDef or TypeRef token" or "`GENERICINST` over a nominal
+head, with arguments", or refuse its shape (`Unmodelled`, `IDS_CLASSLOAD_GENERAL`) before anything it names is
+resolved, and have the rest of `expand` take the classified value. The `BUG:` `failwith` then has no arm to live in.
+Red first: the `int32`-headed row, alone and before a later absent row.
+
+The other half is filed, not fixed: CoreCLR also refuses a head spelled `VALUETYPE` before binding its token, so
+`GENERICINST VALUETYPE Missing ...` is a shape refusal on the host and `TypeAbsent` here. `main` says `TypeAbsent`
+too, both refuse, and the head that exists keeps its `KindMismatch`. It goes in #2329.
+
+##### 4. A class head's approximate instantiation: filed
+
+Not fixed here, and the caller's rule ("what this pull request introduces is fixed in it") deserves a direct answer.
+On a row naming a class this branch differs from `main` in three ways:
+
+| row | host | `main` | this branch |
+|---|---|---|---|
+| `G<int>`, well formed, `G` a class | refuses | **answers, with a class in the map** | refuses (`Unmodelled`) |
+| `G<class Missing>` | not an interface | `TypeAbsent` | refuses as not an interface |
+| `G<int, int>` for one-parameter `G` | wrong arity | `WrongArity` | refuses as not an interface |
+| `G<valuetype Missing>` | missing type | `TypeAbsent` | refuses as not an interface |
+
+Every row is refused on this branch, loudly, and the first is a silent wrong answer on `main`. What moved is which
+refusal is named, toward the host in one row and away from it in two. Naming it correctly needs a primitive PawPrint
+does not have: CoreCLR's approximate load of an instantiation (`SigPointer::GetTypeHandleThrowing` with
+`dropGenericArgumentLevel`, siginfo.cpp:1457-1600), which replaces each argument that is a GC reference or a
+`GENERICINST CLASS` by `__Canon` without loading it, loads every other argument recursively under the same rule,
+and only then checks arity. A partial version (arity alone, or top-level value types alone) would name the right
+refusal for Codex's two examples and the wrong one for their combinations, and would be a third thing to keep in step
+with the host. It is one feature, with its own measurements, and nothing in PRs 3 to 5 needs it.
+
+In this pull request:
+
+- The diagnostic of the not-an-interface refusal must not claim more than is modelled: it says the row names a type
+  that is not an interface, and that CoreCLR refuses the type either for that (`IDS_CLASSLOAD_NOTINTERFACE`) or for
+  an earlier failure of the class's approximate instantiation, which is not modelled, naming #2329.
+- Two tests pin the shapes as refusals without pinning the identity: for `G<int, int>` and `G<valuetype Missing>`
+  the host fails and PawPrint returns `Error`, with #2329 named in the docstring. They are green now; they exist
+  so that the fix for #2329 has a test to tighten.
+
+Filed as #2329, which the diagnostic and the two docstrings name.
+
+##### 5. `baseOfDefinition`'s arity `failwith`: fix here
+
+`walkHead` is new in this pull request and is what lets a closed receiver reach it: `C` with a row naming `BadHead`,
+where `BadHead : G<int, int>` over a one-parameter `G`. `main` never loads `BadHead`'s base and answers silently, so
+a throw is not worse, but the fix is three lines in a function that already returns a `Result`, and it also closes
+the gap "As built" leaves for PR 3. `MethodTableLayout.baseOfDefinition` returns
+`Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity (baseIdentity, declared, supplied)))`, and its comment
+says the clause can be malformed rather than that the image would not load. Its other callers get an `Error` where
+they would have thrown, and each already propagates one.
+
+Red first: Codex's `C`/`BadHead` image through `interfaceMapOf` (throws today; the host reports a type-load
+failure), and the same extends clause through `interfaceMapOfDefinition` on `BadHead` itself, which gives that
+function its first test.
+
+##### Order of work, and the sixth review
+
+1. The comparison pull request, from `origin/main`: T1 to T3 first, then the change, then its own Codex review. W2's
+   run on `main` goes in its body.
+2. On this branch, before rebasing: add W1, the cycle tests, the `int32`-head tests and the `BadHead` tests in one
+   commit of tests alone, with the failing output recorded.
+3. Rebase onto `main` with the comparison merged; W1 and W2 go green with no change here.
+4. Findings 2, 3 and 5, and finding 4's diagnostic and two tests. Mutants: the in-progress check removed from the
+   expansion path; removed from `walkDefinition`'s entry; made global rather than local to the path (must fail the
+   diamond); the head classification accepting a non-nominal head.
+5. Suites, the dump, and "As built" brought up to date, as for the earlier rounds.
+
+**Run a sixth Codex round on this pull request**, since steps 2 to 4 change the walk's control flow. What it may
+reopen is fixed in advance:
+
+- A finding on valid metadata, or a hang or a host exception reachable from any metadata, is fixed here, tests
+  first, and reviewed again.
+- A finding only about *which* refusal is named for an image that both PawPrint and the host refuse is added to the
+  #2329 and not fixed here. It does not call for another round.
+- A finding that needs a structural choice stops the work, as before.
+
+A seventh round is the last. If it still has a finding of the first kind, stop and report rather than fix: six rounds
+of approximate-load corrections would then be saying that interleaving the approximate load's checks with the map's
+construction is the wrong shape, and the choice to make is whether the approximate load of a row becomes a function
+of its own which the walk calls.
+
+**No further split of this pull request.** The re-expression cannot land without the row checks, because closing is
+no longer what refuses a malformed row, and the checks are what five rounds have been about.
