@@ -1752,7 +1752,10 @@ module TypeConcretization =
 
     /// The pairs of spelled elements that one public comparison has proved equal so far, so that a
     /// pair it meets again through another occurrence of a type variable is answered without being
-    /// walked again.
+    /// walked again. That makes a comparison polynomial in what its chains hold, at most quadratic in
+    /// their depth, where without it the work is exponential in depth. Quadratic, not linear: a type
+    /// variable whose argument is another bare variable, as in `class A<T> : B<T>`, is still followed
+    /// to the end of its aliases at each read.
     ///
     /// A pair is recorded only after comparing it has answered `true`. The values compared are
     /// immutable, so a pair proved equal is equal however often it is met, and an assembly loaded

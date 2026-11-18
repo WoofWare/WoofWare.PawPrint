@@ -15,7 +15,9 @@ open WoofWare.PawPrint
 /// one array whose arguments are spellings read against the array below. A spelling that mentions a
 /// variable twice, such as <c>KeyValuePair&lt;!0, !0&gt;</c>, makes the type it denotes a tree twice
 /// as large as the level below while the chain grows by one array. Comparing two such chains must
-/// cost what the chains hold, not what they denote.
+/// cost a polynomial in what the chains hold, at most quadratic in their depth, and not what they
+/// denote. (Quadratic, not linear: a chain of bare variables, as <c>class A&lt;T&gt; : B&lt;T&gt;</c>
+/// spells at every level, is followed to its end at each read of the variable.)
 /// </summary>
 /// <remarks>
 /// <para>
@@ -125,7 +127,7 @@ module TestSubstitutionComparisonSharing =
 
     [<TestCase true>]
     [<TestCase false>]
-    let ``comparing chains that double at each level costs what the chains hold`` (equal : bool) : unit =
+    let ``comparing chains that double at each level costs a polynomial in their depth`` (equal : bool) : unit =
         let shape = if equal then equalSides else differsAtBottom
 
         // One untimed call first, so that one-off work is not charged to the measurement.
@@ -140,8 +142,47 @@ module TestSubstitutionComparisonSharing =
         answer8 |> shouldEqual equal
         answer16 |> shouldEqual equal
 
-        // Work exponential in depth gives a ratio near 2^8 = 256, and work linear in it a ratio near 2.
+        // Work exponential in depth gives a ratio near 2^8 = 256. This shape has no chain of bare
+        // variables, so shared work is linear in its depth here and gives a ratio near 2; quadratic
+        // work would give 4.
         allocated16 |> shouldBeSmallerThan (8L * allocated8 + 1L)
+
+    /// `levels` contexts stacked on a bottom context, each `[!0; KeyValuePair<!0, !1>]` over the one
+    /// below, with fresh spelling nodes at every level. Every level's first argument is a bare
+    /// variable naming the level below's, so reading it at depth `n` follows `n` aliases to the
+    /// bottom.
+    let private aliasChain (levels : int) : TypeConcretization.SubstitutionContext =
+        (bottomOf 0 1, [ 1..levels ])
+        ||> List.fold (fun below _ ->
+            let spellings =
+                ImmutableArray.Create (
+                    TypeDefn.GenericTypeParameter 0,
+                    pairOf (TypeDefn.GenericTypeParameter 0) (TypeDefn.GenericTypeParameter 1)
+                )
+
+            TypeConcretization.SubstitutionContext.forBase corelibName spellings below
+        )
+
+    /// The shape that keeps the work quadratic rather than linear in depth: each read of a bare
+    /// variable follows its aliases to the end, and no pair of elements is met twice to be shared.
+    /// Two equal chains, built separately.
+    [<Test>]
+    let ``comparing chains of bare variables costs at most quadratically in their depth`` () : unit =
+        // One untimed call first, so that one-off work is not charged to the measurement.
+        measure (aliasChain 64) (aliasChain 64) |> ignore<bool * int64>
+
+        let answer64, allocated64 = measure (aliasChain 64) (aliasChain 64)
+        let answer256, allocated256 = measure (aliasChain 256) (aliasChain 256)
+
+        TestContext.Out.WriteLine
+            $"alias chain: depth 64 allocated %d{allocated64} bytes, depth 256 allocated %d{allocated256} bytes, ratio %.2f{float allocated256 / float allocated64}"
+
+        answer64 |> shouldEqual true
+        answer256 |> shouldEqual true
+
+        // Quadratic work gives a ratio of 16 and linear work 4; anything worse than quadratic, more
+        // than twice the former.
+        allocated256 |> shouldBeSmallerThan (32L * allocated64 + 1L)
 
     /// A spelling in the generated fragment, before it is built as a `TypeDefn`.
     type private Spelling =
