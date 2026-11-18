@@ -96,6 +96,11 @@ public static class Program
 }
 """
 
+    /// The temp directory, as the oracle finds it: walked as the operating system walks it, since
+    /// `TMPDIR` may be relative, or climb out of a symbolic link with `..`.
+    let private tempDirectory () : string =
+        FrameworkUnderTest.resolveLinks (Path.GetTempPath ())
+
     /// Write `image` as `<assemblyName>.dll` into a new directory of its own under `parent`, with
     /// `besideConfig` as its `<assemblyName>.runtimeconfig.json` if given; run `body` on the DLL's
     /// path; then remove the directory.
@@ -133,7 +138,7 @@ public static class Program
         (body : string -> 'a)
         : 'a
         =
-        laidOutUnder (Path.GetFullPath (Path.GetTempPath ())) assemblyName image besideConfig body
+        laidOutUnder (tempDirectory ()) assemblyName image besideConfig body
 
     /// Every file in `dllPath`'s directory, by name, with its bytes: as text for a JSON file, so
     /// that a failure shows what changed, and otherwise as their SHA-256.
@@ -511,7 +516,7 @@ public static class Program
     [<Test>]
     let ``an assembly directly in the temp directory is refused, not run`` () : unit =
         let dllPath =
-            Path.Combine (Path.GetTempPath (), "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll")
+            Path.Combine (tempDirectory (), "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll")
 
         File.WriteAllBytes (dllPath, endsAsToldImage.Value)
 
@@ -533,8 +538,8 @@ public static class Program
     [<Test>]
     let ``an assembly in the temp directory, reached through a symbolic link, is refused, not run`` () : unit =
         let name = "pawprint-in-place-test-" + Path.GetRandomFileName ()
-        let dllPath = Path.Combine (Path.GetTempPath (), name + ".dll")
-        let linkParent = Path.Combine (Path.GetTempPath (), name)
+        let dllPath = Path.Combine (tempDirectory (), name + ".dll")
+        let linkParent = Path.Combine (tempDirectory (), name)
         Directory.CreateDirectory linkParent |> ignore<DirectoryInfo>
 
         try
@@ -542,8 +547,7 @@ public static class Program
             let link = Path.Combine (linkParent, "temp")
 
             // Absolute, since a relative target is relative to the link's own directory.
-            Directory.CreateSymbolicLink (link, Path.GetFullPath (Path.GetTempPath ()))
-            |> ignore<FileSystemInfo>
+            Directory.CreateSymbolicLink (link, tempDirectory ()) |> ignore<FileSystemInfo>
 
             let outcome =
                 try
@@ -570,10 +574,7 @@ public static class Program
     [<Test>]
     let ``an assembly that is a symbolic link to one in the temp directory is refused, not run`` () : unit =
         let target =
-            Path.Combine (
-                Path.GetFullPath (Path.GetTempPath ()),
-                "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll"
-            )
+            Path.Combine (tempDirectory (), "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll")
 
         File.WriteAllBytes (target, endsAsToldImage.Value)
 
@@ -606,8 +607,7 @@ public static class Program
     /// spelling does not reach the assembly.
     [<Test>]
     let ``an assembly in the temp directory, spelled in other case, is refused, not run`` () : unit =
-        let temp =
-            Path.TrimEndingDirectorySeparator (Path.GetFullPath (Path.GetTempPath ()))
+        let temp = Path.TrimEndingDirectorySeparator (tempDirectory ())
 
         let flipped =
             Path.Combine (
@@ -658,7 +658,7 @@ public static class Program
             + 1
 
         let root =
-            Path.Combine (Path.GetFullPath (Path.GetTempPath ()), "pawprint-in-place-test-" + Path.GetRandomFileName ())
+            Path.Combine (tempDirectory (), "pawprint-in-place-test-" + Path.GetRandomFileName ())
 
         let nested = Path.Combine (Array.append [| root |] (Array.replicate depth "d"))
         Directory.CreateDirectory nested |> ignore<DirectoryInfo>

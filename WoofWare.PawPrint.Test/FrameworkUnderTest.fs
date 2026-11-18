@@ -112,7 +112,8 @@ module FrameworkUnderTest =
     /// location has the links resolved, another framework assembly's does not. A relative `path`
     /// is relative to the working directory. The path is walked as `realpath` walks it: a `..`
     /// climbs from wherever the path has reached, which after a link is the link's target, not
-    /// the directory holding the link. Fails on more than 40 links, as `realpath` does (ELOOP).
+    /// the directory holding the link. Fails on a `..` after something that is not a directory,
+    /// and on more than 40 links, as `realpath` does (ENOTDIR or ENOENT, and ELOOP).
     let resolveLinks (path : string) : string =
         let separators = [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |]
 
@@ -126,6 +127,12 @@ module FrameworkUnderTest =
             | [] -> reached
             | "." :: rest -> go hops reached rest
             | ".." :: rest ->
+                // The operating system fails a lookup through anything but a directory, so a `..`
+                // cannot cancel a component that names nothing, or a file.
+                if not (Directory.Exists reached) then
+                    failwith
+                        $"resolving %s{path}: %s{reached} is not a directory, so the operating system cannot climb out of it with '..'"
+
                 match Path.GetDirectoryName reached with
                 | null -> go hops reached rest
                 | parent -> go hops parent rest

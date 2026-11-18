@@ -1048,11 +1048,17 @@ module RealRuntime =
         let name = Path.GetFileNameWithoutExtension dllPath
 
         // Created under a name no other directory has, and in a temp directory that already
-        // exists, so that cleaning up removes only what this call made. Absolute, because
-        // `Path.GetTempPath` keeps a relative `TMPDIR` as it is, and the host would resolve the
-        // runtimeconfig's path against the guest's working directory.
+        // exists, so that cleaning up removes only what this call made. The temp directory is
+        // resolved as the operating system walks it, as the assembly's is above: `TMPDIR` may be
+        // relative, which the host would read against the guest's working directory, and may
+        // climb out of a link with `..`, which `Path.GetFullPath` would read by its spelling.
         let scratch =
-            Path.GetFullPath (Directory.CreateTempSubdirectory "pawprint-oracle-").FullName
+            Path.Combine (
+                FrameworkUnderTest.resolveLinks (Path.GetTempPath ()),
+                Path.GetFileName (
+                    Path.TrimEndingDirectorySeparator (Directory.CreateTempSubdirectory "pawprint-oracle-").FullName
+                )
+            )
 
         try
             // Whether the guest could reach `scratch` by walking down from `candidate`, decided by
