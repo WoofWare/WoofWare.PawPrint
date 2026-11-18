@@ -148,46 +148,6 @@ module TestFrameworkUnderTest =
         )
 
     [<Test>]
-    let ``resolveLinks climbs from a link's target, as the operating system walks a path`` () : unit =
-        withTempDir (fun parent ->
-            let parent = FrameworkUnderTest.resolveLinks parent
-            let target = Path.Combine (parent, "package", "sub")
-            Directory.CreateDirectory target |> ignore<DirectoryInfo>
-            let app = Path.Combine (parent, "app")
-            Directory.CreateDirectory app |> ignore<DirectoryInfo>
-
-            Directory.CreateSymbolicLink (Path.Combine (app, "current"), target)
-            |> ignore<FileSystemInfo>
-
-            String.Join (string<char> Path.DirectorySeparatorChar, [| app ; "current" ; ".." ; "file" |])
-            |> FrameworkUnderTest.resolveLinks
-            |> shouldEqual (Path.Combine (parent, "package", "file"))
-        )
-
-    /// The operating system fails a lookup that passes through something other than a directory,
-    /// however a later `..` would have cancelled it; so must `resolveLinks`, rather than answer
-    /// with a path the operating system would never have reached.
-    [<Test>]
-    let ``resolveLinks refuses a .. after something that is not a directory`` () : unit =
-        withTempDir (fun parent ->
-            File.WriteAllText (Path.Combine (parent, "file"), "")
-
-            for through in [ "missing" ; "file" ] do
-                let path =
-                    String.Join (string<char> Path.DirectorySeparatorChar, [| parent ; through ; ".." ; "other" |])
-
-                let outcome =
-                    try
-                        Ok (FrameworkUnderTest.resolveLinks path)
-                    with e ->
-                        Error e.Message
-
-                match outcome with
-                | Error message -> message |> shouldContainText "not a directory"
-                | Ok resolved -> failwith $"expected resolveLinks to refuse %s{path}, but it gave %s{resolved}"
-        )
-
-    [<Test>]
     let ``Directories with no CoreLib fail the selection`` () : unit =
         withTempDir (fun dir ->
             match FrameworkUnderTest.check (FrameworkUnderTest.runtime ()) (ImmutableArray.Create dir) with

@@ -1013,9 +1013,9 @@ module RealRuntime =
     /// runtimeconfig of its own, from a scratch directory of the call's own, and reads and writes
     /// nothing in the assembly's directory. So callers may run one assembly concurrently, each
     /// with different properties. The guest's working directory is the assembly's directory. A
-    /// relative `dllPath` is relative to the test host's working directory. An assembly in the
-    /// temp directory, or in a directory above it, is refused, since the scratch directories go
-    /// there.
+    /// relative `dllPath` is relative to the test host's working directory; a `dllPath` or temp
+    /// directory with `..` in it is refused. An assembly in the temp directory, or in a
+    /// directory above it, is refused, since the scratch directories go there.
     ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.
@@ -1025,21 +1025,26 @@ module RealRuntime =
         (dllPath : string)
         : CapturedRun
         =
-        // Made absolute here, against the test host's working directory, because the host would
-        // resolve a relative path against the guest's, which is the assembly's directory. The
-        // directory is resolved as the operating system walks it, since `Path.GetFullPath`, and
-        // so `File.Exists`, collapse `..` by its spelling, while after a symbolic link `..`
-        // climbs from the link's target.
-        let dllPath =
-            Path.Combine (
-                FrameworkUnderTest.resolveLinks (
-                    match Path.GetDirectoryName dllPath with
-                    | null
-                    | "" -> "."
-                    | directory -> directory
-                ),
-                Path.GetFileName dllPath
-            )
+        // `Path.GetFullPath`, and so `File.Exists`, collapse `..` by its spelling, while the
+        // operating system, after a symbolic link, climbs from the link's target; so a path with
+        // `..` in it is refused rather than read two ways. Without it, `Path.GetFullPath` only
+        // joins the path to the working directory and drops any `.`, which both readings agree on.
+        let absoluteWithoutParent (what : string) (path : string) : string =
+            let components =
+                path.Split (
+                    [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |],
+                    StringSplitOptions.RemoveEmptyEntries
+                )
+
+            if Array.contains ".." components then
+                failwith
+                    $"Cannot run an assembly under the real runtime in place with %s{what} %s{path}, which has '..' in it: the operating system and System.IO read it differently after a symbolic link. Pass the path without it."
+
+            Path.GetFullPath path
+
+        // Absolute, because the host would resolve a relative path against the guest's working
+        // directory, which is the assembly's directory.
+        let dllPath = absoluteWithoutParent "the assembly path" dllPath
 
         if not (File.Exists dllPath) then
             failwith $"Cannot run %s{dllPath} under the real runtime: the assembly does not exist."
@@ -1047,14 +1052,19 @@ module RealRuntime =
         let directory = Path.GetDirectoryName dllPath
         let name = Path.GetFileNameWithoutExtension dllPath
 
-        // Created under a name no other directory has, and in a temp directory that already
-        // exists, so that cleaning up removes only what this call made. The temp directory is
-        // resolved as the operating system walks it, as the assembly's is above: `TMPDIR` may be
-        // relative, which the host would read against the guest's working directory, and may
-        // climb out of a link with `..`, which `Path.GetFullPath` would read by its spelling.
+        // Absolute, for the reason the assembly path is: `TMPDIR` may be relative.
+        let temp = absoluteWithoutParent "the temp directory" (Path.GetTempPath ())
+
+        // Some platforms' `CreateTempSubdirectory` creates a missing temp directory, which could
+        // lie in the assembly's tree.
+        if not (Directory.Exists temp) then
+            failwith
+                $"Cannot run %s{dllPath} under the real runtime in place: the temp directory %s{temp} does not exist."
+
+        // Under a name no other directory has, so that cleaning up removes only what this call made.
         let scratch =
             Path.Combine (
-                FrameworkUnderTest.resolveLinks (Path.GetTempPath ()),
+                temp,
                 Path.GetFileName (
                     Path.TrimEndingDirectorySeparator (Directory.CreateTempSubdirectory "pawprint-oracle-").FullName
                 )

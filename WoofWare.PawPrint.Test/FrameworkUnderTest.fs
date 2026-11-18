@@ -109,61 +109,29 @@ module FrameworkUnderTest =
     /// `path` with every symbolic link along it resolved, so that two spellings of one directory
     /// compare equal. The devshell's `dotnet` links each framework directory to the one its own
     /// package installs, and the host is not consistent about which spelling it reports: CoreLib's
-    /// location has the links resolved, another framework assembly's does not. A relative `path`
-    /// is relative to the working directory. The path is walked as `realpath` walks it: a `..`
-    /// climbs from wherever the path has reached, which after a link is the link's target, not
-    /// the directory holding the link. Fails on a `..` after something that is not a directory,
-    /// and on more than 40 links, as `realpath` does (ENOTDIR or ENOENT, and ELOOP).
+    /// location has the links resolved, another framework assembly's does not. Fails on a chain of
+    /// more than 40 links, as `realpath` does (ELOOP).
     let resolveLinks (path : string) : string =
-        let separators = [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |]
+        let rec go (hops : int) (path : string) : string =
+            let full = Path.TrimEndingDirectorySeparator (Path.GetFullPath path)
 
-        let components (p : string) : string list =
-            p.Split (separators, StringSplitOptions.RemoveEmptyEntries) |> List.ofArray
-
-        // `reached` has no link, `.` or `..` in it, so `FileInfo`'s own normalisation of a path
-        // under it changes nothing.
-        let rec go (hops : int) (reached : string) (remaining : string list) : string =
-            match remaining with
-            | [] -> reached
-            | "." :: rest -> go hops reached rest
-            | ".." :: rest ->
-                // The operating system fails a lookup through anything but a directory, so a `..`
-                // cannot cancel a component that names nothing, or a file.
-                if not (Directory.Exists reached) then
-                    failwith
-                        $"resolving %s{path}: %s{reached} is not a directory, so the operating system cannot climb out of it with '..'"
-
-                match Path.GetDirectoryName reached with
-                | null -> go hops reached rest
-                | parent -> go hops parent rest
-            | next :: rest ->
-                let candidate = Path.Combine (reached, next)
+            match Path.GetDirectoryName full with
+            | null -> full
+            | parent ->
+                let candidate = Path.Combine (go hops parent, Path.GetFileName full)
 
                 match FileInfo(candidate).LinkTarget with
-                | null -> go hops candidate rest
+                | null -> candidate
                 | target ->
                     if hops >= 40 then
                         failwith $"resolving %s{path} followed more than 40 symbolic links"
 
                     // A relative target is relative to the link's own directory.
-                    let from =
-                        match Path.GetPathRoot target with
-                        | null
-                        | "" -> reached
-                        | root -> root
+                    match Path.GetDirectoryName candidate with
+                    | null -> failwith $"logic error: %s{candidate} has no directory"
+                    | linkDir -> go (hops + 1) (Path.Combine (linkDir, target))
 
-                    go (hops + 1) from (components target @ rest)
-
-        let start =
-            if Path.IsPathRooted path then
-                path
-            else
-                Path.Combine (Directory.GetCurrentDirectory (), path)
-
-        match Path.GetPathRoot start with
-        | null
-        | "" -> failwith $"logic error: %s{start} has no root"
-        | root -> go 0 root (components (start.Substring root.Length))
+        go 0 path
 
     /// `runtimeDirs` as a framework for `runtime`: every directory exists, and the CoreLib a guest
     /// binds along them (the first `System.Private.CoreLib.dll`) is `runtime`'s.

@@ -565,8 +565,8 @@ public static class Program
             | Ok run -> failwith $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
         finally
             File.Delete dllPath
-            // Not recursive, so as not to follow the link into the temp directory.
-            File.Delete (Path.Combine (linkParent, "temp"))
+            // Not recursive, so as to remove the link and not what it names.
+            Directory.Delete (Path.Combine (linkParent, "temp"))
             Directory.Delete linkParent
 
     /// As above, with the assembly's file itself a symbolic link to one in the temp directory:
@@ -648,46 +648,33 @@ public static class Program
 
     [<Test>]
     let ``a relative path to the assembly names the same assembly`` () : unit =
-        // Nested deeper below the temp directory than the test host's working directory is below
-        // the root, so that the relative path's `..`s, taken from the guest's working directory
-        // instead, do not climb to the root and so reach a different place.
-        let cwd : string = Path.GetFullPath Environment.CurrentDirectory
+        // Under the test host's working directory, since a relative path climbing out of it with
+        // `..` is refused, so the relative path is a directory and a file name, which names
+        // nothing from the guest's working directory.
+        laidOutUnder
+            Environment.CurrentDirectory
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let relative = Path.GetRelativePath (Environment.CurrentDirectory, dllPath)
 
-        let depth : int =
-            (cwd.Split (Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)).Length
-            + 1
+                relative
+                |> shouldEqual (Path.Combine (Path.GetFileName (Path.GetDirectoryName dllPath), "EndsAsTold.dll"))
 
-        let root =
-            Path.Combine (tempDirectory (), "pawprint-in-place-test-" + Path.GetRandomFileName ())
+                File.Exists (Path.Combine (Path.GetDirectoryName dllPath, relative))
+                |> shouldEqual false
 
-        let nested = Path.Combine (Array.append [| root |] (Array.replicate depth "d"))
-        Directory.CreateDirectory nested |> ignore<DirectoryInfo>
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
+                |> _.Result
+                |> shouldEqual (RealRuntimeResult.NormalExit 5)
+            )
 
-        try
-            laidOutUnder
-                nested
-                "EndsAsTold"
-                endsAsToldImage.Value
-                None
-                (fun dllPath ->
-                    let relative = Path.GetRelativePath (cwd, dllPath)
-                    Path.IsPathRooted relative |> shouldEqual false
-
-                    // The precondition: the same spelling names nothing from the guest's directory.
-                    File.Exists (Path.GetFullPath (relative, Path.GetDirectoryName dllPath))
-                    |> shouldEqual false
-
-                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
-                    |> _.Result
-                    |> shouldEqual (RealRuntimeResult.NormalExit 5)
-                )
-        finally
-            Directory.Delete (root, true)
-
-    /// A `..` after a symbolic link climbs from the link's target, as the operating system walks
-    /// the path, not from the directory holding the link.
+    /// A `..` after a symbolic link climbs from the link's target as the operating system walks
+    /// the path, but from the directory holding the link as `System.IO` reads it, so the oracle
+    /// refuses a path with `..` in it rather than run a different assembly from the one named.
     [<Test>]
-    let ``a path climbing out of a symbolic link names the assembly the operating system finds`` () : unit =
+    let ``a path with .. in it is refused, not run`` () : unit =
         laidOut
             "Unused"
             [||]
@@ -713,9 +700,18 @@ public static class Program
                         [| app ; "current" ; ".." ; "EndsAsTold.dll" |]
                     )
 
-                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] climbing
-                |> _.Result
-                |> shouldEqual (RealRuntimeResult.NormalExit 5)
+                // The decoy that a reading by spelling would run.
+                File.WriteAllBytes (Path.Combine (app, "EndsAsTold.dll"), endsAsToldImage.Value)
+
+                let outcome =
+                    try
+                        Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] climbing)
+                    with e ->
+                        Error e.Message
+
+                match outcome with
+                | Error message -> message |> shouldContainText "'..'"
+                | Ok run -> failwith $"expected the oracle to refuse a path with '..' in it, but it ran: %A{run}"
             )
 
     [<Test>]
