@@ -1391,6 +1391,23 @@ public struct S2<T> : IC<T[]> { }
             | Ok [ entry ] -> entry.Definition.DeclaredOnType |> shouldEqual true
             | other -> failwith $"PawPrint answered %A{other}"
 
+    /// `C`'s `I<class Int32>` names `B`'s `I<valuetype Int32>` again and adds no entry, and nothing but
+    /// loading its argument finds the wrong kind there.
+    [<Test>]
+    let ``A row that adds no entry is still loaded`` () : unit =
+        let host, pawPrint =
+            rowsOutcome
+                [ Row.Instantiation (false, RowArgument.Int32AsValueType) ]
+                [ Row.Instantiation (false, RowArgument.Int32AsClass) ]
+
+        match host with
+        | Error (:? TypeLoadException) -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
     /// Rows are loaded in the order read, the parent's first, whether or not they add an entry:
     /// `C`'s `I<Missing>` comes before its `I<class Int32>`, which names `B`'s `I<valuetype Int32>`
     /// again with the wrong kind.
