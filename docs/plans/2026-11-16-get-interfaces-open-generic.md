@@ -997,6 +997,10 @@ package.
 6. *Interface map: rows load in the order read; shared contexts close once*: the fix.
 7. *Test: a row that adds no entry is still loaded*, added when mutation testing of commit 6 found that the
    re-declared-row test no longer reaches closing (below).
+8. *Plan for #2309: the second pull request after Codex's review*: this section, before Codex's second review.
+9. *Tests: rows the definition walk cannot read, and a head's base chain*, from Codex's second review; all five cases
+   failed before the next commit, each for the reason the review gave.
+10. *Interface map: arguments are an exact-load fact*: the fix.
 
 **The function.** `ConcreteInterfaceDispatch.interfaceMapOfDefinition` takes a definition's identity and returns a
 `DefinitionInterfaceMap`: its entries (`DefinitionInterfaceMapEntry`, the decision's five fields, in the definition's
@@ -1022,22 +1026,35 @@ handle and that each handle is an instantiation of the interface the entry names
   `C`'s row spelled `GENERICINST VALUETYPE I 1 int32`, does not load ("Could not load TypeSpec"); PawPrint refuses with
   `KindMismatch`. An earlier version kept such rows on their entry and closed them beside it, which Codex showed reports
   the wrong one of two failing rows; the rows list replaced it.
-- **Checks before the duplicate check.** Comparing a row with the entries reads its arguments, so before it the
-  definition walk makes the checks concretisation makes of a spelling, in concretisation's order: the head's kind
-  (`KindMismatch`), a TypeSpec naming a generic interface with no instantiation (`UninstantiatedDefinition`), a variable
-  its context does not supply (`TypeParameterOutOfScope`, `MethodParameterOutOfScope`), and the arity (`WrongArity`),
-  each the value concretisation gave. Without them the comparison and `spelledInterfaceSubstitution` threw on two of
-  those images, and a mis-kinded row was reported after a later absent one.
+- **What the definition walk checks, and what it leaves to closing.** CoreCLR's approximate load of a row
+  (`LoadApproxInterfaceMap`) resolves the interface, loads its base chain and checks the spelling's kind; only the
+  exact load (`LoadExactInterfaceMap`) reads the arguments, row by row. The definition walk does the same. For a
+  TypeSpec row it loads the interface's base chain (`BaseTypeAbsent` and the like), then refuses a generic interface
+  spelled with no instantiation (`UninstantiatedDefinition`) or with the wrong kind (`KindMismatch`), before reading
+  any later row. A row whose arguments it cannot read in the definition's vocabulary (a variable its context does not
+  supply, or the wrong number of arguments), or that names no nominal type (`!!0` as the whole spelling), cannot be
+  compared with the entries; it adds no entry, is recorded as unreadable, and the walk reads on.
+  `interfaceMapOfDefinition` refuses a map holding such a row with the first one's failure; `interfaceMapOf` loads
+  every row in order, unreadable ones included, so an earlier row's absent argument is reported first and an unreadable
+  row's own arguments are loaded before its arity is refused, as the old walk and the host report them. The first
+  version of this pull request refused all of these in the walk, which threw on three malformed images and reported
+  the wrong failure on four; Codex's two reviews found them, and each is now a test against the host.
 - **Shared contexts.** A chain of generic interfaces nests each interface's arguments in the context of the one above,
   so the same context appears many times in a deep entry. Closing keeps one closed context per shared context, and
   re-reading a parent's map onto the extends clause keeps one re-read context per shared one, so the work is linear in
   the chain's depth. Codex measured the version without this at 165.75 MB for one map of a ten-deep chain of
-  three-parameter interfaces, against 0.60 MB on the base.
+  three-parameter interfaces, against 0.60 MB on the base. The walk's rows are accumulated last first and reversed
+  once; appending them made a deep chain's rows (quadratic in number, since Roslyn lists every interface's parents)
+  quartic to build.
 - **The base chain.** The closed function walks the closed base chain with `resolveBaseConcreteType` before anything
   else. The definition map needs no closed parent, but the old walk concretised every ancestor first (its recursion
   did), so a type whose ancestor's arguments do not bind failed, and the ancestors were registered before any
   interface. The walk keeps both.
 - **The concretisation context** is applied to the state through `ConcreteMethodTable.inContext`, made internal for it.
+- **`interfaceMapOfDefinition` has no caller yet.** `interfaceMapOf` reads the walk directly, since it must load the
+  rows `interfaceMapOfDefinition` refuses. The function is the third pull request's starting point, as the decisions
+  intend; until then its refusal of an unreadable row is exercised by no test, and that pull request's tests should
+  cover it.
 
 **The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
 walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
@@ -1058,9 +1075,9 @@ substitutions, and nothing else, of five CoreLib interface receivers (`IList<int
 rows' parents, so an entry such as `IList<T>`'s `IEnumerable<T>` now comes from the interface's own row (spelled
 `!0`) rather than from expanding `ICollection<T>` (spelled `!0` in `ICollection`'s context, over `IList`'s `!0`); the
 two denote the same types, and the handles, order, flags, registrations and loads are unchanged. With only that rule
-put back to value types, commit 2's dump is identical to the base in all five files. After the fix of commit 6, the
-dump (with the deep chain's two receivers added in a sixth file) is identical to commit 2's in all five files it shares
-with it, and so is the probe below.
+put back to value types, commit 2's dump is identical to the base in all five files. After the fixes of commits 6 and 10,
+the dump (with the deep chain's two receivers added in a sixth file) is identical to commit 2's in all five files it
+shares with it, and so is the probe below; the sixth is identical between commits 6 and 10.
 
 **What moved, measured.** In those corpora every assembly is loaded before the walk, so the dump cannot see load
 order. A throwaway probe (not committed) compiled classes against one version of a library and ran them against a
@@ -1085,15 +1102,11 @@ subscribes to `AssemblyLoad` and then asks `GetType("LoadOrder").GetInterfaces()
 of one interface (`IGen<BitVector32>, IGen<IChangeTracking>`) nothing moves. `TestDispatchBindingFailure` and every
 guest stayed green without edits.
 
-One shift Codex found is left as it is. A TypeSpec row giving a generic interface the wrong number of arguments, one of
-which is absent (`I<Missing, int>` for a one-parameter `I`), is refused with `WrongArity`, where the old walk and .NET
-report the absent argument: concretisation loads the arguments before it counts them. The definition walk cannot build
-an entry for such a row, or compare it with the others, without its arity, and it loads no arguments; reporting the
-argument first would mean loading arguments from a walk that closes nothing. The row is malformed twice over, and the
-type fails either way.
+Codex's reviews found seven more malformed images on which an earlier version answered differently from the old walk
+and the host. The tests named under commits 5, 7 and 9 now pin each against the host.
 
-**Mutants**, each applied to commit 2 (the last six to commit 6, each against the tests that name it) by an exact
-replacement, the test project built, and two selections run: the
+**Mutants**, each applied to commit 2 (those marked later to that commit, against the tests that name the shapes) by
+an exact replacement, the test project built, and two selections run: the
 tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindingFailure`, `TestArrayInterfaceMap`,
 `TestGetInterfaceMethodImplementation`, `TestInterfaceMethodImplementation`) and the pure guests whose names contain
 `Interface` or `TypeGetInterfacesOrder` (64). The file was restored and checked against `HEAD` after each.
@@ -1117,6 +1130,10 @@ tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindin
 | (after commit 6) closed contexts not shared | the deep chain (ten minutes, then failed) |
 | (after commit 6) re-read contexts not shared | the deep chain (73 s, then failed) |
 | (after commit 6) rows that add no entry not closed | the no-entry row test (commit 7); it survived before that test existed, since commit 6's head check refuses the re-declared-row test's row before closing |
+| (after commit 10) a variable out of scope refused by the walk | the earlier-absent-argument test (`!0` case) |
+| (after commit 10) the wrong arity refused by the walk | the earlier-absent-argument test (arity case), the absent-argument-before-arity test |
+| (after commit 10) the head's base chain not loaded before its kind | the absent-head-base test |
+| (after commit 10) an unreadable row reported without loading it | the absent-argument-before-arity test |
 | the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
 | the rule widened to every CoreLib type | none: equivalent, the same reason |
 | the rule keyed on the interface being expanded, not the type being built | none: equivalent, as the decisions record |
@@ -1125,18 +1142,19 @@ tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindin
 host. At commit 3, on `24c6fdb3c`: default 5,886 (5,847 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed;
 `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 6, on `3a6d1c53c` (whose two commits beyond `24c6fdb3c`
 change only package descriptions, READMEs, CI and a page under `docs/developer`): default 5,891 (5,852 passed, 39
-skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. Commit 7 adds
-one test to `TestGetInterfacesOrder`, whose 17 tests pass.
+skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 10,
+on `3a6d1c53c`: default 5,897 (5,858 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208
+passed; `GuestImpure` 304 passed.
 
 **Time of the guest categories**, on the same machine, one category at a time, in seconds: on the base (#2322's tip),
-at commit 3, and at commit 6.
+and at commits 3, 6 and 10.
 
-| category | base | commit 3 | commit 6 |
-|---|---|---|---|
-| `Guest` | 1,092 | 1,179 | 1,698 |
-| `GuestSolo` | 545 | 747 | 1,193 |
-| `GuestPure` | 910 | 717 | 796 |
-| `GuestImpure` | 883 | 289 | 408 |
+| category | base | commit 3 | commit 6 | commit 10 |
+|---|---|---|---|---|
+| `Guest` | 1,092 | 1,179 | 1,698 | 1,395 |
+| `GuestSolo` | 545 | 747 | 1,193 | 637 |
+| `GuestPure` | 910 | 717 | 796 | 842 |
+| `GuestImpure` | 883 | 289 | 408 | 396 |
 
 The machine was shared with other runs, and the differences go both ways by more than any change in this branch could
 explain (`GuestImpure` took 505 to 560 s in PR 1's runs; `GuestSolo`, two tests, ranged from 545 to 1,193 s here), so
