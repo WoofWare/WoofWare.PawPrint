@@ -1012,7 +1012,8 @@ module RealRuntime =
     /// `<name>.runtimeconfig.json` sits beside the assembly: the oracle hands the host a
     /// runtimeconfig of its own, from a scratch directory of the call's own, and reads and writes
     /// nothing in the assembly's directory. So callers may run one assembly concurrently, each
-    /// with different properties. The guest's working directory is the assembly's directory.
+    /// with different properties. The guest's working directory is the assembly's directory. A
+    /// relative `dllPath` is relative to the test host's working directory.
     ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.
@@ -1022,6 +1023,10 @@ module RealRuntime =
         (dllPath : string)
         : CapturedRun
         =
+        // Resolved here, against the test host's working directory, because the host would
+        // resolve a relative path against the guest's, which is the assembly's directory.
+        let dllPath = Path.GetFullPath dllPath
+
         if not (File.Exists dllPath) then
             failwith $"Cannot run %s{dllPath} under the real runtime: the assembly does not exist."
 
