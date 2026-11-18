@@ -507,6 +507,28 @@ public static class Program
                 | other -> failwith $"expected a FailFast abort, got %A{other}"
             )
 
+    /// The oracle's scratch directory goes in the temp directory, so an assembly lying there
+    /// directly would see it in its own directory.
+    [<Test>]
+    let ``an assembly directly in the temp directory is refused, not run`` () : unit =
+        let dllPath =
+            Path.Combine (Path.GetTempPath (), "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll")
+
+        File.WriteAllBytes (dllPath, endsAsToldImage.Value)
+
+        try
+            let outcome =
+                try
+                    Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "0" |] dllPath)
+                with e ->
+                    Error e.Message
+
+            match outcome with
+            | Error message -> message |> shouldContainText "temp directory"
+            | Ok run -> failwith $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
+        finally
+            File.Delete dllPath
+
     [<Test>]
     let ``a relative path to the assembly names the same assembly`` () : unit =
         // Under the test host's working directory, so that the relative path is a directory and
