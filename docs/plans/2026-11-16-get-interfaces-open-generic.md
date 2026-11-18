@@ -1,7 +1,7 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: decided (see "Decisions"); the first of five pull requests, the closed order (#1318), is built (see "As built
-(PR 1)"); the other four are not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
+Status: decided (see "Decisions"); the first two of five pull requests are built: the closed order (#1318, "As built
+(PR 1)") and the definition-level interface map ("As built (PR 2)"); the other three are not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
 with a throwaway handler described under "PawPrint with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
@@ -975,3 +975,136 @@ against the library version it runs with, only reached by swapping a dependency.
 **Suites**, after a whole-solution build with the reference assemblies deleted, each its own invocation on a .NET 10
 host, at the branch's tip rebased onto `77507f161`: default 5,882 (5,843 passed, 39 skipped); `Guest` 234 passed;
 `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 303 passed.
+
+### As built (PR 2)
+
+The definition-level interface map, with `interfaceMapOf` re-expressed through it and its own walk deleted. TypeSystem
+and tests only; every name added or changed is `internal`, so nothing public is added to or removed from a published
+package.
+
+**Commits.**
+
+1. *The definition-level interface map, beside interfaceMapOf's walk*: `interfaceMapOfDefinition` and a temporary
+   closing function, the old walk untouched, and a property that the two agree entry for entry (below).
+2. *interfaceMapOf is the definition's interface map, closed*: the closing function becomes `interfaceMapOf`, the old
+   walk and the property are deleted, and a closed `InterfaceMapEntry` becomes `{ Definition; Interface; Type }`, so
+   that the substitution and both flags live only on the definition entry. `ownDispatchMapOf` and
+   `DefaultInterfaceImplementation` read them through `Definition`.
+3. *Test: a re-declared interface's own row is loaded*, added when mutation testing found no test for it (below).
+
+**The function.** `ConcreteInterfaceDispatch.interfaceMapOfDefinition` takes a definition's identity and returns
+`DefinitionInterfaceMapEntry`s in the definition's own vocabulary, closing nothing: the parent definition's map
+(through `ConcreteMethodTable.baseOfDefinition`), each entry rebased onto the extends clause's arguments, then each
+row and its parents, depth-first, an entry being "the same interface identity, and `substitutionsEquivalent`". The
+CoreLib rule covers value types and interfaces, keyed on the type being built, with the comment decision 7 asks for.
+`interfaceMapOf` loads the closed type's base chain, takes its definition's map, and closes each entry under the
+type's arguments, asserting that each closes to an instantiation of the interface the definition entry names. Not
+memoised.
+
+**Where the decisions were silent.**
+
+- **What an entry is closed from.** A definition entry carries, besides the decision's five fields, `Spelling`: the
+  interface as its row spells it, in the definition's vocabulary (a `SubstitutionArgument.Spelled` made by
+  `SubstitutionContext.forBase` with one argument). Closing concretises that spelling, so a closed entry is loaded
+  exactly as the old walk loaded it, row by row, with every check concretisation makes of a spelling: a head spelled
+  with the wrong kind, a type argument with a custom modifier, a TypeDef or TypeRef row naming a generic interface.
+  Closing from the identity and `Substitution` alone would have skipped those checks and silently answered where the
+  old walk refused (a modified argument concretises to the unmodified type).
+- **Rows that name an existing entry.** CoreCLR's exact load reads every row's interface as written, and the old walk
+  concretised every row before asking whether it was a duplicate. A definition entry therefore keeps `Respellings`, each
+  later row naming the same instantiation, and closing concretises those too and asserts each closes to the entry's
+  handle. Measured on a .NET 10 host: `C : B, I<int>` over `B : I<int>`, with `C`'s row spelled
+  `GENERICINST VALUETYPE I 1 int32`, does not load ("Could not load TypeSpec"); PawPrint refuses with `KindMismatch`.
+  The new test in `TestGetInterfacesOrder` asserts both, and the control (`GENERICINST CLASS`) on both.
+- **The base chain.** The closed function walks the closed base chain with `resolveBaseConcreteType` before anything
+  else. The definition map needs no closed parent, but the old walk concretised every ancestor first (its recursion did),
+  so a type whose ancestor's arguments do not bind failed, and the ancestors were registered before any interface. The
+  walk keeps both.
+- **Arity.** A TypeSpec row with the wrong number of arguments is refused by the definition walk as
+  `Refused (WrongArity ...)`, the value concretisation gave before, rather than reaching `spelledInterfaceSubstitution`'s
+  `failwith`.
+
+**The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
+walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
+substitution (by `substitutionsEquivalent`) and both flags. It ran over every receiver of `TestInterfaceDispatchMap`'s
+two corpora (969 CoreLib receivers with 3,513 entries; 7,621 generated receivers with 27,121 entries) and over
+`TestGetInterfacesOrder`'s closed receivers (CoreLib, the generated hierarchies, the shapes C# refuses): 11 tests, all
+passed, on a .NET 10 host. It was checked not vacuous on commit 1 by mutating the new walk alone: a duplicate check on
+identity alone failed four of the tests, and a re-declared entry left undeclared failed five.
+
+**The before-and-after dump.** A throwaway patch to the two test files, not committed, wrote one record per receiver of
+`TestInterfaceDispatchMap`'s two corpora (every entry's handle, both flags and substitution) and of
+`TestGetInterfacesOrder`'s three (every answered target, with the expected targets built after the call rather than
+before, so that what the call registers shows), then each receiver's newly registered handles in order, with their
+definitions and arguments, and the assemblies loaded: 179,251 lines. On the base (#2322's tip) it was identical over
+two runs; on commit 1, identical to the base, byte for byte. On commit 2 four files are identical and one differs: the
+substitutions, and nothing else, of five CoreLib interface receivers (`IList<int>`, `IDictionary<string, object>`,
+`IReadOnlyList<Exception>`, `ISet<int>`, `INumber<int>`). That is decision 7: a CoreLib interface no longer expands its
+rows' parents, so an entry such as `IList<T>`'s `IEnumerable<T>` now comes from the interface's own row (spelled
+`!0`) rather than from expanding `ICollection<T>` (spelled `!0` in `ICollection`'s context, over `IList`'s `!0`); the
+two denote the same types, and the handles, order, flags, registrations and loads are unchanged. With only that rule
+put back to value types, commit 2's dump is identical to the base in all five files.
+
+**What moved, measured.** In those corpora every assembly is loaded before the walk, so the dump cannot see load
+order. A throwaway probe (not committed) compiled classes against one version of a library and ran them against a
+second that drops some of its types, and asked the host's `GetInterfaces()` and PawPrint's `interfaceMapOf`:
+
+| type (rows) | host | old walk | new walk |
+|---|---|---|---|
+| `TwoArgFirst : IEquatable<Gone>, IGone` | `IGone` absent | `Gone` absent | `IGone` absent |
+| `TwoHeadFirst : IGone, IEquatable<Gone>` | `IGone` | `IGone` | `IGone` |
+| `TwoArgs : IEquatable<Gone>, IGen<Gone2>` | `Gone` | `Gone` | `Gone` |
+| `TwoHeads : IGone, IGone2` | `IGone` | `IGone` | `IGone` |
+| `DerHead : BaseArg, IGone`, `BaseArg : IEquatable<Gone>` | `IGone` | `Gone` | `IGone` |
+| `ArgThenGenHead : IGen<Gone>, IGoneGen<int>` | ``IGoneGen`1`` | `Gone` | ``IGoneGen`1`` |
+
+So a doubly broken type now reports the failure the host reports in all six shapes, where the old walk did in three:
+the definition walk resolves every row's interface before any argument, as `LoadApproxInterfaceMap` does before
+`LoadExactInterfaceMap`. For `LoadOrder : IEquatable<BitVector32>, IChangeTracking, IKeep` the old walk loaded
+`System.Collections.Specialized`, `System.Runtime`, `System.ComponentModel`, and the new one loads
+`System.ComponentModel`, `System.Collections.Specialized`, `System.Runtime`. A console program on real .NET 10, which
+subscribes to `AssemblyLoad` and then asks `GetType("LoadOrder").GetInterfaces()`, loads `System.ComponentModel` then
+`System.Collections.Specialized` (`System.Runtime` is already loaded at startup there), the new order. With two rows
+of one interface (`IGen<BitVector32>, IGen<IChangeTracking>`) nothing moves. `TestDispatchBindingFailure` and every
+guest stayed green without edits.
+
+**Mutants**, each applied to commit 2 by an exact replacement, the test project built, and two selections run: the
+tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindingFailure`, `TestArrayInterfaceMap`,
+`TestGetInterfaceMethodImplementation`, `TestInterfaceMethodImplementation`) and the pure guests whose names contain
+`Interface` or `TypeGetInterfacesOrder` (64). The file was restored and checked against `HEAD` after each.
+
+| mutant | killed by |
+|---|---|
+| base-class entries after the type's own | both CoreLib and both generated host comparisons, shapes, the `GetInterfaceMap` corpora; guests `TypeGetInterfacesOrder`, `VariantInterfaceMapOrder` |
+| entries deduplicated by closed handle after closing | generated `GetInterfaces` and dispatch comparisons; guests `InterfaceDispatchMapShapes`, `TypeGetInterfacesOrder` |
+| own rows deduplicated against the parent's entries by closed handle | the same four |
+| a declared row's parents not expanded | shapes |
+| parents appended after all declared rows (breadth-first) | shapes |
+| parents expanded before the row | both CoreLib and both generated comparisons, shapes; guest `TypeGetInterfacesOrder` |
+| duplicate check on interface identity alone | CoreLib dispatch, both generated comparisons, shapes; seven guests (`InterfaceDispatchMapShapes`, `InterfaceSlotHiddenByDerivedMethod`, `TypeGetInterfaceMapTargets`, `TypeGetInterfacesOrder`, `VariantInterfaceDefaultBodyPrecedence`, `VariantInterfaceMapOrder`, `VariantInterfaceSlotOwnership`) |
+| the parent's substitution not rebased onto the extends clause | CoreLib dispatch, both generated comparisons, shapes; guest `TypeGetInterfacesOrder` |
+| the parent's spelling not rebased onto the extends clause | eleven tests, among them the modified-TypeSpec base case; four guests |
+| a re-declared row not closed | the re-declared row test (commit 3); it survived the first battery, before that test existed |
+| the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
+| the rule widened to every CoreLib type | none: equivalent, the same reason |
+| the rule keyed on the interface being expanded, not the type being built | none: equivalent, as the decisions record |
+
+**Suites**, after a whole-solution build with the reference assemblies deleted, each its own invocation on a .NET 10
+host, at the branch's tip on `24c6fdb3c`: default 5,886 (5,847 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2
+passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. The branch was then rebased onto `3a6d1c53c`, whose two
+new commits change only package descriptions, READMEs, CI and a page under `docs/developer`, so the suites were not
+re-run.
+
+**Time of the guest categories**, on the same machine, one category at a time, on the base (#2322's tip) and at the
+branch's tip, in seconds:
+
+| category | base | tip |
+|---|---|---|
+| `Guest` | 1,092 | 1,179 |
+| `GuestSolo` | 545 | 747 |
+| `GuestPure` | 910 | 717 |
+| `GuestImpure` | 883 | 289 |
+
+The machine was shared with other runs, and the differences go both ways by more than any change in this branch could
+explain (`GuestImpure` took 505 to 560 s in PR 1's runs), so the measurement shows no slowdown large enough to stand out
+from that noise; nothing asks for memoising the definition map.
