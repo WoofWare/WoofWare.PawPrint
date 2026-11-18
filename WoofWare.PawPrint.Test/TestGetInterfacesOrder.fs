@@ -2313,6 +2313,48 @@ public struct S2<T> : IC<T[]> { }
         | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
+    /// `K : K2` and `K2 : K`, through `interfaceMapOfDefinition` on `K`, which reads each extends
+    /// clause without loading the chain it names: the walk reaches `K` again while loading it.
+    [<Test>]
+    let ``A definition's map refuses a base chain that reaches itself`` () : unit =
+        let image =
+            sketchImage
+                [
+                    { sketch "K" SketchKind.Class 0 [] with
+                        Base = Some (Spelling.Named ("K2", []))
+                    }
+                    { sketch "K2" SketchKind.Class 0 [] with
+                        Base = Some (Spelling.Named ("K", []))
+                    }
+                ]
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let state = coreState.WithLoadedAssembly dumped
+
+        let identity =
+            let handle, _ =
+                dumped.TypeDefs
+                |> Seq.map (fun (KeyValue (handle, typeInfo)) -> handle, typeInfo)
+                |> Seq.find (fun (_, typeInfo) -> typeInfo.Name = "K")
+
+            ResolvedTypeIdentity.ofDefinitionInAssembly dumped.DefinitionFullName handle
+
+        let _, result =
+            ConcreteInterfaceDispatch.interfaceMapOfDefinition
+                loggerFactory
+                state.DotnetRuntimeDirs
+                bct
+                "test"
+                state.TypeSystem
+                identity
+
+        match result with
+        | Error failure when isCycleRefusal failure -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
     /// A row naming a class `G` at an instantiation CoreCLR's approximate load refuses before it
     /// finds `G` is not an interface: the host names that earlier failure, PawPrint refuses the row as
     /// not an interface. Which refusal is named is #2329; these pin that both refuse.
