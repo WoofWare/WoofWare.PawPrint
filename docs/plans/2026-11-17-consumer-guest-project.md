@@ -899,8 +899,9 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   `pawprint-oracle-*` directory under the temp path, and runs
   `dotnet exec --runtimeconfig <that file> <dll> <args>` through `runCapturing` and the muxer of the framework under
   test, in the assembly's directory. A relative path is made absolute first, against the test host's working
-  directory, since the host would resolve it against the guest's (found by Codex). The scratch directory is removed
-  in a `finally`, as the other entries remove theirs. Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
+  directory, since the host would resolve it against the guest's (found by Codex). So is the scratch directory, since
+  `Path.GetTempPath` keeps a relative `TMPDIR` (also found by Codex). The scratch directory is removed in a `finally`,
+  as the other entries remove theirs. Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
   runtimeconfig it is given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a
   `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
 * `executeAssemblyInPlace` is `captureAssemblyInPlace AppContextProperties.empty`, followed by the existing `echo`.
@@ -937,8 +938,8 @@ Choices the decisions left open:
   `TestExecutionContext.CurrentContext.CurrentResult.Output`), and the framework under test whatever runtimeconfig
   the directory holds. The last is what the overwrite used to give the F# pure cases, which are published for
   `net10.0` and run on .NET 11.
-* Two of Codex's findings are not addressed here, because each is a property of every oracle entry rather than of
-  this one, and fixing it for one property would be special-casing:
+* Three of Codex's findings are not addressed here. Two are properties of every oracle entry rather than of this one,
+  and fixing them for one property would be special-casing:
   * The oracle cannot tell a host that refused to start from a guest that exited. `RuntimeConfig.combine` refuses
     the shapes PawPrint models, so the oracle and PawPrint agree on what a launchable runtimeconfig is, but Codex
     measured one it does not model: `APP_PATHS` naming a relative path, without `SetAppPaths`, makes CoreCLR fail to
@@ -946,6 +947,11 @@ Choices the decisions left open:
   * Every entry overlays the test host's environment on the guest's, so a `DOTNET_*` variable in the test host's
     environment reaches the real runtime: Codex measured `DOTNET_STARTUP_HOOKS` being prepended to a supplied
     `STARTUP_HOOKS`. Clearing such variables from the oracle's child processes would be a change to every entry.
+
+  The third: `RuntimeConfig.combine` refuses `APP_PATHS` when any spelling of `SetAppPaths` says `true`, although
+  hostpolicy acts on whichever spelling it visits last, and Codex ran one such config on real .NET. That conservative
+  reading is `RuntimeConfig`'s documented choice for PawPrint, and the oracle refuses exactly what PawPrint refuses,
+  so the two sides cannot disagree about which configurations run.
 * The guest prints paths by their last components only: the host resolves symbolic links (`/tmp` on macOS, the Nix
   store's links), so the guest cannot print a path as the test spells it.
 
@@ -967,6 +973,7 @@ Measured:
 
 | suite | .NET 10.0.14 (host) | .NET 11 (`PAWPRINT_TEST_RUNTIME=Net11`) |
 |---|---|---|
+| default, after the relative-path fix | 5898 total, 5858 passed, 1 failed, 39 skipped | 5898 total, 5870 passed, 28 skipped |
 | default, after the refusal | 5897 total, 5858 passed, 39 skipped | 5897 total, 5869 passed, 28 skipped |
 | default, before it | 5892 total, 5853 passed, 39 skipped | 5892 total, 5864 passed, 28 skipped |
 | `Guest` | 234 passed | 234 passed |
@@ -974,7 +981,10 @@ Measured:
 | `GuestPure` | 1208 passed | not run |
 | `GuestImpure` | 304 passed | not run |
 
-The first default runs failed 24 tests on each runtime, all in `TestFrameworkLocatorRatchet`, which flagged the new
+The one failure after the relative-path fix was `a guest that never reads and never exits is timed out`, in
+`TestRealRuntimeStandardInput`, which bounds a three-second oracle timeout by sixty seconds of wall time and took 109
+on a loaded machine; it reaches the oracle through `executeWithTimeoutAndSeed`, which this change leaves alone, and it
+passed when run again. The first default runs failed 24 tests on each runtime, all in `TestFrameworkLocatorRatchet`, which flagged the new
 guest source's `Assembly.Location`; the allowance above fixed them.
 
 Mutation testing, each mutant applied to the committed `RealRuntime.fs` and the file's tests run against it. Most
@@ -994,6 +1004,7 @@ rows ran before the working-directory test existed, so against seven tests:
 | host-owned names not refused (the code before the refusal) | the three host-owned cases, and `executeConcurrently`'s |
 | ill-formed UTF-16 not refused (the code before the refusal) | the lone-surrogate test |
 | relative path not made absolute (the code before the fix) | the relative-path test (`NormalExit 129`, the host's) |
+| scratch directory not made absolute, with `TMPDIR=.` | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
 the same moment, so a listing of the temp directory before and after a run cannot tell whose is whose. The scratch
