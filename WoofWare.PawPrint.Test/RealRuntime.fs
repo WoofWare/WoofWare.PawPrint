@@ -1013,8 +1013,9 @@ module RealRuntime =
     /// runtimeconfig of its own, from a scratch directory of the call's own, and reads and writes
     /// nothing in the assembly's directory. So callers may run one assembly concurrently, each
     /// with different properties. The guest's working directory is the assembly's directory. A
-    /// relative `dllPath` is relative to the test host's working directory. An assembly lying
-    /// directly in the temp directory, where the scratch directories go, is refused.
+    /// relative `dllPath` is relative to the test host's working directory. An assembly in the
+    /// temp directory, or in a directory above it, is refused, since the scratch directories go
+    /// there.
     ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.
@@ -1039,15 +1040,23 @@ module RealRuntime =
         let scratch =
             Path.GetFullPath (Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ()))
 
+        // Compared with links resolved, since either path may reach the same directory through one.
+        let resolvedTemp = FrameworkUnderTest.resolveLinks (Path.GetDirectoryName scratch)
+        let resolvedDirectory = FrameworkUnderTest.resolveLinks directory
+
         if
-            String.Equals (
-                Path.TrimEndingDirectorySeparator (Path.GetDirectoryName scratch),
-                Path.TrimEndingDirectorySeparator directory,
+            resolvedTemp = resolvedDirectory
+            // `EndsInDirectorySeparator` holds only for a root, which `resolveLinks` keeps as it is.
+            || resolvedTemp.StartsWith (
+                (if Path.EndsInDirectorySeparator resolvedDirectory then
+                     resolvedDirectory
+                 else
+                     resolvedDirectory + string<char> Path.DirectorySeparatorChar),
                 StringComparison.Ordinal
             )
         then
             failwith
-                $"Cannot run %s{dllPath} under the real runtime in place: it lies directly in the temp directory, where the oracle makes its scratch directories, so the guest would see them in its own directory. Move the assembly into a directory of its own."
+                $"Cannot run %s{dllPath} under the real runtime in place: it lies in the temp directory (%s{resolvedTemp}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
 
         Directory.CreateDirectory scratch |> ignore<DirectoryInfo>
 
