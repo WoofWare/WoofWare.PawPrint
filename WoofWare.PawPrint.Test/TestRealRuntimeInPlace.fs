@@ -96,10 +96,11 @@ public static class Program
 }
 """
 
-    /// Write `image` as `<assemblyName>.dll` into a directory of its own, with `besideConfig` as
-    /// its `<assemblyName>.runtimeconfig.json` if given; run `body` on the DLL's path; then remove
-    /// the directory.
-    let private laidOut<'a>
+    /// Write `image` as `<assemblyName>.dll` into a new directory of its own under `parent`, with
+    /// `besideConfig` as its `<assemblyName>.runtimeconfig.json` if given; run `body` on the DLL's
+    /// path; then remove the directory.
+    let private laidOutUnder<'a>
+        (parent : string)
         (assemblyName : string)
         (image : byte[])
         (besideConfig : string option)
@@ -107,7 +108,7 @@ public static class Program
         : 'a
         =
         let directory =
-            Path.Combine (Path.GetTempPath (), "pawprint-in-place-test-" + Path.GetRandomFileName ())
+            Path.Combine (parent, "pawprint-in-place-test-" + Path.GetRandomFileName ())
 
         Directory.CreateDirectory directory |> ignore<DirectoryInfo>
 
@@ -123,6 +124,16 @@ public static class Program
             body dllPath
         finally
             Directory.Delete (directory, true)
+
+    /// `laidOutUnder` the temp directory.
+    let private laidOut<'a>
+        (assemblyName : string)
+        (image : byte[])
+        (besideConfig : string option)
+        (body : string -> 'a)
+        : 'a
+        =
+        laidOutUnder (Path.GetTempPath ()) assemblyName image besideConfig body
 
     /// Every file in `dllPath`'s directory, by name, with its bytes: as text for a JSON file, so
     /// that a failure shows what changed, and otherwise as their SHA-256.
@@ -494,6 +505,27 @@ public static class Program
                 | RealRuntimeResult.Aborted (ObservedFatalError.FailFast, report) ->
                     report |> shouldContainText "failed fast by the guest"
                 | other -> failwith $"expected a FailFast abort, got %A{other}"
+            )
+
+    [<Test>]
+    let ``a relative path to the assembly names the same assembly`` () : unit =
+        // Under the test host's working directory, so that the relative path is a directory and
+        // a file name: one that climbed with `..` past the root of the guest's working directory
+        // would resolve to the same file from there too.
+        laidOutUnder
+            Environment.CurrentDirectory
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let relative = Path.GetRelativePath (Environment.CurrentDirectory, dllPath)
+
+                relative
+                |> shouldEqual (Path.Combine (Path.GetFileName (Path.GetDirectoryName dllPath), "EndsAsTold.dll"))
+
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
+                |> _.Result
+                |> shouldEqual (RealRuntimeResult.NormalExit 5)
             )
 
     [<Test>]
