@@ -273,6 +273,7 @@
     <Compile Include="TestNativeGetDynamicMethod.fs" />
     <Compile Include="TestMethodReturnType.fs" />
     <Compile Include="TestMethodSignatureComparison.fs" />
+    <Compile Include="TestSubstitutionComparisonSharing.fs" />
     <Compile Include="TestMethodReferenceResolution.fs" />
     <Compile Include="TestMethodReferenceResolutionGenerated.fs" />
     <Compile Include="TestFieldReferenceResolution.fs" />
