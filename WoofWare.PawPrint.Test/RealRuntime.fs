@@ -1033,8 +1033,10 @@ module RealRuntime =
         let directory = Path.GetDirectoryName dllPath
         let name = Path.GetFileNameWithoutExtension dllPath
 
+        // Absolute, because `Path.GetTempPath` keeps a relative `TMPDIR` as it is, and the host
+        // would resolve the runtimeconfig's path against the guest's working directory.
         let scratch =
-            Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ())
+            Path.GetFullPath (Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ()))
 
         Directory.CreateDirectory scratch |> ignore<DirectoryInfo>
 
