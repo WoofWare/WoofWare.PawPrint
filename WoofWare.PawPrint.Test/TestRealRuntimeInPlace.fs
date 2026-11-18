@@ -684,6 +684,40 @@ public static class Program
         finally
             Directory.Delete (root, true)
 
+    /// A `..` after a symbolic link climbs from the link's target, as the operating system walks
+    /// the path, not from the directory holding the link.
+    [<Test>]
+    let ``a path climbing out of a symbolic link names the assembly the operating system finds`` () : unit =
+        laidOut
+            "Unused"
+            [||]
+            None
+            (fun unusedPath ->
+                let root = Path.GetDirectoryName unusedPath
+                let package = Path.Combine (root, "package")
+
+                Directory.CreateDirectory (Path.Combine (package, "sub"))
+                |> ignore<DirectoryInfo>
+
+                File.WriteAllBytes (Path.Combine (package, "EndsAsTold.dll"), endsAsToldImage.Value)
+                let app = Path.Combine (root, "app")
+                Directory.CreateDirectory app |> ignore<DirectoryInfo>
+
+                Directory.CreateSymbolicLink (Path.Combine (app, "current"), Path.Combine (package, "sub"))
+                |> ignore<FileSystemInfo>
+
+                // Spelled out rather than through `Path.Combine`, which keeps the `..` anyway.
+                let climbing =
+                    String.Join (
+                        string<char> Path.DirectorySeparatorChar,
+                        [| app ; "current" ; ".." ; "EndsAsTold.dll" |]
+                    )
+
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] climbing
+                |> _.Result
+                |> shouldEqual (RealRuntimeResult.NormalExit 5)
+            )
+
     [<Test>]
     let ``the guest's working directory is the assembly's directory`` () : unit =
         laidOut
