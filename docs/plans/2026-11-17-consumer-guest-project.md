@@ -902,8 +902,10 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   directory, since the host would resolve it against the guest's (found by Codex). So is the scratch directory, since
   `Path.GetTempPath` keeps a relative `TMPDIR` (also found by Codex). The scratch directory is removed in a `finally`,
   as the other entries remove theirs. An assembly whose directory is the temp directory, or a directory above it, is
-  refused, since the guest would see the scratch directories in its tree; both paths are compared with symbolic links
-  resolved (found by Codex, in two rounds). Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
+  refused, since the guest would see the scratch directories in its tree. The check covers the guest's working
+  directory and the directory of the file the host runs (the target's, when the assembly's file is a link), resolves
+  symbolic links, and ignores case, so that on a case-sensitive filesystem it refuses, loudly, a directory differing
+  from the temp directory only by case (found by Codex, over three rounds). Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
   runtimeconfig it is given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a
   `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
 * `executeAssemblyInPlace` is `captureAssemblyInPlace AppContextProperties.empty`, followed by the existing `echo`.
@@ -1027,6 +1029,7 @@ rows ran before the working-directory test existed, so against seven tests:
 | relative path not made absolute (the code before the fix) | the relative-path test (`NormalExit 129`, the host's) |
 | assembly directly in the temp directory not refused (the code before the refusal) | the temp-directory test (`NormalExit 0`: the guest ran) |
 | refusal comparing spellings (the code before links were resolved) | the temp-directory test through a symbolic link (`NormalExit 0`) |
+| refusal ignoring a linked assembly file, and comparing case (the code before) | the linked-file test and the other-case test (each `NormalExit 0`; the other-case test is ignored on a case-sensitive filesystem) |
 | scratch directory not made absolute, with `TMPDIR=.` | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
