@@ -296,13 +296,16 @@ module ConcreteInterfaceDispatch =
 
     /// `interfaceMapOfDefinition`'s walk, which reads on past a row whose arguments it cannot read.
     /// `inProgress` holds the definitions whose loads are in progress on the path that reached this
-    /// one; entering the walk of one of them again is a recursive load, and refused.
+    /// one; entering the walk of one of them again is a recursive load, and refused. `walked` holds
+    /// the definitions whose walk has already succeeded within the caller's one question, which this
+    /// walk adds to; a row whose head is one of them need not walk it again (see `walkHeadOnce`).
     let rec private walkDefinition
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (operation : string)
         (inProgress : Set<ResolvedTypeIdentity>)
+        (walked : HashSet<ResolvedTypeIdentity>)
         (state : TypeSystemState)
         (identity : ResolvedTypeIdentity)
         : TypeSystemState * Result<WalkedDefinition, TypeBindingFailure>
@@ -349,6 +352,7 @@ module ConcreteInterfaceDispatch =
                         baseClassTypes
                         operation
                         inProgress
+                        walked
                         state
                         baseIdentity
                 with
@@ -534,19 +538,33 @@ module ConcreteInterfaceDispatch =
             // The approximate load loads the type a row names, its own interfaces included, before
             // it asks whether that type is an interface or names it bare; a failure there comes
             // first.
+            // A walk that has already succeeded within this question cannot fail on another path: its
+            // failures other than a recursive load do not depend on the path, and had a recursive load
+            // reached this head from a path here, its own walk would have met itself and failed. So
+            // the second row naming a head does not walk it again, which keeps two rows a level from
+            // doubling the work at every level.
+            let walkHeadOnce (state : TypeSystemState) : TypeSystemState * Result<unit, TypeBindingFailure> =
+                if walked.Contains interfaceIdentity then
+                    state, Ok ()
+                else
+                    match
+                        walkDefinition
+                            loggerFactory
+                            dotnetRuntimeDirs
+                            baseClassTypes
+                            operation
+                            inProgress
+                            walked
+                            state
+                            interfaceIdentity
+                    with
+                    | state, Error headFailure -> state, Error headFailure
+                    | state, Ok _ -> state, Ok ()
+
             let walkHead (state : TypeSystemState) (refusal : TypeBindingFailure) =
-                match
-                    walkDefinition
-                        loggerFactory
-                        dotnetRuntimeDirs
-                        baseClassTypes
-                        operation
-                        inProgress
-                        state
-                        interfaceIdentity
-                with
+                match walkHeadOnce state with
                 | state, Error headFailure -> state, Error headFailure
-                | state, Ok _ -> state, Error refusal
+                | state, Ok () -> state, Error refusal
 
             match rowArguments with
             | _ when kindMismatch -> refused state (TypeLoadRefusal.KindMismatch (interfaceIdentity, spelledKind))
@@ -576,18 +594,9 @@ module ConcreteInterfaceDispatch =
                 if not expandParents then
                     unreadable state failure
                 else
-                    match
-                        walkDefinition
-                            loggerFactory
-                            dotnetRuntimeDirs
-                            baseClassTypes
-                            operation
-                            inProgress
-                            state
-                            interfaceIdentity
-                    with
+                    match walkHeadOnce state with
                     | state, Error parentFailure -> state, Error parentFailure
-                    | state, Ok _ -> unreadable state failure
+                    | state, Ok () -> unreadable state failure
 
             match outOfScope, rowArguments with
             | Some refusal, _ -> unreadableRow state (TypeBindingFailure.Refused refusal)
@@ -693,8 +702,14 @@ module ConcreteInterfaceDispatch =
             (state, map, interfaceTypeInfo.ImplementedInterfaces)
             |||> StateResult.fold (expand false interfaceAssembly substitution (Set.add interfaceIdentity inProgress))
 
-        (state, inherited, typeInfo.ImplementedInterfaces)
-        |||> StateResult.fold (expand true assembly owner.Substitution inProgress)
+        match
+            (state, inherited, typeInfo.ImplementedInterfaces)
+            |||> StateResult.fold (expand true assembly owner.Substitution inProgress)
+        with
+        | state, Error failure -> state, Error failure
+        | state, Ok walkedDefinition ->
+            walked.Add identity |> ignore<bool>
+            state, Ok walkedDefinition
 
     /// The interface map of the generic definition `identity` (or of a non-generic type, which is its
     /// own definition), in CoreCLR's order: the parent definition's entries first, re-read in this
@@ -719,7 +734,17 @@ module ConcreteInterfaceDispatch =
         (identity : ResolvedTypeIdentity)
         : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
         =
-        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation Set.empty state identity with
+        match
+            walkDefinition
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                operation
+                Set.empty
+                (HashSet ())
+                state
+                identity
+        with
         | state, Error failure -> state, Error failure
         | state, Ok walked ->
 
@@ -795,7 +820,17 @@ module ConcreteInterfaceDispatch =
         | state, Error failure -> state, Error failure
         | state, Ok () ->
 
-        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation Set.empty state ty.Identity with
+        match
+            walkDefinition
+                loggerFactory
+                dotnetRuntimeDirs
+                baseClassTypes
+                operation
+                Set.empty
+                (HashSet ())
+                state
+                ty.Identity
+        with
         | state, Error failure -> state, Error failure
         | state, Ok walked ->
 

@@ -515,8 +515,24 @@ module MethodTableLayout =
                         generic, ImmutableArray.CreateRange arguments
                     | nominal -> nominal, ImmutableArray.Empty
 
-                nominalIdentityOfSpelling loggerFactory dotnetRuntimeDirs operation ctx assembly generic
-                |> fun (ctx, identity) -> ctx, identity |> Result.map (fun identity -> identity, arguments)
+                match generic with
+                | TypeDefn.FromDefinition _
+                | TypeDefn.FromReference _
+                | TypeDefn.PrimitiveType PrimitiveType.Object ->
+                    nominalIdentityOfSpelling loggerFactory dotnetRuntimeDirs operation ctx assembly generic
+                    |> fun (ctx, identity) -> ctx, identity |> Result.map (fun identity -> identity, arguments)
+                | other ->
+                    // Malformed metadata can spell an extends clause that names no class at all (an
+                    // array, a variable, an instantiation whose head is not a type token); CoreCLR
+                    // refuses to load the type.
+                    ctx,
+                    Error (
+                        TypeBindingFailure.Unmodelled
+                            {
+                                Diagnostic =
+                                    $"%s{operation}: %s{owner.Description} extends %O{other}, which names no class; CoreCLR refuses to load the type"
+                            }
+                    )
 
         match spelled with
         | Error failure -> ctx, Error failure
