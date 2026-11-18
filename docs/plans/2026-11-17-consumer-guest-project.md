@@ -901,7 +901,8 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   test, in the assembly's directory. A relative path is made absolute first, against the test host's working
   directory, since the host would resolve it against the guest's (found by Codex). So is the scratch directory, since
   `Path.GetTempPath` keeps a relative `TMPDIR` (also found by Codex). The scratch directory is removed in a `finally`,
-  as the other entries remove theirs. Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
+  as the other entries remove theirs. An assembly lying directly in the temp directory is refused, since the guest
+  would see the scratch directories in its own (found by Codex). Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
   runtimeconfig it is given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a
   `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
 * `executeAssemblyInPlace` is `captureAssemblyInPlace AppContextProperties.empty`, followed by the existing `echo`.
@@ -938,6 +939,19 @@ Choices the decisions left open:
   `TestExecutionContext.CurrentContext.CurrentResult.Output`), and the framework under test whatever runtimeconfig
   the directory holds. The last is what the overwrite used to give the F# pure cases, which are published for
   `net10.0` and run on .NET 11.
+* **Decision 6's premise about invariant globalisation is wrong, and PR 3 needs a decision.** Decision 6 says the
+  `System.Globalization.Invariant` property takes precedence over the environment variable in CoreLib. It is the
+  other way round: `GlobalizationMode.Settings.Invariant` is
+  `AppContextConfigHelper.GetBooleanConfig("System.Globalization.Invariant", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT")`,
+  which returns the environment variable's value whenever it is `0`, `1`, `true` or `false`, and reads the property
+  only otherwise (read in the pinned .NET 10 source). Codex measured it on .NET 10.0.14: with
+  `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=0` inherited, a guest given the property `true` constructed
+  `CultureInfo("fr-FR")`, while `AppContext.GetData` still reported `true`. The oracle overlays the test host's
+  environment on its children, so stating the property on both sides does not make them agree on a machine whose
+  environment sets the variable. Options for PR 3: give `captureAssemblyInPlace` an environment overlay, as
+  `executeConcurrently` has, and have the fixture pass the variable PawPrint's kernel seeds; or clear `DOTNET_*`
+  variables from every oracle child; or accept the exposure and say so in the fixture. PR 2 builds the function as
+  decision 6 specifies and leaves the choice to the decider.
 * Three of Codex's findings are not addressed here. Two are properties of every oracle entry rather than of this one,
   and fixing them for one property would be special-casing:
   * The oracle cannot tell a host that refused to start from a guest that exited. `RuntimeConfig.combine` refuses
@@ -1004,6 +1018,7 @@ rows ran before the working-directory test existed, so against seven tests:
 | host-owned names not refused (the code before the refusal) | the three host-owned cases, and `executeConcurrently`'s |
 | ill-formed UTF-16 not refused (the code before the refusal) | the lone-surrogate test |
 | relative path not made absolute (the code before the fix) | the relative-path test (`NormalExit 129`, the host's) |
+| assembly directly in the temp directory not refused (the code before the refusal) | the temp-directory test (`NormalExit 0`: the guest ran) |
 | scratch directory not made absolute, with `TMPDIR=.` | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
