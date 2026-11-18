@@ -1040,20 +1040,30 @@ module RealRuntime =
         let scratch =
             Path.GetFullPath (Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ()))
 
-        // Compared with links resolved, since either path may reach the same directory through one.
+        // Compared with links resolved, since either path may reach the same directory through one,
+        // and ignoring case, since a case-insensitive filesystem takes two spellings for one
+        // directory. On a case-sensitive filesystem that refuses a directory differing from the temp
+        // directory only by case, which fails loudly rather than exposing anything.
         let resolvedTemp = FrameworkUnderTest.resolveLinks (Path.GetDirectoryName scratch)
-        let resolvedDirectory = FrameworkUnderTest.resolveLinks directory
 
-        if
-            resolvedTemp = resolvedDirectory
+        let isTempOrAbove (candidate : string) : bool =
+            let resolved = FrameworkUnderTest.resolveLinks candidate
+
+            String.Equals (resolvedTemp, resolved, StringComparison.OrdinalIgnoreCase)
             // `EndsInDirectorySeparator` holds only for a root, which `resolveLinks` keeps as it is.
             || resolvedTemp.StartsWith (
-                (if Path.EndsInDirectorySeparator resolvedDirectory then
-                     resolvedDirectory
+                (if Path.EndsInDirectorySeparator resolved then
+                     resolved
                  else
-                     resolvedDirectory + string<char> Path.DirectorySeparatorChar),
-                StringComparison.Ordinal
+                     resolved + string<char> Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase
             )
+
+        // The guest's working directory, and the directory of the file the host runs, which is
+        // the target's when the assembly's file is itself a link.
+        if
+            isTempOrAbove directory
+            || isTempOrAbove (Path.GetDirectoryName (FrameworkUnderTest.resolveLinks dllPath))
         then
             failwith
                 $"Cannot run %s{dllPath} under the real runtime in place: it lies in the temp directory (%s{resolvedTemp}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
