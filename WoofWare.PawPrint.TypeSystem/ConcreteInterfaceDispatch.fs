@@ -281,25 +281,42 @@ module ConcreteInterfaceDispatch =
             returned @ signature.ParameterTypes |> List.tryPick (firstOutOfScope typeArity)
         | _ -> None
 
+    /// The refusal of a load that reaches a definition whose load is already in progress on the same
+    /// path: CoreCLR refuses a recursive load (`IDS_CLASSLOAD_GENERAL`, clsload.cpp).
+    let private recursiveLoad
+        (operation : string)
+        (typeInfo : TypeInfo<GenericParamFromMetadata, TypeDefn>)
+        : TypeBindingFailure
+        =
+        TypeBindingFailure.Unmodelled
+            {
+                Diagnostic =
+                    $"%s{operation}: loading %s{typeInfo.Namespace}.%s{typeInfo.Name} reaches its own definition while that definition is loading, through its interfaces or its base; CoreCLR refuses the recursive load (IDS_CLASSLOAD_GENERAL)"
+            }
+
     /// `interfaceMapOfDefinition`'s walk, which reads on past a row whose arguments it cannot read.
-    /// `walking` holds the definitions whose walks are already under way, so that a walk begun for
-    /// one of them again, through an interface hierarchy that is a cycle, is not begun.
+    /// `inProgress` holds the definitions whose loads are in progress on the path that reached this
+    /// one; entering the walk of one of them again is a recursive load, and refused.
     let rec private walkDefinition
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (operation : string)
-        (walking : Set<ResolvedTypeIdentity>)
+        (inProgress : Set<ResolvedTypeIdentity>)
         (state : TypeSystemState)
         (identity : ResolvedTypeIdentity)
         : TypeSystemState * Result<WalkedDefinition, TypeBindingFailure>
         =
-        let walking = Set.add identity walking
-
         let owner = ConcreteMethodTable.ownerOfDefinition operation state identity
 
         let assembly, typeInfo =
             ConcreteMethodTable.definitionMetadata operation state identity
+
+        if inProgress.Contains identity then
+            state, Error (recursiveLoad operation typeInfo)
+        else
+
+        let inProgress = Set.add identity inProgress
 
         let state, baseOfDefinition =
             ConcreteMethodTable.baseOfDefinition
@@ -326,7 +343,14 @@ module ConcreteInterfaceDispatch =
                     }
             | Some (baseIdentity, arguments) ->
                 match
-                    walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation walking state baseIdentity
+                    walkDefinition
+                        loggerFactory
+                        dotnetRuntimeDirs
+                        baseClassTypes
+                        operation
+                        inProgress
+                        state
+                        baseIdentity
                 with
                 | state, Error failure -> state, Error failure
                 | state, Ok parentMap ->
@@ -368,10 +392,13 @@ module ConcreteInterfaceDispatch =
         let refused (state : TypeSystemState) (refusal : TypeLoadRefusal) =
             state, Error (TypeBindingFailure.Refused refusal)
 
+        // `inProgress` is the path to the row: this definition, and each interface whose rows are being
+        // expanded.
         let rec expand
             (declared : bool)
             (spellingAssembly : DumpedAssembly)
             (spellingContext : TypeConcretization.SubstitutionContext)
+            (inProgress : Set<ResolvedTypeIdentity>)
             (state : TypeSystemState)
             (map : WalkedDefinition)
             (row : WoofWare.PawPrint.InterfaceImplementation)
@@ -412,39 +439,38 @@ module ConcreteInterfaceDispatch =
                         RowsLastFirst = WalkedRow.Unreadable (spelling, failure) :: map.RowsLastFirst
                     }
 
-            // The interface's definition, which is all a definition-level map resolves: its arguments
-            // are loaded only when the map is closed.
-            let head, rowArguments =
-                match TypeDefn.stripCustomModifiers rowSpelling with
-                | TypeDefn.GenericInstantiation (head, arguments) -> head, Some arguments
-                | nominal -> nominal, None
-
-            let spelledKind =
-                match head with
-                | TypeDefn.FromDefinition (_, spelledKind)
-                | TypeDefn.FromReference (_, spelledKind) -> Some spelledKind
-                | _ -> None
-
-            // CoreCLR's approximate load accepts a TypeSpec here only if it spells a generic
-            // instantiation (`ClassLoader::LoadApproxTypeThrowing`), before it resolves anything the
-            // TypeSpec names. A TypeDef or TypeRef row always names a nominal type.
-            match row.InterfaceHandle, rowArguments with
-            | MetadataToken.TypeSpecification _, None ->
-                state,
+            // The row, classified once, before anything it names is resolved. A TypeDef or TypeRef token
+            // is read by `resolveTypeMetadataToken` as a nominal type, at its own variables if generic.
+            // A TypeSpec is accepted here by CoreCLR's approximate load only as `GENERICINST` over a type
+            // token (`ClassLoader::LoadApproxTypeThrowing`), and anything else is refused for its shape.
+            // Only the interface's definition is resolved now; its arguments are loaded when the map is
+            // closed.
+            let refuseRow (diagnostic : string) =
                 Error (
                     TypeBindingFailure.Unmodelled
                         {
                             Diagnostic =
-                                $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} is the TypeSpec %O{rowSpelling}, which is not a generic instantiation; CoreCLR refuses to load the type"
+                                $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} %s{diagnostic}; CoreCLR refuses to load the type"
                         }
                 )
-            | _ ->
 
-            match spelledKind with
-            | None ->
-                failwith
-                    $"BUG: %s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} named %O{head}, which is not nominal, although only a TypeSpec can spell such a type and a TypeSpec here is a generic instantiation"
-            | Some spelledKind ->
+            let classified =
+                match row.InterfaceHandle, TypeDefn.stripCustomModifiers rowSpelling with
+                | MetadataToken.TypeSpecification _,
+                  TypeDefn.GenericInstantiation ((TypeDefn.FromDefinition (_, spelledKind) as head), arguments)
+                | MetadataToken.TypeSpecification _,
+                  TypeDefn.GenericInstantiation ((TypeDefn.FromReference (_, spelledKind) as head), arguments) ->
+                    Ok (head, spelledKind, Some arguments)
+                | MetadataToken.TypeSpecification _, other ->
+                    refuseRow $"is the TypeSpec %O{other}, which is not a generic instantiation over a type token"
+                | _, (TypeDefn.FromDefinition (_, spelledKind) as head) -> Ok (head, spelledKind, None)
+                | _, TypeDefn.GenericInstantiation ((TypeDefn.FromDefinition (_, spelledKind) as head), arguments) ->
+                    Ok (head, spelledKind, Some arguments)
+                | _, other -> refuseRow $"names %O{other}, which is not an interface"
+
+            match classified with
+            | Error failure -> state, Error failure
+            | Ok (head, spelledKind, rowArguments) ->
 
             let state, interfaceIdentity =
                 ConcreteMethodTable.nominalIdentityOfSpelling
@@ -462,6 +488,10 @@ module ConcreteInterfaceDispatch =
 
             let interfaceAssembly, interfaceTypeInfo =
                 ConcreteMethodTable.definitionMetadata operation state interfaceIdentity
+
+            if inProgress.Contains interfaceIdentity then
+                state, Error (recursiveLoad operation interfaceTypeInfo)
+            else
 
             // What CoreCLR's approximate load of a row checks, before any argument is loaded: the
             // interface's base chain, a generic definition named with no instantiation, and the head's
@@ -505,21 +535,18 @@ module ConcreteInterfaceDispatch =
             // it asks whether that type is an interface or names it bare; a failure there comes
             // first.
             let walkHead (state : TypeSystemState) (refusal : TypeBindingFailure) =
-                if walking.Contains interfaceIdentity then
-                    state, Error refusal
-                else
-                    match
-                        walkDefinition
-                            loggerFactory
-                            dotnetRuntimeDirs
-                            baseClassTypes
-                            operation
-                            walking
-                            state
-                            interfaceIdentity
-                    with
-                    | state, Error headFailure -> state, Error headFailure
-                    | state, Ok _ -> state, Error refusal
+                match
+                    walkDefinition
+                        loggerFactory
+                        dotnetRuntimeDirs
+                        baseClassTypes
+                        operation
+                        inProgress
+                        state
+                        interfaceIdentity
+                with
+                | state, Error headFailure -> state, Error headFailure
+                | state, Ok _ -> state, Error refusal
 
             match rowArguments with
             | _ when kindMismatch -> refused state (TypeLoadRefusal.KindMismatch (interfaceIdentity, spelledKind))
@@ -531,7 +558,7 @@ module ConcreteInterfaceDispatch =
                     (TypeBindingFailure.Unmodelled
                         {
                             Diagnostic =
-                                $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %s{interfaceTypeInfo.Namespace}.%s{interfaceTypeInfo.Name}, which is not an interface; CoreCLR refuses to load the type (IDS_CLASSLOAD_NOTINTERFACE)"
+                                $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %s{interfaceTypeInfo.Namespace}.%s{interfaceTypeInfo.Name}, which is not an interface; CoreCLR refuses the type, for that (IDS_CLASSLOAD_NOTINTERFACE) or for an earlier failure of the row's approximate instantiation, which is not modelled (#2329)"
                         })
             | _ ->
 
@@ -546,7 +573,7 @@ module ConcreteInterfaceDispatch =
             // still expands the interface's own parents, in the interface's own vocabulary, and a
             // parent that does not resolve fails there first.
             let unreadableRow (state : TypeSystemState) (failure : TypeBindingFailure) =
-                if not expandParents || walking.Contains interfaceIdentity then
+                if not expandParents then
                     unreadable state failure
                 else
                     match
@@ -555,7 +582,7 @@ module ConcreteInterfaceDispatch =
                             dotnetRuntimeDirs
                             baseClassTypes
                             operation
-                            walking
+                            inProgress
                             state
                             interfaceIdentity
                     with
@@ -664,10 +691,10 @@ module ConcreteInterfaceDispatch =
             else
 
             (state, map, interfaceTypeInfo.ImplementedInterfaces)
-            |||> StateResult.fold (expand false interfaceAssembly substitution)
+            |||> StateResult.fold (expand false interfaceAssembly substitution (Set.add interfaceIdentity inProgress))
 
         (state, inherited, typeInfo.ImplementedInterfaces)
-        |||> StateResult.fold (expand true assembly owner.Substitution)
+        |||> StateResult.fold (expand true assembly owner.Substitution inProgress)
 
     /// The interface map of the generic definition `identity` (or of a non-generic type, which is its
     /// own definition), in CoreCLR's order: the parent definition's entries first, re-read in this

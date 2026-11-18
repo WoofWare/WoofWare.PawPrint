@@ -525,12 +525,16 @@ module MethodTableLayout =
         let baseAssembly, baseTypeDefinition =
             definitionMetadata operation ctx.LoadedAssemblies baseIdentity
 
-        // The clause supplies one argument per variable the base declares, or the image would not
-        // load. Checked because a decomposition bug above would otherwise surface as a signature
-        // comparison reading past the end of a substitution.
+        // A malformed clause can supply another number of arguments than the base declares; CoreCLR
+        // refuses to load the type (`IDS_CLASSLOAD_TYPEWRONGNUMGENERICARGS`).
         if arguments.Length <> baseTypeDefinition.Generics.Length then
-            failwith
-                $"%s{operation}: %s{owner.Description} extends %s{baseAssembly.Name.Name}/%O{baseIdentity.TypeDefinition.Get}, which declares %d{baseTypeDefinition.Generics.Length} generic parameter(s), but its extends clause supplies %d{arguments.Length} argument(s)"
+            ctx,
+            Error (
+                TypeBindingFailure.Refused (
+                    TypeLoadRefusal.WrongArity (baseIdentity, baseTypeDefinition.Generics.Length, arguments.Length)
+                )
+            )
+        else
 
         // The clause's arguments are spelled in the token space of the type that *writes* the clause,
         // which is this type's and not the base's.
