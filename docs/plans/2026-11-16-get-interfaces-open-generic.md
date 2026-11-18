@@ -1004,6 +1004,10 @@ package.
 11. *Plan for #2309: the second pull request after Codex's second review*: this section, before the third review.
 12. *Tests: rows CoreCLR's approximate load refuses*, from Codex's third review; all four failed before the next commit.
 13. *Interface map: what the approximate load refuses*: the fix.
+14. *Plan for #2309: the second pull request after Codex's third review*: this section, before the fourth review.
+15. *Tests: a TypeSpec row is a generic instantiation; heads load first; cycles*, from Codex's fourth review; six
+    cases failed before the next commit, and the cycle test would have recursed without end.
+16. *Interface map: TypeSpec shape, heads loaded first, no cycle re-walked*: the fix.
 
 **The function.** `ConcreteInterfaceDispatch.interfaceMapOfDefinition` takes a definition's identity and returns a
 `DefinitionInterfaceMap`: its entries (`DefinitionInterfaceMapEntry`, the decision's five fields, in the definition's
@@ -1032,11 +1036,14 @@ handle and that each handle is an instantiation of the interface the entry names
 - **What the definition walk checks, and what it leaves to closing.** CoreCLR's approximate load of a row
   (`LoadApproxInterfaceMap`) resolves the interface, loads its base chain and checks the spelling's kind; only the
   exact load (`LoadExactInterfaceMap`) reads the arguments, row by row. The definition walk does the same. Before
-  reading any later row it refuses a row that names no nominal type (`!!0` as the whole spelling, reported as
-  concretisation reports it), loads a TypeSpec row's interface's base chain (`BaseTypeAbsent` and the like), and
-  refuses a generic interface named with no instantiation by any token (`UninstantiatedDefinition`), a spelling with
-  the wrong kind (`KindMismatch`), and a type that is not an interface (`Unmodelled`, for
-  `IDS_CLASSLOAD_NOTINTERFACE`). It also refuses an extends clause naming a variable the type does not have, before
+  reading any later row it refuses a TypeSpec row that is not a generic instantiation (`CLASS I`, `!!0`, `CLASS K`
+  for a non-generic `K`: `Unmodelled`, as `ClassLoader::LoadApproxTypeThrowing` refuses them before resolving what
+  they name), loads a TypeSpec row's interface's base chain (`BaseTypeAbsent` and the like), and refuses a spelling
+  with the wrong kind (`KindMismatch`), a generic interface named by a TypeDef or TypeRef token, which carries no
+  instantiation (`UninstantiatedDefinition`), and a type that is not an interface (`Unmodelled`, for
+  `IDS_CLASSLOAD_NOTINTERFACE`); before the last two it walks the named type's own map, as the approximate load loads
+  that type, so a failure there comes first. The walk carries the definitions it is already walking, so an interface
+  cycle through such a row ends. It also refuses an extends clause naming a variable the type does not have, before
   re-reading the parent's map through it. A row whose arguments it cannot read in the definition's vocabulary (a
   variable its context does not supply, or the wrong number of arguments) cannot be compared with the entries; the
   walk still walks that interface's own map, as the approximate load expands its parents, then records the row as
@@ -1045,9 +1052,9 @@ handle and that each handle is an instantiation of the interface the entry names
   every row in order, unreadable ones included, so an earlier row's absent argument is reported first and an unreadable
   row's own arguments are loaded before its arity is refused, as the old walk and the host report them. The first
   version of this pull request refused all of these in the walk, or none, which threw on five malformed images,
-  answered one, and reported the wrong failure on seven; Codex's three reviews found them, and each is now a test
-  against the host, except the extends clause, which the closed path refuses first (in its base chain) and which only
-  `interfaceMapOfDefinition`, not yet called, can reach.
+  recursed without end on one, answered two that .NET refuses, and reported the wrong failure on eight; Codex's four
+  reviews found them, and each is now a test against the host, except the extends clause, which the closed path
+  refuses first (in its base chain) and which only `interfaceMapOfDefinition`, not yet called, can reach.
 - **Shared contexts.** A chain of generic interfaces nests each interface's arguments in the context of the one above,
   so the same context appears many times in a deep entry. Closing keeps one closed context per shared context, and
   re-reading a parent's map onto the extends clause keeps one re-read context per shared one, so the work is linear in
@@ -1063,8 +1070,11 @@ handle and that each handle is an instantiation of the interface the entry names
 - **The concretisation context** is applied to the state through `ConcreteMethodTable.inContext`, made internal for it.
 - **`interfaceMapOfDefinition` has no caller yet.** `interfaceMapOf` reads the walk directly, since it must load the
   rows `interfaceMapOfDefinition` refuses. The function is the third pull request's starting point, as the decisions
-  intend; until then its refusal of an unreadable row is exercised by no test, and that pull request's tests should
-  cover it.
+  intend; until then its refusal of an unreadable row, and of an extends clause naming a variable the type lacks, is
+  exercised by no test, and that pull request's tests should cover both. One gap remains there, found by Codex's
+  fourth review and left for that pull request: an extends clause giving its base the wrong number of arguments
+  reaches `MethodTableLayout.baseOfDefinition`'s arity `failwith` rather than a refusal. The closed path never gets
+  there, since its base-chain load refuses such a clause first.
 
 **The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
 walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
@@ -1085,9 +1095,9 @@ substitutions, and nothing else, of five CoreLib interface receivers (`IList<int
 rows' parents, so an entry such as `IList<T>`'s `IEnumerable<T>` now comes from the interface's own row (spelled
 `!0`) rather than from expanding `ICollection<T>` (spelled `!0` in `ICollection`'s context, over `IList`'s `!0`); the
 two denote the same types, and the handles, order, flags, registrations and loads are unchanged. With only that rule
-put back to value types, commit 2's dump is identical to the base in all five files. After the fixes of commits 6, 10 and 13,
+put back to value types, commit 2's dump is identical to the base in all five files. After the fixes of commits 6, 10, 13 and 16,
 the dump (with the deep chain's two receivers added in a sixth file) is identical to commit 2's in all five files it
-shares with it, and so is the probe below; the sixth is identical across commits 6, 10 and 13.
+shares with it, and so is the probe below; the sixth is identical across commits 6, 10, 13 and 16.
 
 **What moved, measured.** In those corpora every assembly is loaded before the walk, so the dump cannot see load
 order. A throwaway probe (not committed) compiled classes against one version of a library and ran them against a
@@ -1113,7 +1123,7 @@ of one interface (`IGen<BitVector32>, IGen<IChangeTracking>`) nothing moves. `Te
 guest stayed green without edits.
 
 Codex's reviews found more malformed images on which an earlier version answered differently from the old walk and the
-host. The tests named under commits 5, 7, 9 and 12 now pin each against the host.
+host. The tests named under commits 5, 7, 9, 12 and 15 now pin each against the host.
 
 **Mutants**, each applied to commit 2 (those marked later to that commit, against the tests that name the shapes) by
 an exact replacement, the test project built, and two selections run: the
@@ -1148,6 +1158,9 @@ tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindin
 | (after commit 13) only a TypeSpec checked for a missing instantiation | the TypeDef-row test |
 | (after commit 13) a head that is not an interface accepted | the `System.Object` row test |
 | (after commit 13) an unreadable row's interface not walked | the absent-parent test |
+| (after commit 16) a TypeSpec row's shape not checked | five tests: the four moved to the shape refusal, and `CLASS K` |
+| (after commit 16) a refused head's own map not walked first | the class-with-absent-interface test |
+| (after commit 16) an unreadable row's interface walked again within a cycle | the cycle test (the test host overflowed its stack) |
 | the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
 | the rule widened to every CoreLib type | none: equivalent, the same reason |
 | the rule keyed on the interface being expanded, not the type being built | none: equivalent, as the decisions record |
@@ -1159,17 +1172,19 @@ change only package descriptions, READMEs, CI and a page under `docs/developer`)
 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 10,
 on `3a6d1c53c`: default 5,897 (5,858 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208
 passed; `GuestImpure` 304 passed. At commit 13, on `3a6d1c53c`: default 5,901 (5,862 passed, 39 skipped); `Guest` 234
-passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed.
+passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 16, on `3a6d1c53c`:
+default 5,905 (5,866 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed;
+`GuestImpure` 304 passed.
 
 **Time of the guest categories**, on the same machine, one category at a time, in seconds: on the base (#2322's tip),
-and at commits 3, 6, 10 and 13.
+and at commits 3, 6, 10, 13 and 16.
 
-| category | base | commit 3 | commit 6 | commit 10 | commit 13 |
-|---|---|---|---|---|---|
-| `Guest` | 1,092 | 1,179 | 1,698 | 1,395 | 1,175 |
-| `GuestSolo` | 545 | 747 | 1,193 | 637 | 648 |
-| `GuestPure` | 910 | 717 | 796 | 842 | 715 |
-| `GuestImpure` | 883 | 289 | 408 | 396 | 687 |
+| category | base | commit 3 | commit 6 | commit 10 | commit 13 | commit 16 |
+|---|---|---|---|---|---|---|
+| `Guest` | 1,092 | 1,179 | 1,698 | 1,395 | 1,175 | 1,515 |
+| `GuestSolo` | 545 | 747 | 1,193 | 637 | 648 | 665 |
+| `GuestPure` | 910 | 717 | 796 | 842 | 715 | 776 |
+| `GuestImpure` | 883 | 289 | 408 | 396 | 687 | 693 |
 
 The machine was shared with other runs, and the differences go both ways by more than any change in this branch could
 explain (`GuestImpure` took 505 to 560 s in PR 1's runs; `GuestSolo`, two tests, ranged from 545 to 1,193 s here), so
