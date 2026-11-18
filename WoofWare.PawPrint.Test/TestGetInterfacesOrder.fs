@@ -1171,6 +1171,15 @@ public struct S2<T> : IC<T[]> { }
         /// `GENERICINST CLASS J 1 !0`, where `J<T>` extends the absent `IAbsent`, in a type with no
         /// variables.
         | OverAbsentParentWithVar0
+        /// `CLASS K`, the non-generic interface `K` as a TypeSpec.
+        | NonGenericAsTypeSpec
+        /// `K` by its TypeDef token.
+        | NonGenericByTypeDef
+        /// The class `F2`, which implements the absent `IAbsent`, by its TypeDef token.
+        | ClassOverAbsentInterface
+        /// `L` by its TypeDef token, where `L : M<int, int>` gives the one-parameter `M<T> : L` two
+        /// arguments: a cycle through a row whose arguments cannot be read.
+        | CycleThroughWrongArity
 
     /// An image with `I<T>`, `B : <baseRows>` and `C : B, <receiverRows>`.
     let private rowsImage (baseRows : Row list) (receiverRows : Row list) : byte[] =
@@ -1254,13 +1263,16 @@ public struct S2<T> : IC<T[]> { }
         let receiver = addType "C" Reflection.TypeAttributes.Public (definition baseClass)
         let fake = addType "Fake" Reflection.TypeAttributes.Public absentBaseRef
 
-        let overAbsent =
-            addType
-                "J`1"
-                (Reflection.TypeAttributes.Public
-                 ||| Reflection.TypeAttributes.Interface
-                 ||| Reflection.TypeAttributes.Abstract)
-                nil
+        let interfaceAttributes =
+            Reflection.TypeAttributes.Public
+            ||| Reflection.TypeAttributes.Interface
+            ||| Reflection.TypeAttributes.Abstract
+
+        let overAbsent = addType "J`1" interfaceAttributes nil
+        let nonGeneric = addType "K" interfaceAttributes nil
+        let classOverAbsent = addType "F2" Reflection.TypeAttributes.Public objectRef
+        let cycleL = addType "L" interfaceAttributes nil
+        let cycleM = addType "M`1" interfaceAttributes nil
 
         let typeSpec (write : Reflection.Metadata.BlobBuilder -> unit) : Reflection.Metadata.EntityHandle =
             let blob = Reflection.Metadata.BlobBuilder ()
@@ -1292,6 +1304,14 @@ public struct S2<T> : IC<T[]> { }
             match row with
             | Row.Absent -> absentRef
             | Row.Object -> objectRef
+            | Row.NonGenericAsTypeSpec ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition nonGeneric))
+                )
+            | Row.NonGenericByTypeDef -> definition nonGeneric
+            | Row.ClassOverAbsentInterface -> definition classOverAbsent
+            | Row.CycleThroughWrongArity -> definition cycleL
             | Row.GenericByTypeDef -> definition iface
             | Row.OverAbsentParentWithVar0 ->
                 typeSpec (fun blob ->
@@ -1345,6 +1365,25 @@ public struct S2<T> : IC<T[]> { }
         metadata.AddInterfaceImplementation (overAbsent, absentRef)
         |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
 
+        metadata.AddInterfaceImplementation (classOverAbsent, absentRef)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        let mOfIntInt =
+            typeSpec (fun blob ->
+                blob.WriteByte 0x15uy
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex (definition cycleM))
+                blob.WriteCompressedInteger 2
+                blob.WriteByte 0x08uy
+                blob.WriteByte 0x08uy
+            )
+
+        metadata.AddInterfaceImplementation (cycleL, mOfIntInt)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddInterfaceImplementation (cycleM, definition cycleL)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
         metadata.AddGenericParameter (
             definition iface,
             Reflection.GenericParameterAttributes.None,
@@ -1355,6 +1394,14 @@ public struct S2<T> : IC<T[]> { }
 
         metadata.AddGenericParameter (
             definition overAbsent,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        metadata.AddGenericParameter (
+            definition cycleM,
             Reflection.GenericParameterAttributes.None,
             metadata.GetOrAddString "T",
             0
@@ -1519,7 +1566,7 @@ public struct S2<T> : IC<T[]> { }
         | Ok interfaces -> failwith $"the host answered %A{interfaces}"
 
         match pawPrint with
-        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.UninstantiatedDefinition _)) -> ()
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     /// `C`, which has no type variables, names `I<!0>`, as `B` names `I<int>`, so the duplicate check
@@ -1575,7 +1622,7 @@ public struct S2<T> : IC<T[]> { }
         | Error (TypeBindingFailure.TypeAbsent _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
-    /// A row spelled `!!0` names no interface and no variable in scope.
+    /// A row spelled `!!0`, a TypeSpec that is not a generic instantiation.
     [<Test>]
     let ``A row spelled as a method variable is refused`` () : unit =
         let host, pawPrint = rowsOutcome [] [ Row.MethodVariable ]
@@ -1585,15 +1632,14 @@ public struct S2<T> : IC<T[]> { }
         | Ok interfaces -> failwith $"the host answered %A{interfaces}"
 
         match pawPrint with
-        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodParameterOutOfScope (0, 0))) -> ()
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     /// A row spelled `CLASS Fake`, a class of the image whose base type does not exist. The host
     /// refuses the row's shape (a TypeSpec here must be a generic instantiation) before reading
-    /// `Fake`; PawPrint fails on `Fake`'s base, as concretising the row fails, and must not throw
-    /// asking the head's kind before that base has loaded.
+    /// `Fake`, and so does PawPrint.
     [<Test>]
-    let ``A row whose head's base type is absent fails on that base`` () : unit =
+    let ``A TypeSpec row naming a class is refused for its shape`` () : unit =
         let host, pawPrint = rowsOutcome [] [ Row.ClassOverAbsentBase ]
 
         match host with
@@ -1601,7 +1647,7 @@ public struct S2<T> : IC<T[]> { }
         | Ok interfaces -> failwith $"the host answered %A{interfaces}"
 
         match pawPrint with
-        | Error (TypeBindingFailure.BaseTypeAbsent _) -> ()
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     /// A row spelled `!!0` fails before a later absent interface is read, as the host fails on it.
@@ -1614,7 +1660,7 @@ public struct S2<T> : IC<T[]> { }
         | other -> failwith $"the host answered %A{other}"
 
         match pawPrint with
-        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodParameterOutOfScope (0, 0))) -> ()
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     /// A TypeDef row naming the generic `I<T>` itself, with no instantiation.
@@ -1655,6 +1701,62 @@ public struct S2<T> : IC<T[]> { }
 
         match pawPrint with
         | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `CLASS K`, a non-generic interface spelled as a TypeSpec, is refused for its shape; `K` by its
+    /// TypeDef token is the control, answered on both.
+    [<TestCase true>]
+    [<TestCase false>]
+    let ``A non-generic interface is named by a token, not a TypeSpec`` (asTypeSpec : bool) : unit =
+        let row =
+            if asTypeSpec then
+                Row.NonGenericAsTypeSpec
+            else
+                Row.NonGenericByTypeDef
+
+        let host, pawPrint = rowsOutcome [] [ row ]
+
+        if asTypeSpec then
+            match host with
+            | Error (:? TypeLoadException) -> ()
+            | other -> failwith $"the host answered %A{other}"
+
+            match pawPrint with
+            | Error (TypeBindingFailure.Unmodelled _) -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+        else
+            host |> Result.toOption |> shouldEqual (Some [| "K" |])
+
+            match pawPrint with
+            | Ok [ _ ] -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row naming the class `F2`, which implements the absent `IAbsent`: the host loads `F2`,
+    /// and fails on its interface, before it finds that `F2` is not an interface.
+    [<Test>]
+    let ``A row naming a class fails first on that class's own interfaces`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.ClassOverAbsentInterface ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "IAbsent" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `L : M<int, int>` and `M<T> : L`: a cycle through a row with the wrong number of arguments,
+    /// which must end in a refusal rather than walk the cycle again.
+    [<Test>]
+    let ``A cycle through an unreadable row is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.CycleThroughWrongArity ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     // ----- A generic definition -----
