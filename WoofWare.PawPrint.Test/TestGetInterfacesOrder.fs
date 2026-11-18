@@ -2012,12 +2012,13 @@ public struct S2<T> : IC<T[]> { }
         output.ToArray ()
 
     /// What the host and PawPrint answer for the non-generic type `receiver` of `sketches`: the host's
-    /// `GetInterfaces()`, or what loading the type raised; PawPrint's interface map, and the bytes the
-    /// call allocated on this thread.
+    /// `GetInterfaces()`, or what loading the type raised; PawPrint's interface map, each entry as the
+    /// host type it names over the same image; and the bytes PawPrint's call allocated on this thread,
+    /// the naming not included.
     let private sketchOutcome
         (sketches : Sketch list)
         (receiver : string)
-        : Result<string[], exn> * Result<ConcreteInterfaceDispatch.InterfaceMapEntry list, TypeBindingFailure> * int64
+        : Result<string[], exn> * Result<string list, TypeBindingFailure> * int64
         =
         let image = sketchImage sketches
 
@@ -2055,7 +2056,7 @@ public struct S2<T> : IC<T[]> { }
 
             let before = GC.GetAllocatedBytesForCurrentThread ()
 
-            let _, pawPrintAnswer =
+            let typeSystem, pawPrintAnswer =
                 ConcreteInterfaceDispatch.interfaceMapOf
                     loggerFactory
                     state.DotnetRuntimeDirs
@@ -2065,18 +2066,52 @@ public struct S2<T> : IC<T[]> { }
                     handle
 
             let allocated = GC.GetAllocatedBytesForCurrentThread () - before
-            hostAnswer, pawPrintAnswer, allocated
+
+            let rec hostTypeOf (handle : ConcreteTypeHandle) : Type =
+                match handle with
+                | ConcreteTypeHandle.Concrete _ ->
+                    let ty =
+                        AllConcreteTypes.lookup handle typeSystem.ConcreteTypes
+                        |> Option.defaultWith (fun () -> failwith $"%O{handle} is not registered")
+
+                    let assembly =
+                        if ty.Identity.AssemblyFullName = dumped.DefinitionFullName then
+                            host
+                        else
+                            hostCoreLib
+
+                    let definition =
+                        assembly.ManifestModule.ResolveType (
+                            Reflection.Metadata.Ecma335.MetadataTokens.GetToken (
+                                Reflection.Metadata.TypeDefinitionHandle.op_Implicit ty.Identity.TypeDefinition.Get
+                                : Reflection.Metadata.EntityHandle
+                            )
+                        )
+
+                    if ty.Generics.IsEmpty then
+                        definition
+                    else
+                        definition.MakeGenericType (ty.Generics |> Seq.map hostTypeOf |> Array.ofSeq)
+                | ConcreteTypeHandle.OneDimArrayZero element -> (hostTypeOf element).MakeArrayType ()
+                | ConcreteTypeHandle.Pointer element -> (hostTypeOf element).MakePointerType ()
+                | other -> failwith $"no host type is built for %O{other}"
+
+            let named =
+                pawPrintAnswer
+                |> Result.map (List.map (fun entry -> (hostTypeOf entry.Interface).ToString ()))
+
+            hostAnswer, named, allocated
         finally
             context.Unload ()
 
     /// The host's and PawPrint's answers agree, interface for interface, in order.
     let private agreeWithHost
         (host : Result<string[], exn>)
-        (pawPrint : Result<ConcreteInterfaceDispatch.InterfaceMapEntry list, TypeBindingFailure>)
+        (pawPrint : Result<string list, TypeBindingFailure>)
         : unit
         =
         match host, pawPrint with
-        | Ok hostInterfaces, Ok entries -> entries.Length |> shouldEqual hostInterfaces.Length
+        | Ok hostInterfaces, Ok interfaces -> interfaces |> shouldEqual (List.ofArray hostInterfaces)
         | other -> failwith $"the host and PawPrint answered %A{other}"
 
     /// The refusal of an interface hierarchy that reaches a definition whose load is already in
@@ -2193,6 +2228,96 @@ public struct S2<T> : IC<T[]> { }
 
         TestContext.Progress.WriteLine $"pair diamond: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
         Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
+    /// `J0<T>`, and `Jk<T>` with two rows each giving its predecessor `J(k-1)` two arguments, under
+    /// `C : J<depth><int>`. The image holds two rows a level; each row's arguments cannot be read, and
+    /// its interface's own map is walked before it is deferred. Walking the same interface's map again
+    /// for the second row of each level would double the work at every level.
+    let private wrongArityLadder (depth : int) : Sketch list =
+        [
+            yield sketch "J0`1" SketchKind.Interface 1 []
+            for k in 1..depth do
+                let previous = Spelling.Named ($"J%d{k - 1}`1", [ Spelling.Var 0 ; Spelling.Var 0 ])
+                yield sketch $"J%d{k}`1" SketchKind.Interface 1 [ previous ; previous ]
+            yield sketch "C" SketchKind.Class 0 [ Spelling.Named ($"J%d{depth}`1", [ Spelling.Int32 ]) ]
+        ]
+
+    /// Both refuse the ladder; PawPrint's work at twelve levels is at most 8 times its work at six,
+    /// where walking each interface once gives about 2 and walking it once a row about 64.
+    [<Test>]
+    let ``Rows that cannot be read walk each interface once`` () : unit =
+        let _, _, _ = sketchOutcome (wrongArityLadder 2) "C"
+        let host6, pawPrint6, allocated6 = sketchOutcome (wrongArityLadder 6) "C"
+        let host12, pawPrint12, allocated12 = sketchOutcome (wrongArityLadder 12) "C"
+
+        for host, pawPrint in [ host6, pawPrint6 ; host12, pawPrint12 ] do
+            match host with
+            | Error _ -> ()
+            | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+            match pawPrint with
+            | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)) -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+
+        TestContext.Progress.WriteLine
+            $"wrong-arity ladder: %d{allocated6} bytes at depth 6, %d{allocated12} at depth 12"
+
+        Assert.That (allocated12, Is.LessThanOrEqualTo (8L * allocated6))
+
+    /// A class `D : int32[]`, an extends clause naming no class.
+    let private overArray : Sketch list =
+        [
+            { sketch "D" SketchKind.Class 0 [] with
+                Base = Some (Spelling.SzArray Spelling.Int32)
+            }
+        ]
+
+    /// A row naming `D`, whose extends clause is `int32[]`: loading the row's head refuses the clause,
+    /// as the host refuses `C`.
+    [<Test>]
+    let ``A row naming a class whose extends clause names no class is refused`` () : unit =
+        let host, pawPrint, _ =
+            sketchOutcome (overArray @ [ sketch "C" SketchKind.Class 0 [ Spelling.Named ("D", []) ] ]) "C"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// The same clause through `interfaceMapOfDefinition` on `D`.
+    [<Test>]
+    let ``A definition's map refuses an extends clause naming no class`` () : unit =
+        let image = sketchImage overArray
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let state = coreState.WithLoadedAssembly dumped
+
+        let identity =
+            let handle, _ =
+                dumped.TypeDefs
+                |> Seq.map (fun (KeyValue (handle, typeInfo)) -> handle, typeInfo)
+                |> Seq.find (fun (_, typeInfo) -> typeInfo.Name = "D")
+
+            ResolvedTypeIdentity.ofDefinitionInAssembly dumped.DefinitionFullName handle
+
+        let _, result =
+            ConcreteInterfaceDispatch.interfaceMapOfDefinition
+                loggerFactory
+                state.DotnetRuntimeDirs
+                bct
+                "test"
+                state.TypeSystem
+                identity
+
+        match result with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
 
     /// Shapes whose interface hierarchy reaches a definition already being loaded, which CoreCLR
     /// refuses as a recursive load (`IDS_CLASSLOAD_GENERAL`). A row naming a class whose base chain
