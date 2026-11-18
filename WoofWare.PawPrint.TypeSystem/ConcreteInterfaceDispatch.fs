@@ -122,14 +122,6 @@ module ConcreteInterfaceDispatch =
             /// let two distinct declarations coincide: `C<T> : I<int>` declaring `M(T)` and `M(int)`
             /// must bind `I<int>.M(int)` to `M(int)` alone, even in `C<int>`.
             Substitution : TypeConcretization.SubstitutionContext
-            /// The interface as the InterfaceImpl row that added it spells it, read in the same
-            /// vocabulary. Closing the map concretises this, so that a closed entry is loaded as its
-            /// row writes it, with every check concretisation makes of a spelling.
-            Spelling : TypeConcretization.SubstitutionArgument
-            /// Each later row that names the same instantiation, as it spells it. CoreCLR loads every
-            /// row's interface as written (`LoadExactInterfaceMap`), these included, so closing the
-            /// map concretises them too; each closes to this entry's interface.
-            Respellings : TypeConcretization.SubstitutionArgument list
             /// The type lists this interface in its own InterfaceImpl rows, rather than reaching it
             /// only through its parent or through another interface. A declared interface the parent
             /// also implements is *re-implemented*: its slots are matched afresh against the type's
@@ -139,21 +131,26 @@ module ConcreteInterfaceDispatch =
             ImplementedByParent : bool
         }
 
-    /// Re-read one argument built in `definition`'s vocabulary in the vocabulary of a type that
-    /// instantiates it, as `SubstitutionContext.rebase` re-reads a whole context.
-    let private rebaseArgument
-        (definition : ResolvedTypeIdentity)
-        (arguments : ImmutableArray<TypeConcretization.SubstitutionArgument>)
-        (argument : TypeConcretization.SubstitutionArgument)
-        : TypeConcretization.SubstitutionArgument
-        =
-        (TypeConcretization.SubstitutionContext.rebase
-            definition
-            arguments
-            {
-                TypeConcretization.SubstitutionContext.Arguments = ImmutableArray.Create argument
-            })
-            .Arguments.[0]
+    /// One InterfaceImpl row the definition walk read: the type's own, its parent's, or one of an
+    /// interface it expanded.
+    type internal DefinitionInterfaceMapRow =
+        {
+            /// The row's interface as the row spells it, read in the definition's vocabulary.
+            Spelling : TypeConcretization.SubstitutionArgument
+            /// The position, in the map's entries, of the instantiation the row names.
+            Entry : int
+        }
+
+    /// A generic definition's interface map, and every row read to build it.
+    type internal DefinitionInterfaceMap =
+        {
+            Entries : DefinitionInterfaceMapEntry list
+            /// Every row the walk read, the parent's first, in the order it read them. The first row
+            /// naming an instantiation added its entry; a later one adds nothing. CoreCLR still loads
+            /// every row's interface as written, in this order (`LoadExactInterfaceMap`), so closing
+            /// the map concretises each row, and a row that does not load fails the type.
+            Rows : DefinitionInterfaceMapRow list
+        }
 
     /// One entry of a closed type's interface map (`bmtInterfaceEntry`): its definition's entry, and
     /// the interface instantiation that entry closes to under the type's arguments.
@@ -167,6 +164,99 @@ module ConcreteInterfaceDispatch =
             Type : ConcreteType<ConcreteTypeHandle>
         }
 
+    /// `SubstitutionContext.rebase` over every substitution and spelling of a parent's map at once,
+    /// re-reading each context the map shares once and sharing the result. A chain of interfaces each
+    /// passing its arguments to the next nests one context inside the next, so re-reading each
+    /// occurrence afresh would take time exponential in the chain's length.
+    let private rebaseMap
+        (definition : ResolvedTypeIdentity)
+        (arguments : ImmutableArray<TypeConcretization.SubstitutionArgument>)
+        (map : DefinitionInterfaceMap)
+        : DefinitionInterfaceMap
+        =
+        // Keyed on the array itself: `ImmutableArray` compares by reference.
+        let rebased =
+            Dictionary<
+                ImmutableArray<TypeConcretization.SubstitutionArgument>,
+                ImmutableArray<TypeConcretization.SubstitutionArgument>
+             > ()
+
+        let rec rebaseContext
+            (context : ImmutableArray<TypeConcretization.SubstitutionArgument>)
+            : ImmutableArray<TypeConcretization.SubstitutionArgument>
+            =
+            match rebased.TryGetValue context with
+            | true, result -> result
+            | false, _ ->
+                let result = context |> ImmutableArray.map rebaseArgument
+                rebased.[context] <- result
+                result
+
+        and rebaseArgument
+            (argument : TypeConcretization.SubstitutionArgument)
+            : TypeConcretization.SubstitutionArgument
+            =
+            match argument with
+            | TypeConcretization.SubstitutionArgument.Spelled (assembly, spelling, inner) ->
+                TypeConcretization.SubstitutionArgument.Spelled (assembly, spelling, rebaseContext inner)
+            | TypeConcretization.SubstitutionArgument.Closed _
+            | TypeConcretization.SubstitutionArgument.Formal _ ->
+                // A leaf: `rebase` itself says what it becomes, and checks a variable's owner.
+                (TypeConcretization.SubstitutionContext.rebase
+                    definition
+                    arguments
+                    {
+                        TypeConcretization.SubstitutionContext.Arguments = ImmutableArray.Create argument
+                    })
+                    .Arguments.[0]
+
+        {
+            Entries =
+                map.Entries
+                |> List.map (fun entry ->
+                    { entry with
+                        Substitution =
+                            {
+                                TypeConcretization.SubstitutionContext.Arguments =
+                                    rebaseContext entry.Substitution.Arguments
+                            }
+                        DeclaredOnType = false
+                        ImplementedByParent = true
+                    }
+                )
+            Rows =
+                map.Rows
+                |> List.map (fun row ->
+                    { row with
+                        Spelling = rebaseArgument row.Spelling
+                    }
+                )
+        }
+
+    /// The first type variable `spelling` names that a context of `typeArity` variables and no method
+    /// variables does not supply, as concretisation refuses it.
+    let rec private firstOutOfScope (typeArity : int) (spelling : TypeDefn) : TypeLoadRefusal option =
+        match spelling with
+        | TypeDefn.GenericTypeParameter index when index < 0 || index >= typeArity ->
+            Some (TypeLoadRefusal.TypeParameterOutOfScope (index, typeArity))
+        | TypeDefn.GenericMethodParameter index -> Some (TypeLoadRefusal.MethodParameterOutOfScope (index, 0))
+        | TypeDefn.GenericInstantiation (head, arguments) ->
+            Seq.append [ head ] arguments |> Seq.tryPick (firstOutOfScope typeArity)
+        | TypeDefn.Modified modified -> firstOutOfScope typeArity modified.Unmodified
+        | TypeDefn.Array (element, _)
+        | TypeDefn.Pinned element
+        | TypeDefn.Pointer element
+        | TypeDefn.Byref element
+        | TypeDefn.OneDimensionalArrayLowerBoundZero element -> firstOutOfScope typeArity element
+        | TypeDefn.FunctionPointer signature ->
+            let returned =
+                match signature.ReturnType with
+                | MethodReturnType.Void -> []
+                | MethodReturnType.Returns ty -> [ ty ]
+
+            returned @ signature.ParameterTypes |> List.tryPick (firstOutOfScope typeArity)
+        | _ -> None
+
     /// The interface map of the generic definition `identity` (or of a non-generic type, which is its
     /// own definition), in CoreCLR's order: the parent definition's entries first, re-read in this
     /// definition's vocabulary through its extends clause, then each interface the type declares
@@ -176,9 +266,10 @@ module ConcreteInterfaceDispatch =
     /// and their arguments are the same types *of the definition*, so `C<T, U> : I<T>, I<U>` has two
     /// entries.
     ///
-    /// Nothing is closed, so an interface is resolved to its definition, and its arguments are not
-    /// loaded. An interface that does not resolve is the failure, as is a row naming a generic
-    /// interface with the wrong number of arguments.
+    /// Nothing is closed, so a row's interface is resolved to its definition and its arguments are not
+    /// loaded. The failure is the first row, in the order read, whose interface does not resolve, whose
+    /// spelling names the interface with the wrong kind, names a variable its context does not supply,
+    /// or gives a generic interface the wrong number of arguments or none.
     let rec internal interfaceMapOfDefinition
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
@@ -186,7 +277,7 @@ module ConcreteInterfaceDispatch =
         (operation : string)
         (state : TypeSystemState)
         (identity : ResolvedTypeIdentity)
-        : TypeSystemState * Result<DefinitionInterfaceMapEntry list, TypeBindingFailure>
+        : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
         =
         let owner = ConcreteMethodTable.ownerOfDefinition operation state identity
 
@@ -209,28 +300,19 @@ module ConcreteInterfaceDispatch =
 
         let state, inherited =
             match baseOfDefinition with
-            | None -> state, Ok []
+            | None ->
+                state,
+                Ok
+                    {
+                        Entries = []
+                        Rows = []
+                    }
             | Some (baseIdentity, arguments) ->
                 match
                     interfaceMapOfDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state baseIdentity
                 with
                 | state, Error failure -> state, Error failure
-                | state, Ok parentMap ->
-
-                let inherited =
-                    parentMap
-                    |> List.map (fun entry ->
-                        { entry with
-                            Substitution =
-                                TypeConcretization.SubstitutionContext.rebase baseIdentity arguments entry.Substitution
-                            Spelling = rebaseArgument baseIdentity arguments entry.Spelling
-                            Respellings = entry.Respellings |> List.map (rebaseArgument baseIdentity arguments)
-                            DeclaredOnType = false
-                            ImplementedByParent = true
-                        }
-                    )
-
-                state, Ok inherited
+                | state, Ok parentMap -> state, Ok (rebaseMap baseIdentity arguments parentMap)
 
         match inherited with
         | Error failure -> state, Error failure
@@ -252,14 +334,17 @@ module ConcreteInterfaceDispatch =
                     || LoadedTypeInfo.isValueType baseClassTypes state._LoadedAssemblies typeInfo)
             )
 
+        let refused (state : TypeSystemState) (refusal : TypeLoadRefusal) =
+            state, Error (TypeBindingFailure.Refused refusal)
+
         let rec expand
             (declared : bool)
             (spellingAssembly : DumpedAssembly)
             (spellingContext : TypeConcretization.SubstitutionContext)
             (state : TypeSystemState)
-            (map : DefinitionInterfaceMapEntry list)
+            (map : DefinitionInterfaceMap)
             (row : WoofWare.PawPrint.InterfaceImplementation)
-            : TypeSystemState * Result<DefinitionInterfaceMapEntry list, TypeBindingFailure>
+            : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
             =
             let rowAssembly =
                 match state.LoadedAssembly row.RelativeToAssembly.FullName with
@@ -286,18 +371,21 @@ module ConcreteInterfaceDispatch =
                 | TypeDefn.GenericInstantiation (head, arguments) -> head, Some arguments
                 | nominal -> nominal, None
 
-            let state, interfaceIdentity =
+            let state, interfaceIdentity, spelledKind =
                 match head with
-                | TypeDefn.FromDefinition _
-                | TypeDefn.FromReference _ ->
-                    ConcreteMethodTable.nominalIdentityOfSpelling
-                        loggerFactory
-                        dotnetRuntimeDirs
-                        baseClassTypes
-                        operation
-                        state
-                        rowResolvedAssembly
-                        head
+                | TypeDefn.FromDefinition (_, spelledKind)
+                | TypeDefn.FromReference (_, spelledKind) ->
+                    let state, interfaceIdentity =
+                        ConcreteMethodTable.nominalIdentityOfSpelling
+                            loggerFactory
+                            dotnetRuntimeDirs
+                            baseClassTypes
+                            operation
+                            state
+                            rowResolvedAssembly
+                            head
+
+                    state, interfaceIdentity, spelledKind
                 | other ->
                     failwith
                         $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %O{other}, which is not a nominal type"
@@ -309,21 +397,46 @@ module ConcreteInterfaceDispatch =
             let interfaceAssembly, interfaceTypeInfo =
                 ConcreteMethodTable.definitionMetadata operation state interfaceIdentity
 
+            // The checks concretisation makes of a spelling before it loads any argument, in its
+            // order: the head's kind, then a generic definition named with no instantiation (only a
+            // TypeSpec can spell one; a TypeDef or TypeRef row is read at the definition's own kind).
+            // Those it makes after loading the arguments -- a variable out of scope, the arity -- are
+            // made here before the duplicate check below compares the arguments, which assumes both.
+            let isTypeSpec =
+                match row.InterfaceHandle with
+                | MetadataToken.TypeSpecification _ -> true
+                | _ -> false
+
+            let kindMismatch =
+                isTypeSpec
+                && TypeResolution.spellingMismatches
+                    baseClassTypes
+                    state._LoadedAssemblies
+                    interfaceIdentity
+                    spelledKind
+                && (rowArguments.IsSome
+                    || not (TypeResolution.overlooksNominalSpelling rowResolvedAssembly))
+
             match rowArguments with
-            | Some arguments when arguments.Length <> interfaceTypeInfo.Generics.Length ->
+            | None when isTypeSpec && not interfaceTypeInfo.Generics.IsEmpty ->
+                refused state (TypeLoadRefusal.UninstantiatedDefinition interfaceIdentity)
+            | _ when kindMismatch -> refused state (TypeLoadRefusal.KindMismatch (interfaceIdentity, spelledKind))
+            | _ ->
+
+            let outOfScope =
+                rowArguments
+                |> Option.map (Seq.tryPick (firstOutOfScope spellingContext.Arguments.Length))
+                |> Option.flatten
+
+            match outOfScope, rowArguments with
+            | Some refusal, _ -> refused state refusal
+            | None, Some arguments when arguments.Length <> interfaceTypeInfo.Generics.Length ->
                 // CoreCLR refuses an instantiation with any other number of arguments than its
                 // definition declares (`IDS_CLASSLOAD_TYPEWRONGNUMGENERICARGS`).
-                state,
-                Error (
-                    TypeBindingFailure.Refused (
-                        TypeLoadRefusal.WrongArity (
-                            interfaceIdentity,
-                            interfaceTypeInfo.Generics.Length,
-                            arguments.Length
-                        )
-                    )
-                )
-            | _ ->
+                refused
+                    state
+                    (TypeLoadRefusal.WrongArity (interfaceIdentity, interfaceTypeInfo.Generics.Length, arguments.Length))
+            | None, _ ->
 
             let substitution =
                 spelledInterfaceSubstitution
@@ -366,23 +479,33 @@ module ConcreteInterfaceDispatch =
                     | state, Ok true -> state, Ok (Some i)
                     | state, Ok false -> findExisting state (i + 1) rest
 
-            match findExisting state 0 map with
+            match findExisting state 0 map.Entries with
             | state, Error failure -> state, Error failure
             | state, Ok (Some existing) ->
                 // Already present: an entry is added once, and its parents with it. Re-declaring it
                 // on this type is recorded, since that is what makes it re-implemented here.
                 state,
-                map
-                |> List.mapi (fun i entry ->
-                    if i = existing then
-                        { entry with
-                            Respellings = entry.Respellings @ [ spelling ]
-                            DeclaredOnType = entry.DeclaredOnType || declared
-                        }
-                    else
-                        entry
-                )
-                |> Ok
+                Ok
+                    {
+                        Entries =
+                            map.Entries
+                            |> List.mapi (fun i entry ->
+                                if i = existing then
+                                    { entry with
+                                        DeclaredOnType = entry.DeclaredOnType || declared
+                                    }
+                                else
+                                    entry
+                            )
+                        Rows =
+                            map.Rows
+                            @ [
+                                {
+                                    Spelling = spelling
+                                    Entry = existing
+                                }
+                            ]
+                    }
             | state, Ok None ->
 
             let entry =
@@ -390,13 +513,22 @@ module ConcreteInterfaceDispatch =
                     Interface = interfaceIdentity
                     TypeInfo = interfaceTypeInfo
                     Substitution = substitution
-                    Spelling = spelling
-                    Respellings = []
                     DeclaredOnType = declared
                     ImplementedByParent = false
                 }
 
-            let map = map @ [ entry ]
+            let map =
+                {
+                    Entries = map.Entries @ [ entry ]
+                    Rows =
+                        map.Rows
+                        @ [
+                            {
+                                Spelling = spelling
+                                Entry = map.Entries.Length
+                            }
+                        ]
+                }
 
             if not expandParents then
                 state, Ok map
@@ -407,41 +539,6 @@ module ConcreteInterfaceDispatch =
 
         (state, inherited, typeInfo.ImplementedInterfaces)
         |||> StateResult.fold (expand true assembly owner.Substitution)
-
-    /// Concretise one spelling of a definition-level entry under a closed type's arguments.
-    let private closeSpelling
-        (loggerFactory : ILoggerFactory)
-        (dotnetRuntimeDirs : string seq)
-        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (state : TypeSystemState)
-        (definition : ResolvedTypeIdentity)
-        (closedArguments : ImmutableArray<TypeConcretization.SubstitutionArgument>)
-        (spelling : TypeConcretization.SubstitutionArgument)
-        : TypeSystemState * Result<ConcreteTypeHandle, TypeBindingFailure>
-        =
-        let ctx : TypeConcretization.ConcretizationContext<DumpedAssembly> =
-            {
-                ConcreteTypes = state.ConcreteTypes
-                LoadedAssemblies = state._LoadedAssemblies
-                BaseTypes = baseClassTypes
-            }
-
-        let closed, ctx =
-            TypeConcretization.concretizeSubstitution
-                ctx
-                (TypeResolution.directoryLoader loggerFactory dotnetRuntimeDirs)
-                {
-                    TypeConcretization.SubstitutionContext.Arguments =
-                        ImmutableArray.Create (rebaseArgument definition closedArguments spelling)
-                }
-
-        let state =
-            { state with
-                ConcreteTypes = ctx.ConcreteTypes
-                _LoadedAssemblies = ctx.LoadedAssemblies
-            }
-
-        state, closed |> Result.map (fun closed -> closed.[0])
 
     /// The interface map of a class, value type or interface, in CoreCLR's order: the parent's
     /// entries first, then each interface the type declares followed by its own parents,
@@ -456,7 +553,8 @@ module ConcreteInterfaceDispatch =
     /// `C<int, int>` -- has two entries with one closed handle.
     ///
     /// The type's base chain is loaded first, as CoreCLR loads a type's parent before the type, so a
-    /// closed type whose ancestor does not bind has no map.
+    /// closed type whose ancestor does not bind has no map. Then every row the definition's map read
+    /// is loaded as written, in the order read, and the first that does not load is the failure.
     let internal interfaceMapOf
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
@@ -491,17 +589,99 @@ module ConcreteInterfaceDispatch =
         | state, Error failure -> state, Error failure
         | state, Ok definitionMap ->
 
-        let closedArguments =
-            ty.Generics |> ImmutableArray.map TypeConcretization.SubstitutionArgument.Closed
+        let loader = TypeResolution.directoryLoader loggerFactory dotnetRuntimeDirs
 
-        let close = closeSpelling loggerFactory dotnetRuntimeDirs baseClassTypes
+        // Each context the map shares is closed once: a chain of interfaces nests one context inside
+        // the next, and closing each occurrence afresh would take time exponential in its length.
+        // Keyed on the array itself, which `ImmutableArray` compares by reference.
+        let closedContexts =
+            Dictionary<ImmutableArray<TypeConcretization.SubstitutionArgument>, ImmutableArray<ConcreteTypeHandle>> ()
 
-        let state, reversed =
-            (state, [], definitionMap)
-            |||> StateResult.fold (fun state closedSoFar entry ->
-                match close state ty.Identity closedArguments entry.Spelling with
-                | state, Error failure -> state, Error failure
-                | state, Ok handle ->
+        let rec closeArgument
+            (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>)
+            (argument : TypeConcretization.SubstitutionArgument)
+            : Result<ConcreteTypeHandle, TypeBindingFailure> * TypeConcretization.ConcretizationContext<DumpedAssembly>
+            =
+            match argument with
+            | TypeConcretization.SubstitutionArgument.Closed handle -> Ok handle, ctx
+            | TypeConcretization.SubstitutionArgument.Formal (owner, index) ->
+                if owner <> ty.Identity || index >= ty.Generics.Length then
+                    failwith
+                        $"%s{operation}: an interface-map row of %O{typeHandle} mentions variable !%d{index} of %s{owner.AssemblyFullName}/%O{owner.TypeDefinition.Get}, which is not one of its definition's"
+
+                Ok ty.Generics.[index], ctx
+            | TypeConcretization.SubstitutionArgument.Spelled (assembly, spelling, inner) ->
+                match closeContext ctx inner with
+                | Error failure, ctx -> Error failure, ctx
+                | Ok generics, ctx ->
+                    TypeConcretization.concretizeType ctx loader assembly generics ImmutableArray.Empty spelling
+
+        and closeContext
+            (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>)
+            (context : ImmutableArray<TypeConcretization.SubstitutionArgument>)
+            : Result<ImmutableArray<ConcreteTypeHandle>, TypeBindingFailure> *
+              TypeConcretization.ConcretizationContext<DumpedAssembly>
+            =
+            match closedContexts.TryGetValue context with
+            | true, closed -> Ok closed, ctx
+            | false, _ ->
+                let rec go
+                    ctx
+                    (acc : ConcreteTypeHandle list)
+                    (arguments : TypeConcretization.SubstitutionArgument list)
+                    =
+                    match arguments with
+                    | [] -> Ok (ImmutableArray.CreateRange (List.rev acc)), ctx
+                    | argument :: rest ->
+                        match closeArgument ctx argument with
+                        | Error failure, ctx -> Error failure, ctx
+                        | Ok handle, ctx -> go ctx (handle :: acc) rest
+
+                match go ctx [] (List.ofSeq context) with
+                | Ok closed, ctx ->
+                    closedContexts.[context] <- closed
+                    Ok closed, ctx
+                | Error failure, ctx -> Error failure, ctx
+
+        let entries = Array.ofList definitionMap.Entries
+
+        let state, closedEntries =
+            ConcreteMethodTable.inContext
+                baseClassTypes
+                state
+                (fun ctx ->
+                    let rec go
+                        (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>)
+                        (closed : Map<int, ConcreteTypeHandle>)
+                        (rows : DefinitionInterfaceMapRow list)
+                        =
+                        match rows with
+                        | [] -> ctx, Ok closed
+                        | row :: rest ->
+                            match closeArgument ctx row.Spelling with
+                            | Error failure, ctx -> ctx, Error failure
+                            | Ok handle, ctx ->
+                                match Map.tryFind row.Entry closed with
+                                | None -> go ctx (Map.add row.Entry handle closed) rest
+                                | Some first when first = handle -> go ctx closed rest
+                                | Some first ->
+                                    failwith
+                                        $"%s{operation}: two rows of %O{typeHandle}'s interface map name the same instantiation of its definition, but close to %O{first} and %O{handle}"
+
+                    go ctx Map.empty definitionMap.Rows
+                )
+
+        match closedEntries with
+        | Error failure -> state, Error failure
+        | Ok closedEntries ->
+
+        let closed =
+            entries
+            |> Array.mapi (fun i entry ->
+                let handle =
+                    match Map.tryFind i closedEntries with
+                    | Some handle -> handle
+                    | None -> failwith $"%s{operation}: no row of %O{typeHandle}'s interface map added its entry %d{i}"
 
                 let interfaceTy =
                     match TypeSystemState.tryGetConcreteTypeInfo state handle with
@@ -514,31 +694,15 @@ module ConcreteInterfaceDispatch =
                     failwith
                         $"%s{operation}: an interface-map entry of %O{typeHandle} names %s{entry.Interface.AssemblyFullName}/%O{entry.Interface.TypeDefinition.Get} on the definition but closes to %O{handle}, an instantiation of %s{interfaceTy.Identity.AssemblyFullName}/%O{interfaceTy.Identity.TypeDefinition.Get}"
 
-                let state, respellings =
-                    (state, (), entry.Respellings)
-                    |||> StateResult.fold (fun state () respelling ->
-                        match close state ty.Identity closedArguments respelling with
-                        | state, Error failure -> state, Error failure
-                        | state, Ok respelled when respelled <> handle ->
-                            failwith
-                                $"%s{operation}: two rows of %O{typeHandle}'s interface map name the same instantiation of its definition, but close to %O{handle} and %O{respelled}"
-                        | state, Ok _ -> state, Ok ()
-                    )
-
-                match respellings with
-                | Error failure -> state, Error failure
-                | Ok () ->
-                    let closed =
-                        {
-                            Definition = entry
-                            Interface = handle
-                            Type = interfaceTy
-                        }
-
-                    state, Ok (closed :: closedSoFar)
+                {
+                    Definition = entry
+                    Interface = handle
+                    Type = interfaceTy
+                }
             )
+            |> List.ofArray
 
-        state, reversed |> Result.map List.rev
+        state, Ok closed
 
     /// The interface method a MethodImpl declaration names, together with the interface instantiation
     /// it names it on -- closed, and read in the vocabulary of the owner's generic definition, whose
