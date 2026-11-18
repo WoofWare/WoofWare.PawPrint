@@ -1158,6 +1158,12 @@ public struct S2<T> : IC<T[]> { }
         | BareGeneric
         /// `[CoreLib]System.IAbsent`, which CoreLib does not declare.
         | Absent
+        /// `!!0`, the whole spelling, in a row where no method variable is in scope.
+        | MethodVariable
+        /// `CLASS Fake`, a class of the image whose base type CoreLib does not declare.
+        | ClassOverAbsentBase
+        /// `GENERICINST CLASS I 2 <first> <second>`: two arguments to the one-parameter `I`.
+        | TwoArguments of first : RowArgument * second : RowArgument
 
     /// An image with `I<T>`, `B : <baseRows>` and `C : B, <receiverRows>`.
     let private rowsImage (baseRows : Row list) (receiverRows : Row list) : byte[] =
@@ -1210,6 +1216,7 @@ public struct S2<T> : IC<T[]> { }
         let int32Ref = coreLibType "Int32"
         let missingRef = coreLibType "Missing"
         let absentRef = coreLibType "IAbsent"
+        let absentBaseRef = coreLibType "AbsentBase"
 
         let addType
             (name : string)
@@ -1238,6 +1245,7 @@ public struct S2<T> : IC<T[]> { }
 
         let baseClass = addType "B" Reflection.TypeAttributes.Public objectRef
         let receiver = addType "C" Reflection.TypeAttributes.Public (definition baseClass)
+        let fake = addType "Fake" Reflection.TypeAttributes.Public absentBaseRef
 
         let typeSpec (write : Reflection.Metadata.BlobBuilder -> unit) : Reflection.Metadata.EntityHandle =
             let blob = Reflection.Metadata.BlobBuilder ()
@@ -1249,9 +1257,44 @@ public struct S2<T> : IC<T[]> { }
         let codedIndex (handle : Reflection.Metadata.EntityHandle) : int =
             Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef handle
 
+        let writeArgument (blob : Reflection.Metadata.BlobBuilder) (argument : RowArgument) : unit =
+            match argument with
+            | RowArgument.Int32 -> blob.WriteByte 0x08uy
+            | RowArgument.Int32AsValueType ->
+                blob.WriteByte 0x11uy
+                blob.WriteCompressedInteger (codedIndex int32Ref)
+            | RowArgument.Int32AsClass ->
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex int32Ref)
+            | RowArgument.Var0 ->
+                blob.WriteByte 0x13uy
+                blob.WriteCompressedInteger 0
+            | RowArgument.Missing ->
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex missingRef)
+
         let token (row : Row) : Reflection.Metadata.EntityHandle =
             match row with
             | Row.Absent -> absentRef
+            | Row.MethodVariable ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x1Euy
+                    blob.WriteCompressedInteger 0
+                )
+            | Row.ClassOverAbsentBase ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition fake))
+                )
+            | Row.TwoArguments (first, second) ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x15uy
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition iface))
+                    blob.WriteCompressedInteger 2
+                    writeArgument blob first
+                    writeArgument blob second
+                )
             | Row.BareGeneric ->
                 typeSpec (fun blob ->
                     blob.WriteByte 0x12uy
@@ -1263,21 +1306,7 @@ public struct S2<T> : IC<T[]> { }
                     blob.WriteByte (if asValueType then 0x11uy else 0x12uy)
                     blob.WriteCompressedInteger (codedIndex (definition iface))
                     blob.WriteCompressedInteger 1
-
-                    match argument with
-                    | RowArgument.Int32 -> blob.WriteByte 0x08uy
-                    | RowArgument.Int32AsValueType ->
-                        blob.WriteByte 0x11uy
-                        blob.WriteCompressedInteger (codedIndex int32Ref)
-                    | RowArgument.Int32AsClass ->
-                        blob.WriteByte 0x12uy
-                        blob.WriteCompressedInteger (codedIndex int32Ref)
-                    | RowArgument.Var0 ->
-                        blob.WriteByte 0x13uy
-                        blob.WriteCompressedInteger 0
-                    | RowArgument.Missing ->
-                        blob.WriteByte 0x12uy
-                        blob.WriteCompressedInteger (codedIndex missingRef)
+                    writeArgument blob argument
                 )
 
         for row in baseRows do
@@ -1470,6 +1499,71 @@ public struct S2<T> : IC<T[]> { }
 
         match pawPrint with
         | Error (TypeBindingFailure.Refused (TypeLoadRefusal.TypeParameterOutOfScope (0, 0))) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row whose arguments the definition walk cannot read is loaded in its turn, so an earlier
+    /// row's absent argument is reported first: `I<Missing>` before `I<!0>` in a type with no variables,
+    /// and before `I<Missing, int>` given to a one-parameter `I`, as on the host.
+    [<TestCase false>]
+    [<TestCase true>]
+    let ``An earlier row's absent argument comes before a later row's unreadable arguments`` (arity : bool) : unit =
+        let later =
+            if arity then
+                Row.TwoArguments (RowArgument.Int32, RowArgument.Int32)
+            else
+                Row.Instantiation (false, RowArgument.Var0)
+
+        let host, pawPrint =
+            rowsOutcome [] [ Row.Instantiation (false, RowArgument.Missing) ; later ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "Missing" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// The same arity row alone: its own absent argument is reported before its arity, as the host
+    /// reports it.
+    [<Test>]
+    let ``A row's absent argument comes before its wrong number of arguments`` () : unit =
+        let host, pawPrint =
+            rowsOutcome [] [ Row.TwoArguments (RowArgument.Missing, RowArgument.Int32) ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "Missing" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row spelled `!!0` names no interface and no variable in scope.
+    [<Test>]
+    let ``A row spelled as a method variable is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.MethodVariable ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodParameterOutOfScope (0, 0))) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row naming a class of the image whose base type does not exist fails on that base, which
+    /// loading the row's head loads before anything asks the head's kind.
+    [<Test>]
+    let ``A row whose head's base type is absent fails on that base`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.ClassOverAbsentBase ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.BaseTypeAbsent _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     // ----- A generic definition -----
