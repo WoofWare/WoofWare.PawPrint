@@ -1042,18 +1042,17 @@ module RealRuntime =
 
             Path.GetFullPath path
 
-        // A `.` is refused here too, though both readings agree on it inside a path: a final one,
-        // as in `Guest.dll/.`, names a directory to the operating system, and `Path.GetFullPath`
-        // would drop it.
+        // Both readings agree on a `.` inside a path, but a final one, as in `Guest.dll/.`, names a
+        // directory to the operating system, and `Path.GetFullPath` would drop it.
         if
             dllPath.Split (
                 [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |],
                 StringSplitOptions.RemoveEmptyEntries
             )
-            |> Array.contains "."
+            |> Array.tryLast = Some "."
         then
             failwith
-                $"Cannot run an assembly under the real runtime in place with the assembly path %s{dllPath}, which has '.' in it. Pass the path without it."
+                $"Cannot run an assembly under the real runtime in place with the assembly path %s{dllPath}, which ends in '.', so names a directory. Pass the path to the file."
 
         // Absolute, because the host would resolve a relative path against the guest's working
         // directory, which is the assembly's directory.
@@ -1117,10 +1116,12 @@ module RealRuntime =
                 failwith
                     $"Cannot run %s{dllPath} under the real runtime in place: its directory is the temp directory (%s{Path.GetDirectoryName scratch}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
 
-            // The host looks for the dev runtimeconfig beside the runtimeconfig it is given
-            // (`get_runtime_config_paths_from_arg` in hostfxr's fx_muxer.cpp), so a
-            // `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
-            let configPath = Path.Combine (scratch, name + ".runtimeconfig.json")
+            // The host looks for the dev runtimeconfig beside the runtimeconfig it is given, under a
+            // name derived from it (`get_runtime_config_paths_from_arg` in hostfxr's fx_muxer.cpp),
+            // so a `<name>.runtimeconfig.dev.json` beside the assembly is not read either. The name
+            // is fixed rather than the assembly's because that derivation takes a backslash, which
+            // a Unix file name may hold, for a separator.
+            let configPath = Path.Combine (scratch, "guest.runtimeconfig.json")
             File.WriteAllText (configPath, runtimeConfigFor OracleFrameworks.NetCoreApp configProperties)
 
             runCapturing

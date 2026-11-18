@@ -670,10 +670,45 @@ public static class Program
                 |> shouldEqual (RealRuntimeResult.NormalExit 5)
             )
 
+    /// A `.` inside the path changes nothing, so it is accepted.
+    [<Test>]
+    let ``a path with . inside it names the same assembly`` () : unit =
+        laidOut
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let dotted =
+                    Path.Combine (Path.GetDirectoryName dllPath, ".", Path.GetFileName dllPath)
+
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] dotted
+                |> _.Result
+                |> shouldEqual (RealRuntimeResult.NormalExit 5)
+            )
+
+    /// A Unix file name may hold a backslash, which hostfxr, deriving one runtimeconfig's name
+    /// from another's, takes for a separator.
+    [<Test>]
+    let ``an assembly whose file name holds a backslash runs`` () : unit =
+        if OperatingSystem.IsWindows () then
+            Assert.Ignore "a backslash separates directories on Windows"
+
+        laidOut
+            "Ends\\AsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                Path.GetFileName dllPath |> shouldEqual "Ends\\AsTold.dll"
+
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] dllPath
+                |> _.Result
+                |> shouldEqual (RealRuntimeResult.NormalExit 5)
+            )
+
     /// A final `.` names a directory to the operating system, so `EndsAsTold.dll/.` names
     /// nothing; `Path.GetFullPath` would drop it and run the file.
     [<Test>]
-    let ``a path with . in it is refused, not run`` () : unit =
+    let ``a path ending in . is refused, not run`` () : unit =
         laidOut
             "EndsAsTold"
             endsAsToldImage.Value
