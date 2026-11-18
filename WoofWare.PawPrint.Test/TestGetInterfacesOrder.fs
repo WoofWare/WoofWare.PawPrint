@@ -1164,6 +1164,13 @@ public struct S2<T> : IC<T[]> { }
         | ClassOverAbsentBase
         /// `GENERICINST CLASS I 2 <first> <second>`: two arguments to the one-parameter `I`.
         | TwoArguments of first : RowArgument * second : RowArgument
+        /// `[CoreLib]System.Object`, a class, by its TypeRef.
+        | Object
+        /// `I<T>` by its TypeDef token, which carries no instantiation.
+        | GenericByTypeDef
+        /// `GENERICINST CLASS J 1 !0`, where `J<T>` extends the absent `IAbsent`, in a type with no
+        /// variables.
+        | OverAbsentParentWithVar0
 
     /// An image with `I<T>`, `B : <baseRows>` and `C : B, <receiverRows>`.
     let private rowsImage (baseRows : Row list) (receiverRows : Row list) : byte[] =
@@ -1247,6 +1254,14 @@ public struct S2<T> : IC<T[]> { }
         let receiver = addType "C" Reflection.TypeAttributes.Public (definition baseClass)
         let fake = addType "Fake" Reflection.TypeAttributes.Public absentBaseRef
 
+        let overAbsent =
+            addType
+                "J`1"
+                (Reflection.TypeAttributes.Public
+                 ||| Reflection.TypeAttributes.Interface
+                 ||| Reflection.TypeAttributes.Abstract)
+                nil
+
         let typeSpec (write : Reflection.Metadata.BlobBuilder -> unit) : Reflection.Metadata.EntityHandle =
             let blob = Reflection.Metadata.BlobBuilder ()
             write blob
@@ -1276,6 +1291,16 @@ public struct S2<T> : IC<T[]> { }
         let token (row : Row) : Reflection.Metadata.EntityHandle =
             match row with
             | Row.Absent -> absentRef
+            | Row.Object -> objectRef
+            | Row.GenericByTypeDef -> definition iface
+            | Row.OverAbsentParentWithVar0 ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x15uy
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition overAbsent))
+                    blob.WriteCompressedInteger 1
+                    writeArgument blob RowArgument.Var0
+                )
             | Row.MethodVariable ->
                 typeSpec (fun blob ->
                     blob.WriteByte 0x1Euy
@@ -1317,8 +1342,19 @@ public struct S2<T> : IC<T[]> { }
             metadata.AddInterfaceImplementation (receiver, token row)
             |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
 
+        metadata.AddInterfaceImplementation (overAbsent, absentRef)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
         metadata.AddGenericParameter (
             definition iface,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        metadata.AddGenericParameter (
+            definition overAbsent,
             Reflection.GenericParameterAttributes.None,
             metadata.GetOrAddString "T",
             0
@@ -1552,8 +1588,10 @@ public struct S2<T> : IC<T[]> { }
         | Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodParameterOutOfScope (0, 0))) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
-    /// A row naming a class of the image whose base type does not exist fails on that base, which
-    /// loading the row's head loads before anything asks the head's kind.
+    /// A row spelled `CLASS Fake`, a class of the image whose base type does not exist. The host
+    /// refuses the row's shape (a TypeSpec here must be a generic instantiation) before reading
+    /// `Fake`; PawPrint fails on `Fake`'s base, as concretising the row fails, and must not throw
+    /// asking the head's kind before that base has loaded.
     [<Test>]
     let ``A row whose head's base type is absent fails on that base`` () : unit =
         let host, pawPrint = rowsOutcome [] [ Row.ClassOverAbsentBase ]
@@ -1564,6 +1602,59 @@ public struct S2<T> : IC<T[]> { }
 
         match pawPrint with
         | Error (TypeBindingFailure.BaseTypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row spelled `!!0` fails before a later absent interface is read, as the host fails on it.
+    [<Test>]
+    let ``A row spelled as a method variable fails before a later absent row`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.MethodVariable ; Row.Absent ]
+
+        match host with
+        | Error e when not (e.Message.Contains "IAbsent") -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.MethodParameterOutOfScope (0, 0))) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A TypeDef row naming the generic `I<T>` itself, with no instantiation.
+    [<Test>]
+    let ``A TypeDef row naming a generic interface is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.GenericByTypeDef ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.UninstantiatedDefinition _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row naming `System.Object`, which is not an interface.
+    [<Test>]
+    let ``A row naming a class is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.Object ]
+
+        match host with
+        | Error (:? TypeLoadException) -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `J<!0>` in a type with no variables cannot be read, but `J`'s own parent `IAbsent` is absent,
+    /// and the host reports that first.
+    [<Test>]
+    let ``An unreadable row's interface's absent parent is reported first`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.OverAbsentParentWithVar0 ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "IAbsent" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
     // ----- A generic definition -----
