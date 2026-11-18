@@ -1067,12 +1067,100 @@ public struct S2<T> : IC<T[]> { }
         finally
             context.Unload ()
 
-    // ----- A re-declared interface whose row does not load -----
+    // ----- A deep chain of generic interfaces -----
 
-    /// An image with `I<T>`, `B : I<int>` and `C : B, I<int>`, where `C`'s row spells its `I<int>`
-    /// as `GENERICINST VALUETYPE` (`asValueType`) or, correctly, as `GENERICINST CLASS`. C# never
-    /// writes the first.
-    let private respelledInterfaceImage (asValueType : bool) : byte[] =
+    /// `I16<A, B, C> : I15<A, B, C>`, and so on down to `I0`, each passing its three arguments on; a
+    /// class implementing the top, and a chain of generic classes over it. Each interface's arguments
+    /// are read in the context of the one above, so the contexts nest sixteen deep, and closing or
+    /// re-reading each occurrence of a context afresh would take time exponential in the depth.
+    [<Test>]
+    let ``A deep chain of generic interfaces agrees with the host`` () : unit =
+        let depth = 16
+
+        let source =
+            let interfaces =
+                [
+                    yield "public interface I0<A, B, C> { }"
+                    for i in 1..depth do
+                        yield $"public interface I%d{i}<A, B, C> : I%d{i - 1}<A, B, C> {{ }}"
+                ]
+
+            String.concat
+                "\n"
+                (interfaces
+                 @ [
+                     $"public class Top : I%d{depth}<int, string, long> {{ }}"
+                     $"public class B0<A, B, C> : I%d{depth}<A, B, C> {{ }}"
+                     "public class B1<A, B, C> : B0<A, B, C> { }"
+                     "public class B2<A, B, C> : B1<A, B, C> { }"
+                 ])
+
+        let image =
+            Roslyn.compileAssembly "DeepChain" OutputKind.DynamicallyLinkedLibrary [] [ source ]
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("deepChain", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let images = [ hostCoreLib, corelib ; host, dumped ]
+            let mutable state = coreState.WithLoadedAssembly dumped
+            let mutable failures = []
+            let stopwatch = Stopwatch.StartNew ()
+
+            for receiver in
+                [
+                    host.GetType "Top"
+                    host.GetType("B2`3").MakeGenericType (typeof<int>, typeof<string>, typeof<int64>)
+                ] do
+                let after, failure = compareReceiver images state receiver
+                state <- after
+
+                match failure with
+                | Some failure -> failures <- failure :: failures
+                | None -> ()
+
+            report "deep chain" (List.rev failures)
+            (host.GetType "Top").GetInterfaces().Length |> shouldEqual (depth + 1)
+            // Linear work finishes in well under a second; the exponential would not finish at all.
+            Assert.That (stopwatch.Elapsed, Is.LessThan (TimeSpan.FromSeconds 60.0))
+        finally
+            context.Unload ()
+
+    // ----- InterfaceImpl rows C# never writes -----
+
+    /// An argument of a hand-spelled `I<_>` row.
+    [<RequireQualifiedAccess>]
+    type private RowArgument =
+        /// `int32`.
+        | Int32
+        /// `valuetype [CoreLib]System.Int32`.
+        | Int32AsValueType
+        /// `class [CoreLib]System.Int32`, the wrong kind.
+        | Int32AsClass
+        /// `!0`, in a type with no variables.
+        | Var0
+        /// `class [CoreLib]System.Missing`, which CoreLib does not declare.
+        | Missing
+
+    /// One InterfaceImpl row of a hand-built image.
+    [<RequireQualifiedAccess>]
+    type private Row =
+        /// `GENERICINST <CLASS or VALUETYPE> I 1 <argument>`.
+        | Instantiation of asValueType : bool * argument : RowArgument
+        /// `CLASS I`: the generic `I<T>` with no instantiation.
+        | BareGeneric
+        /// `[CoreLib]System.IAbsent`, which CoreLib does not declare.
+        | Absent
+
+    /// An image with `I<T>`, `B : <baseRows>` and `C : B, <receiverRows>`.
+    let private rowsImage (baseRows : Row list) (receiverRows : Row list) : byte[] =
         let metadata = Reflection.Metadata.Ecma335.MetadataBuilder ()
         let nil = Unchecked.defaultof<Reflection.Metadata.EntityHandle>
 
@@ -1081,7 +1169,7 @@ public struct S2<T> : IC<T[]> { }
 
         metadata.AddModule (
             0,
-            metadata.GetOrAddString "RespelledRow.dll",
+            metadata.GetOrAddString "InterfaceRows.dll",
             metadata.GetOrAddGuid (Guid ("0f5b8c2a-3d61-4e7b-9a40-5c7e2d18b963")),
             Unchecked.defaultof<_>,
             Unchecked.defaultof<_>
@@ -1089,7 +1177,7 @@ public struct S2<T> : IC<T[]> { }
         |> ignore<Reflection.Metadata.ModuleDefinitionHandle>
 
         metadata.AddAssembly (
-            metadata.GetOrAddString "RespelledRow",
+            metadata.GetOrAddString "InterfaceRows",
             Version (1, 0, 0, 0),
             Unchecked.defaultof<_>,
             Unchecked.defaultof<_>,
@@ -1110,14 +1198,18 @@ public struct S2<T> : IC<T[]> { }
                 Unchecked.defaultof<_>
             )
 
-        let objectRef =
+        let coreLibType (name : string) : Reflection.Metadata.EntityHandle =
             metadata.AddTypeReference (
                 Reflection.Metadata.AssemblyReferenceHandle.op_Implicit coreLibRef,
                 metadata.GetOrAddString "System",
-                metadata.GetOrAddString "Object"
+                metadata.GetOrAddString name
             )
-            |> fun handle ->
-                (Reflection.Metadata.TypeReferenceHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+            |> Reflection.Metadata.TypeReferenceHandle.op_Implicit
+
+        let objectRef = coreLibType "Object"
+        let int32Ref = coreLibType "Int32"
+        let missingRef = coreLibType "Missing"
+        let absentRef = coreLibType "IAbsent"
 
         let addType
             (name : string)
@@ -1147,24 +1239,54 @@ public struct S2<T> : IC<T[]> { }
         let baseClass = addType "B" Reflection.TypeAttributes.Public objectRef
         let receiver = addType "C" Reflection.TypeAttributes.Public (definition baseClass)
 
-        // `GENERICINST <CLASS or VALUETYPE> I 1 int32`
-        let instantiation (kind : byte) =
+        let typeSpec (write : Reflection.Metadata.BlobBuilder -> unit) : Reflection.Metadata.EntityHandle =
             let blob = Reflection.Metadata.BlobBuilder ()
-            blob.WriteByte 0x15uy
-            blob.WriteByte kind
-            blob.WriteCompressedInteger (Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef (definition iface))
-            blob.WriteCompressedInteger 1
-            blob.WriteByte 0x08uy
+            write blob
 
             metadata.AddTypeSpecification (metadata.GetOrAddBlob blob)
-            |> fun handle ->
-                (Reflection.Metadata.TypeSpecificationHandle.op_Implicit handle : Reflection.Metadata.EntityHandle)
+            |> Reflection.Metadata.TypeSpecificationHandle.op_Implicit
 
-        metadata.AddInterfaceImplementation (baseClass, instantiation 0x12uy)
-        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+        let codedIndex (handle : Reflection.Metadata.EntityHandle) : int =
+            Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef handle
 
-        metadata.AddInterfaceImplementation (receiver, instantiation (if asValueType then 0x11uy else 0x12uy))
-        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+        let token (row : Row) : Reflection.Metadata.EntityHandle =
+            match row with
+            | Row.Absent -> absentRef
+            | Row.BareGeneric ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition iface))
+                )
+            | Row.Instantiation (asValueType, argument) ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x15uy
+                    blob.WriteByte (if asValueType then 0x11uy else 0x12uy)
+                    blob.WriteCompressedInteger (codedIndex (definition iface))
+                    blob.WriteCompressedInteger 1
+
+                    match argument with
+                    | RowArgument.Int32 -> blob.WriteByte 0x08uy
+                    | RowArgument.Int32AsValueType ->
+                        blob.WriteByte 0x11uy
+                        blob.WriteCompressedInteger (codedIndex int32Ref)
+                    | RowArgument.Int32AsClass ->
+                        blob.WriteByte 0x12uy
+                        blob.WriteCompressedInteger (codedIndex int32Ref)
+                    | RowArgument.Var0 ->
+                        blob.WriteByte 0x13uy
+                        blob.WriteCompressedInteger 0
+                    | RowArgument.Missing ->
+                        blob.WriteByte 0x12uy
+                        blob.WriteCompressedInteger (codedIndex missingRef)
+                )
+
+        for row in baseRows do
+            metadata.AddInterfaceImplementation (baseClass, token row)
+            |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        for row in receiverRows do
+            metadata.AddInterfaceImplementation (receiver, token row)
+            |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
 
         metadata.AddGenericParameter (
             definition iface,
@@ -1189,19 +1311,20 @@ public struct S2<T> : IC<T[]> { }
         builder.Serialize output |> ignore<Reflection.Metadata.BlobContentId>
         output.ToArray ()
 
-    /// `C`'s row names the instantiation `B` already put in the map, so it adds no entry; but the
-    /// runtime loads every row's interface as the row spells it, so a row that does not load fails
-    /// the type all the same.
-    [<TestCase true>]
-    [<TestCase false>]
-    let ``A re-declared interface's own row is loaded`` (asValueType : bool) : unit =
-        let image = respelledInterfaceImage asValueType
+    /// The host's `C.GetInterfaces()`, or the exception that loading `C` raised; and PawPrint's
+    /// interface map of `C`.
+    let private rowsOutcome
+        (baseRows : Row list)
+        (receiverRows : Row list)
+        : Result<string[], exn> * Result<ConcreteInterfaceDispatch.InterfaceMapEntry list, TypeBindingFailure>
+        =
+        let image = rowsImage baseRows receiverRows
 
         let dumped =
             use stream = new MemoryStream (image)
             AssemblyApi.read loggerFactory None stream
 
-        let context = AssemblyLoadContext ("respelledRow", isCollectible = true)
+        let context = AssemblyLoadContext ("interfaceRows", isCollectible = true)
 
         try
             let host =
@@ -1211,8 +1334,8 @@ public struct S2<T> : IC<T[]> { }
             let hostAnswer =
                 try
                     host.GetType("C", true).GetInterfaces () |> Array.map _.ToString() |> Ok
-                with :? TypeLoadException as e ->
-                    Error e.Message
+                with e ->
+                    Error e
 
             let state = coreState.WithLoadedAssembly dumped
 
@@ -1238,22 +1361,99 @@ public struct S2<T> : IC<T[]> { }
                     state.TypeSystem
                     receiver
 
-            if asValueType then
-                match hostAnswer with
-                | Error _ -> ()
-                | Ok interfaces -> failwith $"the host answered %A{interfaces}"
-
-                match pawPrintAnswer with
-                | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
-                | other -> failwith $"PawPrint answered %A{other}"
-            else
-                hostAnswer |> shouldEqual (Ok [| "I`1[System.Int32]" |])
-
-                match pawPrintAnswer with
-                | Ok [ entry ] -> entry.Definition.DeclaredOnType |> shouldEqual true
-                | other -> failwith $"PawPrint answered %A{other}"
+            hostAnswer, pawPrintAnswer
         finally
             context.Unload ()
+
+    /// `C`'s row names the instantiation `B` already put in the map, so it adds no entry; but the
+    /// runtime loads every row's interface as the row spells it, so a row that does not load fails
+    /// the type all the same.
+    [<TestCase true>]
+    [<TestCase false>]
+    let ``A re-declared interface's own row is loaded`` (asValueType : bool) : unit =
+        let host, pawPrint =
+            rowsOutcome
+                [ Row.Instantiation (false, RowArgument.Int32) ]
+                [ Row.Instantiation (asValueType, RowArgument.Int32) ]
+
+        if asValueType then
+            match host with
+            | Error (:? TypeLoadException) -> ()
+            | other -> failwith $"the host answered %A{other}"
+
+            match pawPrint with
+            | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+        else
+            host |> Result.toOption |> shouldEqual (Some [| "I`1[System.Int32]" |])
+
+            match pawPrint with
+            | Ok [ entry ] -> entry.Definition.DeclaredOnType |> shouldEqual true
+            | other -> failwith $"PawPrint answered %A{other}"
+
+    /// Rows are loaded in the order read, the parent's first, whether or not they add an entry:
+    /// `C`'s `I<Missing>` comes before its `I<class Int32>`, which names `B`'s `I<valuetype Int32>`
+    /// again with the wrong kind.
+    [<Test>]
+    let ``Rows that do not load fail in the order they are read`` () : unit =
+        let host, pawPrint =
+            rowsOutcome
+                [ Row.Instantiation (false, RowArgument.Int32AsValueType) ]
+                [
+                    Row.Instantiation (false, RowArgument.Missing)
+                    Row.Instantiation (false, RowArgument.Int32AsClass)
+                ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "Missing" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row's interface is resolved, and its spelling's kind checked, before any later row is read:
+    /// `GENERICINST VALUETYPE I<int>` fails before the absent interface after it.
+    [<Test>]
+    let ``A row's interface is spelled with the wrong kind before a later row is absent`` () : unit =
+        let host, pawPrint =
+            rowsOutcome [] [ Row.Instantiation (true, RowArgument.Int32) ; Row.Absent ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when not (e.Message.Contains "IAbsent") -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A TypeSpec naming the generic `I<T>` with no instantiation, which the host does not load.
+    [<Test>]
+    let ``A row naming a generic interface without an instantiation is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.BareGeneric ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.UninstantiatedDefinition _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `C`, which has no type variables, names `I<!0>`, as `B` names `I<int>`, so the duplicate check
+    /// would compare a variable its context does not supply. The host does not load `C`.
+    [<Test>]
+    let ``A row naming a variable its type does not have is refused`` () : unit =
+        let host, pawPrint =
+            rowsOutcome [ Row.Instantiation (false, RowArgument.Int32) ] [ Row.Instantiation (false, RowArgument.Var0) ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.TypeParameterOutOfScope (0, 0))) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
 
     // ----- A generic definition -----
 
