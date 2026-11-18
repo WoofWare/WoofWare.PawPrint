@@ -1013,7 +1013,8 @@ module RealRuntime =
     /// runtimeconfig of its own, from a scratch directory of the call's own, and reads and writes
     /// nothing in the assembly's directory. So callers may run one assembly concurrently, each
     /// with different properties. The guest's working directory is the assembly's directory. A
-    /// relative `dllPath` is relative to the test host's working directory.
+    /// relative `dllPath` is relative to the test host's working directory. An assembly lying
+    /// directly in the temp directory, where the scratch directories go, is refused.
     ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.
@@ -1037,6 +1038,16 @@ module RealRuntime =
         // would resolve the runtimeconfig's path against the guest's working directory.
         let scratch =
             Path.GetFullPath (Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ()))
+
+        if
+            String.Equals (
+                Path.TrimEndingDirectorySeparator (Path.GetDirectoryName scratch),
+                Path.TrimEndingDirectorySeparator directory,
+                StringComparison.Ordinal
+            )
+        then
+            failwith
+                $"Cannot run %s{dllPath} under the real runtime in place: it lies directly in the temp directory, where the oracle makes its scratch directories, so the guest would see them in its own directory. Move the assembly into a directory of its own."
 
         Directory.CreateDirectory scratch |> ignore<DirectoryInfo>
 
