@@ -901,10 +901,11 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   test, in the assembly's directory. The assembly's directory is resolved first, against the test host's working
   directory, since the host would resolve a relative path against the guest's, and as the operating system walks it,
   since `Path.GetFullPath` (and so `File.Exists`) collapses `..` by its spelling while after a symbolic link `..`
-  climbs from the link's target; `FrameworkUnderTest.resolveLinks` now walks a path that way. The scratch directory
-  comes from `Directory.CreateTempSubdirectory`, which picks a name no other directory has and does not create a
-  missing temp directory, and is made absolute, since `Path.GetTempPath` keeps a relative `TMPDIR`. It is removed in
-  a `finally`, as the other entries remove theirs. Each of these was found by Codex. An assembly whose directory is the temp directory, or a directory above it, is
+  climbs from the link's target. `FrameworkUnderTest.resolveLinks` now walks a path that way, and fails, as the
+  operating system's lookup does, on a `..` after something that is not a directory. The scratch directory comes from
+  `Directory.CreateTempSubdirectory`, which picks a name no other directory has and does not create a missing temp
+  directory; its path is the temp directory walked the same way, since `TMPDIR` may be relative or climb out of a
+  link. It is removed in a `finally`, as the other entries remove theirs. Each of these was found by Codex. An assembly whose directory is the temp directory, or a directory above it, is
   refused, since the guest would see the scratch directories in its tree. Comparing spellings proved unsound over
   four Codex rounds (symbolic links, a linked assembly file, case folding, Unicode normalisation), so the check asks
   the filesystem instead: after creating the scratch directory, whose name is random, it tries the path down to it
@@ -962,7 +963,7 @@ Choices the decisions left open:
   `executeConcurrently` has, and have the fixture pass the variable PawPrint's kernel seeds; or clear `DOTNET_*`
   variables from every oracle child; or accept the exposure and say so in the fixture. PR 2 builds the function as
   decision 6 specifies and leaves the choice to the decider.
-* Three of Codex's findings are not addressed here. Two are properties of every oracle entry rather than of this one,
+* Four of Codex's findings are not addressed here. Two are properties of every oracle entry rather than of this one,
   and fixing them for one property would be special-casing:
   * The oracle cannot tell a host that refused to start from a guest that exited. `RuntimeConfig.combine` refuses
     the shapes PawPrint models, so the oracle and PawPrint agree on what a launchable runtimeconfig is, but Codex
@@ -976,6 +977,10 @@ Choices the decisions left open:
   hostpolicy acts on whichever spelling it visits last, and Codex ran one such config on real .NET. That conservative
   reading is `RuntimeConfig`'s documented choice for PawPrint, and the oracle refuses exactly what PawPrint refuses,
   so the two sides cannot disagree about which configurations run.
+
+  The fourth: for an assembly lying directly in the temp directory, the oracle creates its scratch directory beside
+  the assembly before refusing, and removes it again. The refusal needs the scratch directory to exist, since its
+  random name is what makes the filesystem check sound, and nothing runs in that window.
 
 * The relative-path test lays its assembly out in the temp directory, nested deeper than the test host's working
   directory, and asserts that the relative path names nothing from the guest's directory. Without that, the path's
@@ -991,6 +996,9 @@ Measured:
   the echo and the framework passed on the old code, which is the behaviour the new wrapper keeps; only the directory
   comparison failed, because the old mechanism replaced the runtimeconfig beside the assembly. The working-directory
   test was added after mutation testing and also passes on the old code's behaviour.
+* Under unusual `TMPDIR`s, measured by running `TestRealRuntimeInPlace` in the devshell with `TMPDIR=.` and with
+  `TMPDIR=<dir>/a/current/..`, where `current` links to `<dir>/b/sub`: every test passes, and no scratch directory is
+  left behind.
 * The callers of `executeAssemblyInPlace` (directly, or through `CrossAssemblyHarness` and `FabricatedGuest`) are in
   the default suite and in `Guest` (`TestFSharpPureCases`, `TestDelegateBindFormalSignature`,
   `TestOpcodeFaultsOnPawPrint`). `GuestSolo`, `GuestPure` and `GuestImpure` reach the oracle only through
@@ -1039,6 +1047,7 @@ rows ran before the working-directory test existed, so against seven tests:
 | refusal removed (the filesystem check bypassed) | the four temp-directory tests |
 | relative path not made absolute, against the final relative-path test | the relative-path test |
 | `..` collapsed by its spelling (`Path.GetFullPath`, the code before) | the climbing-out-of-a-link test ("the assembly does not exist") |
+| `resolveLinks` lets `..` cancel a missing component or a file (the code before) | the `TestFrameworkUnderTest` refusal test |
 | scratch directory not made absolute, with `TMPDIR=.` (the code before `CreateTempSubdirectory`) | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
