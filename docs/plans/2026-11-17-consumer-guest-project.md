@@ -915,6 +915,13 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   FailFast), its command line, the guest's working directory, its echo to the test's output, and that it runs the
   framework under test, leaving the directory unchanged, when the runtimeconfig beside the assembly names a framework
   that does not exist.
+* `runtimeConfigFor`, which writes the runtimeconfig for both `captureAssemblyInPlace` and `executeConcurrently`,
+  fails on properties no runtimeconfig can deliver as given (found by Codex): a name the hosting layer populates,
+  checked with `RuntimeConfig.combine` as for a runtimeconfig PawPrint reads, and a name or value that is not
+  well-formed UTF-16. Before, a host-owned name made the host refuse to start, and its exit code, 161, read as the
+  guest's `NormalExit 161`; a lone surrogate reached the guest as U+FFFD. Tests: `TRUSTED_PLATFORM_ASSEMBLIES`,
+  `HOST_RUNTIME_CONTRACT`, and `APP_PATHS` with `SetAppPaths`, refused by `captureAssemblyInPlace`, and the first by
+  `executeConcurrently`; a lone surrogate in a value and in a name.
 * `TestFrameworkLocatorRatchet` gains one allowance: the guest source in the new file names `Assembly.Location` to
   report which framework real .NET loaded the guest's CoreLib from.
 
@@ -944,13 +951,16 @@ Measured:
   `TestOpcodeFaultsOnPawPrint`). `GuestSolo`, `GuestPure` and `GuestImpure` reach the oracle only through
   `executeWithRealRuntime` and its siblings, which this change does not touch, so they ran on .NET 10 only. The guest
   suites ran before the rebase onto the `main` that carries PR 1; that `main` changed no F# source, and the default
-  suites were re-run after the rebase.
+  suites were re-run after the rebase. The refusal in `runtimeConfigFor` also reaches `executeConcurrently`, whose
+  caller with properties is `TestAspNetTwoProcess` in `GuestSolo`, so after it the default suite ran again on both
+  runtimes and `GuestSolo` again on .NET 10. The check is pure and does not depend on the runtime.
 
 | suite | .NET 10.0.14 (host) | .NET 11 (`PAWPRINT_TEST_RUNTIME=Net11`) |
 |---|---|---|
-| default | 5892 total, 5853 passed, 39 skipped | 5892 total, 5864 passed, 28 skipped |
+| default, after the refusal | 5897 total, 5858 passed, 39 skipped | 5897 total, 5869 passed, 28 skipped |
+| default, before it | 5892 total, 5853 passed, 39 skipped | 5892 total, 5864 passed, 28 skipped |
 | `Guest` | 234 passed | 234 passed |
-| `GuestSolo` | 2 passed | not run |
+| `GuestSolo` | 2 passed, before and after the refusal | not run |
 | `GuestPure` | 1208 passed | not run |
 | `GuestImpure` | 304 passed | not run |
 
@@ -971,6 +981,8 @@ rows ran before the working-directory test existed, so against seven tests:
 | working directory moved to the scratch directory | the working-directory test (added for this mutant, which first survived) |
 | `executeAssemblyInPlace` does not echo | the command-line test and the framework test |
 | scratch directory not removed | none: survives |
+| host-owned names not refused (the code before the refusal) | the three host-owned cases, and `executeConcurrently`'s |
+| ill-formed UTF-16 not refused (the code before the refusal) | the lone-surrogate test |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
 the same moment, so a listing of the temp directory before and after a run cannot tell whose is whose. The scratch
