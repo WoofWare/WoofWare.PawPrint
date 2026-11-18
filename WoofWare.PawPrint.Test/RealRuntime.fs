@@ -1025,9 +1025,21 @@ module RealRuntime =
         (dllPath : string)
         : CapturedRun
         =
-        // Resolved here, against the test host's working directory, because the host would
-        // resolve a relative path against the guest's, which is the assembly's directory.
-        let dllPath = Path.GetFullPath dllPath
+        // Made absolute here, against the test host's working directory, because the host would
+        // resolve a relative path against the guest's, which is the assembly's directory. The
+        // directory is resolved as the operating system walks it, since `Path.GetFullPath`, and
+        // so `File.Exists`, collapse `..` by its spelling, while after a symbolic link `..`
+        // climbs from the link's target.
+        let dllPath =
+            Path.Combine (
+                FrameworkUnderTest.resolveLinks (
+                    match Path.GetDirectoryName dllPath with
+                    | null
+                    | "" -> "."
+                    | directory -> directory
+                ),
+                Path.GetFileName dllPath
+            )
 
         if not (File.Exists dllPath) then
             failwith $"Cannot run %s{dllPath} under the real runtime: the assembly does not exist."
@@ -1035,12 +1047,12 @@ module RealRuntime =
         let directory = Path.GetDirectoryName dllPath
         let name = Path.GetFileNameWithoutExtension dllPath
 
-        // Absolute, because `Path.GetTempPath` keeps a relative `TMPDIR` as it is, and the host
-        // would resolve the runtimeconfig's path against the guest's working directory.
+        // Created under a name no other directory has, and in a temp directory that already
+        // exists, so that cleaning up removes only what this call made. Absolute, because
+        // `Path.GetTempPath` keeps a relative `TMPDIR` as it is, and the host would resolve the
+        // runtimeconfig's path against the guest's working directory.
         let scratch =
-            Path.GetFullPath (Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ()))
-
-        Directory.CreateDirectory scratch |> ignore<DirectoryInfo>
+            Path.GetFullPath (Directory.CreateTempSubdirectory "pawprint-oracle-").FullName
 
         try
             // Whether the guest could reach `scratch` by walking down from `candidate`, decided by

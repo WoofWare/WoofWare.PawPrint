@@ -133,7 +133,7 @@ public static class Program
         (body : string -> 'a)
         : 'a
         =
-        laidOutUnder (Path.GetTempPath ()) assemblyName image besideConfig body
+        laidOutUnder (Path.GetFullPath (Path.GetTempPath ())) assemblyName image besideConfig body
 
     /// Every file in `dllPath`'s directory, by name, with its bytes: as text for a JSON file, so
     /// that a failure shows what changed, and otherwise as their SHA-256.
