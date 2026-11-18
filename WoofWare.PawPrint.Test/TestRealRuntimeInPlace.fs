@@ -541,7 +541,8 @@ public static class Program
             File.WriteAllBytes (dllPath, endsAsToldImage.Value)
             let link = Path.Combine (linkParent, "temp")
 
-            Directory.CreateSymbolicLink (link, Path.GetTempPath ())
+            // Absolute, since a relative target is relative to the link's own directory.
+            Directory.CreateSymbolicLink (link, Path.GetFullPath (Path.GetTempPath ()))
             |> ignore<FileSystemInfo>
 
             let outcome =
@@ -563,6 +564,87 @@ public static class Program
             // Not recursive, so as not to follow the link into the temp directory.
             File.Delete (Path.Combine (linkParent, "temp"))
             Directory.Delete linkParent
+
+    /// As above, with the assembly's file itself a symbolic link to one in the temp directory:
+    /// the host runs the target, from the target's directory.
+    [<Test>]
+    let ``an assembly that is a symbolic link to one in the temp directory is refused, not run`` () : unit =
+        let target =
+            Path.Combine (
+                Path.GetFullPath (Path.GetTempPath ()),
+                "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll"
+            )
+
+        File.WriteAllBytes (target, endsAsToldImage.Value)
+
+        try
+            laidOut
+                "Unused"
+                [||]
+                None
+                (fun unusedPath ->
+                    let link = Path.Combine (Path.GetDirectoryName unusedPath, "EndsAsTold.dll")
+                    File.CreateSymbolicLink (link, target) |> ignore<FileSystemInfo>
+
+                    let outcome =
+                        try
+                            Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "0" |] link)
+                        with e ->
+                            Error e.Message
+
+                    match outcome with
+                    | Error message -> message |> shouldContainText "temp directory"
+                    | Ok run ->
+                        failwith
+                            $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
+                )
+        finally
+            File.Delete target
+
+    /// As above, with the temp directory spelled in other case, which a case-insensitive
+    /// filesystem takes for the same directory. Ignored on a case-sensitive one, where the
+    /// spelling names nothing.
+    [<Test>]
+    let ``an assembly in the temp directory, spelled in other case, is refused, not run`` () : unit =
+        let temp =
+            Path.TrimEndingDirectorySeparator (Path.GetFullPath (Path.GetTempPath ()))
+
+        let flipped =
+            Path.Combine (
+                Path.GetDirectoryName temp,
+                Path.GetFileName temp
+                |> String.map (fun c ->
+                    if Char.IsUpper c then
+                        Char.ToLowerInvariant c
+                    else
+                        Char.ToUpperInvariant c
+                )
+            )
+
+        if flipped = temp || not (Directory.Exists flipped) then
+            Assert.Ignore $"the temp directory %s{temp} has no other spelling on this filesystem"
+
+        let name = "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll"
+        let dllPath = Path.Combine (temp, name)
+        File.WriteAllBytes (dllPath, endsAsToldImage.Value)
+
+        try
+            let outcome =
+                try
+                    Ok (
+                        RealRuntime.captureAssemblyInPlace
+                            AppContextProperties.empty
+                            [| "exit" ; "0" |]
+                            (Path.Combine (flipped, name))
+                    )
+                with e ->
+                    Error e.Message
+
+            match outcome with
+            | Error message -> message |> shouldContainText "temp directory"
+            | Ok run -> failwith $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
+        finally
+            File.Delete dllPath
 
     [<Test>]
     let ``a relative path to the assembly names the same assembly`` () : unit =
