@@ -630,3 +630,211 @@ module TestSubstitutionComparisonSharing =
 
         Check.One (Config.QuickThrowOnFailure.WithMaxTest 200, Prop.forAll (Arb.fromGen genBoundCase) property)
         TestContext.Out.WriteLine $"largest bytes per unit: %.1f{largestRatio.Value}"
+
+    /// A function pointer spelling the GENERIC calling convention, which a comparison against
+    /// another with the same generic-parameter count refuses rather than answers.
+    let private genericFunctionPointer : TypeDefn =
+        TypeDefn.FunctionPointer
+            {
+                Header =
+                    ComparableSignatureHeader.Make (
+                        SignatureHeader (
+                            SignatureKind.Method,
+                            SignatureCallingConvention.Default,
+                            SignatureAttributes.Generic
+                        )
+                    )
+                ParameterTypes = [ TypeDefn.PrimitiveType PrimitiveType.Int32 ]
+                GenericParameterCount = 1
+                RequiredParameterCount = 1
+                ReturnType = MethodReturnType.Void
+            }
+
+    /// The answer of one `substitutionsEquivalent` call, as the result says it.
+    let private compareIn
+        (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>)
+        (left : TypeConcretization.SubstitutionContext)
+        (right : TypeConcretization.SubstitutionContext)
+        : Result<bool, TypeBindingFailure>
+        =
+        TypeConcretization.substitutionsEquivalent ctx IAssemblyLoad.alreadyLoadedOnly left right
+        |> fst
+
+    /// Being the same object is not being equal: comparing an element with itself can refuse, so a
+    /// context compared with itself must refuse wherever comparing it with an equal copy does. Both
+    /// at the root, and through a type variable, where the comparison keys pairs by identity.
+    [<Test>]
+    let ``a substitution compared with itself refuses as a copy of it does`` () : unit =
+        let atRoot () : TypeConcretization.SubstitutionContext =
+            TypeConcretization.SubstitutionContext.forDefinition keyValuePair 1
+            |> TypeConcretization.SubstitutionContext.forBase corelibName (ImmutableArray.Create genericFunctionPointer)
+
+        let throughVariable () : TypeConcretization.SubstitutionContext =
+            atRoot ()
+            |> TypeConcretization.SubstitutionContext.forBase
+                corelibName
+                (ImmutableArray.Create (TypeDefn.GenericTypeParameter 0))
+
+        for build in [ atRoot ; throughVariable ] do
+            let subject = build ()
+
+            for right in [ subject ; build () ] do
+                match compareIn concretizationContext subject right with
+                | Error (TypeBindingFailure.Unmodelled unmodelled) ->
+                    unmodelled.Diagnostic |> shouldContainText "GENERIC calling convention"
+                | other -> failwith $"expected the comparison to be refused, got %A{other}"
+
+    /// What a comparison answers depends on its arguments alone, not on comparisons made before it:
+    /// the pairs one call proves are not carried into the next. Here the first call is made where the
+    /// assembly a TypeRef needs is loaded, and proves the pair; the second, of the very same objects,
+    /// is made where it is not, and must fail to load it just as it does when made first.
+    [<Test>]
+    let ``a comparison's answer does not depend on comparisons made before it`` () : unit =
+        let image =
+            Roslyn.compileAssembly
+                "SubstitutionComparisonSharingTypeRef"
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                []
+                [
+                    "public class Holder { public System.Collections.Generic.LinkedList<int> Field; }"
+                ]
+
+        let assembly =
+            use stream = new IO.MemoryStream (image)
+            let _, loggerFactory = LoggerFactory.makeTest ()
+            AssemblyApi.read loggerFactory None stream
+
+        // `LinkedList`1` is declared outside CoreLib, so naming it by TypeRef needs this assembly.
+        let systemCollections : DumpedAssembly =
+            let _, loggerFactory = LoggerFactory.makeTest ()
+            Assembly.readFile loggerFactory (IO.Path.Combine (HostImage.frameworkDirectory, "System.Collections.dll"))
+
+        let linkedListReference : TypeDefn =
+            assembly.TypeRefs.Values
+            |> Seq.find (fun typeRef ->
+                typeRef.Namespace = "System.Collections.Generic"
+                && typeRef.Name = "LinkedList`1"
+            )
+            |> fun typeRef -> TypeDefn.FromReference (typeRef, SignatureTypeKind.Class)
+
+        let linkedListDefinition : TypeDefn =
+            systemCollections.TryGetTopLevelTypeDef "System.Collections.Generic" "LinkedList`1"
+            |> Option.defaultWith (fun () ->
+                failwith "expected System.Collections.Generic.LinkedList`1 in System.Collections"
+            )
+            |> fun ty -> TypeDefn.FromDefinition (ty.Identity, SignatureTypeKind.Class)
+
+        // `!0` over a context supplying `spelling`, so that the pair is reached through a variable.
+        let chain (spellingAssembly : string) (spelling : TypeDefn) : TypeConcretization.SubstitutionContext =
+            TypeConcretization.SubstitutionContext.forDefinition keyValuePair 1
+            |> TypeConcretization.SubstitutionContext.forBase spellingAssembly (ImmutableArray.Create spelling)
+            |> TypeConcretization.SubstitutionContext.forBase
+                spellingAssembly
+                (ImmutableArray.Create (TypeDefn.GenericTypeParameter 0))
+
+        let left = chain assembly.DefinitionFullName linkedListReference
+        let right = chain systemCollections.DefinitionFullName linkedListDefinition
+
+        let withSystemCollections =
+            { concretizationContext with
+                LoadedAssemblies = LoadedAssemblies.ofAssemblies [ corelib ; assembly ; systemCollections ]
+            }
+
+        let withoutSystemCollections =
+            { concretizationContext with
+                LoadedAssemblies = LoadedAssemblies.ofAssemblies [ corelib ; assembly ]
+            }
+
+        let failsToLoad () : unit =
+            let thrown =
+                Assert.Throws<exn> (fun () ->
+                    compareIn withoutSystemCollections left right
+                    |> ignore<Result<bool, TypeBindingFailure>>
+                )
+
+            thrown.Message |> shouldContainText "System.Collections"
+
+        failsToLoad ()
+        compareIn withSystemCollections left right |> shouldEqual (Ok true)
+        failsToLoad ()
+
+    /// A comparison whose contexts supply no spelled argument cannot meet a pair twice, so it keeps no
+    /// record of pairs: a closed signature comparison costs what the same comparison with nothing
+    /// substituted costs, give or take its two contexts.
+    [<Test>]
+    let ``a closed comparison keeps no record of pairs`` () : unit =
+        let signature : TypeMethodSignature<TypeDefn> =
+            let parameters =
+                List.init
+                    64
+                    (fun _ -> TypeDefn.OneDimensionalArrayLowerBoundZero (TypeDefn.PrimitiveType PrimitiveType.Int32))
+
+            {
+                Header =
+                    ComparableSignatureHeader.Make (
+                        SignatureHeader (
+                            SignatureKind.Method,
+                            SignatureCallingConvention.Default,
+                            SignatureAttributes.None
+                        )
+                    )
+                ParameterTypes = parameters
+                GenericParameterCount = 0
+                RequiredParameterCount = parameters.Length
+                ReturnType = MethodReturnType.Void
+            }
+
+        let closed () : bool * int64 =
+            let comparand : TypeConcretization.SignatureComparand =
+                {
+                    Signature = signature
+                    AssemblyFullName = corelibName
+                    DeclaringTypeGenerics = TypeConcretization.SubstitutionContext.ofClosed ImmutableArray.Empty
+                }
+
+            let before = GC.GetAllocatedBytesForCurrentThread ()
+
+            let result, _ =
+                TypeConcretization.signaturesEquivalent
+                    concretizationContext
+                    IAssemblyLoad.alreadyLoadedOnly
+                    false
+                    comparand
+                    comparand
+
+            let allocated = GC.GetAllocatedBytesForCurrentThread () - before
+            BindingResult.value result, allocated
+
+        let unsubstituted () : bool * int64 =
+            let comparand : TypeConcretization.UnsubstitutedComparand =
+                {
+                    Signature = signature
+                    AssemblyFullName = corelibName
+                }
+
+            let before = GC.GetAllocatedBytesForCurrentThread ()
+
+            let result, _ =
+                TypeConcretization.signaturesEquivalentWithoutSubstitution
+                    concretizationContext
+                    IAssemblyLoad.alreadyLoadedOnly
+                    false
+                    comparand
+                    comparand
+
+            let allocated = GC.GetAllocatedBytesForCurrentThread () - before
+            BindingResult.value result, allocated
+
+        // Untimed first calls, so that one-off work is charged to neither.
+        closed () |> ignore<bool * int64>
+        unsubstituted () |> ignore<bool * int64>
+
+        let closedAnswer, closedBytes = closed ()
+        let unsubstitutedAnswer, unsubstitutedBytes = unsubstituted ()
+
+        TestContext.Out.WriteLine $"closed: %d{closedBytes} bytes; unsubstituted: %d{unsubstitutedBytes} bytes"
+
+        closedAnswer |> shouldEqual true
+        unsubstitutedAnswer |> shouldEqual true
+        // A record of 64 pairs costs kilobytes; the two contexts' own representations, a few dozen bytes.
+        closedBytes |> shouldBeSmallerThan (unsubstitutedBytes + 256L)
