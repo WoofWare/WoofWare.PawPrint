@@ -1076,6 +1076,24 @@ handle and that each handle is an instantiation of the interface the entry names
   reaches `MethodTableLayout.baseOfDefinition`'s arity `failwith` rather than a refusal. The closed path never gets
   there, since its base-chain load refuses such a clause first.
 
+**Open after Codex's fifth review; this pull request is not ready to merge.** The fifth review (on commit 17) found:
+
+- **[P1] Exponential comparison on valid metadata.** The definition walk filters duplicate candidates by interface
+  identity, where the old walk filtered by closed handle, so distinct instantiations of one interface now reach
+  `substitutionsEquivalent`, which re-walks shared argument contexts without memoising them. Codex measured a 16-level
+  chain of interfaces passing `Pair<A, A>` and `Pair<A, B>` on, with `I<A>` and `I<B>` at the bottom: 173 MB allocated
+  for one map, against 0.36 MB on the base. The fix is a structural choice the decisions do not make: memoise pairs of
+  shared contexts inside `TypeConcretization.substitutionsEquivalent` (published code that every signature comparison
+  uses), or compare a canonical, shared form of definition-level types in the walk.
+- **[P1] A malformed `I<T> : I<T*>`** expands without end: each level adds a pointer, so no entry is ever a duplicate.
+  The expansion path needs to carry the interface definitions on it and refuse re-entry (CoreCLR refuses cyclic
+  interface inheritance); the old walk refused the pointer argument when closing.
+- **[P2]** A TypeSpec row whose head is not `CLASS <token>` (an `int32` head reaches a `failwith`; `VALUETYPE Missing`
+  reports `TypeAbsent` where the host refuses the shape). A TypeSpec naming a class (`G<int, int>` for a one-parameter
+  `G`) should load that instantiation approximately, and report its failure, before refusing it as not an interface.
+  `MethodTableLayout.baseOfDefinition`'s arity `failwith` is reachable through a row head's base, not only through
+  `interfaceMapOfDefinition`, and should become `Refused (WrongArity ...)`.
+
 **The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
 walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
 substitution (by `substitutionsEquivalent`) and both flags. It ran over every receiver of `TestInterfaceDispatchMap`'s
