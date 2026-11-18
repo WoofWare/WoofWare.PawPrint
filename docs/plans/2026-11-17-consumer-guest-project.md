@@ -898,8 +898,9 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   `runtimeConfigFor OracleFrameworks.NetCoreApp configProperties` as `<name>.runtimeconfig.json` into a new
   `pawprint-oracle-*` directory under the temp path, and runs
   `dotnet exec --runtimeconfig <that file> <dll> <args>` through `runCapturing` and the muxer of the framework under
-  test, in the assembly's directory. The scratch directory is removed in a `finally`, as the other entries remove
-  theirs. Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
+  test, in the assembly's directory. A relative path is made absolute first, against the test host's working
+  directory, since the host would resolve it against the guest's (found by Codex). The scratch directory is removed
+  in a `finally`, as the other entries remove theirs. Nothing in the assembly's directory is read or written. The host looks for the dev runtimeconfig beside the
   runtimeconfig it is given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a
   `<name>.runtimeconfig.dev.json` beside the assembly is not read either.
 * `executeAssemblyInPlace` is `captureAssemblyInPlace AppContextProperties.empty`, followed by the existing `echo`.
@@ -914,7 +915,7 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   both come back as `Environment.NewLine`). For `executeAssemblyInPlace`: its endings (exit code, unhandled exception,
   FailFast), its command line, the guest's working directory, its echo to the test's output, and that it runs the
   framework under test, leaving the directory unchanged, when the runtimeconfig beside the assembly names a framework
-  that does not exist.
+  that does not exist. A relative path, with a directory in it, names the same assembly.
 * `runtimeConfigFor`, which writes the runtimeconfig for both `captureAssemblyInPlace` and `executeConcurrently`,
   fails on properties no runtimeconfig can deliver as given (found by Codex): a name the hosting layer populates,
   checked with `RuntimeConfig.combine` as for a runtimeconfig PawPrint reads, and a name or value that is not
@@ -936,6 +937,15 @@ Choices the decisions left open:
   `TestExecutionContext.CurrentContext.CurrentResult.Output`), and the framework under test whatever runtimeconfig
   the directory holds. The last is what the overwrite used to give the F# pure cases, which are published for
   `net10.0` and run on .NET 11.
+* Two of Codex's findings are not addressed here, because each is a property of every oracle entry rather than of
+  this one, and fixing it for one property would be special-casing:
+  * The oracle cannot tell a host that refused to start from a guest that exited. `RuntimeConfig.combine` refuses
+    the shapes PawPrint models, so the oracle and PawPrint agree on what a launchable runtimeconfig is, but Codex
+    measured one it does not model: `APP_PATHS` naming a relative path, without `SetAppPaths`, makes CoreCLR fail to
+    start with exit code 137. Teaching `RuntimeConfig.combine` that rule would fix both sides at once.
+  * Every entry overlays the test host's environment on the guest's, so a `DOTNET_*` variable in the test host's
+    environment reaches the real runtime: Codex measured `DOTNET_STARTUP_HOOKS` being prepended to a supplied
+    `STARTUP_HOOKS`. Clearing such variables from the oracle's child processes would be a change to every entry.
 * The guest prints paths by their last components only: the host resolves symbolic links (`/tmp` on macOS, the Nix
   store's links), so the guest cannot print a path as the test spells it.
 
@@ -983,6 +993,7 @@ rows ran before the working-directory test existed, so against seven tests:
 | scratch directory not removed | none: survives |
 | host-owned names not refused (the code before the refusal) | the three host-owned cases, and `executeConcurrently`'s |
 | ill-formed UTF-16 not refused (the code before the refusal) | the lone-surrogate test |
+| relative path not made absolute (the code before the fix) | the relative-path test (`NormalExit 129`, the host's) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
 the same moment, so a listing of the temp directory before and after a run cannot tell whose is whose. The scratch
