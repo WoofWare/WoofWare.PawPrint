@@ -322,7 +322,21 @@ module ConcreteInterfaceDispatch =
             | Some (baseIdentity, arguments) ->
                 match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state baseIdentity with
                 | state, Error failure -> state, Error failure
-                | state, Ok parentMap -> state, Ok (rebaseMap baseIdentity arguments parentMap)
+                | state, Ok parentMap ->
+
+                let outOfScope =
+                    arguments
+                    |> Seq.tryPick (fun argument ->
+                        match argument with
+                        | TypeConcretization.SubstitutionArgument.Spelled (_, spelling, _) ->
+                            firstOutOfScope typeInfo.Generics.Length spelling
+                        | TypeConcretization.SubstitutionArgument.Closed _
+                        | TypeConcretization.SubstitutionArgument.Formal _ -> None
+                    )
+
+                match outOfScope with
+                | Some refusal -> state, Error (TypeBindingFailure.Refused refusal)
+                | None -> state, Ok (rebaseMap baseIdentity arguments parentMap)
 
         match inherited with
         | Error failure -> state, Error failure
@@ -406,18 +420,21 @@ module ConcreteInterfaceDispatch =
 
             match spelledKind with
             | None ->
-                // Not a nominal type, so not an interface. A variable here is out of scope, or is one
-                // of the type's own, and loading the row says which.
+                // Not a nominal type, so not an interface. CoreCLR's approximate load accepts only a
+                // generic instantiation as a TypeSpec here (`ClassLoader::LoadApproxTypeThrowing`).
+                // Reported as concretisation reports it: a variable out of scope, or a type CoreCLR
+                // refuses.
                 match firstOutOfScope spellingContext.Arguments.Length head with
-                | Some refusal -> unreadable state (TypeBindingFailure.Refused refusal)
+                | Some refusal -> refused state refusal
                 | None ->
-                    unreadable
-                        state
-                        (TypeBindingFailure.Unmodelled
+                    state,
+                    Error (
+                        TypeBindingFailure.Unmodelled
                             {
                                 Diagnostic =
                                     $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %O{head}, which is not an interface; CoreCLR refuses to load such a type"
-                            })
+                            }
+                    )
             | Some spelledKind ->
 
             let state, interfaceIdentity =
@@ -473,10 +490,24 @@ module ConcreteInterfaceDispatch =
                 && (rowArguments.IsSome
                     || not (TypeResolution.overlooksNominalSpelling rowResolvedAssembly))
 
+            // A TypeDef or TypeRef row has no instantiation of its own: `resolveTypeMetadataToken`
+            // reads a generic one at the definition's own variables.
+            let uninstantiated =
+                not interfaceTypeInfo.Generics.IsEmpty
+                && (not isTypeSpec || rowArguments.IsNone)
+
             match rowArguments with
-            | None when isTypeSpec && not interfaceTypeInfo.Generics.IsEmpty ->
-                refused state (TypeLoadRefusal.UninstantiatedDefinition interfaceIdentity)
+            | _ when uninstantiated -> refused state (TypeLoadRefusal.UninstantiatedDefinition interfaceIdentity)
             | _ when kindMismatch -> refused state (TypeLoadRefusal.KindMismatch (interfaceIdentity, spelledKind))
+            | _ when not interfaceTypeInfo.IsInterface ->
+                state,
+                Error (
+                    TypeBindingFailure.Unmodelled
+                        {
+                            Diagnostic =
+                                $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %s{interfaceTypeInfo.Namespace}.%s{interfaceTypeInfo.Name}, which is not an interface; CoreCLR refuses to load the type (IDS_CLASSLOAD_NOTINTERFACE)"
+                        }
+                )
             | _ ->
 
             let outOfScope =
@@ -486,11 +517,23 @@ module ConcreteInterfaceDispatch =
 
             // What only loading the arguments finds: a variable out of scope, then the arity
             // (`IDS_CLASSLOAD_TYPEWRONGNUMGENERICARGS`). The row cannot be compared with the entries
-            // without both, so it adds none, and closing loads it in its turn.
+            // without both, so it adds none, and closing loads it in its turn. The approximate load
+            // still expands the interface's own parents, in the interface's own vocabulary, and a
+            // parent that does not resolve fails there first.
+            let unreadableRow (state : TypeSystemState) (failure : TypeBindingFailure) =
+                if not expandParents then
+                    unreadable state failure
+                else
+                    match
+                        walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state interfaceIdentity
+                    with
+                    | state, Error parentFailure -> state, Error parentFailure
+                    | state, Ok _ -> unreadable state failure
+
             match outOfScope, rowArguments with
-            | Some refusal, _ -> unreadable state (TypeBindingFailure.Refused refusal)
+            | Some refusal, _ -> unreadableRow state (TypeBindingFailure.Refused refusal)
             | None, Some arguments when arguments.Length <> interfaceTypeInfo.Generics.Length ->
-                unreadable
+                unreadableRow
                     state
                     (TypeBindingFailure.Refused (
                         TypeLoadRefusal.WrongArity (
@@ -541,15 +584,18 @@ module ConcreteInterfaceDispatch =
                 Ok
                     {
                         Entries =
-                            map.Entries
-                            |> List.mapi (fun i entry ->
-                                if i = existing then
-                                    { entry with
-                                        DeclaredOnType = entry.DeclaredOnType || declared
-                                    }
-                                else
-                                    entry
-                            )
+                            if declared then
+                                map.Entries
+                                |> List.mapi (fun i entry ->
+                                    if i = existing then
+                                        { entry with
+                                            DeclaredOnType = true
+                                        }
+                                    else
+                                        entry
+                                )
+                            else
+                                map.Entries
                         RowsLastFirst =
                             WalkedRow.Read
                                 {
