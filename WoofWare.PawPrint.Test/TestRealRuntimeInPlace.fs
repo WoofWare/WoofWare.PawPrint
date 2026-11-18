@@ -435,12 +435,12 @@ public static class Program
 
     /// Exits as its first argument says: `exit <n>`, `throw`, or `failfast`; or, given `args`,
     /// prints its command line joined by `|`, the first element by its file name alone, and exits
-    /// 0; or, given `framework`, prints the last two components of the directory CoreLib was
-    /// loaded from (the framework's name and version) and exits 0; or, given `cwd`, prints the
-    /// name of its working directory and whether `EndsAsTold.dll` is in it, and exits 0.
+    /// 0; or, given `framework`, prints the directory CoreLib was loaded from and exits 0; or,
+    /// given `cwd`, prints the name of its working directory and whether `EndsAsTold.dll` is in
+    /// it, and exits 0.
     ///
-    /// The host resolves symbolic links in both paths (`/tmp` on macOS, the Nix store's links),
-    /// so the guest cannot print either as the test spells it.
+    /// The host resolves symbolic links in these paths (`/tmp` on macOS, the Nix store's links),
+    /// so the guest cannot print one as the test spells it.
     let private endsAsToldImage : Lazy<byte[]> =
         lazy
             Roslyn.compileAssembly
@@ -471,8 +471,7 @@ public static class Program
                 Console.WriteLine("command line: " + string.Join("|", commandLine));
                 return 0;
             case "framework":
-                var directory = Path.GetDirectoryName(typeof(object).Assembly.Location);
-                Console.WriteLine("framework: " + Path.GetFileName(Path.GetDirectoryName(directory)) + "/" + Path.GetFileName(directory));
+                Console.WriteLine("framework: " + Path.GetDirectoryName(typeof(object).Assembly.Location));
                 return 0;
             case "cwd":
                 Console.WriteLine("working directory: " + Path.GetFileName(Directory.GetCurrentDirectory()) + " " + File.Exists("EndsAsTold.dll"));
@@ -528,6 +527,42 @@ public static class Program
             | Ok run -> failwith $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
         finally
             File.Delete dllPath
+
+    /// As above, with the temp directory reached through a symbolic link, which the oracle must
+    /// see through.
+    [<Test>]
+    let ``an assembly in the temp directory, reached through a symbolic link, is refused, not run`` () : unit =
+        let name = "pawprint-in-place-test-" + Path.GetRandomFileName ()
+        let dllPath = Path.Combine (Path.GetTempPath (), name + ".dll")
+        let linkParent = Path.Combine (Path.GetTempPath (), name)
+        Directory.CreateDirectory linkParent |> ignore<DirectoryInfo>
+
+        try
+            File.WriteAllBytes (dllPath, endsAsToldImage.Value)
+            let link = Path.Combine (linkParent, "temp")
+
+            Directory.CreateSymbolicLink (link, Path.GetTempPath ())
+            |> ignore<FileSystemInfo>
+
+            let outcome =
+                try
+                    Ok (
+                        RealRuntime.captureAssemblyInPlace
+                            AppContextProperties.empty
+                            [| "exit" ; "0" |]
+                            (Path.Combine (link, name + ".dll"))
+                    )
+                with e ->
+                    Error e.Message
+
+            match outcome with
+            | Error message -> message |> shouldContainText "temp directory"
+            | Ok run -> failwith $"expected the oracle to refuse an assembly in the temp directory, but it ran: %A{run}"
+        finally
+            File.Delete dllPath
+            // Not recursive, so as not to follow the link into the temp directory.
+            File.Delete (Path.Combine (linkParent, "temp"))
+            Directory.Delete linkParent
 
     [<Test>]
     let ``a relative path to the assembly names the same assembly`` () : unit =
@@ -610,15 +645,22 @@ public static class Program
                 RealRuntime.executeAssemblyInPlace [| "framework" |] dllPath
                 |> shouldEqual (RealRuntimeResult.NormalExit 0)
 
-                let framework =
-                    Path.TrimEndingDirectorySeparator (FrameworkUnderTest.sharedFrameworkDirectory ())
-
                 // Echoed to the test's own output.
-                TestExecutionContext.CurrentContext.CurrentResult.Output
-                |> shouldContainText (
-                    $"framework: %s{Path.GetFileName (Path.GetDirectoryName framework)}/%s{Path.GetFileName framework}"
-                    + Environment.NewLine
-                )
+                let printed =
+                    TestExecutionContext.CurrentContext.CurrentResult.Output.Split Environment.NewLine
+                    |> Array.choose (fun line ->
+                        if line.StartsWith ("framework: ", StringComparison.Ordinal) then
+                            Some (line.Substring "framework: ".Length)
+                        else
+                            None
+                    )
+
+                printed
+                |> Array.map FrameworkUnderTest.resolveLinks
+                |> shouldEqual
+                    [|
+                        FrameworkUnderTest.resolveLinks (FrameworkUnderTest.sharedFrameworkDirectory ())
+                    |]
 
                 directoryContents dllPath |> shouldEqual before
             )
