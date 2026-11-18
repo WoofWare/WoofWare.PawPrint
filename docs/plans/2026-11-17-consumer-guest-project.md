@@ -898,10 +898,13 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   `runtimeConfigFor OracleFrameworks.NetCoreApp configProperties` as `<name>.runtimeconfig.json` into a new
   `pawprint-oracle-*` directory under the temp path, and runs
   `dotnet exec --runtimeconfig <that file> <dll> <args>` through `runCapturing` and the muxer of the framework under
-  test, in the assembly's directory. A relative path is made absolute first, against the test host's working
-  directory, since the host would resolve it against the guest's (found by Codex). So is the scratch directory, since
-  `Path.GetTempPath` keeps a relative `TMPDIR` (also found by Codex). The scratch directory is removed in a `finally`,
-  as the other entries remove theirs. An assembly whose directory is the temp directory, or a directory above it, is
+  test, in the assembly's directory. The assembly's directory is resolved first, against the test host's working
+  directory, since the host would resolve a relative path against the guest's, and as the operating system walks it,
+  since `Path.GetFullPath` (and so `File.Exists`) collapses `..` by its spelling while after a symbolic link `..`
+  climbs from the link's target; `FrameworkUnderTest.resolveLinks` now walks a path that way. The scratch directory
+  comes from `Directory.CreateTempSubdirectory`, which picks a name no other directory has and does not create a
+  missing temp directory, and is made absolute, since `Path.GetTempPath` keeps a relative `TMPDIR`. It is removed in
+  a `finally`, as the other entries remove theirs. Each of these was found by Codex. An assembly whose directory is the temp directory, or a directory above it, is
   refused, since the guest would see the scratch directories in its tree. Comparing spellings proved unsound over
   four Codex rounds (symbolic links, a linked assembly file, case folding, Unicode normalisation), so the check asks
   the filesystem instead: after creating the scratch directory, whose name is random, it tries the path down to it
@@ -923,7 +926,8 @@ Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`:
   FailFast), its command line, the guest's working directory, its echo to the test's output, and that it runs the
   framework under test (CoreLib's whole directory, links resolved on both sides), leaving the directory unchanged, when
   the runtimeconfig beside the assembly names a framework
-  that does not exist. A relative path, with a directory in it, names the same assembly.
+  that does not exist. A relative path, with a directory in it, names the same assembly, and a path climbing with `..`
+  out of a symbolic link names the file the operating system finds.
 * `runtimeConfigFor`, which writes the runtimeconfig for both `captureAssemblyInPlace` and `executeConcurrently`,
   fails on properties no runtimeconfig can deliver as given (found by Codex): a name the hosting layer populates,
   checked with `RuntimeConfig.combine` as for a runtimeconfig PawPrint reads, and a name or value that is not
@@ -1034,7 +1038,8 @@ rows ran before the working-directory test existed, so against seven tests:
 | refusal ignoring a linked assembly file, and comparing case (the code before) | the linked-file test and the other-case test (each `NormalExit 0`; the other-case test is ignored on a case-sensitive filesystem) |
 | refusal removed (the filesystem check bypassed) | the four temp-directory tests |
 | relative path not made absolute, against the final relative-path test | the relative-path test |
-| scratch directory not made absolute, with `TMPDIR=.` | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
+| `..` collapsed by its spelling (`Path.GetFullPath`, the code before) | the climbing-out-of-a-link test ("the assembly does not exist") |
+| scratch directory not made absolute, with `TMPDIR=.` (the code before `CreateTempSubdirectory`) | nine of thirteen (measured by running the file's tests with `TMPDIR=.` in the devshell; no test sets `TMPDIR`, which every concurrent test would see) |
 
 The last survives because no test can see the scratch directory: other tests create and remove their own beside it at
 the same moment, so a listing of the temp directory before and after a run cannot tell whose is whose. The scratch
