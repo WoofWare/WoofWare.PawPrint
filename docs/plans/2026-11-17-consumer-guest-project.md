@@ -904,7 +904,7 @@ beside the assembly is not read either. `executeAssemblyInPlace` is `captureAsse
 AppContextProperties.empty` followed by the existing `echo`; its signature and its fourteen call sites are unchanged,
 and the overwrite of the runtimeconfig beside the assembly, with its staging file and rename, is deleted.
 
-Codex found, over ten rounds, the ways in which the first version could report an ending for something other than
+Codex found, over eleven rounds, the ways in which the first version could report an ending for something other than
 the guest it was asked to run, or let the guest see the oracle's files. The function now refuses, with an exception
 rather than a `CapturedRun`:
 
@@ -916,14 +916,17 @@ rather than a `CapturedRun`:
   spelling, while after a symbolic link the operating system climbs from the link's target. An attempt to walk paths
   as the operating system does needed, round after round, more of `realpath`'s behaviour (search permission, Windows
   roots, drive-relative paths), so the oracle refuses the ambiguity instead. Without `..`, `Path.GetFullPath` only
-  joins a relative path to the test host's working directory and drops `.`;
+  joins a relative path to the test host's working directory and drops `.`. The assembly path may not hold a `.`
+  either, since a final one, as in `Guest.dll/.`, names a directory to the operating system and `Path.GetFullPath`
+  would drop it;
+* an assembly file that is a symbolic link, which the host would run from its target's directory;
 * a temp directory that does not exist, which `Directory.CreateTempSubdirectory` creates on some platforms;
 * an assembly whose directory is the temp directory or above it, where the guest would see the scratch directory in
   its tree. Comparing spellings proved unsound (symbolic links, a linked assembly file, case folding, Unicode
   normalisation), so the check asks the filesystem: after creating the scratch directory, whose name is random, it
-  tries the path down to it from each directory above it, starting from the guest's working directory and from the
-  directory of the file the host runs (the target's, when the assembly's file is a link), and with the temp directory
-  both as spelled and with its links resolved. That path exists only if the guest could reach the scratch directory.
+  tries the path down to it from each directory above it, starting from the assembly's directory, with the temp
+  directory both as spelled and with its links resolved. That path exists only if the guest could reach the scratch
+  directory.
 
 The scratch directory comes from `Directory.CreateTempSubdirectory`, so its name is no other directory's and cleanup
 removes only what this call made; its path is absolute, since `TMPDIR` may be relative.
@@ -946,8 +949,9 @@ removes only what this call made; its path is absolute, since `TMPDIR` may be re
   run on .NET 11;
 * each refusal above: three host-owned property shapes, and one through `executeConcurrently` in
   `TestRealRuntimeConcurrent.fs`; a lone surrogate in a value and in a name; a path with `..` that would otherwise
-  have run a decoy; an assembly directly in the temp directory, through a symbolic link to it, as a link to a file in
-  it, and through another case of its name (ignored on a case-sensitive filesystem);
+  have run a decoy; `EndsAsTold.dll/.`; an assembly file that is a symbolic link; an assembly directly in the temp
+  directory, through a symbolic link to it, and through another case of its name (ignored on a case-sensitive
+  filesystem);
 * a relative path, with a directory in it, names the same assembly. Its assembly is laid out under the test host's
   working directory, which must therefore be writable, since a relative path climbing out of it would be refused.
 
@@ -990,6 +994,8 @@ specifies and leaves the choice to the decider.
   the refusal removes it. The refusal needs it to exist, since its random name is what makes the check sound, and no
   guest runs in that window.
 * The relative-path test needs a writable working directory; see above.
+* The temp directory's links are resolved with `FrameworkUnderTest.resolveLinks`, which reads a `..` inside a link's
+  target by its spelling. A `TMPDIR` reached through such a link, inside the assembly's tree, would escape the check.
 
 **Measured.**
 
@@ -1041,7 +1047,9 @@ where a row says "the code before", the mutant is the code the red commit ran ag
 | ill-formed UTF-16 not refused (the code before) | the lone-surrogate test |
 | relative path not made absolute (the code before) | the relative-path test (`NormalExit 129`, the host's) |
 | `..` not refused | the `..` test (the decoy ran) |
-| temp-directory refusal removed | the four temp-directory tests |
+| `.` not refused | the `.` test |
+| linked assembly file not refused | the linked-file test (its target, in the temp directory, ran) |
+| temp-directory refusal removed | the temp-directory tests (then four, the linked-file test among them) |
 | temp-directory refusal comparing spellings (the code before) | the symbolic-link, linked-file and other-case tests (each `NormalExit 0`) |
 | scratch directory not made absolute, with `TMPDIR=.` (the code before) | nine of thirteen |
 
