@@ -1040,37 +1040,40 @@ module RealRuntime =
         let scratch =
             Path.GetFullPath (Path.Combine (Path.GetTempPath (), "pawprint-oracle-" + Path.GetRandomFileName ()))
 
-        // Compared with links resolved, since either path may reach the same directory through one,
-        // and ignoring case, since a case-insensitive filesystem takes two spellings for one
-        // directory. On a case-sensitive filesystem that refuses a directory differing from the temp
-        // directory only by case, which fails loudly rather than exposing anything.
-        let resolvedTemp = FrameworkUnderTest.resolveLinks (Path.GetDirectoryName scratch)
-
-        let isTempOrAbove (candidate : string) : bool =
-            let resolved = FrameworkUnderTest.resolveLinks candidate
-
-            String.Equals (resolvedTemp, resolved, StringComparison.OrdinalIgnoreCase)
-            // `EndsInDirectorySeparator` holds only for a root, which `resolveLinks` keeps as it is.
-            || resolvedTemp.StartsWith (
-                (if Path.EndsInDirectorySeparator resolved then
-                     resolved
-                 else
-                     resolved + string<char> Path.DirectorySeparatorChar),
-                StringComparison.OrdinalIgnoreCase
-            )
-
-        // The guest's working directory, and the directory of the file the host runs, which is
-        // the target's when the assembly's file is itself a link.
-        if
-            isTempOrAbove directory
-            || isTempOrAbove (Path.GetDirectoryName (FrameworkUnderTest.resolveLinks dllPath))
-        then
-            failwith
-                $"Cannot run %s{dllPath} under the real runtime in place: it lies in the temp directory (%s{resolvedTemp}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
-
         Directory.CreateDirectory scratch |> ignore<DirectoryInfo>
 
         try
+            // Whether the guest could reach `scratch` by walking down from `candidate`, decided by
+            // asking the filesystem rather than by comparing spellings, which links, case folding
+            // and Unicode normalisation can each defeat: for each directory above `scratch`, the
+            // path down from it to `scratch` is tried from `candidate`. The scratch directory's
+            // name is random, so that path exists from `candidate` only if it reaches `scratch`.
+            // The paths down are taken from `scratch` as spelled and with its links resolved,
+            // whose directories above it can differ.
+            let reachesScratch (candidate : string) : bool =
+                let rec downFrom (above : string) (suffix : string) : bool =
+                    match Path.GetDirectoryName above with
+                    | null -> false
+                    | parent ->
+                        let suffix = Path.Combine (Path.GetFileName above, suffix)
+                        Directory.Exists (Path.Combine (candidate, suffix)) || downFrom parent suffix
+
+                [ scratch ; FrameworkUnderTest.resolveLinks scratch ]
+                |> List.exists (fun target ->
+                    Directory.Exists (Path.Combine (candidate, Path.GetFileName target))
+                    || downFrom (Path.GetDirectoryName target) (Path.GetFileName target)
+                )
+
+            // The guest's working directory, and the directory of the file the host runs, which is
+            // the target's when the assembly's file is itself a link.
+            let reachable =
+                [ directory ; Path.GetDirectoryName (FrameworkUnderTest.resolveLinks dllPath) ]
+                |> List.exists reachesScratch
+
+            if reachable then
+                failwith
+                    $"Cannot run %s{dllPath} under the real runtime in place: its directory is the temp directory (%s{Path.GetDirectoryName scratch}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
+
             // The host looks for the dev runtimeconfig beside the runtimeconfig it is given
             // (`get_runtime_config_paths_from_arg` in hostfxr's fx_muxer.cpp), so a
             // `<name>.runtimeconfig.dev.json` beside the assembly is not read either.

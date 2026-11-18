@@ -603,7 +603,7 @@ public static class Program
 
     /// As above, with the temp directory spelled in other case, which a case-insensitive
     /// filesystem takes for the same directory. Ignored on a case-sensitive one, where the
-    /// spelling names nothing.
+    /// spelling does not reach the assembly.
     [<Test>]
     let ``an assembly in the temp directory, spelled in other case, is refused, not run`` () : unit =
         let temp =
@@ -621,14 +621,14 @@ public static class Program
                 )
             )
 
-        if flipped = temp || not (Directory.Exists flipped) then
-            Assert.Ignore $"the temp directory %s{temp} has no other spelling on this filesystem"
-
         let name = "pawprint-in-place-test-" + Path.GetRandomFileName () + ".dll"
         let dllPath = Path.Combine (temp, name)
         File.WriteAllBytes (dllPath, endsAsToldImage.Value)
 
         try
+            if flipped = temp || not (File.Exists (Path.Combine (flipped, name))) then
+                Assert.Ignore $"the temp directory %s{temp} has no other spelling on this filesystem"
+
             let outcome =
                 try
                     Ok (
@@ -648,24 +648,41 @@ public static class Program
 
     [<Test>]
     let ``a relative path to the assembly names the same assembly`` () : unit =
-        // Under the test host's working directory, so that the relative path is a directory and
-        // a file name: one that climbed with `..` past the root of the guest's working directory
-        // would resolve to the same file from there too.
-        laidOutUnder
-            Environment.CurrentDirectory
-            "EndsAsTold"
-            endsAsToldImage.Value
-            None
-            (fun dllPath ->
-                let relative = Path.GetRelativePath (Environment.CurrentDirectory, dllPath)
+        // Nested deeper below the temp directory than the test host's working directory is below
+        // the root, so that the relative path's `..`s, taken from the guest's working directory
+        // instead, do not climb to the root and so reach a different place.
+        let cwd : string = Path.GetFullPath Environment.CurrentDirectory
 
-                relative
-                |> shouldEqual (Path.Combine (Path.GetFileName (Path.GetDirectoryName dllPath), "EndsAsTold.dll"))
+        let depth : int =
+            (cwd.Split (Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)).Length
+            + 1
 
-                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
-                |> _.Result
-                |> shouldEqual (RealRuntimeResult.NormalExit 5)
-            )
+        let root =
+            Path.Combine (Path.GetFullPath (Path.GetTempPath ()), "pawprint-in-place-test-" + Path.GetRandomFileName ())
+
+        let nested = Path.Combine (Array.append [| root |] (Array.replicate depth "d"))
+        Directory.CreateDirectory nested |> ignore<DirectoryInfo>
+
+        try
+            laidOutUnder
+                nested
+                "EndsAsTold"
+                endsAsToldImage.Value
+                None
+                (fun dllPath ->
+                    let relative = Path.GetRelativePath (cwd, dllPath)
+                    Path.IsPathRooted relative |> shouldEqual false
+
+                    // The precondition: the same spelling names nothing from the guest's directory.
+                    File.Exists (Path.GetFullPath (relative, Path.GetDirectoryName dllPath))
+                    |> shouldEqual false
+
+                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
+                    |> _.Result
+                    |> shouldEqual (RealRuntimeResult.NormalExit 5)
+                )
+        finally
+            Directory.Delete (root, true)
 
     [<Test>]
     let ``the guest's working directory is the assembly's directory`` () : unit =
