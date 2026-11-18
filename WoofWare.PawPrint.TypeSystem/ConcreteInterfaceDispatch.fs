@@ -152,6 +152,25 @@ module ConcreteInterfaceDispatch =
             Rows : DefinitionInterfaceMapRow list
         }
 
+    /// A row as the definition walk read it.
+    [<RequireQualifiedAccess>]
+    type private WalkedRow =
+        /// A row read in the definition's vocabulary, naming an entry.
+        | Read of DefinitionInterfaceMapRow
+        /// A row whose arguments cannot be read in the definition's vocabulary (a variable its
+        /// context does not supply, or the wrong number of them), or that names no nominal type. It
+        /// names no entry. CoreCLR finds such a row only when it loads the row's arguments
+        /// (`LoadExactInterfaceMap`), in row order with the others, so closing loads it there;
+        /// `failure` is what is reported should loading it succeed.
+        | Unreadable of spelling : TypeConcretization.SubstitutionArgument * failure : TypeBindingFailure
+
+    /// What the definition walk builds: the map's entries, and every row read, the last first.
+    type private WalkedDefinition =
+        {
+            Entries : DefinitionInterfaceMapEntry list
+            RowsLastFirst : WalkedRow list
+        }
+
     /// One entry of a closed type's interface map (`bmtInterfaceEntry`): its definition's entry, and
     /// the interface instantiation that entry closes to under the type's arguments.
     type internal InterfaceMapEntry =
@@ -171,8 +190,8 @@ module ConcreteInterfaceDispatch =
     let private rebaseMap
         (definition : ResolvedTypeIdentity)
         (arguments : ImmutableArray<TypeConcretization.SubstitutionArgument>)
-        (map : DefinitionInterfaceMap)
-        : DefinitionInterfaceMap
+        (map : WalkedDefinition)
+        : WalkedDefinition
         =
         // Keyed on the array itself: `ImmutableArray` compares by reference.
         let rebased =
@@ -224,12 +243,17 @@ module ConcreteInterfaceDispatch =
                         ImplementedByParent = true
                     }
                 )
-            Rows =
-                map.Rows
+            RowsLastFirst =
+                map.RowsLastFirst
                 |> List.map (fun row ->
-                    { row with
-                        Spelling = rebaseArgument row.Spelling
-                    }
+                    match row with
+                    | WalkedRow.Read row ->
+                        WalkedRow.Read
+                            { row with
+                                Spelling = rebaseArgument row.Spelling
+                            }
+                    | WalkedRow.Unreadable (spelling, failure) ->
+                        WalkedRow.Unreadable (rebaseArgument spelling, failure)
                 )
         }
 
@@ -257,27 +281,15 @@ module ConcreteInterfaceDispatch =
             returned @ signature.ParameterTypes |> List.tryPick (firstOutOfScope typeArity)
         | _ -> None
 
-    /// The interface map of the generic definition `identity` (or of a non-generic type, which is its
-    /// own definition), in CoreCLR's order: the parent definition's entries first, re-read in this
-    /// definition's vocabulary through its extends clause, then each interface the type declares
-    /// followed by its own parents, depth-first, each instantiation of the definition appearing once
-    /// (`MethodTableBuilder::ExpandApproxInheritedInterfaces` and `ExpandApproxDeclaredInterfaces`,
-    /// methodtablebuilder.cpp). Two rows are the same instantiation when they name the same interface
-    /// and their arguments are the same types *of the definition*, so `C<T, U> : I<T>, I<U>` has two
-    /// entries.
-    ///
-    /// Nothing is closed, so a row's interface is resolved to its definition and its arguments are not
-    /// loaded. The failure is the first row, in the order read, whose interface does not resolve, whose
-    /// spelling names the interface with the wrong kind, names a variable its context does not supply,
-    /// or gives a generic interface the wrong number of arguments or none.
-    let rec internal interfaceMapOfDefinition
+    /// `interfaceMapOfDefinition`'s walk, which reads on past a row whose arguments it cannot read.
+    let rec private walkDefinition
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (operation : string)
         (state : TypeSystemState)
         (identity : ResolvedTypeIdentity)
-        : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
+        : TypeSystemState * Result<WalkedDefinition, TypeBindingFailure>
         =
         let owner = ConcreteMethodTable.ownerOfDefinition operation state identity
 
@@ -305,12 +317,10 @@ module ConcreteInterfaceDispatch =
                 Ok
                     {
                         Entries = []
-                        Rows = []
+                        RowsLastFirst = []
                     }
             | Some (baseIdentity, arguments) ->
-                match
-                    interfaceMapOfDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state baseIdentity
-                with
+                match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state baseIdentity with
                 | state, Error failure -> state, Error failure
                 | state, Ok parentMap -> state, Ok (rebaseMap baseIdentity arguments parentMap)
 
@@ -342,9 +352,9 @@ module ConcreteInterfaceDispatch =
             (spellingAssembly : DumpedAssembly)
             (spellingContext : TypeConcretization.SubstitutionContext)
             (state : TypeSystemState)
-            (map : DefinitionInterfaceMap)
+            (map : WalkedDefinition)
             (row : WoofWare.PawPrint.InterfaceImplementation)
-            : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
+            : TypeSystemState * Result<WalkedDefinition, TypeBindingFailure>
             =
             let rowAssembly =
                 match state.LoadedAssembly row.RelativeToAssembly.FullName with
@@ -364,6 +374,23 @@ module ConcreteInterfaceDispatch =
             | Error failure -> state, Error failure
             | Ok (rowSpelling, rowResolvedAssembly) ->
 
+            // The row's interface itself, spelled in the token space the row's interface resolved in
+            // and read in the context of the type that wrote the row, as an extends clause's arguments
+            // are.
+            let spelling =
+                (TypeConcretization.SubstitutionContext.forBase
+                    rowResolvedAssembly.DefinitionFullName
+                    (ImmutableArray.Create rowSpelling)
+                    spellingContext)
+                    .Arguments.[0]
+
+            let unreadable (state : TypeSystemState) (failure : TypeBindingFailure) =
+                state,
+                Ok
+                    { map with
+                        RowsLastFirst = WalkedRow.Unreadable (spelling, failure) :: map.RowsLastFirst
+                    }
+
             // The interface's definition, which is all a definition-level map resolves: its arguments
             // are loaded only when the map is closed.
             let head, rowArguments =
@@ -371,24 +398,37 @@ module ConcreteInterfaceDispatch =
                 | TypeDefn.GenericInstantiation (head, arguments) -> head, Some arguments
                 | nominal -> nominal, None
 
-            let state, interfaceIdentity, spelledKind =
+            let spelledKind =
                 match head with
                 | TypeDefn.FromDefinition (_, spelledKind)
-                | TypeDefn.FromReference (_, spelledKind) ->
-                    let state, interfaceIdentity =
-                        ConcreteMethodTable.nominalIdentityOfSpelling
-                            loggerFactory
-                            dotnetRuntimeDirs
-                            baseClassTypes
-                            operation
-                            state
-                            rowResolvedAssembly
-                            head
+                | TypeDefn.FromReference (_, spelledKind) -> Some spelledKind
+                | _ -> None
 
-                    state, interfaceIdentity, spelledKind
-                | other ->
-                    failwith
-                        $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %O{other}, which is not a nominal type"
+            match spelledKind with
+            | None ->
+                // Not a nominal type, so not an interface. A variable here is out of scope, or is one
+                // of the type's own, and loading the row says which.
+                match firstOutOfScope spellingContext.Arguments.Length head with
+                | Some refusal -> unreadable state (TypeBindingFailure.Refused refusal)
+                | None ->
+                    unreadable
+                        state
+                        (TypeBindingFailure.Unmodelled
+                            {
+                                Diagnostic =
+                                    $"%s{operation}: an InterfaceImpl row in %s{rowAssembly.Name.Name} names %O{head}, which is not an interface; CoreCLR refuses to load such a type"
+                            })
+            | Some spelledKind ->
+
+            let state, interfaceIdentity =
+                ConcreteMethodTable.nominalIdentityOfSpelling
+                    loggerFactory
+                    dotnetRuntimeDirs
+                    baseClassTypes
+                    operation
+                    state
+                    rowResolvedAssembly
+                    head
 
             match interfaceIdentity with
             | Error failure -> state, Error failure
@@ -397,15 +437,31 @@ module ConcreteInterfaceDispatch =
             let interfaceAssembly, interfaceTypeInfo =
                 ConcreteMethodTable.definitionMetadata operation state interfaceIdentity
 
-            // The checks concretisation makes of a spelling before it loads any argument, in its
-            // order: the head's kind, then a generic definition named with no instantiation (only a
-            // TypeSpec can spell one; a TypeDef or TypeRef row is read at the definition's own kind).
-            // Those it makes after loading the arguments -- a variable out of scope, the arity -- are
-            // made here before the duplicate check below compares the arguments, which assumes both.
+            // What CoreCLR's approximate load of a row checks, before any argument is loaded: the
+            // interface's base chain, a generic definition named with no instantiation, and the head's
+            // kind. Only a TypeSpec can spell either of the last two wrongly; a TypeDef or TypeRef row
+            // is read at the definition's own kind.
             let isTypeSpec =
                 match row.InterfaceHandle with
                 | MetadataToken.TypeSpecification _ -> true
                 | _ -> false
+
+            let state, baseChain =
+                if isTypeSpec then
+                    TypeSystemState.lookupTypeDefn
+                        loggerFactory
+                        dotnetRuntimeDirs
+                        baseClassTypes
+                        state
+                        interfaceAssembly
+                        interfaceIdentity.TypeDefinition.Get
+                    |> fun (state, result) -> state, result |> Result.map ignore<TypeDefn>
+                else
+                    state, Ok ()
+
+            match baseChain with
+            | Error failure -> state, Error failure
+            | Ok () ->
 
             let kindMismatch =
                 isTypeSpec
@@ -428,14 +484,21 @@ module ConcreteInterfaceDispatch =
                 |> Option.map (Seq.tryPick (firstOutOfScope spellingContext.Arguments.Length))
                 |> Option.flatten
 
+            // What only loading the arguments finds: a variable out of scope, then the arity
+            // (`IDS_CLASSLOAD_TYPEWRONGNUMGENERICARGS`). The row cannot be compared with the entries
+            // without both, so it adds none, and closing loads it in its turn.
             match outOfScope, rowArguments with
-            | Some refusal, _ -> refused state refusal
+            | Some refusal, _ -> unreadable state (TypeBindingFailure.Refused refusal)
             | None, Some arguments when arguments.Length <> interfaceTypeInfo.Generics.Length ->
-                // CoreCLR refuses an instantiation with any other number of arguments than its
-                // definition declares (`IDS_CLASSLOAD_TYPEWRONGNUMGENERICARGS`).
-                refused
+                unreadable
                     state
-                    (TypeLoadRefusal.WrongArity (interfaceIdentity, interfaceTypeInfo.Generics.Length, arguments.Length))
+                    (TypeBindingFailure.Refused (
+                        TypeLoadRefusal.WrongArity (
+                            interfaceIdentity,
+                            interfaceTypeInfo.Generics.Length,
+                            arguments.Length
+                        )
+                    ))
             | None, _ ->
 
             let substitution =
@@ -445,16 +508,6 @@ module ConcreteInterfaceDispatch =
                     spellingContext
                     interfaceTypeInfo
                     row.InterfaceHandle
-
-            // The row's interface itself, spelled in the token space the row's interface resolved in
-            // and read in the context of the type that wrote the row, as an extends clause's arguments
-            // are.
-            let spelling =
-                (TypeConcretization.SubstitutionContext.forBase
-                    rowResolvedAssembly.DefinitionFullName
-                    (ImmutableArray.Create rowSpelling)
-                    spellingContext)
-                    .Arguments.[0]
 
             let rec findExisting
                 (state : TypeSystemState)
@@ -497,14 +550,13 @@ module ConcreteInterfaceDispatch =
                                 else
                                     entry
                             )
-                        Rows =
-                            map.Rows
-                            @ [
+                        RowsLastFirst =
+                            WalkedRow.Read
                                 {
                                     Spelling = spelling
                                     Entry = existing
                                 }
-                            ]
+                            :: map.RowsLastFirst
                     }
             | state, Ok None ->
 
@@ -520,14 +572,13 @@ module ConcreteInterfaceDispatch =
             let map =
                 {
                     Entries = map.Entries @ [ entry ]
-                    Rows =
-                        map.Rows
-                        @ [
+                    RowsLastFirst =
+                        WalkedRow.Read
                             {
                                 Spelling = spelling
                                 Entry = map.Entries.Length
                             }
-                        ]
+                        :: map.RowsLastFirst
                 }
 
             if not expandParents then
@@ -539,6 +590,60 @@ module ConcreteInterfaceDispatch =
 
         (state, inherited, typeInfo.ImplementedInterfaces)
         |||> StateResult.fold (expand true assembly owner.Substitution)
+
+    /// The interface map of the generic definition `identity` (or of a non-generic type, which is its
+    /// own definition), in CoreCLR's order: the parent definition's entries first, re-read in this
+    /// definition's vocabulary through its extends clause, then each interface the type declares
+    /// followed by its own parents, depth-first, each instantiation of the definition appearing once
+    /// (`MethodTableBuilder::ExpandApproxInheritedInterfaces` and `ExpandApproxDeclaredInterfaces`,
+    /// methodtablebuilder.cpp). Two rows are the same instantiation when they name the same interface
+    /// and their arguments are the same types *of the definition*, so `C<T, U> : I<T>, I<U>` has two
+    /// entries.
+    ///
+    /// Nothing is closed, so a row's interface is resolved to its definition and its arguments are not
+    /// loaded. The failure is the first row, in the order read, whose interface does not resolve or
+    /// whose base chain does not load, or whose spelling names the interface with the wrong kind or
+    /// a generic interface with no instantiation; failing those, the first row that names a variable
+    /// its context does not supply, gives the wrong number of arguments, or names no interface.
+    let internal interfaceMapOfDefinition
+        (loggerFactory : ILoggerFactory)
+        (dotnetRuntimeDirs : string seq)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : TypeSystemState)
+        (identity : ResolvedTypeIdentity)
+        : TypeSystemState * Result<DefinitionInterfaceMap, TypeBindingFailure>
+        =
+        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state identity with
+        | state, Error failure -> state, Error failure
+        | state, Ok walked ->
+
+        let rows = List.rev walked.RowsLastFirst
+
+        let unreadable =
+            rows
+            |> List.tryPick (fun row ->
+                match row with
+                | WalkedRow.Unreadable (_, failure) -> Some failure
+                | WalkedRow.Read _ -> None
+            )
+
+        match unreadable with
+        | Some failure -> state, Error failure
+        | None ->
+
+        state,
+        Ok
+            {
+                Entries = walked.Entries
+                Rows =
+                    rows
+                    |> List.choose (fun row ->
+                        match row with
+                        | WalkedRow.Read row -> Some row
+                        | WalkedRow.Unreadable _ -> None
+                    )
+            }
 
     /// The interface map of a class, value type or interface, in CoreCLR's order: the parent's
     /// entries first, then each interface the type declares followed by its own parents,
@@ -585,9 +690,9 @@ module ConcreteInterfaceDispatch =
         | state, Error failure -> state, Error failure
         | state, Ok () ->
 
-        match interfaceMapOfDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state ty.Identity with
+        match walkDefinition loggerFactory dotnetRuntimeDirs baseClassTypes operation state ty.Identity with
         | state, Error failure -> state, Error failure
-        | state, Ok definitionMap ->
+        | state, Ok walked ->
 
         let loader = TypeResolution.directoryLoader loggerFactory dotnetRuntimeDirs
 
@@ -643,7 +748,7 @@ module ConcreteInterfaceDispatch =
                     Ok closed, ctx
                 | Error failure, ctx -> Error failure, ctx
 
-        let entries = Array.ofList definitionMap.Entries
+        let entries = Array.ofList walked.Entries
 
         let state, closedEntries =
             ConcreteMethodTable.inContext
@@ -653,11 +758,15 @@ module ConcreteInterfaceDispatch =
                     let rec go
                         (ctx : TypeConcretization.ConcretizationContext<DumpedAssembly>)
                         (closed : Map<int, ConcreteTypeHandle>)
-                        (rows : DefinitionInterfaceMapRow list)
+                        (rows : WalkedRow list)
                         =
                         match rows with
                         | [] -> ctx, Ok closed
-                        | row :: rest ->
+                        | WalkedRow.Unreadable (spelling, failure) :: _ ->
+                            match closeArgument ctx spelling with
+                            | Error failure, ctx -> ctx, Error failure
+                            | Ok _, ctx -> ctx, Error failure
+                        | WalkedRow.Read row :: rest ->
                             match closeArgument ctx row.Spelling with
                             | Error failure, ctx -> ctx, Error failure
                             | Ok handle, ctx ->
@@ -668,7 +777,7 @@ module ConcreteInterfaceDispatch =
                                     failwith
                                         $"%s{operation}: two rows of %O{typeHandle}'s interface map name the same instantiation of its definition, but close to %O{first} and %O{handle}"
 
-                    go ctx Map.empty definitionMap.Rows
+                    go ctx Map.empty (List.rev walked.RowsLastFirst)
                 )
 
         match closedEntries with
