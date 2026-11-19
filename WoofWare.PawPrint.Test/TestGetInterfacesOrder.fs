@@ -3048,6 +3048,72 @@ public struct S2<T> : IC<T[]> { }
         | Error (TypeBindingFailure.Refused (TypeLoadRefusal.TypeParameterOutOfScope _)) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
+    /// `ofInstantiation` of `receiver` in `pairChain depth`, at its own variables if it is generic:
+    /// the host's count of its interfaces, how many PawPrint answered, and the bytes the call allocated
+    /// on this thread, measured after a first call has registered every type it closes.
+    let private pairChainConversion (depth : int) (receiver : string) : int * int * int64 =
+        let image = sketchImage (pairChain depth)
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("pairChainConversion", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let hostCount = host.GetType(receiver, true).GetInterfaces().Length
+
+            let typeInfo =
+                dumped.TypeDefs.Values |> Seq.find (fun typeInfo -> typeInfo.Name = receiver)
+
+            let arguments =
+                Seq.init
+                    typeInfo.Generics.Length
+                    (fun i -> RuntimeTypeHandleTarget.GenericParameter (typeInfo.Identity, i))
+                |> Collections.Immutable.ImmutableArray.CreateRange
+
+            let convert (state : IlMachineState) =
+                match
+                    RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state typeInfo.Identity arguments
+                with
+                | state, Ok targets -> state, targets
+                | _, Error failure -> failwith $"PawPrint refused: %s{TypeBindingFailure.describe failure}"
+
+            let state, _ = convert (coreState.WithLoadedAssembly dumped)
+            let before = GC.GetAllocatedBytesForCurrentThread ()
+            let _, targets = convert state
+            let allocated = GC.GetAllocatedBytesForCurrentThread () - before
+            hostCount, targets.Length, allocated
+        finally
+            context.Unload ()
+
+    /// Converting a definition's map to targets converts each context the map shares once. The chain's
+    /// image holds one row per interface, each of constant size, so what it holds is linear in its
+    /// depth, and so is the work: sixteen levels cost at most 32 times what eight do, where converting
+    /// each occurrence of a shared context afresh gives about 256. The closed `C` takes the path where
+    /// every argument is closed; the definition `N<depth>` the path over its own variables.
+    [<TestCase "C">]
+    [<TestCase "N">]
+    let ``Converting a chain passing Pair<A, A> and Pair<A, B> on costs work linear in its depth``
+        (receiver : string)
+        : unit
+        =
+        let name (depth : int) =
+            if receiver = "C" then "C" else $"N%d{depth}`2"
+
+        let host8, pawPrint8, allocated8 = pairChainConversion 8 (name 8)
+        pawPrint8 |> shouldEqual host8
+        let host16, pawPrint16, allocated16 = pairChainConversion 16 (name 16)
+        pawPrint16 |> shouldEqual host16
+
+        TestContext.Progress.WriteLine $"%s{receiver}: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
     /// expects; PawPrint must stop where managed code asks `GetUtf8NameInternal` for the name of an
     /// open construction (#2315).
