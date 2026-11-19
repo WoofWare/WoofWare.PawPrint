@@ -1229,10 +1229,12 @@ Two changes beyond decision 1, each from Codex's first review and each committed
 **The tests**, in the default suite:
 
 * decision 1's four. The property test expects, for `WOOFWARE_TEST_ABSENT`, whatever the test host holds, since
-  the overlay does not unset it. The replacement test takes the first two host variables whose names are plain
-  ASCII letters, digits and underscores and that the launch does not read. It replaces the first and checks that
-  the guest inherits the second. It compares what the guest printed without showing it, since host variables may be
-  credentials. The globalisation test also states `DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1`,
+  the overlay does not unset it. The replacement test sets two variables of its own in the test host, under names
+  unique to the run, and unsets them afterwards. It replaces one through an entry and checks that the guest inherits
+  the other, both with known values, and that the test host's value is unchanged. So it reads nothing the test host
+  was started with. This departs from decision 1, which said the test must not set a variable in the test host.
+  The names are unique, so no other test reads them. Taking existing host variables instead failed on a test host
+  started with few variables, and risked showing a credential. The globalisation test also states `DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1`,
   because a test host that set it to `0` would let invariant mode construct `fr-FR`. The refusal test covers no
   `=`, a leading `=`, and one name twice. In each case it checks that the guest wrote no marker file.
 * an entry with a NUL and one with an unpaired surrogate are refused, not run;
@@ -1259,8 +1261,9 @@ amendment, and the choice is PR 3's to make.
 * Red, against a `captureAssemblyInPlace` that took the parameter and ignored it: six of 27 tests in the file
   failed. These were the property test, the replacement test, the globalisation test (`constructed fr-FR`) and the
   three refusal cases. The NUL/surrogate test and the roll-forward test were each red against the code before their
-  fix. The NUL/surrogate test failed because the guest ran. The roll-forward test ran on .NET 11. The test fix for a
-  host variable whose name holds a carriage return was red and then green with such a variable inherited.
+  fix. The NUL/surrogate test failed because the guest ran. The roll-forward test ran on .NET 11. The replacement
+  test with its own variables passes with the test host started from only `PATH`, `HOME`, `TMPDIR` and
+  `DOTNET_ROOT`.
 * At the final commit, on .NET 10.0.14 on macOS, the default suite had 5965 tests: 5926 passed and 39 were
   skipped. `Guest` had 234 tests, all passed. The file's 29 tests also pass on .NET 11
   (`PAWPRINT_TEST_RUNTIME=Net11`).
@@ -1271,7 +1274,7 @@ amendment, and the choice is PR 3's to make.
 |---|---|
 | environment not passed (`Map.empty` to `runCapturing`) | the property, replacement and globalisation tests |
 | the host's value wins over the entry (`runCapturing` sets only names the host lacks) | the replacement test |
-| the child's environment cleared before the overlay | the replacement test (the inherited variable) |
+| the child's environment cleared before the overlay | the replacement test (the inherited variable read null) |
 | refusal removed (bad entries skipped, last duplicate wins) | the three refusal cases, and the NUL/surrogate test |
 | refusal made after the guest has run | the same four, each at the marker file |
 | encodability check removed | the NUL/surrogate test |
