@@ -2287,3 +2287,6 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
   that owns a module's dynamic methods, which the `refuseMetadataQuery` arm refuses. The docstring now names both.
 - [P3] This section said `AddSpecialInterface` asks `IsAssignableFrom` after the name; it asks it before, so that
   call already answered on `main`. Corrected.
+
+**Codex's second review (on commit 6).** No findings. It ran the selection and the new guest again. Commits after 4
+change only a docstring and this plan, so the suites above stand.
