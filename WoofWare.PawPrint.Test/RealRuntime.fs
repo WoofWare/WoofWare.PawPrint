@@ -276,10 +276,18 @@ module RealRuntime =
     /// on an entry with no `=`, an entry beginning with `=`, and a second entry
     /// naming a variable: the oracle would otherwise run with a different
     /// environment from the one PawPrint's kernel holds for the same
-    /// description.
+    /// description. It also fails on an entry no process could hold intact
+    /// (see `EnvironmentPal.tryEncodeEntry`), which PawPrint's kernel refuses
+    /// and the child would receive altered.
     let private oracleEnvironment (entries : string list) : Map<string, string> =
         (Map.empty, entries)
         ||> List.fold (fun acc entry ->
+            match EnvironmentPal.tryEncodeEntry entry with
+            | Ok _ -> ()
+            | Error problem ->
+                failwith
+                    $"RealRuntime: the oracle cannot give a guest %s{problem}, since it would reach the guest altered"
+
             match entry.IndexOf '=' with
             | index when index > 0 ->
                 let name = entry.Substring (0, index)
@@ -1025,7 +1033,9 @@ module RealRuntime =
     /// kernel seeds, so a caller comparing with PawPrint names
     /// `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` itself; CoreLib reads that variable in preference to
     /// the `System.Globalization.Invariant` property. Entries the overlay cannot express are
-    /// refused before any process starts; see `oracleEnvironment`.
+    /// refused before any process starts; see `oracleEnvironment`. No entry moves the guest off
+    /// the framework under test: roll-forward is disabled on the host's command line, which the
+    /// host prefers to `DOTNET_ROLL_FORWARD`.
     ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.
@@ -1137,10 +1147,19 @@ module RealRuntime =
             let configPath = Path.Combine (scratch, "guest.runtimeconfig.json")
             File.WriteAllText (configPath, runtimeConfigFor OracleFrameworks.NetCoreApp configProperties)
 
+            // The runtimeconfig already disables roll-forward, but the host prefers
+            // `DOTNET_ROLL_FORWARD`, which `environment` or the test host may set, to it; the
+            // command line is the one setting the host prefers to the environment.
             runCapturing
                 guestTimeout
                 muxerPath
-                ("exec" :: "--runtimeconfig" :: configPath :: dllPath :: List.ofArray args)
+                ("exec"
+                 :: "--roll-forward"
+                 :: "Disable"
+                 :: "--runtimeconfig"
+                 :: configPath
+                 :: dllPath
+                 :: List.ofArray args)
                 directory
                 environment
                 StandardStreamsConfig.piped
