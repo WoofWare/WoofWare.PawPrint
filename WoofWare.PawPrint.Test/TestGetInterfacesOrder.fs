@@ -3271,6 +3271,9 @@ public struct S2<T> : IC<T[]> { }
     /// depth, and so is the work: sixteen levels cost at most 32 times what eight do, where converting
     /// each occurrence of a shared context afresh gives about 256. The closed `C` takes the path where
     /// every argument is closed; the definition `N<depth>` the path over its own variables.
+    ///
+    /// This measures the conversion alone. Registering the targets as guest `Type`s, as the QCall then
+    /// does, is not linear in a shared chain (#2339).
     [<TestCase "C">]
     [<TestCase "N">]
     let ``Converting a chain passing Pair<A, A> and Pair<A, B> on costs work linear in its depth``

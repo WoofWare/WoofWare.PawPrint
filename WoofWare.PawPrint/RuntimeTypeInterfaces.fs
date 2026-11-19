@@ -48,7 +48,11 @@ module RuntimeTypeInterfaces =
     /// The `Error` is the definition map's refusal. That map refuses some malformed InterfaceImpl rows
     /// and extends clauses, but not every extends clause CoreCLR refuses (#2336). A type that the
     /// base chain, a row or an entry names and that does not load stops the run, as
-    /// `reflectedTypeTarget` and `resolveBaseRuntimeTypeHandleTarget` stop it.
+    /// `reflectedTypeTarget` and `resolveBaseRuntimeTypeHandleTarget` stop it, and so does an
+    /// instantiation with the wrong number of arguments. But an open entry's other load checks are
+    /// not made: a definition whose row has a pointer, byref or function-pointer argument, or nests
+    /// an instantiation spelled with the wrong kind, is answered where CoreCLR refuses to load the
+    /// definition, while a closed receiver of the same definition is refused (#2340).
     let internal ofInstantiation
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)

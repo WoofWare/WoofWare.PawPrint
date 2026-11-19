@@ -61,6 +61,12 @@ module ReflectedTypeTarget =
     /// argument closed (true of no arguments, for a definition that declares none) is a closed type,
     /// concretised into `AllConcreteTypes`; otherwise `RuntimeTypeHandleTarget.openConstructed`,
     /// which collapses the definition applied to its own variables to the definition.
+    ///
+    /// The wrong number of arguments stops the run, whichever the result. A closed result is checked
+    /// as concretisation checks it. An open result has its arity checked and nothing else: neither
+    /// the arguments CoreCLR admits in no instantiation (a pointer, a byref, a function pointer), nor
+    /// the `CLASS` or `VALUETYPE` kind the instantiation was spelled with, which a target does not
+    /// record (#2340).
     let instantiateTargets
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -78,10 +84,6 @@ module ReflectedTypeTarget =
                 | _ -> None
             )
 
-        if closedArguments.Length <> arguments.Length then
-            state, RuntimeTypeHandleTarget.openConstructed definition arguments
-        else
-
         let assembly =
             state.LoadedAssembly definition.AssemblyFullName
             |> Option.defaultWith (fun () ->
@@ -93,6 +95,10 @@ module ReflectedTypeTarget =
         if typeInfo.Generics.Length <> arguments.Length then
             failwith
                 $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} declares %i{typeInfo.Generics.Length} generic parameters, but %i{arguments.Length} arguments were supplied"
+
+        if closedArguments.Length <> arguments.Length then
+            state, RuntimeTypeHandleTarget.openConstructed definition arguments
+        else
 
         let definitionDefn =
             TypeDefn.FromDefinition (
