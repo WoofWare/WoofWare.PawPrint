@@ -263,6 +263,49 @@ module TestGuestParking =
         |> shouldEqual []
 
     [<Test>]
+    let ``Consumer scenarios parked or ending specially everywhere are so on every runtime`` () : unit =
+        for runtime in everyRuntime do
+            let cases = TestConsumerCases.onRuntime runtime
+            assertFoldedIn $"%O{runtime} parks" TestConsumerCases.parkedEverywhere cases.Parked
+            assertFoldedIn $"%O{runtime} endings" TestConsumerCases.endingsEverywhere cases.Endings
+            assertReasonsNotBlank $"%O{runtime}" (Map.toList cases.Parked)
+
+    [<Test>]
+    let ``Every consumer scenario a table names is a consumer scenario`` () : unit =
+        let known = Set.ofList TestConsumerCases.scenarios
+
+        [
+            for runtime in everyRuntime do
+                let cases = TestConsumerCases.onRuntime runtime
+                yield! Map.keys cases.Parked
+                yield! Map.keys cases.Endings
+            yield! Map.keys TestConsumerCases.generatedTypeWitnesses
+        ]
+        |> List.filter (fun name -> not (known.Contains name))
+        |> List.distinct
+        |> shouldEqual []
+
+    /// Agreement with the real runtime cannot show that a library emitted code: both sides could
+    /// take a path that never does. So each library has a scenario whose run must print a line
+    /// that only a generated type produces.
+    [<Test>]
+    let ``Every consumer library has a scenario that shows it generated a type`` () : unit =
+        let libraries = Set.ofList TestConsumerCases.libraries
+
+        TestConsumerCases.scenarios
+        |> List.map TestConsumerCases.libraryOf
+        |> List.filter (fun library -> not (libraries.Contains library))
+        |> shouldEqual []
+
+        let witnessed =
+            TestConsumerCases.generatedTypeWitnesses
+            |> Map.keys
+            |> Seq.map TestConsumerCases.libraryOf
+            |> Set.ofSeq
+
+        Set.difference libraries witnessed |> Set.toList |> shouldEqual []
+
+    [<Test>]
     let ``Impure cases parked everywhere are so on every runtime, and every registered case runs or is parked``
         ()
         : unit

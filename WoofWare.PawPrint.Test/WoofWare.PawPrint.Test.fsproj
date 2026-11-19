@@ -548,6 +548,7 @@
     <Compile Include="TestTraceSourceLocations.fs" />
     <Compile Include="TestPureCases.fs" />
     <Compile Include="TestFSharpPureCases.fs" />
+    <Compile Include="TestConsumerCases.fs" />
     <Compile Include="TestImpureCases.fs" />
     <Compile Include="TestSignalTerminatedCases.fs" />
     <Compile Include="TestLibcKillRefusals.fs" />
@@ -650,6 +651,8 @@
     <FootprintInput Include="..\WoofWare.PawPrint.slnx;..\*\*.fsproj;..\*\*.csproj" />
     <!-- TestFSharpPureCases builds this project. -->
     <FootprintInput Include="..\WoofWare.PawPrint.Test.FSharpPureCases" />
+    <!-- TestConsumerCases builds this project. -->
+    <FootprintInput Include="..\WoofWare.PawPrint.Test.ConsumerCases" />
   </ItemGroup>
 
   <ItemGroup>
