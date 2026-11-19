@@ -3091,7 +3091,7 @@ public struct S2<T> : IC<T[]> { }
         | Ok interfaces -> failwith $"the host answered %A{interfaces}"
 
         match pawPrint with
-        | Error message -> message |> shouldContainText "Int32"
+        | Error message -> message |> shouldContainText "a signature spells it"
         | Ok interfaces -> failwith $"PawPrint answered %A{interfaces}"
 
     /// An open receiver's answer is its definition's map, which cannot compare a row whose arguments

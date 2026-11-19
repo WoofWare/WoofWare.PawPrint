@@ -38,8 +38,17 @@ module RuntimeTypeInterfaces =
     /// interface with none, is the closed instantiation, and the definition applied to its own
     /// variables is the definition (`ReflectedTypeTarget.instantiateTargets`).
     ///
-    /// The failure is the definition map's. That map refuses some malformed InterfaceImpl rows and
-    /// extends clauses, but not every extends clause CoreCLR refuses (#2336).
+    /// Once the definition's map is built, the receiver's base chain is loaded, as CoreCLR loads a
+    /// type's parent before the type, whether or not the parent adds an entry. Then every
+    /// InterfaceImpl row the map read is loaded as it is spelled, in the order read, as
+    /// `interfaceMapOf` loads them for a closed type, whether or not the row adds an entry; and then
+    /// each entry is converted. The map comes first because it checks each extends clause's shape and
+    /// the variables it names, which loading the chain would otherwise stop on.
+    ///
+    /// The `Error` is the definition map's refusal. That map refuses some malformed InterfaceImpl rows
+    /// and extends clauses, but not every extends clause CoreCLR refuses (#2336). A type that the
+    /// base chain, a row or an entry names and that does not load stops the run, as
+    /// `reflectedTypeTarget` and `resolveBaseRuntimeTypeHandleTarget` stop it.
     let internal ofInstantiation
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -74,6 +83,23 @@ module RuntimeTypeInterfaces =
         match map with
         | Error failure -> state, Error failure
         | Ok map ->
+
+        let state, receiver =
+            ReflectedTypeTarget.instantiateTargets
+                loggerFactory
+                baseClassTypes
+                operation
+                state
+                definition
+                (List.ofSeq arguments)
+
+        let rec loadBaseChain (state : IlMachineState) (target : RuntimeTypeHandleTarget) : IlMachineState =
+            match IlMachineState.resolveBaseRuntimeTypeHandleTarget loggerFactory baseClassTypes state target with
+            | state, None -> state
+            | state, Some parent -> loadBaseChain state parent
+
+        let state = loadBaseChain state receiver
+
 
         let ownerDescription =
             $"an interface-map entry of %s{typeInfo.Namespace}.%s{typeInfo.Name}"
@@ -154,6 +180,10 @@ module RuntimeTypeInterfaces =
                 let targets = targets |> List.rev |> ImmutableArray.CreateRange
                 converted.[context] <- targets
                 state, targets
+
+        let state =
+            (state, map.Rows)
+            ||> List.fold (fun state row -> convertArgument state row.Spelling |> fst)
 
         let state, targets =
             ((state, []), map.Entries)
