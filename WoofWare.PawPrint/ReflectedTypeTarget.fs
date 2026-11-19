@@ -100,9 +100,11 @@ module ReflectedTypeTarget =
             state, RuntimeTypeHandleTarget.openConstructed definition arguments
         else
 
-        // The definition's kind is read off its base chain, which may run into an assembly nothing has
-        // loaded yet; load the chain first, as concretisation does.
-        let typeSystem, chain =
+        // The definition spelled over its own variables (bare, if it has none), its base chain loaded
+        // first, since its kind is read off that chain, which may run into an assembly nothing has
+        // loaded yet. Closed under the arguments' handles, so a handle is never re-spelled as the type
+        // it names, whose spelling can be exponentially larger than the handles that share its parts.
+        let typeSystem, spelling =
             TypeSystemState.lookupTypeDefn
                 loggerFactory
                 state.DotnetRuntimeDirs
@@ -111,26 +113,8 @@ module ReflectedTypeTarget =
                 assembly
                 definition.TypeDefinition.Get
 
-        BindingStop.bound chain |> ignore<TypeDefn>
+        let spelling = BindingStop.bound spelling
         let state = state.WithTypeSystem typeSystem
-
-        let definitionDefn =
-            TypeDefn.FromDefinition (
-                definition,
-                LoadedTypeInfo.signatureTypeKind baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
-            )
-
-        // The definition over its own variables, closed under the arguments' handles: a handle is
-        // never re-spelled as the type it names, whose spelling can be exponentially larger than the
-        // handles that share its parts. A definition with no variables is the type its TypeDef names.
-        let spelling =
-            if arguments.IsEmpty then
-                definitionDefn
-            else
-                TypeDefn.GenericInstantiation (
-                    definitionDefn,
-                    ImmutableArray.CreateRange (List.init arguments.Length TypeDefn.GenericTypeParameter)
-                )
 
         let state, handle =
             IlMachineTypeResolution.concretizeType
