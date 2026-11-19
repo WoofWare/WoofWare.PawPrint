@@ -1,9 +1,9 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: decided (see "Decisions"); the first three of five pull requests are built: the closed order (#1318, "As built
+Status: decided (see "Decisions"); the first four of five pull requests are built: the closed order (#1318, "As built
 (PR 1)", merged as #2322), the definition-level interface map ("As built (PR 2)", merged as #2337, on top of #2331,
-which shares the substitution comparison's work) and open receivers (#2309, "As built (PR 3)"); the other two are not
-started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
+which shares the substitution comparison's work), open receivers (#2309, "As built (PR 3)", merged as #2344) and the
+name of an open construction (#2315, "As built (PR 4)"); the `dynamic` guest is not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
 with a throwaway handler described under "PawPrint with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
@@ -2208,3 +2208,74 @@ run, like the other failures of the conversion, and not CoreCLR's `TypeLoadExcep
 
 No test pins the two remaining shapes as answered. A test that asserts an answer the host does not give would have to
 be edited by the fix, and the issue carries the reproduction instead.
+
+### As built (PR 4)
+
+The name of an open construction, closing #2315. The interpreter and tests; nothing is added to or removed from a
+published package's public surface.
+
+**Commits.**
+
+1. *GetUtf8NameInternal's name is a function of the target, callable outside a guest*: the handler's match moves,
+   unchanged, into `NativeRuntimeTypeFCall.utf8Name` (internal), so that the tests can call what the handler calls.
+2. *Tests: GetUtf8NameInternal names an open construction by its definition*: tests alone, with the red run in the
+   message (below).
+3. *GetUtf8NameInternal names an open construction by its definition*: the change.
+4. *Test: GetInterface by name finds a nested generic interface over a variable*, added when a mutant survived the
+   guest.
+5. This section.
+
+**The change.** Decision 6 settled it, and nothing was left open: CoreCLR's `RuntimeTypeHandle::GetUtf8Name` reads the
+TypeDef row `pMT->GetCl()` names, which is the generic definition's for every instantiation. The `OpenConstructed`
+arm now shares the bare definition's arm, which reads the definition's TypeDef `Name`, arity suffix included. Every
+other shape is as it was: a closed type reads its `TypeInfo`, and arrays, TypeDescs and variables still fail, since the
+managed wrapper throws `ArgumentException` for them before the FCall. The definition arm's note that no test reaches
+it is gone: `List<>` over `IList<>`'s own `T` reaches it through `GetInterface`, and `IList<>`'s `T[]` through
+`GetInterfaces`.
+
+**Where the routes go next.** Nowhere: both of #2315's routes now reach real .NET's answer, with no further stop.
+After the name, `AddSpecialInterface` asks `IsAssignableFrom` and `GetInterfaces` of the open `IList<T>`, and
+`GetInterface(name)` compares the namespace; each already answered.
+
+**Tests** (default suite):
+
+- `TestGetInterfacesOrder`'s `compareReceiver` now also names, for every receiver of every corpus (CoreLib's closed
+  types, its definitions and the substitution law's instantiations, the generated hierarchies, the shapes C#
+  refuses, the deep chain and the modified TypeSpecs), each type managed code names when it looks an interface up by
+  name: every entry of the QCall's answer, and an SZ array's five appended generic interfaces. The oracle is the
+  host's own `RuntimeTypeHandle.GetUtf8Name`, reached by reflection, over the same image.
+- The two refusal tests that PR 3 left pinning the stop now expect PawPrint to agree with the real runtime: the
+  eleven interfaces of `List<>`'s `T[]`, and `typeof(List<>).GetInterface("IList`1")`.
+
+**Guest.** `sourcesPure/TypeGetInterfaceByNameOpenGeneric.cs`, 21 checks, each by reference against an expectation
+built from `typeof` and `MakeGenericType`: `typeof(List<>).GetInterface("IList`1")` against the map's first entry and
+against `IList<>` over `List<>`'s `T`; the namespace-qualified name and a wrong namespace; misses (``IList`2``,
+`IEnumerable<T>`) and the non-generic `IList`; a user definition's open and closed rows; `Mixed<>`'s two ``IA`1``
+entries, one closed and one open, which are ambiguous; a nested receiver and a nested interface, each named without
+its encloser; an open-construction receiver (`List<K>`); `List<>` over `IList<>`'s own `T`, whose entry is
+`typeof(IList<>)`; and the eleven interfaces of arrays over `List<>`'s `T`, over `List<K>`, over a method's `TM` and
+over `IList<>`'s own `T`, plus a by-name lookup on one. It exits 0 on real .NET 10.0.14 and 11.0.0-rc.3, and each of
+22 perturbed expectations exits with its own check's number on both. Under PawPrint it passes on each runtime's
+CoreLib.
+
+**Red** (commit 2, on commit 1). `TestGetInterfacesOrder`: 6 of 67 failed (the shapes, CoreLib definitions with 128
+disagreements, the generated hierarchies, CoreLib instantiations with 233, and both converted tests), every one at
+"TODO: open constructed types are not handled"; no name PawPrint did give differed from the host's. The guest stopped
+at the same `TODO`, in `RuntimeTypeHandle.GetUtf8NameInternal`.
+
+**Mutants.** Each replaced the definition arm's last line exactly; the test project was built and two selections run:
+`TestGetInterfacesOrder` (67 tests), and the pure guests `TypeGetInterface*`, `ArrayGetInterfaces*` and
+`RuntimeTypeGetInterface*` (16). The file was restored after each.
+
+| mutant | killed by |
+|---|---|
+| an open construction named without its arity suffix | shapes, CoreLib definitions and instantiations, generated, the converted `GetInterface` test; guest check 1 |
+| a definition named without its arity suffix | CoreLib definitions (`List<>` over `IList<>`'s `T`); guest check 14 |
+| an open construction named with its namespace | CoreLib definitions and instantiations, the converted `GetInterface` test; guest check 1 |
+| a nested open construction named by its declaring type | CoreLib definitions and instantiations; guest check 21. Before commit 4 the guest survived it, its only nested definition being a receiver |
+| an open construction named with its argument count (`IList`1[1]`) | shapes, CoreLib definitions and instantiations, generated, the converted `GetInterface` test; guest check 1 |
+
+**Suites**, run at commit 4 on `0888233c4` (#2344) after a whole-solution build, the reference assemblies deleted and
+the solution built again, each suite its own invocation on a .NET 10 host: default 5,982 (5,943 passed, 39 skipped);
+`Guest` 234 passed (733 s); `GuestSolo` 2 passed (444 s); `GuestPure` 1,210 passed (565 s); `GuestImpure` 305 passed
+(307 s).
