@@ -981,7 +981,7 @@ module TestDepsJson =
         Gen.frequency
             [
                 3, Gen.constant doc
-                1,
+                3,
                 pick
                     (List.indexed doc.Libraries)
                     (fun (i, _) ->
@@ -1430,7 +1430,7 @@ module TestDepsJson =
         let thin =
             everyLabel
             |> List.map (fun label -> label, coverage.Count label)
-            |> List.filter (fun (_, count) -> count < 20)
+            |> List.filter (fun (_, count) -> count < 30)
 
         thin |> shouldBe []
 
