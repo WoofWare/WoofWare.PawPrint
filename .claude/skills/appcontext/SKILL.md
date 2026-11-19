@@ -16,5 +16,7 @@ The design has three properties:
 
 What we seed is *only* `configProperties`. A real host also populates `TRUSTED_PLATFORM_ASSEMBLIES`, `APP_CONTEXT_BASE_DIRECTORY` and seven more from deps resolution and its filesystem layout, which PawPrint has neither of; that gap is recorded in [docs/divergences.md](../../../docs/divergences.md). Do not be tempted to close it by synthesising plausible values.
 
+A property named exactly `APP_PATHS` is refused, from a runtimeconfig (`RuntimeConfig.combine`) and from a hand-built `GuestConfig` (at the start of every run). CoreCLR reads it into its binder as application paths, which PawPrint's binder does not model (`AppContextProperties.unreproducibleReason`).
+
 Values that are reals, arrays or objects are *refused* rather than approximated: `hostpolicy` renders them with rapidjson's `Writer` (Grisu2 plus `dtoa.h`'s `Prettify`, so `1e2` becomes `100.0`), which PawPrint does not reproduce. Both files are in the pinned runtime source under `$DOTNET_RUNTIME_SRC_NET10/src/native/`.
 
