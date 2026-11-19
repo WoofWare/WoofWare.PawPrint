@@ -212,6 +212,8 @@ module TestDepsJson =
 
     type private DocSpec =
         {
+            /// Whose hostpolicy reads the document.
+            Runtime : EmulatedRuntime
             Mode : DepsJsonMode
             TargetName : string
             RuntimeTargetAsObject : bool
@@ -478,7 +480,19 @@ module TestDepsJson =
 
     let private member' (name : string) : DepsJsonPathSegment = DepsJsonPathSegment.Member name
 
-    let private expected (doc : DocSpec) : Result<(DepsEntry * bool * string) list, DepsJsonError> =
+    /// The packages for which `has_package` holds: those with an asset-type member, and, when
+    /// reading `runtimeTargets`, those with RID-specific assets for a listed RID.
+    let private expectedPackages (doc : DocSpec) : Set<string> =
+        doc.Packages
+        |> List.filter (fun p ->
+            not p.Assets.IsEmpty
+            || [ DepsAssetType.Runtime ; DepsAssetType.Resources ; DepsAssetType.Native ]
+               |> List.exists (fun t -> (ridChoice doc.Mode p t).IsSome)
+        )
+        |> List.map packageKey
+        |> Set.ofList
+
+    let private expected (doc : DocSpec) : Result<(DepsEntry * bool * string) list * Set<string>, DepsJsonError> =
         let fd = isFrameworkDependent doc.Mode
 
         let packagePath (p : PackageSpec) : DepsJsonPathSegment list =
@@ -530,16 +544,19 @@ module TestDepsJson =
 
                         match l.Value with
                         | LibraryValue.Bad bad ->
-                            match bad with
-                            | BadLibrary.NotAnObject -> DepsJsonError.WrongKind (path, DepsJsonKind.Object)
-                            | BadLibrary.NoSha512 -> DepsJsonError.MissingMember (path, "sha512")
-                            | BadLibrary.Sha512NotAString ->
+                            match bad, doc.Runtime with
+                            // .NET 11's hostpolicy does not read `sha512`.
+                            | BadLibrary.NoSha512, EmulatedRuntime.Net11
+                            | BadLibrary.Sha512NotAString, EmulatedRuntime.Net11 -> ()
+                            | BadLibrary.NotAnObject, _ -> DepsJsonError.WrongKind (path, DepsJsonKind.Object)
+                            | BadLibrary.NoSha512, EmulatedRuntime.Net10 -> DepsJsonError.MissingMember (path, "sha512")
+                            | BadLibrary.Sha512NotAString, EmulatedRuntime.Net10 ->
                                 DepsJsonError.WrongKind (path @ [ member' "sha512" ], DepsJsonKind.String)
-                            | BadLibrary.NoServiceable -> DepsJsonError.MissingMember (path, "serviceable")
-                            | BadLibrary.ServiceableNotABool ->
+                            | BadLibrary.NoServiceable, _ -> DepsJsonError.MissingMember (path, "serviceable")
+                            | BadLibrary.ServiceableNotABool, _ ->
                                 DepsJsonError.WrongKind (path @ [ member' "serviceable" ], DepsJsonKind.Bool)
-                            | BadLibrary.NoType -> DepsJsonError.MissingMember (path, "type")
-                            | BadLibrary.TypeNotAString ->
+                            | BadLibrary.NoType, _ -> DepsJsonError.MissingMember (path, "type")
+                            | BadLibrary.TypeNotAString, _ ->
                                 DepsJsonError.WrongKind (path @ [ member' "type" ], DepsJsonKind.String)
                         | LibraryValue.Proper _ -> ()
                         | LibraryValue.Junk _ -> failwith "model error: junk library value for a package the host reads"
@@ -558,6 +575,9 @@ module TestDepsJson =
                     let libType =
                         match l.Value with
                         | LibraryValue.Proper (_, t, _, _) -> t
+                        // Rendered with type `package`; only .NET 11 gets this far with them.
+                        | LibraryValue.Bad BadLibrary.NoSha512
+                        | LibraryValue.Bad BadLibrary.Sha512NotAString -> DepsLibraryType.Other "package"
                         | v -> failwith $"model error: library value %A{v} survived the fault check"
 
                     let name, version = keyParts l.Name l.Version
@@ -592,7 +612,7 @@ module TestDepsJson =
                             yield entry, placeholder, expectedDirRelativePath libType t f
                 | _ -> ()
         ]
-        |> Ok
+        |> fun entries -> Ok (entries, expectedPackages doc)
 
     // ---------------------------------------------------------------------------------------
     // Generators.
@@ -821,6 +841,8 @@ module TestDepsJson =
 
     let private genDoc : Gen<DocSpec> =
         gen {
+            let! runtime = Gen.elements [ EmulatedRuntime.Net10 ; EmulatedRuntime.Net11 ]
+
             let! mode =
                 Gen.frequency
                     [
@@ -900,6 +922,7 @@ module TestDepsJson =
 
             return
                 {
+                    Runtime = runtime
                     Mode = mode
                     TargetName = targetName
                     RuntimeTargetAsObject = asObject
@@ -1138,8 +1161,18 @@ module TestDepsJson =
         | EscapedEverything
         | Decoy
         | EntryCount of atLeastFive : bool
+        | Runtime of EmulatedRuntime
+        /// .NET 11 reads a library whose `sha512` is missing or not a string.
+        | Sha512FaultOnNet11
+        /// A package whose library the host reads, but for which `has_package` is false: it has
+        /// only RID-specific assets, none for a listed RID.
+        | ReadButNotAPackage
 
-    let private labels (doc : DocSpec) (result : Result<(DepsEntry * bool * string) list, DepsJsonError>) : Label list =
+    let private labels
+        (doc : DocSpec)
+        (result : Result<(DepsEntry * bool * string) list * Set<string>, DepsJsonError>)
+        : Label list
+        =
         let fd = isFrameworkDependent doc.Mode
 
         let allFiles =
@@ -1187,6 +1220,7 @@ module TestDepsJson =
 
         [
             if fd then Label.FrameworkDependent else Label.SelfContained
+            Label.Runtime doc.Runtime
 
             match result with
             | Error e ->
@@ -1198,9 +1232,21 @@ module TestDepsJson =
                     | other -> $"unexpected: %A{other}"
 
                 Label.Refused kind
-            | Ok entries ->
+            | Ok (entries, packages) ->
                 if hasFault then
                     Label.FaultNotRead
+
+                for p in doc.Packages do
+                    if packageExists doc.Mode p && not (packages.Contains (packageKey p)) then
+                        Label.ReadButNotAPackage
+
+                if doc.Runtime = EmulatedRuntime.Net11 then
+                    for l in doc.Libraries do
+                        match l.Value, mainPackage doc l with
+                        | LibraryValue.Bad BadLibrary.NoSha512, Some p
+                        | LibraryValue.Bad BadLibrary.Sha512NotAString, Some p when packageExists doc.Mode p ->
+                            Label.Sha512FaultOnNet11
+                        | _ -> ()
 
                 Label.EntryCount (entries.Length >= 5)
 
@@ -1405,15 +1451,24 @@ module TestDepsJson =
             Label.Decoy
             Label.EntryCount true
             Label.EntryCount false
+            Label.Runtime EmulatedRuntime.Net10
+            Label.Runtime EmulatedRuntime.Net11
+            Label.Sha512FaultOnNet11
+            Label.ReadButNotAPackage
         ]
 
     let private parseWithClassifiers
+        (runtime : EmulatedRuntime)
         (mode : DepsJsonMode)
         (contents : byte[])
-        : Result<(DepsEntry * bool * string) list, DepsJsonError>
+        : Result<(DepsEntry * bool * string) list * Set<string>, DepsJsonError>
         =
-        DepsJson.parse mode contents
-        |> Result.map (List.map (fun entry -> entry, DepsEntry.isPlaceholder entry, DepsEntry.dirRelativePath entry))
+        DepsJson.parse runtime mode contents
+        |> Result.map (fun manifest ->
+            manifest.Entries
+            |> List.map (fun entry -> entry, DepsEntry.isPlaceholder entry, DepsEntry.dirRelativePath entry),
+            manifest.Packages
+        )
 
     [<Test>]
     let ``A generated deps.json parses to the entries its model says the host reads`` () =
@@ -1421,7 +1476,7 @@ module TestDepsJson =
             let expected = expected doc
             labels doc expected |> List.iter cover
 
-            parseWithClassifiers doc.Mode (renderDoc doc) |> shouldBe expected
+            parseWithClassifiers doc.Runtime doc.Mode (renderDoc doc) |> shouldBe expected
 
         let coverage =
             CoverageSample.check
@@ -1454,8 +1509,15 @@ module TestDepsJson =
     let private onePackage (assets : string) : string =
         document $"\"P/1.0.0\": {{ %s{assets} }}" (library "P/1.0.0")
 
+    /// Parses under both runtimes' rules, which agree on everything but `sha512`.
+    let private parseBoth (mode : DepsJsonMode) (contents : byte[]) : Result<DepsManifest, DepsJsonError> =
+        let net10 = DepsJson.parse EmulatedRuntime.Net10 mode contents
+        DepsJson.parse EmulatedRuntime.Net11 mode contents |> shouldBe net10
+        net10
+
     let private parseText (mode : DepsJsonMode) (text : string) : Result<DepsEntry list, DepsJsonError> =
-        DepsJson.parse mode (Encoding.UTF8.GetBytes text)
+        parseBoth mode (Encoding.UTF8.GetBytes text)
+        |> Result.map (fun manifest -> manifest.Entries)
 
     let private m (name : string) : DepsJsonPathSegment = DepsJsonPathSegment.Member name
 
@@ -1466,7 +1528,7 @@ module TestDepsJson =
         parseText mode text |> shouldBe (Error expected)
 
     let private notStrict (mode : DepsJsonMode) (bytes : byte[]) : unit =
-        match DepsJson.parse mode bytes with
+        match parseBoth mode bytes with
         | Error (DepsJsonError.NotStrictJson _) -> ()
         | other -> failwith $"expected NotStrictJson, got %A{other}"
 
@@ -1502,14 +1564,15 @@ module TestDepsJson =
         let bytes =
             Array.append bytes.[.. index - 1] (Array.append [| 0xBFuy |] bytes.[index + 2 ..])
 
-        DepsJson.parse fd bytes |> shouldBe (Error DepsJsonError.InvalidUtf8)
+        parseBoth fd bytes |> shouldBe (Error DepsJsonError.InvalidUtf8)
 
     [<Test>]
     let ``A byte order mark is skipped, once`` () =
         let text = Encoding.UTF8.GetBytes (onePackage "\"runtime\": { \"lib/P.dll\": {} }")
         let bom = [| 0xEFuy ; 0xBBuy ; 0xBFuy |]
 
-        DepsJson.parse fd (Array.append bom text)
+        parseBoth fd (Array.append bom text)
+        |> Result.map (fun manifest -> manifest.Entries)
         |> shouldBe (Ok [ entry "lib/P.dll" "P" ])
 
         notStrict fd (Array.concat [ bom ; bom ; text ])
@@ -1727,16 +1790,6 @@ module TestDepsJson =
 
             refuses
                 mode
-                (withLibrary "{ \"type\": \"package\", \"serviceable\": false }")
-                (DepsJsonError.MissingMember (libraryPath, "sha512"))
-
-            refuses
-                mode
-                (withLibrary "{ \"type\": \"package\", \"serviceable\": false, \"sha512\": 1 }")
-                (DepsJsonError.WrongKind (libraryPath @ [ m "sha512" ], DepsJsonKind.String))
-
-            refuses
-                mode
                 (withLibrary "{ \"type\": \"package\", \"sha512\": \"\" }")
                 (DepsJsonError.MissingMember (libraryPath, "serviceable"))
 
@@ -1939,6 +1992,66 @@ module TestDepsJson =
 
         withType "Package" |> shouldBe (Ok [ DepsLibraryType.Other "Package" ])
 
+    [<Test>]
+    let ``sha512 is read only by .NET 10`` () =
+        let good = onePackage "\"runtime\": { \"lib/P.dll\": {} }"
+        let goodLibrary = library "P/1.0.0"
+        let libraryPath = [ m "libraries" ; m "P/1.0.0" ]
+
+        let withLibrary (value : string) : byte[] =
+            Encoding.UTF8.GetBytes (good.Replace (goodLibrary, $"\"P/1.0.0\": %s{value}"))
+
+        let missing = withLibrary "{ \"type\": \"package\", \"serviceable\": false }"
+
+        let notAString =
+            withLibrary "{ \"type\": \"package\", \"serviceable\": false, \"sha512\": 1 }"
+
+        for mode in [ fd ; DepsJsonMode.SelfContained ] do
+            DepsJson.parse EmulatedRuntime.Net10 mode missing
+            |> shouldBe (Error (DepsJsonError.MissingMember (libraryPath, "sha512")))
+
+            DepsJson.parse EmulatedRuntime.Net10 mode notAString
+            |> shouldBe (Error (DepsJsonError.WrongKind (libraryPath @ [ m "sha512" ], DepsJsonKind.String)))
+
+            for bytes in [ missing ; notAString ] do
+                DepsJson.parse EmulatedRuntime.Net11 mode bytes
+                |> Result.map (fun manifest -> manifest.Entries)
+                |> shouldBe (Ok [ entry "lib/P.dll" "P" ])
+
+    [<Test>]
+    let ``Packages are those for which has_package holds`` () =
+        let text =
+            document
+                "\"P\": { \"runtime\": { \"P.dll\": {} } }, \"Q/1.0\": { \"runtime\": {} }, \"R/1.0\": { \"runtimeTargets\": { \"r/R.dll\": { \"assetType\": \"runtime\", \"rid\": \"linux-x64\" } } }, \"S/1.0\": { \"runtimeTargets\": { \"r/S.dll\": { \"assetType\": \"runtime\", \"rid\": \"osx\" } } }, \"T/1.0\": { \"dependencies\": {} }"
+                (library "P" + ", " + library "R/1.0")
+
+        let parsed (mode : DepsJsonMode) : Result<DepsManifest, DepsJsonError> =
+            parseBoth mode (Encoding.UTF8.GetBytes text)
+
+        parsed fd
+        |> Result.map (fun manifest -> manifest.Packages)
+        |> shouldBe (Ok (Set.ofList [ "P" ; "Q/1.0" ; "S/1.0" ]))
+
+        parsed DepsJsonMode.SelfContained
+        |> Result.map (fun manifest -> manifest.Packages)
+        |> shouldBe (Ok (Set.ofList [ "P" ; "Q/1.0" ]))
+
+        // The entry of a library keyed without a slash names the package `P/P`, which is not
+        // there; `R/1.0` is read but contributes nothing.
+        match parsed fd with
+        | Ok manifest ->
+            manifest.Entries
+            |> List.map (fun e -> e.RelativePath, DepsManifest.hasPackage manifest e.LibraryName e.LibraryVersion)
+            |> shouldBe [ "P.dll", false ]
+        | Error e -> failwith $"%A{e}"
+
+    [<Test>]
+    let ``A document that is not strict JSON is refused with where the reader stopped`` () =
+        // A position rather than System.Text.Json's message, whose text depends on the process's
+        // resource settings.
+        parseBoth fd (Encoding.UTF8.GetBytes "{\n  BAD }")
+        |> shouldBe (Error (DepsJsonError.NotStrictJson (Some 1L, Some 2L)))
+
     // ---------------------------------------------------------------------------------------
     // The real frameworks' files.
 
@@ -1980,13 +2093,21 @@ module TestDepsJson =
             let version = dir |> Path.TrimEndingDirectorySeparator |> Path.GetFileName
             let bytes = File.ReadAllBytes (Path.Combine (dir, name + ".deps.json"))
 
-            let entries =
-                match DepsJson.parse DepsJsonMode.SelfContained bytes with
-                | Ok entries -> entries
+            let manifest =
+                match DepsJson.parse runtime DepsJsonMode.SelfContained bytes with
+                | Ok manifest -> manifest
                 | Error e -> failwith $"%s{dir}: %A{e}"
 
+            let entries = manifest.Entries
+
             // No framework lists RID-specific assets, so the two modes agree.
-            DepsJson.parse fd bytes |> shouldBe (Ok entries)
+            DepsJson.parse runtime fd bytes |> shouldBe (Ok manifest)
+
+            // Every package has entries, so each is the key of some entry's library.
+            entries
+            |> List.map (fun e -> e.LibraryName + "/" + e.LibraryVersion)
+            |> Set.ofList
+            |> shouldBe manifest.Packages
 
             let runtimeEntries =
                 entries |> List.filter (fun e -> e.AssetType = DepsAssetType.Runtime)
