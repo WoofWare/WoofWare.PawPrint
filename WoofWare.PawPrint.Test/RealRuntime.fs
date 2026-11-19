@@ -1033,9 +1033,12 @@ module RealRuntime =
     /// kernel seeds, so a caller comparing with PawPrint names
     /// `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` itself; CoreLib reads that variable in preference to
     /// the `System.Globalization.Invariant` property. Entries the overlay cannot express are
-    /// refused before any process starts; see `oracleEnvironment`. No entry moves the guest off
-    /// the framework under test: roll-forward is disabled on the host's command line, which the
-    /// host prefers to `DOTNET_ROLL_FORWARD`.
+    /// refused before any process starts; see `oracleEnvironment`. Roll-forward is disabled on the
+    /// host's command line, which the host prefers to the environment, so `DOTNET_ROLL_FORWARD`,
+    /// from the entries or the test host, cannot move the guest to another framework version. The
+    /// oracle does not police any other variable: an entry naming a host or runtime variable such
+    /// as `CORE_SERVICING`, `TMPDIR` or a locale variable can change where the runtime's files come
+    /// from, where it writes files of its own, and how the guest's output is encoded (issue #2334).
     ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.

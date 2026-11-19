@@ -1224,7 +1224,9 @@ Two changes beyond decision 1, each from Codex's first review and each committed
 * `dotnet exec` is given `--roll-forward Disable`. The host prefers `DOTNET_ROLL_FORWARD`, whether from the entries
   or the test host, to the runtimeconfig's `rollForward`. With `DOTNET_ROLL_FORWARD=LatestMajor` and
   `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`, the .NET 10 leg ran the guest on .NET 11. The host prefers the command
-  line to the environment.
+  line to the environment. This pins only the framework version the host selects. Other variables given as entries
+  can still change which files the runtime loads (see `CORE_SERVICING` below), and the docstring says the oracle
+  does not police them.
 
 **The tests**, in the default suite:
 
@@ -1252,9 +1254,18 @@ amendment, and the choice is PR 3's to make.
   framework under test gives `NormalExit 150`. This is the general gap of decision 2, which declined to special-case
   exit codes. The inherited case is #2334. A list of variables to refuse would be option B's unmeasured list.
 * An entry such as `LC_ALL=en_US.ISO-8859-1` changes the guest's console encoding, but `runCapturing` decodes as
-  UTF-8, so non-ASCII output is lost. An inherited locale does the same, which belongs to #2334.
+  UTF-8, so non-ASCII output is lost (stdout and stderr alike). Codex raised it again in its fifth round, as an
+  entry the caller writes rather than an inherited variable. An inherited locale does the same; both belong to
+  #2334.
 * On Windows, `oracleEnvironment` accepts two names differing only in case, which `ProcessStartInfo.Environment`
-  merges. This predates PR 2b in every oracle entry, and no CI job runs on Windows.
+  merges. This predates PR 2b in every oracle entry, and no CI job runs on Windows. Codex's fifth round added that
+  the property test's generator can draw such a pair, so on Windows that test would fail depending on its seed.
+* An entry `CORE_SERVICING` naming a servicing package backed by another runtime replaces the framework's files
+  despite `--roll-forward Disable`. Codex measured a guest on the .NET 10 leg reporting `Environment.Version`
+  11.0.0 and the .NET 11 CoreLib. This is #2334.
+* An entry `TMPDIR=./` makes the guest's own runtime create its `clr-debug-pipe-*` files in the assembly's
+  directory, where the guest sees them while it runs, and which a listing after the run misses. `reachesScratch`
+  checks only the test host's temp directory. This is #2334.
 
 **Measured.**
 
