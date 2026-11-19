@@ -1763,6 +1763,10 @@ the interpreter's package.
 16. *Tests: an open receiver's base chain and closed arguments, from Codex's second review*: tests alone; two red.
 17. *An open base is named by its definition; instantiateTargets loads the chain it reads*: the fix.
 18. This section, after Codex's second review.
+19. *Test: a function pointer returning modified void in an open receiver's entry*, from Codex's third review; red.
+20. *A function pointer reflected open returns nothing when its void is modified*: the fix.
+21. *instantiateTargets closes lookupTypeDefn's spelling; each converted context keeps its binding*: two P3s.
+22. This section, after Codex's third review.
 
 **The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
 variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
@@ -1890,6 +1894,7 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
 | (after commit 14) the arity check moved back below the open branch | both wrong-arity tests |
 | (after commit 17) an open base described by its whole target | the base-chain cost test |
 | (after commit 17) `instantiateTargets` not loading the chain it reads | the cross-assembly guest |
+| (after commit 20) the open walk's function pointer keeping a modified `void` as a returned type | the modified-void guest |
 
 **Codex's first review (on commit 7).** It ran the focused tests and both guests, and found:
 
@@ -1963,6 +1968,20 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
   absent at run time, CoreCLR refuses to load `C<>` and PawPrint answers `I<D<T>>`: the open branch builds `D<T>`
   without loading `D`. This is the load of an open construction's definition, which #2340 is about. It is recorded
   there as a comment and not fixed here, as the decisions after the first review direct.
+
+**Codex's third review (on commit 18).** It found:
+
+- [P2] *A second `Type` for a function pointer whose `void` return is modified.* For
+  `G<T, U> : I<delegate* unmanaged[SuppressGCTransition]<T, void>[]>`, the entry of `G<int, U>` is read over a
+  context with an open argument, so through the open walk, whose `FunctionPointer` arm read the modified `void` as
+  returning `System.Void`. Concretisation reads it as returning nothing. Real .NET 10 and 11 hand back the `typeof` of
+  the closed array as the entry's argument; PawPrint handed back another object. Fixed (commits 19 and 20): the rule
+  is now `TypeConcretization.runtimeReturnColumn` (internal), which `concretizeReturnColumn` and the open walk both
+  apply. The guest compares the argument, not the entry: PawPrint refuses the `ldtoken` of `I<...>` itself, since
+  it does not concretise an instantiation whose argument carries a custom modifier (an existing `TODO`).
+- [P3] *Use the spelling `lookupTypeDefn` returns*, rather than reading the kind off the chain again and spelling the
+  variables by hand; and [P3] *keep each converted context's binding* rather than rescanning it for every spelling
+  read in it. Both done (commit 21), with no change in what is answered.
 
 **A flaky assertion found on the way, not this pull request's.** One run of the selection failed `A diamond of two
 chains passing Pair<A, A> on agrees with the host, in work linear in its depth` (PR 2's W2). It failed on the sketch
