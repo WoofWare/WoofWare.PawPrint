@@ -971,9 +971,15 @@ Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after t
   is under test. Each case:
   * fails when the pack directory holds no `Microsoft.NETCore.App.deps.json`;
   * checks that `runtimeTarget` is `.NETCoreApp,Version=v<major>.0/<rid>`, for the pack's RID;
-  * collects the runtime assets of that target (each library's `runtime` assets, and its `runtimeTargets` assets
-    of type `runtime`), and requires them to equal the set of `*.dll` files in the directory. Each set difference
-    is compared with the empty list, so a failure names the files.
+  * collects the runtime assets which the host reads, and requires them to equal the set of `*.dll` files in the
+    directory. Each set difference is compared with the empty list, so a failure names the files.
+
+  The host reads `Microsoft.NETCore.App`, the lowest framework, in self-contained mode (read:
+  `hostpolicy/deps_resolver.h:68-87`, `deps_format.cpp:541-555`). That mode takes, for each package which
+  `libraries` declares, the `runtime` assets of the runtime target, and reads no `runtimeTargets`. The test reads
+  the same. A unit case on a synthetic manifest pins this: an undeclared package's asset and a `runtimeTargets`
+  asset are not counted. Fact 3 above covers only the application's file; stages 2 and 3 need this rule for the
+  frameworks too.
 
   Outside the Nix devshell the cases are ignored, as the other pack tests are: only the devshell names the packs.
   `FrameworkUnderTest.requireFrameworkPackDirectoryOf flavour runtime` is new, so that a test can name any
@@ -988,7 +994,7 @@ Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after t
 
 The red run, before the flake change: all four cases failed with "`<pack>` holds no Microsoft.NETCore.App.deps.json".
 
-Mutants, each run against the four cases and each killing all four:
+Mutants, each run against the four pack cases and the unit case:
 
 | Mutant | How it failed |
 |---|---|
@@ -997,6 +1003,48 @@ Mutants, each run against the four cases and each killing all four:
 | The flake copies an extra DLL, `NotListed.dll` | present but unlisted: `NotListed.dll` |
 | The test's expectation gains `NotInThePack.dll` | present but unlisted: `NotInThePack.dll` |
 | The test swaps the two flavours' RIDs | the `runtimeTarget` check |
+| The test counts packages which `libraries` does not declare | the unit case: `C.dll` counted |
+| The test counts `runtimeTargets` assets | the unit case: `runtimes/rid/lib/net10.0/B.dll` counted |
 
-Suites on the .NET 10 host, each its own invocation: default 5990 (5951 passed, 39 skipped), `Guest` 250,
-`GuestSolo` 2, `GuestPure` 1210, `GuestImpure` 305, all passed.
+The first five kill the four pack cases; the last two kill the unit case.
+
+Suites on the .NET 10 host, each its own invocation, at `dca73fe83`: default 5990 (5951 passed, 39 skipped),
+`Guest` 250, `GuestSolo` 2, `GuestPure` 1210, `GuestImpure` 305, all passed.
+
+### Codex review
+
+**Round 1.** Twelve findings. One was about stage 1's code, and was fixed:
+
+* *The test counted assets the host does not read* (`runtimeTargets`, and packages `libraries` does not declare).
+  Fixed tests first, as above.
+
+The other eleven are about the plan's later stages. None changes stage 1, so none is acted on here. Each is
+recorded for the stage it concerns. Codex states that it measured several of them on .NET 10; none is
+re-measured here, so each is a claim for that stage to check before relying on it.
+
+* Stage 5: `assembliesFor` should include ASP.NET Core only for a guest whose oracle selects it. Codex reads
+  `RealRuntime.captureAssemblyInPlace` as naming only `Microsoft.NETCore.App`, and the .NET 10 ASP.NET Core
+  `deps.json` as listing `Microsoft.Extensions.DependencyInjection.Abstractions` 10.0.0.0, which would beat the
+  `di-version` publish's 9.0.0.0 while the oracle binds 9.0.0.0.
+* Stage 4b: an erased abbreviation keeps parameter types, not parameter names. Renaming `dotnetRuntimeDirs` to
+  `assemblies` breaks a C# caller that passes the argument by name. Keep the names until stage 5, or accept that
+  break.
+* Stage 3, fact 10: Codex says `resolve_tpa_list` replaces an entry only when the winner resolves to a different
+  path, and that a manifest listing one name twice in the application (versions 1, then 12) kept version 1 for
+  the comparison with the framework.
+* Stage 3, fact 14: Codex says a library of type `runtimepack` resolves an asset by its full relative path when
+  `localPath` is absent (`sub/Test.dll` became `<app>/sub/Test.dll`).
+* Stage 3, the TPA type: a path holding the path-list separator (`:` on Unix) cannot pass through the host's TPA
+  string. Codex says .NET 10 failed to start from a directory named `colon:dir`.
+* Stage 3, the metamorphic property "every output path lies in the directory of its manifest": a `localPath` of
+  `../common/X.dll` resolves outside it. Refuse such paths, or drop the property.
+* Decision 1, the entry-assembly rule: the refusal needs the entry image's metadata name, not its file name.
+* Stage 4a and 5: outside the Nix devshell there is no pack. `assembliesFor` must then use the installed
+  framework's own `deps.json` and the host's RID list, as `runtimeDirsFor` falls back today.
+* Stage 3, the self-contained real-host case: `RealRuntime` runs a guest with a generated framework-dependent
+  runtimeconfig, so it cannot exercise a self-contained publish. That case needs its own launch.
+* "The two pins agree on the rule": Codex says they differ outside the subset the plan accepts (`.ni.dll` in a
+  directory without `deps.json`; servicing probes). The claim should be limited to the accepted inputs.
+* The stage 3 mutants "frameworks processed before the application" and "no `deps.json`: listed files given the
+  framework's version" need witnesses whose winner changes: the equal-version tie row, and a strictly higher
+  local version.
