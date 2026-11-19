@@ -827,6 +827,16 @@ module internal HostPolicy =
                 | Some _ -> Ok (tpa, coreClrPath)
             )
             |> Result.bind (fun (tpa, coreClrPath) ->
+                // CoreCLR binds an entry assembly with a culture through the satellite
+                // directories under the resource roots.
+                match input.EntryAssemblyCulture with
+                | Some culture ->
+                    Error (
+                        HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.EntryAssemblyHasCulture culture)
+                    )
+                | None -> Ok (tpa, coreClrPath)
+            )
+            |> Result.bind (fun (tpa, coreClrPath) ->
                 // CoreCLR runs the TPA's file of the entry assembly's name, not the file it was
                 // given (measured on .NET 10 and 11).
                 let entryPath =
