@@ -1767,13 +1767,18 @@ the interpreter's package.
 20. *A function pointer reflected open returns nothing when its void is modified*: the fix.
 21. *instantiateTargets closes lookupTypeDefn's spelling; each converted context keeps its binding*: two P3s.
 22. This section, after Codex's third review.
+23. *carriesCustomModifier keeps its docstring*: commit 20 had put `runtimeReturnColumn` between that docstring and
+    its declaration; the docstring-attachment check reported it.
+24. *Test: an inherited row over a function pointer returning modified void*, from Codex's fourth review; red.
+25. *ofInstantiation reads a spelling in an Open environment even where every target is closed*: the fix.
+26. This section, after Codex's fourth review.
 
 **The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
 variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
 converted to targets, in order, duplicates kept (decision 4 (a)). A `Closed` argument stays. `Formal (definition, i)`
 is the `i`th argument, and a variable of any other owner fails loudly. A `Spelled` argument is `reflectedTypeTarget`
-of the spelling in its own assembly, in an environment of its inner context converted the same way: `Bound` when
-every converted argument is closed, `Open` otherwise. Each context the map shares is converted once, keyed on its
+of the spelling in its own assembly, in an `Open` environment of its inner context converted the same way, even where
+every converted argument is closed (commit 25 below). Each context the map shares is converted once, keyed on its
 array, as `interfaceMapOf` closes each once. A refused map is the function's `Error`.
 
 `ofReceiver` answers:
@@ -1887,7 +1892,8 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
 | walk: parents expanded before the row | sixteen default tests; twelve pure guests; the impure guest |
 | walk: duplicate check on interface identity alone | nine default tests; `TypeGetInterfaceMapTargets` and both order guests |
 | walk: the parent's map not rebased onto the extends clause | ten default tests; `TypeGetInterfaceMapTargets` and both order guests |
-| conversion: an environment never `Bound`, always `Open` | none: equivalent on metadata that loads. With every target closed, the walk gives each variable its closed target, each instantiation the same closed handle through `instantiateTargets`, and each array or pointer the closed shape through `composite`. The two differ only where a function pointer is a generic argument, which CoreCLR refuses to load. `Bound` is kept because it concretises a spelling in one step |
+| conversion: an environment never `Bound`, always `Open` | none, when this battery ran: equivalent on the tests then. Codex's fourth review found where the two differ, and commit 25 made `Open` the code; see the next row |
+| (after commit 25) an all-closed context read `Bound` again | the inherited modified-void guest |
 | walk: the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
 | (after commit 9) the receiver's base chain not loaded | the absent-base-argument test |
 | (after commit 9) rows that add no entry not converted | the re-declared-row test |
@@ -1982,6 +1988,24 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
 - [P3] *Use the spelling `lookupTypeDefn` returns*, rather than reading the kind off the chain again and spelling the
   variables by hand; and [P3] *keep each converted context's binding* rather than rescanning it for every spelling
   read in it. Both done (commit 21), with no change in what is answered.
+
+**Codex's fourth review (on commit 23).** It found:
+
+- [P2] *A row inherited through an interface read in an all-closed context stopped the run.* For `G<T, U> : J<T>`,
+  where `J<X> : I<delegate* unmanaged[SuppressGCTransition]<X, void>[]>`, the row from `J` is read in `J<int>`'s
+  context when `G<int, U>` is asked. Every argument there is closed, so the conversion took a `Bound` environment.
+  That made `reflectedTypeTarget` concretise the spelling whole, and concretisation refuses an instantiation whose
+  argument carries a custom modifier (an existing `TODO`). Real .NET 10 and 11 answer. Fixed (commits 24 and 25):
+  the conversion always reads in an `Open` environment, which builds the type from its parts. The "never `Bound`"
+  mutant, recorded as equivalent above, was therefore not equivalent.
+- [P2] *Function-pointer calling conventions are not normalised for identity.* When `B<T>` implements
+  `I<delegate* unmanaged[Cdecl]<T, void>[]>` and `G<T> : B<T>` declares it with `Stdcall`, real .NET 10's two entries
+  are one object (`NormalizeFnPtrCallingConvention`), and PawPrint's are two. Not fixed here. Concretising a function
+  pointer keeps the signature's calling-convention header as well (read, not measured), so this is a question of
+  function-pointer type identity throughout the interpreter, not of this feature. It needs an issue of its own.
+- [P3] *Reuse the rows' targets for the entries*, rather than converting each entry again. Declined: decision 4
+  converts entries, and the rows are converted only so that each is loaded. The repeated work is a constant factor,
+  every context being shared.
 
 **A flaky assertion found on the way, not this pull request's.** One run of the selection failed `A diamond of two
 chains passing Pair<A, A> on agrees with the host, in work linear in its depth` (PR 2's W2). It failed on the sketch
