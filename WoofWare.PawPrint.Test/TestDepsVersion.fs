@@ -1,6 +1,7 @@
 namespace WoofWare.PawPrint.Test
 
 open System
+open System.Globalization
 open System.Numerics
 open FsCheck
 open FsCheck.FSharp
@@ -51,7 +52,7 @@ module TestDepsVersion =
         elif str |> Seq.exists (fun c -> not ("0123456789".Contains c)) then
             None
         else
-            let value = BigInteger.Parse str
+            let value = BigInteger.Parse (str, CultureInfo.InvariantCulture)
 
             if value > BigInteger Int32.MaxValue then
                 raise OutOfRange
@@ -340,3 +341,23 @@ module TestDepsVersion =
         DepsVersion.compare (DepsVersion.MajorMinorBuildRevision (1, 2, 3, 4)) (DepsVersion.MajorMinorBuild (1, 2, 3))
         |> sign
         |> shouldEqual 1
+
+    [<Test>]
+    let ``DepsVersion.parse does not read the current culture`` () =
+        // The host's `try_stou` reads ASCII digits whatever the locale. A culture whose signs are
+        // digits makes a culture-sensitive number parser refuse them.
+        let culture = CultureInfo.InvariantCulture.Clone () :?> CultureInfo
+        culture.NumberFormat.NegativeSign <- "2"
+        culture.NumberFormat.PositiveSign <- "1"
+        let previous = CultureInfo.CurrentCulture
+        CultureInfo.CurrentCulture <- culture
+
+        try
+            DepsVersion.parse "2.1" |> shouldEqual (Ok (DepsVersion.MajorMinor (2, 1)))
+
+            DepsVersion.parse "12.21.2147483647.1"
+            |> shouldEqual (Ok (DepsVersion.MajorMinorBuildRevision (12, 21, Int32.MaxValue, 1)))
+
+            DepsVersion.parse "2.2147483648" |> shouldEqual (Error ())
+        finally
+            CultureInfo.CurrentCulture <- previous
