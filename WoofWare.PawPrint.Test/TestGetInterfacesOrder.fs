@@ -2013,12 +2013,12 @@ public struct S2<T> : IC<T[]> { }
 
     /// What the host and PawPrint answer for the non-generic type `receiver` of `sketches`: the host's
     /// `GetInterfaces()`, or what loading the type raised; PawPrint's interface map, each entry as the
-    /// host type it names over the same image; and the bytes PawPrint's call allocated on this thread,
-    /// the naming not included.
+    /// host type it names over the same image; the bytes PawPrint's call allocated on this thread; and
+    /// the bytes naming its entries allocated, each host type built once per handle.
     let private sketchOutcome
         (sketches : Sketch list)
         (receiver : string)
-        : Result<string[], exn> * Result<string list, TypeBindingFailure> * int64
+        : Result<Type[], exn> * Result<Type list, TypeBindingFailure> * int64 * int64
         =
         let image = sketchImage sketches
 
@@ -2035,7 +2035,7 @@ public struct S2<T> : IC<T[]> { }
 
             let hostAnswer =
                 try
-                    host.GetType(receiver, true).GetInterfaces () |> Array.map _.ToString() |> Ok
+                    host.GetType(receiver, true).GetInterfaces () |> Ok
                 with e ->
                     Error e
 
@@ -2066,8 +2066,20 @@ public struct S2<T> : IC<T[]> { }
                     handle
 
             let allocated = GC.GetAllocatedBytesForCurrentThread () - before
+            let namingBefore = GC.GetAllocatedBytesForCurrentThread ()
+
+            // A shared type such as `Pair<A, A>` names one handle many times; each is built once.
+            let built = Collections.Generic.Dictionary<ConcreteTypeHandle, Type> ()
 
             let rec hostTypeOf (handle : ConcreteTypeHandle) : Type =
+                match built.TryGetValue handle with
+                | true, ty -> ty
+                | false, _ ->
+                    let ty = buildHostType handle
+                    built.[handle] <- ty
+                    ty
+
+            and buildHostType (handle : ConcreteTypeHandle) : Type =
                 match handle with
                 | ConcreteTypeHandle.Concrete _ ->
                     let ty =
@@ -2098,20 +2110,23 @@ public struct S2<T> : IC<T[]> { }
 
             let named =
                 pawPrintAnswer
-                |> Result.map (List.map (fun entry -> (hostTypeOf entry.Interface).ToString ()))
+                |> Result.map (List.map (fun entry -> hostTypeOf entry.Interface))
 
-            hostAnswer, named, allocated
+            let namingAllocated = GC.GetAllocatedBytesForCurrentThread () - namingBefore
+            hostAnswer, named, allocated, namingAllocated
         finally
             context.Unload ()
 
-    /// The host's and PawPrint's answers agree, interface for interface, in order.
-    let private agreeWithHost
-        (host : Result<string[], exn>)
-        (pawPrint : Result<string list, TypeBindingFailure>)
-        : unit
-        =
+    /// The host's and PawPrint's answers agree, interface for interface, in order. Types are compared
+    /// as values, and named only to report a disagreement.
+    let private agreeWithHost (host : Result<Type[], exn>) (pawPrint : Result<Type list, TypeBindingFailure>) : unit =
         match host, pawPrint with
-        | Ok hostInterfaces, Ok interfaces -> interfaces |> shouldEqual (List.ofArray hostInterfaces)
+        | Ok hostInterfaces, Ok interfaces when interfaces = List.ofArray hostInterfaces -> ()
+        | Ok hostInterfaces, Ok interfaces ->
+            let render (types : Type seq) =
+                types |> Seq.map string |> String.concat ", "
+
+            failwith $"the host answered [%s{render hostInterfaces}] and PawPrint [%s{render interfaces}]"
         | other -> failwith $"the host and PawPrint answered %A{other}"
 
     /// The refusal of an interface hierarchy that reaches a definition whose load is already in
@@ -2160,18 +2175,21 @@ public struct S2<T> : IC<T[]> { }
     /// at most 32 times what an eight-deep one does: linear work gives about 2, exponential about 256.
     [<Test>]
     let ``A chain passing Pair<A, A> and Pair<A, B> on agrees with the host, in work linear in its depth`` () : unit =
-        let warm, _, _ = sketchOutcome (pairChain 2) "C"
+        let warm, _, _, _ = sketchOutcome (pairChain 2) "C"
         warm |> Result.isOk |> shouldEqual true
 
-        let host8, pawPrint8, allocated8 = sketchOutcome (pairChain 8) "C"
+        let host8, pawPrint8, allocated8, naming8 = sketchOutcome (pairChain 8) "C"
         agreeWithHost host8 pawPrint8
 
-        let host16, pawPrint16, allocated16 = sketchOutcome (pairChain 16) "C"
+        let host16, pawPrint16, allocated16, naming16 = sketchOutcome (pairChain 16) "C"
         agreeWithHost host16 pawPrint16
         host16 |> Result.map Array.length |> shouldEqual (Ok 19)
 
         TestContext.Progress.WriteLine $"pair chain: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
         Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+        // The oracle naming the entries must not do the exponential work the test rules out.
+        TestContext.Progress.WriteLine $"pair chain naming: %d{naming8} bytes at depth 8, %d{naming16} at depth 16"
+        Assert.That (naming16, Is.LessThanOrEqualTo (8L * naming8))
 
     /// `L0<A> : I<A>`, `Lk<A> : L(k-1)<Pair<A, A>>` up to `depth`, the same for `R`, under
     /// `C : L<depth><int>, R<depth><int>`. Each interface's row names its one direct parent, so the
@@ -2216,18 +2234,58 @@ public struct S2<T> : IC<T[]> { }
     /// about 2, and comparing the two equal substitutions unshared about 256.
     [<Test>]
     let ``A diamond of two chains passing Pair<A, A> on agrees with the host, in work linear in its depth`` () : unit =
-        let warm, _, _ = sketchOutcome (pairDiamond 2) "C"
+        let warm, _, _, _ = sketchOutcome (pairDiamond 2) "C"
         warm |> Result.isOk |> shouldEqual true
 
-        let host8, pawPrint8, allocated8 = sketchOutcome (pairDiamond 8) "C"
+        let host8, pawPrint8, allocated8, naming8 = sketchOutcome (pairDiamond 8) "C"
         agreeWithHost host8 pawPrint8
 
-        let host16, pawPrint16, allocated16 = sketchOutcome (pairDiamond 16) "C"
+        let host16, pawPrint16, allocated16, naming16 = sketchOutcome (pairDiamond 16) "C"
         agreeWithHost host16 pawPrint16
         host16 |> Result.map Array.length |> shouldEqual (Ok 35)
 
         TestContext.Progress.WriteLine $"pair diamond: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
         Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+        TestContext.Progress.WriteLine $"pair diamond naming: %d{naming8} bytes at depth 8, %d{naming16} at depth 16"
+        Assert.That (naming16, Is.LessThanOrEqualTo (8L * naming8))
+
+    /// `C : I<A0>, ..., I<A(count - 1)>`, each `Ai` a class of the image.
+    let private manyInstantiations (count : int) : Sketch list =
+        [
+            yield sketch "I`1" SketchKind.Interface 1 []
+            for i in 0 .. count - 1 do
+                yield sketch $"A%d{i}" SketchKind.Class 0 []
+            yield
+                sketch
+                    "C"
+                    SketchKind.Class
+                    0
+                    [
+                        for i in 0 .. count - 1 do
+                            Spelling.Named ("I`1", [ Spelling.Named ($"A%d{i}", []) ])
+                    ]
+        ]
+
+    /// `n` instantiations of one interface make `n(n-1)/2` duplicate comparisons, as CoreCLR's
+    /// `ExpandApproxInterface` makes them, so the work is quadratic: 128 cost at most 8 times what 64
+    /// do, where quadratic work gives 4. What one comparison costs is #2335.
+    [<Test>]
+    let ``Many instantiations of one interface cost work quadratic in their number`` () : unit =
+        let warm, _, _, _ = sketchOutcome (manyInstantiations 8) "C"
+        warm |> Result.isOk |> shouldEqual true
+
+        let host64, pawPrint64, allocated64, _ = sketchOutcome (manyInstantiations 64) "C"
+        agreeWithHost host64 pawPrint64
+
+        let host128, pawPrint128, allocated128, _ =
+            sketchOutcome (manyInstantiations 128) "C"
+
+        agreeWithHost host128 pawPrint128
+        host128 |> Result.map Array.length |> shouldEqual (Ok 128)
+
+        TestContext.Progress.WriteLine $"many instantiations: %d{allocated64} bytes at 64, %d{allocated128} at 128"
+
+        Assert.That (allocated128, Is.LessThanOrEqualTo (8L * allocated64))
 
     /// `J0<T>`, and `Jk<T>` with two rows each giving its predecessor `J(k-1)` two arguments, under
     /// `C : J<depth><int>`. The image holds two rows a level; each row's arguments cannot be read, and
@@ -2246,9 +2304,9 @@ public struct S2<T> : IC<T[]> { }
     /// where walking each interface once gives about 2 and walking it once a row about 64.
     [<Test>]
     let ``Rows that cannot be read walk each interface once`` () : unit =
-        let _, _, _ = sketchOutcome (wrongArityLadder 2) "C"
-        let host6, pawPrint6, allocated6 = sketchOutcome (wrongArityLadder 6) "C"
-        let host12, pawPrint12, allocated12 = sketchOutcome (wrongArityLadder 12) "C"
+        let _, _, _, _ = sketchOutcome (wrongArityLadder 2) "C"
+        let host6, pawPrint6, allocated6, _ = sketchOutcome (wrongArityLadder 6) "C"
+        let host12, pawPrint12, allocated12, _ = sketchOutcome (wrongArityLadder 12) "C"
 
         for host, pawPrint in [ host6, pawPrint6 ; host12, pawPrint12 ] do
             match host with
@@ -2276,7 +2334,7 @@ public struct S2<T> : IC<T[]> { }
     /// as the host refuses `C`.
     [<Test>]
     let ``A row naming a class whose extends clause names no class is refused`` () : unit =
-        let host, pawPrint, _ =
+        let host, pawPrint, _, _ =
             sketchOutcome (overArray @ [ sketch "C" SketchKind.Class 0 [ Spelling.Named ("D", []) ] ]) "C"
 
         match host with
@@ -2287,7 +2345,8 @@ public struct S2<T> : IC<T[]> { }
         | Error (TypeBindingFailure.Unmodelled _) -> ()
         | other -> failwith $"PawPrint answered %A{other}"
 
-    /// The same clause through `interfaceMapOfDefinition` on `D`.
+    /// The same clause through `interfaceMapOfDefinition` on `D`. Other extends shapes CoreCLR refuses, a
+    /// non-generic class spelled as a bare TypeSpec or a value type as a base, are #2336.
     [<Test>]
     let ``A definition's map refuses an extends clause naming no class`` () : unit =
         let image = sketchImage overArray
@@ -2322,7 +2381,7 @@ public struct S2<T> : IC<T[]> { }
     /// Shapes whose interface hierarchy reaches a definition already being loaded, which CoreCLR
     /// refuses as a recursive load (`IDS_CLASSLOAD_GENERAL`). A row naming a class whose base chain
     /// is a cycle (`K : K2`, `K2 : K`) is not here: the Loader's base-chain loading, which reading the
-    /// row's token runs before the walk sees the row, follows that chain without end.
+    /// row's token runs before the walk sees the row, follows that chain without end (#2330).
     let private cycles : (string * Sketch list) list =
         [
             "I<T> : I<T*>",
@@ -2361,7 +2420,7 @@ public struct S2<T> : IC<T[]> { }
     [<TestCaseSource(nameof cycleNames)>]
     let ``An interface hierarchy that reaches itself is refused`` (name : string) : unit =
         let sketches = cycles |> List.find (fun (n, _) -> n = name) |> snd
-        let host, pawPrint, _ = sketchOutcome sketches "C"
+        let host, pawPrint, _, _ = sketchOutcome sketches "C"
 
         match host with
         | Error _ -> ()
@@ -2413,7 +2472,7 @@ public struct S2<T> : IC<T[]> { }
     [<TestCaseSource(nameof notCycleNames)>]
     let ``A hierarchy that reaches a definition twice without a cycle is answered`` (name : string) : unit =
         let _, sketches, receiver = notCycles |> List.find (fun (n, _, _) -> n = name)
-        let host, pawPrint, _ = sketchOutcome sketches receiver
+        let host, pawPrint, _, _ = sketchOutcome sketches receiver
         agreeWithHost host pawPrint
 
     /// `GENERICINST int32 1 int32`, a TypeSpec whose head is not a type token, alone and before a
@@ -2428,7 +2487,7 @@ public struct S2<T> : IC<T[]> { }
                     yield Spelling.AbsentInterface
             ]
 
-        let host, pawPrint, _ = sketchOutcome [ sketch "C" SketchKind.Class 0 rows ] "C"
+        let host, pawPrint, _, _ = sketchOutcome [ sketch "C" SketchKind.Class 0 rows ] "C"
 
         match host with
         | Error _ -> ()
@@ -2451,7 +2510,7 @@ public struct S2<T> : IC<T[]> { }
     /// fails on that clause, as the host fails.
     [<Test>]
     let ``A row naming a class whose extends clause has the wrong arity is refused`` () : unit =
-        let host, pawPrint, _ =
+        let host, pawPrint, _, _ =
             sketchOutcome (badHead @ [ sketch "C" SketchKind.Class 0 [ Spelling.Named ("BadHead", []) ] ]) "C"
 
         match host with
@@ -2548,7 +2607,7 @@ public struct S2<T> : IC<T[]> { }
             else
                 Spelling.Named ("G`1", [ Spelling.Int32 ; Spelling.Int32 ])
 
-        let host, pawPrint, _ =
+        let host, pawPrint, _, _ =
             sketchOutcome [ sketch "G`1" SketchKind.Class 1 [] ; sketch "C" SketchKind.Class 0 [ row ] ] "C"
 
         match host with
