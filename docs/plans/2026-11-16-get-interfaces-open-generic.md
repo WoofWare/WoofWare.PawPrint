@@ -1145,6 +1145,22 @@ they hold is linear in the depth. The review found:
   `MethodTableLayout.baseOfDefinition`'s arity `failwith` is reachable through a row head's base, not only through
   `interfaceMapOfDefinition`, and should become `Refused (WrongArity ...)`.
 
+**Open after Codex's seventh review (on commit 28); stopped under the decisions' rule.** The seventh round is the
+last, and it has a finding on valid metadata, so the work stops here and is reported rather than fixed:
+
+- [P2, valid metadata] A class implementing many instantiations of one interface (`I<A0>` to `I<A511>`, distinct
+  TypeDefs of one image) now compares every pair with `substitutionsEquivalent`, 130,816 comparisons: Codex measured
+  253 MB for one map against 10.7 MB on the base. The definition walk's duplicate filter is the interface's identity
+  alone, where the old walk's was the closed handle, and nothing cheap rules out arguments that are provably distinct
+  before the full comparison.
+- [P2] An extends clause spelled as the bare TypeSpec `CLASS B` passes `baseOfDefinition`'s shape check, because the
+  outer spelling is discarded before the head is examined, so `interfaceMapOfDefinition` answers where .NET 10 refuses.
+  Malformed metadata, answered rather than refused; of the same kind as `extends valuetype V<int>` above.
+- [P3] The sketch oracle names each of PawPrint's entries by rebuilding its host type and formatting it, which expands
+  a shared type such as `Pair<A, A>` into a tree: 229 MB allocated by one outcome for the depth-16 chain and 191 MB for
+  the diamond, outside the PawPrint call the tests measure. Memoising host types by handle and comparing `Type`
+  values, formatting only on a mismatch, would remove it.
+
 **The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
 walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
 substitution (by `substitutionsEquivalent`) and both flags. It ran over every receiver of `TestInterfaceDispatchMap`'s
