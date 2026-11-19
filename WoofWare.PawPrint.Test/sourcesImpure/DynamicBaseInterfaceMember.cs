@@ -4,8 +4,11 @@
 // symbol table from reflection, one aggregate per generic *definition*: it asks each definition it
 // loads for its interfaces with `Type.GetInterfaces()`, and looks a member of an interface up in the
 // interfaces its symbol table holds for the interface's definition. So a wrong answer for `IList<>`
-// or `IDerived<>` fails to bind. `DynamicMemberAccess.cs` holds checks that do not depend on the
-// answers.
+// or `IDerived<>` fails to bind.
+//
+// Neither receiver's class has the member as a public method of its own (an array's
+// `ICollection<T>.Contains` comes from the runtime, and `Impl` implements `Get` explicitly), so a
+// binder that looked the member up on the run-time class instead would fail to bind too.
 //
 // It is impure because it needs `IsDynamicCodeSupported` true, which is what real .NET runs with.
 //
@@ -24,7 +27,7 @@ public interface IDerived<T> : IBase<T> { }
 
 public class Impl : IDerived<int>
 {
-    public int Get(int x) => x * 10;
+    int IBase<int>.Get(int x) => x * 10;
 }
 
 public static class Program
@@ -42,7 +45,7 @@ public static class Program
         int r;
 
         // A CoreLib interface's base-interface member: `IList<T>` declares no `Contains`.
-        IList<int> asList = new List<int> { 1, 2, 3 };
+        IList<int> asList = new int[] { 1, 2, 3 };
         dynamic three = 3;
         bool contains = asList.Contains(three);
         r = Check(1, "asList.Contains(three)", contains ? 1 : 0, 1);
