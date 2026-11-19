@@ -394,6 +394,31 @@ module TestFrameworkUnderTest =
                 | false, _ -> ()
         ]
 
+    /// The host reads `Microsoft.NETCore.App`'s `deps.json` as it reads a self-contained
+    /// application's: a target package's assets count only if `libraries` declares the package, and
+    /// a RID-specific (`runtimeTargets`) asset never counts.
+    [<Test>]
+    let ``A pack's runtime assets are those the host reads from the lowest framework`` () : unit =
+        let json =
+            """{
+  "runtimeTarget": { "name": "T/rid" },
+  "targets": {
+    "T/rid": {
+      "Declared/1.0.0": {
+        "runtime": { "A.dll": {} },
+        "runtimeTargets": { "runtimes/rid/lib/net10.0/B.dll": { "rid": "rid", "assetType": "runtime" } }
+      },
+      "Undeclared/1.0.0": { "runtime": { "C.dll": {} } }
+    }
+  },
+  "libraries": {
+    "Declared/1.0.0": { "type": "package", "serviceable": true, "sha512": "" }
+  }
+}"""
+
+        use document = JsonDocument.Parse json
+        runtimeAssets document.RootElement "T/rid" |> shouldEqual [ "A.dll" ]
+
     /// Each pinned pack is a `Microsoft.NETCore.App` for its RID, with the `deps.json` its nupkg
     /// ships. Every assembly in the directory is a runtime asset of that `deps.json`, and every
     /// runtime asset is an assembly in the directory.
