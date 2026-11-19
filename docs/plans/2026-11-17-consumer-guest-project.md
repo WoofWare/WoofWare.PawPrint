@@ -1467,6 +1467,7 @@ the final code, the default suite had 5969 tests: 5930 passed and 39 were skippe
   Codex reproduced. With Net10 and Net11 runs overlapping in one checkout and the second publish delayed, the second
   host deleted the publish directory while the first was reading it, and `castle-class` and `castle-target` failed with
   `DirectoryNotFoundException`.
+* Round 4, one finding: the shared publish directory, the only one left.
 
 **Left for a decision: concurrent runs of one checkout share the publish directory.** `GuestPublish.publish` empties
 and rewrites `<project>/bin/Release/pawprint-test-publish` once per test host. A second test host started on the same
