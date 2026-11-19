@@ -2547,8 +2547,8 @@ With PR 5 merged, #2309's staging is finished. This plan then has no open stage,
 
 ### As built (PR 5)
 
-The `dynamic` guests, as "Decisions after PR 5 stopped" decided them. Tests and this plan only; #2309 is closed and
-stays closed.
+The `dynamic` guests, as "Decisions after PR 5 stopped" decided them, with one check added after Codex's first
+review (below). Tests and this plan only; #2309 is closed and stays closed.
 
 **Commits.**
 
@@ -2558,26 +2558,39 @@ stays closed.
    decision 9.
 3. *Two dynamic guests in sourcesImpure*: the change.
 4. This section.
+5. *DynamicMemberAccess.cs: a check the binder answers from GetInterfaces*: check 5, from Codex's first review.
+6. This section again, for commit 5.
 
 **The guests**, both registered in `TestImpureCases` with `IsDynamicCodeSupported` true, as
 `ExpressionLambdaCompileEmitted.cs` is (`Oracle = OraclePolicy.Never`, `ExpectedReturnCode = 0`):
 
 - `sourcesImpure/DynamicMemberAccess.cs`, live: (1) `(int)d.Id + 1` on a user class, (2) `(int)s.Length` on a
   `string`, (3) a dynamic `List<int>` converted implicitly to `IEnumerable<int>`, (4) `Sum(list)` choosing
-  `Sum(IEnumerable<int>)` over `Sum(object)`.
+  `Sum(IEnumerable<int>)` over `Sum(object)`, (5) `CountOf(list)` choosing `CountOf<T>(IEnumerable<T>)`, with `T`
+  inferred as `int`, over `CountOf(object)`.
 - `sourcesImpure/DynamicBaseInterfaceMember.cs`, parked on every runtime on #2348: (1) `IList<int>.Contains(dynamic)`,
   (2) a user `IDerived<int>.Get(dynamic)`, each a member found only through a base interface.
 
 `TestPureCases.fs` and `sourcesPure` are as `main` has them.
 
+**What the live guest tests.** Checks 1 to 4 test that the binder runs: it builds its symbol table (asking 36
+generic definitions for their interfaces), binds a property read, a conversion and an overload resolution, and
+`System.Linq.Expressions` compiles the rules. They do not depend on what `GetInterfaces` answers, as measured in "PR
+5: where the `dynamic` guest stops". Check 5 does: to infer `T` from a `List<int>`, the binder reads `List<int>`'s
+interfaces from those its symbol table holds for `List<>`, and with none it chooses `CountOf(object)`. So the
+statement in "Decisions after PR 5 stopped" that the passing guest does not test what `GetInterfaces` answers held
+for the four checks it was made about, and does not hold for the guest as built: it now sees an empty answer for a
+definition. It does not see every wrong answer; only the `[]` mutant below was run against check 5.
+
 **Measurements**, all run 2026-11-19 on `2b38151e8` (#2347) plus this branch.
 
 - *Real .NET.* Each file exits 0 on real .NET 10.0.14 and 11.0.0-rc.3 as written, printing each check's value. For
-  each check, the expectation perturbed (42 to 43, 5 to 6, 6 to 7, 6 to 7; 1 to 0, 20 to 21) exits with that check's
-  number on both: six perturbations, twelve runs.
-- *The harness, Release, `TestCategory=GuestImpure&Name~DynamicMemberAccess`.* Passes on each runtime: 103 s for the
-  case (114 s for the invocation) on .NET 10's CoreLib, 94 s (104 s) on .NET 11's; the test host's peak RSS was about
-  2.6 GB. Under the 3-minute rule, so it is a `GuestImpure` case.
+  each check, the expectation perturbed (42 to 43, 5 to 6, 6 to 7, 6 to 7, 3 to 4; 1 to 0, 20 to 21) exits with that
+  check's number on both: seven perturbations, fourteen runs.
+- *The harness, Release, `TestCategory=GuestImpure&Name~DynamicMemberAccess`.* Passes on each runtime. With all five
+  checks: 106 s for the case (114 s for the invocation) on .NET 10's CoreLib, 77 s (85 s) on .NET 11's; with checks 1
+  to 4 only, 103 s and 94 s. The test host's peak RSS was about 2.6 to 2.7 GB. Under the 3-minute rule, so it is a
+  `GuestImpure` case.
 - *The parked guest's stop, `FullyQualifiedName~DynamicBaseInterfaceMember`, Release.* On each runtime, about 30 s in:
   "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs:2614; got open constructed
   System.Private.CoreLib/...[generic parameter #0 of System.Private.CoreLib/...]". The open construction is
@@ -2586,16 +2599,25 @@ stays closed.
 - *Mutants against `DynamicMemberAccess.cs`*, each in the `OpenGenericTypeDefinition` arm of
   `RuntimeTypeInterfaces.ofReceiver`, run in the Release harness on .NET 10's CoreLib, reverted and rebuilt after:
 
-  | mutant | outcome |
-  |---|---|
-  | every generic definition answers `[]` | **survives** (passes, 57 s) |
-  | every generic definition refused with a `failwith`, as before the third pull request | **killed**, 5 s in, at the refusal |
+  | mutant | checks 1 to 4 (commit 3) | checks 1 to 5 (commit 5) |
+  |---|---|---|
+  | every generic definition answers `[]` | **survives** (passes, 57 s) | **killed** at check 5: exit 5, 53 s in |
+  | every generic definition refused with a `failwith`, as before the third pull request | **killed**, 5 s in, at the refusal | **killed**, 5 s in, at the refusal |
 
-  So the guest fails if `GetInterfaces` stops on a definition, and does not see what it answers.
+**Suites**, each its own invocation, Debug, after a build of the test project, on a .NET 10 host.
 
-**Suites**, run at commit 3, each its own invocation, Debug, after a build of the test project, on a .NET 10 host: default 5,986 (5,946 passed, 39 skipped, 1 failed: `TestRealRuntimeStandardInput`'s "a guest that never reads
-and never exits is timed out", whose 60 s wait ran out after 76 s under the suite's load; alone it passes, 3 of 3);
-`GuestImpure` 306 passed (333 s) on .NET 10 and 306 passed (433 s) on .NET 11; `Guest` 250 passed (574 s);
-`GuestSolo` 2 passed (263 s); `GuestPure` 1,210 passed (545 s). Inside those Debug category runs, alongside the
-category's other cases, `DynamicMemberAccess.cs` took 4 m 40 s on .NET 10 and 6 m 6 s on .NET 11; CI runs
-Release, where the case alone took the times above.
+- At commit 3: default 5,986 (5,946 passed, 39 skipped, 1 failed: `TestRealRuntimeStandardInput`'s "a guest that
+  never reads and never exits is timed out", whose 60 s wait ran out after 76 s under the suite's load; alone it
+  passes, 3 of 3); `GuestImpure` 306 passed (333 s) on .NET 10 and 306 passed (433 s) on .NET 11; `Guest` 250 passed
+  (574 s); `GuestSolo` 2 passed (263 s); `GuestPure` 1,210 passed (545 s). Inside those Debug category runs,
+  alongside the category's other cases, `DynamicMemberAccess.cs` took 4 m 40 s on .NET 10 and 6 m 6 s on .NET 11; CI
+  runs Release, where the case alone took the times above.
+- At commit 5, which changes one guest and two comments in `TestImpureCases.fs`: default 5,986 (5,947 passed, 39 skipped); `GuestImpure` 306 passed on .NET 10 (636 s) and 306 passed on .NET 11 (499 s). The machine's load average was about 30 during these runs, and in them `DynamicMemberAccess.cs` took 9 m 12 s on .NET 10 and 7 m 13 s on .NET 11, the longest case in the category, whose next longest took 3 m 50 s and 2 m 53 s. `Guest`, `GuestSolo` and
+  `GuestPure` were not rerun, since commit 5 changes nothing they run.
+
+**Codex's first review (on commit 4).** One finding, fixed:
+
+- [P2] Check 4's overload names `IEnumerable<int>`, so it passes with a definition's interfaces answered empty; a
+  generic overload `Sum<T>(IEnumerable<T>)` makes the binder infer `T` from `List<int>`'s interfaces, and Codex
+  measured that variant under PawPrint failing with the `[]` mutant. Added as check 5 (commit 5) rather than by
+  changing check 4, so that checks 1 to 4 stay as measured and decided; the mutants were rerun (table above).
