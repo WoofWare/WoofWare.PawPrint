@@ -286,10 +286,11 @@ module TestGuestParking =
         |> shouldEqual []
 
     /// Agreement with the real runtime cannot show that a library emitted code: both sides could
-    /// take a path that never does. So each library has a scenario whose run must print a line
-    /// that only a generated type produces.
+    /// take a path that never does. So on every runtime, each library with a scenario that runs
+    /// there has a scenario running there whose run must print a line that only a generated type
+    /// produces. A parked scenario runs only on the real runtime, so it witnesses nothing.
     [<Test>]
-    let ``Every consumer library has a scenario that shows it generated a type`` () : unit =
+    let ``Every consumer library has a running scenario that shows it generated a type`` () : unit =
         let libraries = Set.ofList TestConsumerCases.libraries
 
         TestConsumerCases.scenarios
@@ -297,13 +298,29 @@ module TestGuestParking =
         |> List.filter (fun library -> not (libraries.Contains library))
         |> shouldEqual []
 
-        let witnessed =
-            TestConsumerCases.generatedTypeWitnesses
-            |> Map.keys
-            |> Seq.map TestConsumerCases.libraryOf
-            |> Set.ofSeq
+        for runtime in everyRuntime do
+            let parked = (TestConsumerCases.onRuntime runtime).Parked
 
-        Set.difference libraries witnessed |> Set.toList |> shouldEqual []
+            let running (scenario : string) : bool = not (parked.ContainsKey scenario)
+
+            let active =
+                TestConsumerCases.scenarios
+                |> List.filter running
+                |> List.map TestConsumerCases.libraryOf
+                |> Set.ofList
+
+            let witnessed =
+                TestConsumerCases.generatedTypeWitnesses
+                |> Map.keys
+                |> Seq.filter running
+                |> Seq.map TestConsumerCases.libraryOf
+                |> Set.ofSeq
+
+            let unwitnessed = Set.difference active witnessed |> Set.toList
+
+            if not unwitnessed.IsEmpty then
+                failwith
+                    $"On %O{runtime}, these libraries have running scenarios but no running scenario that shows a generated type: %A{unwitnessed}"
 
     [<Test>]
     let ``Impure cases parked everywhere are so on every runtime, and every registered case runs or is parked``
