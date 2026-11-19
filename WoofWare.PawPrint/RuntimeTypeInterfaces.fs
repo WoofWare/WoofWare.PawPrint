@@ -108,15 +108,11 @@ module RuntimeTypeInterfaces =
         let ownerDescription =
             $"an interface-map entry of %s{typeInfo.Namespace}.%s{typeInfo.Name}"
 
-        // Each context the map shares is converted once, to its targets and to the binding a spelling
-        // read in it takes: a chain of interfaces nests one context inside the next, and converting
-        // each occurrence afresh would take time exponential in its length. Keyed on the array itself,
-        // which `ImmutableArray` compares by reference.
+        // Each context the map shares is converted once: a chain of interfaces nests one context
+        // inside the next, and converting each occurrence afresh would take time exponential in its
+        // length. Keyed on the array itself, which `ImmutableArray` compares by reference.
         let converted =
-            Dictionary<
-                ImmutableArray<TypeConcretization.SubstitutionArgument>,
-                ImmutableArray<RuntimeTypeHandleTarget> * ReflectedTypeTarget.ReflectionVariableBinding
-             > ()
+            Dictionary<ImmutableArray<TypeConcretization.SubstitutionArgument>, ImmutableArray<RuntimeTypeHandleTarget>> ()
 
         let rec convertArgument
             (state : IlMachineState)
@@ -133,7 +129,7 @@ module RuntimeTypeInterfaces =
 
                 state, arguments.[index]
             | TypeConcretization.SubstitutionArgument.Spelled (assemblyName, spelling, inner) ->
-                let state, (_, typeVariables) = convertContext state inner
+                let state, innerTargets = convertContext state inner
 
                 let assembly =
                     state.LoadedAssembly assemblyName
@@ -142,6 +138,9 @@ module RuntimeTypeInterfaces =
                             $"%s{operation}: %s{ownerDescription} is spelled in %s{assemblyName}, which is not loaded"
                     )
 
+                // `Open` even where every target is closed: a `Bound` axis concretises the spelling whole,
+                // and concretisation refuses an instantiation whose argument carries a custom modifier,
+                // which the walk builds from its parts. A closed piece still comes back closed.
                 ReflectedTypeTarget.reflectedTypeTarget
                     loggerFactory
                     baseClassTypes
@@ -149,7 +148,7 @@ module RuntimeTypeInterfaces =
                     ownerDescription
                     assembly
                     {
-                        TypeVariables = typeVariables
+                        TypeVariables = ReflectedTypeTarget.ReflectionVariableBinding.Open innerTargets
                         MethodVariables = ReflectedTypeTarget.ReflectionVariableBinding.Open ImmutableArray.Empty
                     }
                     state
@@ -158,10 +157,10 @@ module RuntimeTypeInterfaces =
         and convertContext
             (state : IlMachineState)
             (context : ImmutableArray<TypeConcretization.SubstitutionArgument>)
-            : IlMachineState * (ImmutableArray<RuntimeTypeHandleTarget> * ReflectedTypeTarget.ReflectionVariableBinding)
+            : IlMachineState * ImmutableArray<RuntimeTypeHandleTarget>
             =
             match converted.TryGetValue context with
-            | true, result -> state, result
+            | true, targets -> state, targets
             | false, _ ->
                 let state, targets =
                     ((state, []), context)
@@ -171,26 +170,8 @@ module RuntimeTypeInterfaces =
                     )
 
                 let targets = targets |> List.rev |> ImmutableArray.CreateRange
-
-                let closed =
-                    targets
-                    |> Seq.choose (fun target ->
-                        match target with
-                        | RuntimeTypeHandleTarget.Closed handle -> Some handle
-                        | _ -> None
-                    )
-                    |> ImmutableArray.CreateRange
-
-                // Bound when every argument is closed, so that a spelling read in it is concretised in
-                // one step.
-                let binding =
-                    if closed.Length = targets.Length then
-                        ReflectedTypeTarget.ReflectionVariableBinding.Bound closed
-                    else
-                        ReflectedTypeTarget.ReflectionVariableBinding.Open targets
-
-                converted.[context] <- (targets, binding)
-                state, (targets, binding)
+                converted.[context] <- targets
+                state, targets
 
         let state =
             (state, map.Rows)
@@ -199,7 +180,7 @@ module RuntimeTypeInterfaces =
         let state, targets =
             ((state, []), map.Entries)
             ||> List.fold (fun (state, acc) entry ->
-                let state, (entryArguments, _) = convertContext state entry.Substitution.Arguments
+                let state, entryArguments = convertContext state entry.Substitution.Arguments
 
                 let state, target =
                     ReflectedTypeTarget.instantiateTargets
