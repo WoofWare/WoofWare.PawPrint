@@ -412,6 +412,12 @@ public static class Program
 
         File.WriteAllBytes (Path.Combine (appDir, guestName + ".dll"), guestImage.Force ())
         let entryCount = 1 + rng.Next 6
+        // About one case in seven has one entry which makes the launch fail.
+        let failing =
+            if rng.Next 7 = 0 then
+                Some (1 + rng.Next entryCount)
+            else
+                None
 
         if rng.Next 5 = 0 then
             // No deps.json: the host takes the directory's files, with empty versions.
@@ -463,7 +469,12 @@ public static class Program
 
                         let key = $"Lib%d{k}/1.0.%d{rng.Next 2}"
 
-                        match rng.Next 20 with
+                        let variant =
+                            match failing with
+                            | Some failingEntry when failingEntry = k -> rng.Next 2
+                            | _ -> 2 + rng.Next 18
+
+                        match variant with
                         | 0 ->
                             // The host fails: a name the framework lists, with another extension.
                             yield library key [ asset $"lib/net10.0/%s{name}.exe" None ] []
@@ -626,7 +637,9 @@ public static class Program
         TestContext.Out.WriteLine
             $"%d{count Compared.SameTpa} same TPA, %d{count Compared.HostFailedAsPredicted} host failures predicted, %d{count Compared.NotReproducible} not reproducible, in %d{stopwatch.ElapsedMilliseconds} ms"
 
-        if count Compared.SameTpa < 10 then
+        // A case compares a TPA with probability above 0.8, so fewer than four of 25 happens by
+        // chance less than once in 10^12 runs.
+        if count Compared.SameTpa < 4 then
             Assert.Fail $"Only %d{count Compared.SameTpa} of 25 cases compared a TPA (seed %d{seed})."
 
     [<Test>]
