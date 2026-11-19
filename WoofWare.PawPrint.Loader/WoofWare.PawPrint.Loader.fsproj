@@ -33,6 +33,7 @@
         <Compile Include="BaseChainLoading.fs" />
         <Compile Include="PEKindAndMachine.fs" />
         <Compile Include="ImageAdmission.fs" />
+        <Compile Include="DepsJson.fs" />
         <Compile Include="AssemblyProbe.fs" />
         <Compile Include="AssemblyBinding.fs" />
         <Compile Include="TypeResolution.fs" />

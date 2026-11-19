@@ -1167,3 +1167,270 @@ assets, which stage 2's parser will own; once it lands, this test can read the p
 * The staging listed #2353 as work still to start. It is marked done above.
 
 The findings about later stages are unverified here, as in the earlier rounds.
+
+## As built (stage 2)
+
+Branch `host-binding-2-deps-json`, cut from `origin/main` at `566f797b7` and rebased onto #2357. The tests came first, in a commit of their own,
+and so did the tests of each Codex finding fixed.
+
+### What it adds
+
+`WoofWare.PawPrint.Loader/DepsJson.fs`, all `internal` until the owner confirms decision 2. Loader's public
+surface is unchanged: a reflection dump of `WoofWare.PawPrint.Loader.dll`'s exported types and members, built with
+and without the file, is identical (1702 lines each).
+
+* `DepsJson.parse : EmulatedRuntime -> DepsJsonMode -> byte[] -> Result<DepsManifest, DepsJsonError>`. The shape
+  differs from the plan's `mode -> rids -> byte[] -> Result<DepsEntry list, _>` in three ways, each for a reason in
+  the host's code:
+  * The RID list is part of the mode: `DepsJsonMode.FrameworkDependent of rids : string list`, beside
+    `DepsJsonMode.SelfContained`. The self-contained parse never reads it (`load_self_contained` does not call
+    `process_runtime_targets`).
+  * The runtime is an input. The two pins' hostpolicy differ in one thing the parser sees: .NET 10 reads each
+    read library's `sha512` unchecked, and .NET 11 does not read it at all. Codex measured a .NET 11 host launching
+    an application whose `deps.json` had no `sha512`.
+  * The result is a `DepsManifest`: the entries, and the packages for which `deps_json_t::has_package` holds. A
+    framework entry is found in its framework's directory only if that framework's manifest `has_package
+    (library_name, library_version)`, which looks up `name/version`. An entry from a library keyed `P` (no `/`)
+    has name and version `P`, so the host looks up `P/P` and does not find it, and the launch fails; an entry from
+    `P/P` looks the same and is found. Codex measured this on .NET 11. `DepsManifest.hasPackage` is the lookup.
+    The packages are those of the runtime target with an asset-type member (even an empty one), and, when
+    framework-dependent, those with RID-specific assets that survived RID selection, whether or not `libraries`
+    names them. This is not the set of libraries the host reads: a package with only RID-specific assets, none for
+    a listed RID, has its library read and is not a package.
+* The entries come in the host's loop order (`reconcile_libraries_with_targets`): each `libraries` member in order;
+  within a library, its runtime, then resources, then native assets; each in the order of the runtime target. The
+  host keeps one list per asset type, and the order within each type is this order filtered. All three types are
+  returned (stage 3 needs native assets for `libcoreclr`; see below). Placeholders are returned, not dropped.
+* `DepsEntry` holds what `deps_entry_t` holds that hostpolicy reads without existence checks: the library's name
+  and version (split at the first `/`; a key with no `/` gives the whole key for both, as the host's
+  `substr (npos + 1)` does), its type (`DepsLibraryType.RuntimePack` for `runtimepack` in any ASCII casing, else
+  `Other` as written), the asset type, the asset's name (file name without extension, and without a further `.ni`
+  in any ASCII casing), the listed path with `\` read as `/`, `localPath` (`None` when absent, empty or not a
+  string; `\` read as `/`), the two versions, and whether it came from `runtimeTargets`.
+* `DepsVersion` is `version_t`: `Empty`, or two, three or four components. `DepsVersion.parse` follows
+  `parse_internal`; `DepsVersion.compare` follows `version_t::compare`. The type has no structural comparison, so
+  that nothing compares two versions any other way; structural equality agrees with the host's (a test checks it).
+  The digits are read without .NET's number parsers, which read the current culture.
+* `DepsEntry.isPlaceholder`: the listed path ends `/_._` (`resolve_tpa_list`).
+* `DepsEntry.dirRelativePath`: the path at which `deps_entry_t::to_dir_path` looks: the `localPath` if set; else,
+  for a `runtimepack` library, the listed path; else the file name, under the culture directory for a resource
+  asset (`get_directory`, `get_filename` and `append_path` transcribed, including a path with no directory, which
+  gives `<file>/<file>`). The host probes a framework's directory this way, and the application's too, except for
+  a RID-specific entry with no `localPath`, which it probes at its listed path (`to_package_path`, fact 14's third
+  case).
+
+The parser owns the rules that stage 1's test transcribes: the lowest framework read in self-contained mode
+(stage 3 chooses the mode), placeholders, `localPath` precedence and non-string values, `runtimepack`, a
+`libraries` entry with no target (not read), backslashes, a UTF-8 byte order mark (one is skipped, as
+`json_parser_t::parse_file` does), and `runtimeTarget` as a string or an object. A leading `./` is not a host rule:
+the host keeps it in the path it builds (`append_path`). Stage 1's test drops it to compare paths with file names,
+and stage 3 must decide how a TPA path with `./` in it compares. Once stage 1 is on `main`, its test can read each
+pack through `DepsJson.parse runtime DepsJsonMode.SelfContained`, keeping runtime entries that are not
+placeholders, at `DepsEntry.dirRelativePath`.
+
+### Refusals
+
+`DepsJsonError` has a case for each of these. Each path runs from the document's root.
+
+* *What the host reads without checking.* Where hostpolicy reads a member through rapidjson's `operator[]`,
+  `GetString`, `GetBool` or `GetObject` with no check, a missing member or one of another kind is undefined
+  behaviour (`RAPIDJSON_ASSERT` is `assert`, compiled out). The parser requires: the root an object;
+  `runtimeTarget` a string, or an object with a string `name`; `targets` an object holding the runtime target, an
+  object of objects; each asset-type member and each of its files an object; in framework-dependent mode,
+  `runtimeTargets` and each of its files an object, each file's `assetType` a string, and, for a type the host
+  knows, its `rid` a string; `libraries` an object; and for each library the host reads (one whose package has an
+  asset-type member, or in framework-dependent mode a known `runtimeTargets` file), the value an object,
+  `serviceable` a boolean, `type` a string and, on .NET 10, `sha512` a string. Members the host reads with a check
+  (`localPath`, the versions, `path`, `hashPath`) may be anything.
+* *A version component above `Int32.MaxValue`* wherever the host parses a version (every `targets` file; in
+  framework-dependent mode, every known `runtimeTargets` file). The host's `try_stou` calls `std::stoul`, which
+  throws above `ULONG_MAX`, and `version_t` stores anything above `INT_MAX` wrapped into an `int`. The refusal
+  fires as soon as the host would read such a component, even if a later component makes the parse fail.
+* *What rapidjson and System.Text.Json may read differently*, anywhere in the document, read or not: invalid
+  UTF-8 (the host does not validate it); anything System.Text.Json's defaults refuse (malformed JSON, comments,
+  trailing commas, content after the root value, nesting past 64; rapidjson with the host's flags accepts
+  comments and trailing content), reported with the reader's line and byte position, not its message, whose text
+  depends on the process's resource settings; a duplicate member name (rapidjson's lookup finds the first, its
+  iteration both); an unpaired surrogate escape; U+0000 in a string or name (the host's C strings end there); a
+  number with an exponent, or longer than 300 characters (rapidjson fails the document with
+  `kParseErrorNumberTooBig` on `0e309`, whose value is zero).
+
+The parser does not classify its refusals into "the host would fail" and "PawPrint cannot reproduce". Stage 3's
+refusal type needs that split; by case: `NotStrictJson` is mixed (malformed JSON fails the host; comments, trailing
+content and deep nesting do not), `UnpairedSurrogate` and `UnreproducibleNumber` fail the host, `InvalidUtf8`,
+`DuplicateMember` and `NulCharacter` do not, and `MissingMember`, `WrongKind` and `VersionComponentOutOfRange` are
+undefined or wrapped.
+
+### The two pins
+
+`deps_format.cpp`, `deps_entry.*`, `version.cpp`, `json_parser.*` and `hostmisc/utils.cpp` differ between the pins
+in ways the parser does not see, except two:
+
+* .NET 11 no longer reads `sha512` (above).
+* .NET 11 lowers a library's `type` with `minipal_tolower_invariant` per byte, where .NET 10 uses `::tolower`, so
+  the two lower non-ASCII bytes differently. Only the comparison with `runtimepack` reads the result, and no
+  non-ASCII byte lowers to ASCII under either, so the classification is the same. `DepsLibraryType.Other` keeps
+  the type as written.
+
+`get_directory` was rewritten in C for .NET 11 (`utils_get_directory`); it gives the same answers.
+
+### For stage 3
+
+Facts found while reading the host, which stage 3 needs and stage 2 does not act on:
+
+* *A framework entry's probe asks `has_package`*, of the entry's own framework first and then of each lower one
+  (`setup_probe_config` orders the framework probes highest level first, and `probe_deps_entry` skips those above
+  the entry's level). Use `DepsManifest.hasPackage` on each framework's manifest.
+* *An application's RID-specific asset without `localPath` is probed with `to_package_path`*, at its listed path
+  (`<app>/runtimes/<rid>/lib/<tfm>/X.dll`), not at `dirRelativePath`.
+* *Native assets.* Codex's stage-1 round 2 finding (an application `deps.json` can name a native `libcoreclr`,
+  resolved before the framework's) is answerable from the parser's native entries.
+* *`localPath` can name another file or leave the directory* (`../common/X.dll`); the parser reports it as
+  written. The plan's TPA refusals (a name that is not the stem of the file it resolves to) apply to the probed
+  path.
+* *An empty file name.* A listed path ending `/` gives an empty `dirRelativePath`, and the host then probes the
+  directory itself. Stage 3 should refuse it.
+
+### Tests
+
+* `TestDepsVersion`: `DepsVersion.parse` against a line-by-line transcription of `parse_internal` and `try_stou`
+  (with `BigInteger`, so that it shares no overflow with the code under test), 10 000 fixed and 10 000 fresh
+  cases, coverage asserted for each outcome (no dot; fails after a dot; two, three and four components; out of
+  range); a unit case per branch; a case under a culture whose signs are digits; `DepsVersion.compare` against a
+  transcription of `version_t::compare`, with structural equality checked against it.
+* `TestDepsJson`, the model: a generated description of a manifest (either runtime; packages with asset-type
+  members in any order, empty or absent, a wrong-case member the host ignores, `runtimeTargets` files with RIDs
+  inside and outside the list and differing by case, `assetType` spellings that differ by ASCII case, by dotless
+  or dotted i, or by long s; libraries in their own order, some without a package and some packages without a
+  library, keys with zero, one and two slashes, `type` spellings including `runtimepack` lookalikes under
+  `OrdinalIgnoreCase` and `ToLowerInvariant`; versions parsed, with leading zeros, malformed, empty, absent and not
+  strings; `localPath` set, empty, absent and not a string; backslash and `./` directories; a decoy target; a byte
+  order mark; indented or not; every non-alphanumeric character `\u`-escaped or not), with at most one fault
+  injected (a bad library value, a `runtimeTargets` file without `assetType` or `rid`, an out-of-range version, in
+  the read target or the decoy). The model computes, from the description alone, the entries with
+  `isPlaceholder` and `dirRelativePath`, and the packages, or the one refusal. 3000 fixed and 3000 fresh cases;
+  each of 59 labels must be reached at least 30 times in the fixed sample, including each refusal, a fault in a
+  place the host does not read in that mode or on that runtime, a RID chosen that is neither first in the document
+  nor first in the list, a package read only through `runtimeTargets`, and a library read whose package is not a
+  package.
+* A unit case per refusal, and per rule a unit case can name. Each parses under both runtimes and requires the
+  same answer, except the `sha512` case.
+* The real files: for each runtime (Net10, Net11), the shared `Microsoft.NETCore.App` and
+  `Microsoft.AspNetCore.App` `deps.json` parse in both modes to the same manifest; every runtime entry is
+  non-RID-specific, not a placeholder, has both versions, and its `dirRelativePath` stem is its name; the runtime
+  entries' paths are exactly the directory's `.dll` files; the packages are the entries' libraries; and the
+  runtime entry counts are the plan's measurements (172 and 141 on 10.0.14, 181 and 132 on 11.0.0-rc.3). The
+  pack copies are not tested: stage 1, which puts a `deps.json` in each pack, is not on `main`.
+
+Red runs: without the parser the test project does not compile. Against a stub with the final types, answering
+`Ok []`, `Ok DepsVersion.Empty`, `0`, `false` and the listed path, 37 of the 51 tests failed, each on a wrong
+answer, and 14 passed: the version cases whose answer is "parse fails", which the stub's `Empty` gives. Each Codex
+fix's tests were red first, as each fix's test commit records.
+
+### Mutants
+
+Each was applied to `DepsJson.fs` alone, run against `TestDepsJson` and `TestDepsVersion`, and reverted. 67 in
+all: 64 killed, and 3 equivalent. "Model" is the generated-manifest property; "transcription" is the
+`version_t::parse` property.
+
+| Rule | Mutant | Killed by |
+|---|---|---|
+| version: a `.` is needed | a string with no `.` read as one component | model; transcription; branch cases |
+| version: a fifth component fails | truncated to four | model; transcription; branch cases |
+| version: ASCII digits only | `Char.IsDigit` | model; transcription; branch case `1.٣` |
+| version: an empty component fails | read as 0 | model; transcription; branch cases |
+| version: `Int32.MaxValue` is in range | `>=` for `>` | out-of-range and culture unit cases; transcription; branch case |
+| version: the digit-length guard | eleven digits read as a number | **equivalent**: the guard only keeps the accumulation inside `int64`, and every eleven-digit number is above `Int32.MaxValue` anyway |
+| version: the digit-length guard | removed, so long digit strings overflow | transcription |
+| version: out of range is refused | read as `Empty` | model; transcription; branch cases; `runtimeTargets` unit case |
+| `version_t::compare` | revision ignored | compare transcription; `Empty` unit case |
+| `version_t::compare` | `Empty` stored as zeros | compare transcription; `Empty` unit case |
+| entry order | libraries reversed | model; order unit case |
+| entry order | asset types reversed within a library | model; order unit case; RID unit case |
+| asset-type members matched exactly | matched ignoring case | model |
+| RID selection: first listed RID | first in the document among listed RIDs | model; RID unit case |
+| RID selection: exact | RIDs compared ignoring case | model |
+| RID-specific assets replace | added to the others | model; RID unit case |
+| self-contained reads `targets` only | reads `runtimeTargets` | model; RID, libraries and `runtimeTargets` unit cases |
+| framework-dependent: a package only in `runtimeTargets` is read | ignored | model; libraries unit case |
+| `assetType` ignoring ASCII case | `ToUpperInvariant` | model (`reſources`) |
+| `assetType` ignoring ASCII case | `OrdinalIgnoreCase` | **equivalent**: .NET's `OrdinalIgnoreCase` folds no non-ASCII character to ASCII (measured for `ı`, `İ`, `ſ` and the Kelvin sign), so against an ASCII name it is ASCII case-insensitive |
+| `type` is `runtimepack` ignoring ASCII case | `ToLowerInvariant` | model (Kelvin sign); library-type unit case |
+| `type` is `runtimepack` ignoring ASCII case | `OrdinalIgnoreCase` | **equivalent**, as above |
+| placeholder | never | model; placeholder unit case |
+| placeholder | `_._` without the `/` | model; placeholder unit case |
+| `localPath` precedence | `runtimepack` path ahead of `localPath` | model; `dirRelativePath` unit case |
+| `localPath` precedence | `localPath` ignored | model; `dirRelativePath` unit case |
+| empty `localPath` is unset | set to `""` | model; most unit cases; real files |
+| non-string `localPath` is unset | read as its JSON text | model; paths unit case |
+| non-string version is empty | a number read as a version | model |
+| `\` read as `/` | kept in the listed path | model; paths and placeholder unit cases |
+| `\` read as `/` | kept in `localPath` | model; paths unit case |
+| `.ni` stripped | not stripped | model; paths unit case |
+| `.ni` in any ASCII case | lower case only | model |
+| name after the last `/` or `\` | after the last `/` only | model; paths unit case |
+| key split at the first `/` | at the last | model |
+| key with no `/` | version empty instead of the whole key | model; key unit case |
+| resources probed under their culture | probed like runtime assets | model; `dirRelativePath` unit case |
+| `runtimeTarget` as a string | refused | model; `runtimeTarget` and `targets` unit cases |
+| refusal: invalid UTF-8 | accepted | UTF-8 unit case |
+| refusal: comments | accepted | strict-JSON unit case |
+| refusal: trailing commas | accepted | strict-JSON unit case |
+| one byte order mark skipped | two skipped | byte-order-mark unit case |
+| one byte order mark skipped | none skipped | byte-order-mark unit case; model |
+| refusal: unpaired surrogate | read as empty | surrogate unit case |
+| refusal: duplicate member | accepted | duplicate unit case |
+| refusal: NUL | accepted | NUL unit case |
+| refusal: rapidjson's numbers | every number accepted | number unit case |
+| refusal: rapidjson's numbers | only `e` refused, not `E` | number unit case |
+| refusal: root not an object | unchecked | root unit case |
+| refusal: `runtimeTarget` without `name` | read as empty | `runtimeTarget` unit case |
+| refusal: package value not an object | unchecked | `targets` unit case |
+| refusal: file value not an object | unchecked | `targets` unit case |
+| refusal: target missing | read as empty | `targets` unit case |
+| refusal: `runtimeTargets` not an object | unchecked | `runtimeTargets` unit case |
+| refusal: `assetType` missing | file skipped | model; `runtimeTargets` unit case |
+| refusal: `rid` missing | read as `""` | model; `runtimeTargets` unit case |
+| refusal: `libraries` missing | read as empty | libraries unit case |
+| refusal: `sha512` | unchecked | model; libraries unit case |
+| refusal: `serviceable` | unchecked | model; libraries unit case |
+| refusal: `type` not a string | read as `""` | model; libraries unit case |
+| only read libraries are checked | every library checked | model; libraries unit case |
+| `has_package`: RID assets must survive selection | RID-only packages counted when no RID matched | model; packages unit case |
+| `has_package`: RID assets count | ignored | model; packages unit case |
+| `hasPackage` looks up `name/version` | version ignored | packages unit case |
+| only .NET 10 reads `sha512` | .NET 11 reads it too | model; `sha512` unit case |
+| only .NET 10 reads `sha512` | .NET 10 does not | model; `sha512` unit case |
+| `NotStrictJson` carries the position | no position | position unit case |
+
+The `ToUpperInvariant` mutant was added once the first battery showed the `OrdinalIgnoreCase` one equivalent. The
+`reſources` spelling, added to the generator in the third commit, kills it.
+
+### Suite
+
+The change touches no interpreter behaviour, so the default suite is the one run: at the branch tip
+(`f8175ca6f`), on the macOS arm64 host with .NET 10 under test, 6046 tests, 6007 passed, 39 skipped, `Test Run Successful`. (Also green before the Codex rounds:
+6042 tests, 6003 passed, 39 skipped.) `fantomas` is clean, `scripts/footprint.py generate` changes nothing, and
+`scripts/check-docstring-attachment-branch.sh` passes.
+
+### Codex review
+
+Four rounds; the fourth found nothing.
+
+* **Round 1.** Two findings.
+  * *`DepsVersion.parse` read the current culture* (`Int64.Parse` for the range check; under a culture whose signs
+    are digits, `"2.1"` threw). Fixed, tests first: the digits are accumulated by hand.
+  * *.NET 11 does not read `sha512`*, so the parser refused a manifest .NET 11 launches. Not acted on in this
+    round (a refusal, not a wrong answer); fixed in round 2, when it came back.
+* **Round 2.** Three findings, all fixed, tests first.
+  * *`sha512` again.* `DepsJson.parse` takes the runtime, and requires `sha512` only on .NET 10.
+  * *Package membership.* Entries from libraries keyed `P` and `P/P` were indistinguishable, though
+    `has_package` finds the second and not the first (Codex measured a .NET 11 launch failing to find CoreLib with
+    `P`). The parser returns `DepsManifest`, with the packages for which `has_package` holds.
+  * *`NotStrictJson` carried System.Text.Json's message*, whose text changes with
+    `System.Resources.UseSystemResourceKeys`. It carries the line and byte position instead.
+* **Round 3.** One finding, fixed: `DepsEntry.dirRelativePath`'s docstring claimed it is where the host probes
+  every entry, but an application's RID-specific entry with no `localPath` is probed at its listed path.
+* **Round 4.** No findings. Codex also counted the runtime assets of the Linux packs' `deps.json` files (172 and
+  141 on 10.0.14, 181 and 132 on 11.0.0-rc.3, for linux-x64 and linux-arm64), which match the macOS counts the
+  real-file test asserts.
