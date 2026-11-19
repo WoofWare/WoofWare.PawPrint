@@ -978,7 +978,9 @@ Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after t
     `AssemblyProbe` binds them. Each set difference is compared with the empty list, so a failure names the files.
 
   An asset whose path ends `/_._` is a placeholder, which `resolve_tpa_list` skips (read:
-  `hostpolicy/deps_resolver.cpp:430-434`); the test skips it too.
+  `hostpolicy/deps_resolver.cpp:430-434`); the test skips it too. Like the host, the test reads `\` as `/` in an
+  asset's path and `localPath` (read: `hostpolicy/deps_entry.h:20-25`), drops a leading `./` from the probed
+  path, and skips a UTF-8 byte order mark before parsing.
 
   The host reads `Microsoft.NETCore.App`, the lowest framework, in self-contained mode (read:
   `hostpolicy/deps_resolver.h:68-87`, `deps_format.cpp:541-555`). That mode takes, for each package which
@@ -1026,6 +1028,11 @@ Mutants, each run against the four pack cases and the unit case:
 | The same, with the test's extension filter made case-sensitive | survives on macOS too: the filter is what sees it |
 | The test does not skip placeholders | the first unit case: `_._` counted |
 | The test reads `runtimeTarget` only as an object | the `runtimeTarget` unit case, string form |
+
+| The test does not read `\` as `/` in an asset's path | the probed-path unit case |
+| The test does not read `\` as `/` in a `localPath` | the probed-path unit case |
+| The test keeps a leading `./` | the probed-path unit case |
+| The test does not skip a byte order mark | the byte-order-mark unit case |
 
 The flake mutants kill the four pack cases; the test mutants kill the unit case they name. The two surviving
 double mutants show that the name check is the only thing that catches a swap, and that the case-insensitive
@@ -1118,3 +1125,22 @@ The other three are about later stages, recorded as before, unverified here:
 * Stage 3, the real-host test: the guest that prints the TPA must not itself load a name whose winner is a missing
   or dummy file. Codex says a missing app-local `System.Console.dll` at a higher version made the guest throw
   before it printed anything. Keep those names out of the generator, or read the host's trace instead.
+
+**Round 4.** Five findings. Three were about stage 1's test, and were fixed tests first: a backslash in an asset
+path or `localPath`; a leading `./` in a `localPath`; a UTF-8 byte order mark. Each made the test fail on a
+manifest the host accepts.
+
+The other two are about later stages, recorded as before, unverified here:
+
+* Stage 3, the metamorphic property "permuting the frameworks leaves the TPA unchanged": the lowest framework is
+  parsed in self-contained mode and the others in framework-dependent mode, so a framework whose only asset is a
+  `runtimeTargets` entry contributes it above the lowest position and not in it. Permute only the frameworks
+  above the lowest one.
+* Decision 6's gap: `RealRuntime.executeInScratch` reserves `<guest>.dll` and `<guest>.runtimeconfig.json` but
+  lets a filesystem seed supply `<guest>.deps.json`. The harness must use a seeded manifest, or reserve its name,
+  as well as handle a seeded `.dll`.
+
+Four rounds were run, as the brief allows; round 4 still had findings in the test, which were fixed after it
+without a fifth review. Each round's test fixes made the test agree with the host on a manifest shape that the
+pinned packs do not use. They are a small transcription of `hostpolicy`'s reading of a framework's runtime
+assets, which stage 2's parser will own; once it lands, this test can read the pack through it.
