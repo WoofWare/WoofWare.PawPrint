@@ -1,8 +1,9 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: decided (see "Decisions"); the first two of five pull requests are built: the closed order (#1318, "As built
-(PR 1)", merged as #2322) and the definition-level interface map ("As built (PR 2)", on top of #2331, which shares
-the substitution comparison's work); the other three are not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
+Status: decided (see "Decisions"); the first three of five pull requests are built: the closed order (#1318, "As built
+(PR 1)", merged as #2322), the definition-level interface map ("As built (PR 2)", merged as #2337, on top of #2331,
+which shares the substitution comparison's work) and open receivers (#2309, "As built (PR 3)"); the other two are not
+started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
 with a throwaway handler described under "PawPrint with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
@@ -1733,3 +1734,142 @@ round six's rule with no further round after it.
    under one heading everything this pull request knowingly leaves, each with its issue: the failure named for a
    malformed row, the extends-clause shapes, the comparison's constant, and the cyclic base chain (#2330).
 4. Default suite once more (the changes are tests), then open the pull request and enqueue it.
+
+### As built (PR 3)
+
+Open receivers, closing #2309. The interpreter and tests, and one docstring in the TypeSystem. Nothing is added to
+or removed from a published package's public surface except `ReflectedTypeTarget.instantiateTargets` (below), in
+the interpreter's package.
+
+**Commits.**
+
+1. *RuntimeTypeInterfaces.ofInstantiation: the signature the tests call, not yet implemented*: a stub that fails
+   loudly, so that the tests of the next commit compile and go red for the reason intended.
+2. *Tests: GetInterfaces on open receivers*: tests alone, with the red run in the message (below).
+3. *GetInterfaces answers open receivers from the definition's interface map*: the change.
+4. *Test: converting a definition's map to targets is linear in a shared chain*, added for a mutant; red on commit 3.
+5. *instantiateTargets closes an instantiation under its arguments' handles*: the fix for what commit 4 found.
+6. *Tests: an open construction over an interface's own variable*, added when a mutant survived.
+
+**The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
+variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
+converted to targets, in order, duplicates kept (decision 4 (a)). A `Closed` argument stays. `Formal (definition, i)`
+is the `i`th argument, and a variable of any other owner fails loudly. A `Spelled` argument is `reflectedTypeTarget`
+of the spelling in its own assembly, in an environment of its inner context converted the same way: `Bound` when
+every converted argument is closed, `Open` otherwise. Each context the map shares is converted once, keyed on its
+array, as `interfaceMapOf` closes each once. A refused map is the function's `Error`.
+
+`ofReceiver` answers:
+
+- a generic definition at its own variables, and an open construction at its arguments, through `ofInstantiation`,
+  stopping the run on a refused map as the closed path stops on `interfaceMapOf`'s;
+- an array over a variable as a closed array is answered, with `System.Array`'s map (decision 5 (a));
+- a closed type through `interfaceMapOf`, as before (decision 2).
+
+The first pull request's temporary stop and what was left of the old definition arm are deleted.
+
+**Canonical form.** An entry's target is `ReflectedTypeTarget.instantiateTargets` of its interface and converted
+arguments. Decision 4 asked for this piece to be extracted from `reflectedTypeTarget`'s `GenericInstantiation` arm,
+which now calls it. If every argument is closed, which is true of an interface with none, the entry is the closed
+type. Otherwise it is `openConstructed`, which collapses a typical instantiation to the definition.
+
+**Where the decisions were silent.**
+
+- **An instantiation is closed under its arguments' handles.** The arm used to close an instantiation whose
+  arguments are all closed through `instantiateOpenGenericTypeDefinition`. That function re-spells each argument's
+  handle as the `TypeDefn` it names, and concretises the result. For a deeply shared argument (W1's
+  `Pair<X15, X15>`) the spelling is exponentially larger than the handles: 2.5 GB to convert W1's sixteen-deep map
+  for `C`. Commit 4 found it. `instantiateTargets` now concretises the definition over its own variables, with the
+  handles as the type variables, which gives the same handle: 445 kB at depth 16. `instantiateOpenGenericTypeDefinition`
+  itself is unchanged and still re-spells. `MakeGenericType` reaches it, among others.
+- **Rows that add no entry are not loaded for an open receiver.** Decision 4 converts entries. So a row naming an
+  entry that an earlier row added is not converted, whereas `interfaceMapOf` concretises every row in the order read.
+  Where the receiver is closed, the two agree on every corpus (the cross-check below). A malformed image whose later
+  duplicate row fails to load would be answered for an open receiver and refused for a closed one. That has not been
+  observed; it is recorded so that it is not mistaken for a decision.
+- **A refused definition map stops the run.** It does not raise a guest exception, just as `interfaceMapOf` does not
+  on the closed path. `interfaceMapOfDefinition` refuses some malformed InterfaceImpl rows and extends clauses, but not
+  every extends clause CoreCLR refuses (#2336). Its docstring now says so.
+
+**Tests** (default suite), each against the host's `GetInterfaces()` over the same image, order, duplicates and
+canonical form included:
+
+- CoreLib: every generic definition (421 on a .NET 10 host, 124 with an interface over a variable, floor 100), three
+  arrays over a variable, and `List<>` over `IList<>`'s `T` and `Dictionary<,>` over `IDictionary<,>`'s variables.
+- CoreLib: the substitution law, as in "Test design". Each definition is instantiated at all `object`, all `int` and
+  alternating `string`/`long`, and, if it has no constraints, at all `Dictionary<,>`'s `K`, at its `V` alternating with
+  `K`, and at its own variables reversed. Instantiations the host refuses are left out. That gives 1,569 receivers,
+  456 of them open and 169 of those with an interface over a variable; the floors are 800 and 85. About 0.5 s.
+- The generated hierarchies of PR 1 now also ask for each generic declaration as its definition, as an open
+  construction over `K` alone and alternating with `int`, and its open base class. Three new labels are floored at
+  half the fixed sample: definition receivers 210, open constructions 340, an interface whose argument is a definition
+  29.
+- The shapes C# refuses: each definition, `C<K>`, and `Der<>`'s open base `LBase<T>`.
+- Decision 2's tie: every closed receiver of every corpus also checks that `ofInstantiation`, given its closed
+  arguments as targets, gives `interfaceMapOf`'s handles in order.
+- The canonical forms named outright: `List<>`'s first entry, its non-generic `IEnumerable`, `IX<>`'s
+  `IEquatable<IX<>>`, and `Dup<int, int>`'s one handle twice.
+- `interfaceMapOfDefinition`'s two refusals that PR 2 left without a test, now reached through an open receiver:
+  an unreadable row (a variable out of scope, or the wrong arity), and an extends clause naming a variable the type
+  lacks. The host refuses each.
+- W1's chain converted to targets, for `C` and for the definition `N<depth>`: sixteen levels may cost at most 32
+  times eight. That image is written with `MetadataBuilder`, one row per interface, each spelling of constant size,
+  so what it holds is linear in the depth. Measured: `C` 235,472 and 445,456 bytes; `N` 135,208 and 265,080.
+- Refusals that move: `GetInterfaceMap` of `CGen<>`'s open interface, asked through `GetInterfaces`, now reaches
+  #2303's refusal through public API. The two refusal tests of PR 1's temporary stop are replaced by tests that pin
+  the next stop, `GetUtf8NameInternal` of an open construction (#2315). One reaches it through `GetInterfaces()` on
+  `List<>`'s `T[]` (eleven entries on the host); the other through `typeof(List<>).GetInterface("IList`1")`.
+
+**Guests.** `sourcesPure/TypeGetInterfacesOpenGeneric.cs` has the plan's nineteen checks and the decisions'
+additions: `Action<>`, `OverClosed<>`, a generic method's `List<TM>`, `IC<K>`, and `X<>`'s `IC<X<>>` with its own map.
+Check 25 adds `List<>` over `IList<>`'s `T`. Check 16 reads `SCrtp<>`'s entries by definition and argument rather than
+through `MakeGenericType`, which would check `ISelfIface<>`'s constraint against an open argument (#2317). The guest
+exits 0 on real .NET 10.0.14 and 11.0.0-rc.3. Each of 30 perturbed expectations exits with its own check's number on
+both runtimes; a perturbation swaps entries, adds or removes a duplicate, replaces a definition argument by a
+variable, or reads a list over another owner's variable. The plan also asked for a `#def` argument to be replaced by
+the explicit instantiation over the definition's own variables. That control cannot fail: real .NET's
+`MakeGenericType` returns the definition itself for it, which check 18 asserts.
+`sourcesImpure/TypeBuilderGenericGetInterfaces.cs` (`DynG<T>`) exits 0 on both runtimes. Before commit 3, both
+guests stopped at the definition arm's "names the definition's variables" `TODO`.
+
+**Red** (commit 2, on commit 1). In the default suite, 61 tests were selected and 15 failed. CoreLib definitions had
+189 disagreements, ending in the old arm's `TODO`. The instantiations had 1,480 and CoreLib's closed types 530, both
+in the cross-check, which reached the stub. The generated hierarchies failed after one test, and the shapes had 22
+disagreements. The deep chain and the modified-TypeSpec tests failed in the cross-check. Each new refusal test failed
+on the stub, or failed to find the refusal it names. Both guests stopped at the `TODO`.
+
+**Mutants.** Each mutant was applied by an exact replacement and the test project built. Three selections were run:
+the default tests (`TestGetInterfacesOrder`, `TestGetInterfaceMethodImplementation`, `TestInterfaceDispatchMap` and
+`TestArrayInterfaceMap`, 69 tests); the pure guests `TypeGetInterfaces*`, `ArrayGetInterfaces*`,
+`RuntimeTypeGetInterface*` and `TypeGetInterfaceMap*` (15); and the impure `TypeBuilderGenericGetInterfaces`. The file
+was restored after each. In the table, "conversion" names `ofInstantiation` and "walk" names
+`interfaceMapOfDefinition`.
+
+| mutant | killed by |
+|---|---|
+| conversion: entries deduplicated by target | canonical forms, `N` cost, generated; guest `TypeGetInterfacesOpenGeneric` (check 12) |
+| conversion: an entry's open construction spelled directly (no collapse of a typical instantiation) | CoreLib definitions (`List<>` over `IList<>`'s `T`); guest check 25, by the registry's canonical-form assertion. It survived before commit 6 |
+| `instantiateTargets`: `OpenConstructed` instead of `openConstructed` (the plan's `#def` mutant) | canonical forms, CoreLib definitions and instantiations, generated; the open guest |
+| conversion: an entry over variables answered over the interface's own variables | seven default tests (CoreLib definitions and instantiations, generated, shapes, canonical forms, both moved refusals); both guests |
+| an open construction answered as its definition | CoreLib instantiations, generated, shapes; the open guest |
+| conversion: a closed entry of an open receiver left unconcretised | nine default tests; the open guest |
+| conversion: entries over variables dropped | eight default tests; both guests |
+| an array over a variable refused | the array refusal test, CoreLib definitions |
+| an array given no map | CoreLib closed and definitions; `ArrayGetInterfacesByName`, `Count`, `PointerElement`, `Shape` |
+| conversion: an interface with no arguments answered as a bare definition | eight default tests; both guests |
+| conversion: a variable read at the wrong index | deep chain, CoreLib closed, definitions and instantiations, generated, shapes; the open guest |
+| conversion: converted contexts never shared | both cases of commit 4's cost test (`C` 3.6 GB at depth 16); the deep chain's cross-check did not finish in 24 minutes. Commit 4 was added for it |
+| walk: base-class entries after the type's own | fifteen default tests; all fifteen pure guests; the impure guest |
+| walk: a declared row's parents not expanded | thirteen default tests (shapes, cycles, both cost tests); the impure guest |
+| walk: parents after all declared rows (breadth-first) | shapes, the two diamonds; the impure guest |
+| walk: parents expanded before the row | sixteen default tests; twelve pure guests; the impure guest |
+| walk: duplicate check on interface identity alone | nine default tests; `TypeGetInterfaceMapTargets` and both order guests |
+| walk: the parent's map not rebased onto the extends clause | ten default tests; `TypeGetInterfaceMapTargets` and both order guests |
+| conversion: an environment never `Bound`, always `Open` | none: equivalent on metadata that loads. With every target closed, the walk gives each variable its closed target, each instantiation the same closed handle through `instantiateTargets`, and each array or pointer the closed shape through `composite`. The two differ only where a function pointer is a generic argument, which CoreCLR refuses to load. `Bound` is kept because it concretises a spelling in one step |
+| walk: the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
+
+**Neighbours, now that this has landed.** #2303 and #2295 can read a definition's interface map from
+`ConcreteInterfaceDispatch.interfaceMapOfDefinition`: each entry's interface, its definition-rooted substitution,
+`DeclaredOnType` and `ImplementedByParent`. They can read it as targets over any receiver's arguments from
+`RuntimeTypeInterfaces.ofInstantiation`. #2315 is the next stop for `GetInterface(name)` on an open receiver and for
+an array over a variable, and two refusal tests pin it.
