@@ -497,13 +497,20 @@ public static class Program
             )
 
     /// Whether replacing this variable in the guest's environment leaves the muxer, the host and
-    /// the runtime able to start the guest as they otherwise would.
+    /// the runtime able to start the guest as they otherwise would; and whether its name is plain
+    /// ASCII letters, digits and underscores, which `printsEnvironmentImage` prints as one line
+    /// whatever line endings `CapturedRun` rebuilds.
     let private safeToReplace (name : string) : bool =
+        let plain =
+            name <> ""
+            && name |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '_')
+
         let readByTheLaunch =
             [ "DOTNET_" ; "COMPlus_" ; "CORECLR_" ; "DYLD_" ; "LD_" ]
             |> List.exists (fun prefix -> name.StartsWith (prefix, StringComparison.OrdinalIgnoreCase))
 
-        not readByTheLaunch
+        plain
+        && not readByTheLaunch
         && not (List.contains name [ "PATH" ; "HOME" ; "TMPDIR" ; "TMP" ; "TEMP" ])
 
     [<Test>]
@@ -519,7 +526,9 @@ public static class Program
         let name, hostValue =
             match hostVariables with
             | first :: _ -> first
-            | [] -> failwith "the test host's environment holds no variable that the guest's launch does not read"
+            | [] ->
+                failwith
+                    "the test host's environment holds no plainly named variable that the guest's launch does not read"
 
         let replacement =
             if hostValue = "replaced by the oracle test" then
