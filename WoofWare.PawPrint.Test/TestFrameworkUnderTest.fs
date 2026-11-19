@@ -516,6 +516,7 @@ module TestFrameworkUnderTest =
           "D.dll": { "localPath": "" },
           "lib\\net10.0\\E.dll": {},
           "F.dll": { "localPath": "./F.dll" },
+          "G.dll": { "localPath": ".\\G.dll" },
           "lib\\net10.0\\_._": {}
         }
       },
@@ -538,6 +539,7 @@ module TestFrameworkUnderTest =
                 "D.dll", "D.dll"
                 "E.dll", "E.dll"
                 "F.dll", "F.dll"
+                "G.dll", "G.dll"
                 "C.dll", "lib/net10.0/C.dll"
             ]
 
