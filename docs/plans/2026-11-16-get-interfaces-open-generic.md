@@ -1772,6 +1772,7 @@ the interpreter's package.
 24. *Test: an inherited row over a function pointer returning modified void*, from Codex's fourth review; red.
 25. *ofInstantiation reads a spelling in an Open environment even where every target is closed*: the fix.
 26. This section, after Codex's fourth review.
+27. This section, after Codex's fifth review and the last suites.
 
 **The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
 variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
@@ -2006,6 +2007,22 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
 - [P3] *Reuse the rows' targets for the entries*, rather than converting each entry again. Declined: decision 4
   converts entries, and the rows are converted only so that each is loaded. The repeated work is a constant factor,
   every context being shared.
+
+**Codex's fifth review (on commit 26), the last.** Nothing here was changed for it. It found:
+
+- [P2] Two valid images that real .NET 10 answers and PawPrint stops on, at the same existing `TODO`: PawPrint
+  refuses to concretise a closed instantiation whose argument carries a custom modifier. In the first,
+  `C<T> : I<List<delegate* unmanaged[SuppressGCTransition]<int, void>[]>, T>`, the open walk still concretises a
+  closed subtree whole. In the second, `Der<T, U> : Base<T>`, `Base<T> : Base0<delegate* unmanaged[...]<T, void>[]>`,
+  loading `Der<int, U>`'s base chain reaches the closed `Base<int>`, whose own base is then concretised. A closed
+  receiver of the same types stops at the same `TODO`, and so does `typeof(List<delegate* ...[]>)` alone. So this is
+  the `TODO`, not this feature, and it needs an issue of its own.
+- [P3] Guests run through `CrossAssemblyHarness.runTest` take the host's CoreLib flavour, not their kernel's. That is
+  true of every caller of the harness, not only this pull request's. It needs an issue of its own.
+
+*Suites* at commit 26, on `a32418d9a`, after the same build, reference assemblies deleted, and second build: default
+5,974 (5,935 passed, 39 skipped); `Guest` 234 passed (499 s); `GuestSolo` 2 passed (341 s); `GuestPure` 1,209 passed
+(389 s); `GuestImpure` 305 passed (235 s).
 
 **A flaky assertion found on the way, not this pull request's.** One run of the selection failed `A diamond of two
 chains passing Pair<A, A> on agrees with the host, in work linear in its depth` (PR 2's W2). It failed on the sketch
