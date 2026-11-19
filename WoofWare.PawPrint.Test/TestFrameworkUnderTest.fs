@@ -384,12 +384,32 @@ module TestFrameworkUnderTest =
 
         [
             for library in root.GetProperty("libraries").EnumerateObject () do
+                let libraryType = library.Value.GetProperty("type").GetString ()
+
                 match target.TryGetProperty library.Name with
                 | true, package ->
                     match package.TryGetProperty "runtime" with
                     | true, runtime ->
                         for asset in runtime.EnumerateObject () do
-                            yield Path.GetFileName asset.Name, asset.Name
+                            let localPath =
+                                match asset.Value.TryGetProperty "localPath" with
+                                | true, localPath -> localPath.GetString ()
+                                | false, _ -> null
+
+                            // `deps_entry_t::to_dir_path`, for a runtime asset.
+                            let probed =
+                                match localPath with
+                                | null
+                                | "" ->
+                                    if
+                                        String.Equals (libraryType, "runtimepack", StringComparison.OrdinalIgnoreCase)
+                                    then
+                                        asset.Name
+                                    else
+                                        Path.GetFileName asset.Name
+                                | localPath -> localPath
+
+                            yield Path.GetFileName asset.Name, probed
                     | false, _ -> ()
                 | false, _ -> ()
         ]
