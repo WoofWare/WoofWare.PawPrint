@@ -137,7 +137,9 @@ module TestTrustedPlatformAssemblies =
         TrustedPlatformAssemblies.tryFindIgnoringCase "C" tpa |> shouldBe None
 
     /// CoreCLR's map hashes and compares names upper-cased, and the Kelvin sign is upper case
-    /// already, so it does not find `K` (measured by Codex on .NET 10). The long s uppers to `S`.
+    /// already, so it does not find `K` (measured by Codex on .NET 10). The long s uppers to `S`,
+    /// whether or not the process runs with invariant globalization, under which .NET's own upper
+    /// casing leaves it as it is.
     [<Test>]
     let ``tryFindIgnoringCase compares upper-cased names`` () =
         let tpa =

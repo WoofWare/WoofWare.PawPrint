@@ -38,6 +38,7 @@ public static class Program
     {
         var text = new System.Text.StringBuilder();
         text.Append("TPA ").Append(Get("TRUSTED_PLATFORM_ASSEMBLIES")).Append('\n');
+        text.Append("CORELIB ").Append(typeof(object).Assembly.Location).Append('\n');
         foreach (var a in System.AppDomain.CurrentDomain.GetAssemblies())
             text.Append("LOADED ").Append(a.GetName().Name).Append('\n');
         System.IO.File.WriteAllText(args[0], text.ToString());
@@ -54,6 +55,12 @@ public static class Program
     /// The assemblies the guest may load; no generated entry names one of them.
     let private guestLoads : Set<string> =
         Set.ofList [ guestName ; "System.Runtime" ; "System.Private.CoreLib" ]
+
+    let private coreClrFileName : string =
+        if RuntimeInformation.IsOSPlatform OSPlatform.OSX then
+            "libcoreclr.dylib"
+        else
+            "libcoreclr.so"
 
     let private platform : HostPolicyPlatform =
         if RuntimeInformation.IsOSPlatform OSPlatform.OSX then
@@ -133,7 +140,14 @@ public static class Program
 
         // The settings of decision 10 which the environment gives, removed so that the child runs
         // with the settings `gatherSettings` reports.
-        for name in [ "CORE_SERVICING" ; "DOTNET_SHARED_STORE" ; "DOTNET_ADDITIONAL_DEPS" ] do
+        // And startup hooks, which would load assemblies the comparison does not allow.
+        for name in
+            [
+                "CORE_SERVICING"
+                "DOTNET_SHARED_STORE"
+                "DOTNET_ADDITIONAL_DEPS"
+                "DOTNET_STARTUP_HOOKS"
+            ] do
             psi.Environment.Remove name |> ignore<bool>
 
         use proc = Process.Start psi
@@ -265,21 +279,6 @@ public static class Program
         | Ok resolution ->
             let tpa = resolution.Tpa
 
-            // What the caller must check, since the function cannot see links: the CoreLib beside
-            // the CoreCLR library's real path is the TPA's.
-            match TrustedPlatformAssemblies.tryFindIgnoringCase "System.Private.CoreLib" tpa with
-            | None -> Assert.Fail $"HostPolicy.resolveTpa gave a TPA without CoreLib.\n%s{context ()}"
-            | Some (_, coreLib) ->
-                let real = FrameworkUnderTest.resolveLinks resolution.CoreClr
-
-                let beside =
-                    Path.Combine (Path.GetDirectoryName real, "System.Private.CoreLib.dll")
-                    |> FrameworkUnderTest.resolveLinks
-
-                if beside <> FrameworkUnderTest.resolveLinks coreLib then
-                    Assert.Fail
-                        $"CoreCLR loads CoreLib from %s{beside}, beside %s{real}, but the TPA's is %s{coreLib}.\n%s{context ()}"
-
             let output =
                 match run.Output with
                 | Some output -> output
@@ -305,6 +304,35 @@ public static class Program
 
             let tpaLine =
                 lines |> Array.find (fun l -> l.StartsWith ("TPA ", StringComparison.Ordinal))
+
+            // The CoreLib the guest runs on is the TPA's, by its real path. And what the caller must
+            // check, since the function cannot see links, says so too: the host opens the CoreCLR
+            // library of its fixed name in the directory of the found library's real path, and
+            // CoreCLR loads CoreLib from beside the real path of that.
+            let ranOn =
+                lines
+                |> Array.find (fun l -> l.StartsWith ("CORELIB ", StringComparison.Ordinal))
+                |> fun l -> FrameworkUnderTest.resolveLinks (l.Substring 8)
+
+            match TrustedPlatformAssemblies.tryFindIgnoringCase "System.Private.CoreLib" tpa with
+            | None -> Assert.Fail $"HostPolicy.resolveTpa gave a TPA without CoreLib.\n%s{context ()}"
+            | Some (_, coreLib) ->
+                if FrameworkUnderTest.resolveLinks coreLib <> ranOn then
+                    Assert.Fail $"The guest ran on CoreLib %s{ranOn}, but the TPA's is %s{coreLib}.\n%s{context ()}"
+
+                let found = FrameworkUnderTest.resolveLinks resolution.CoreClr
+
+                let loaded =
+                    Path.Combine (Path.GetDirectoryName found, coreClrFileName)
+                    |> FrameworkUnderTest.resolveLinks
+
+                let beside =
+                    Path.Combine (Path.GetDirectoryName loaded, "System.Private.CoreLib.dll")
+                    |> FrameworkUnderTest.resolveLinks
+
+                if beside <> ranOn then
+                    Assert.Fail
+                        $"The CoreLib beside %s{loaded} is %s{beside}, but the guest ran on %s{ranOn}.\n%s{context ()}"
 
             // The host checked no file's existence: every probe it set up is the application's or
             // a framework's, and no probe looked at the disk.
@@ -460,7 +488,8 @@ public static class Program
                 |> Array.map Path.GetFileName
                 |> List.ofArray
 
-            HostPolicyAppManifest.Listing listing, $"no deps.json: %A{names}"
+            let coreClrExists = File.Exists (Path.Combine (appDir, coreClrFileName))
+            HostPolicyAppManifest.Listing (listing, coreClrExists), $"no deps.json: %A{names}"
         else
             let library (key : string) (runtime : ManifestAsset list) (rid : ManifestRidAsset list) : ManifestLibrary =
                 { ManifestSpec.library key runtime with

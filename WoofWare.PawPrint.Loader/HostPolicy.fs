@@ -25,9 +25,11 @@ type internal HostPolicyFramework =
 type internal HostPolicyAppManifest =
     /// The bytes of the application's `deps.json`.
     | DepsJson of contents : byte[]
-    /// There is no `deps.json`. The names of the entries in the directory, in the order the host's
-    /// directory listing gives them; the host considers each as a file.
-    | Listing of names : string list
+    /// There is no `deps.json`. `names` are the names of the entries in the directory, in the
+    /// order the host's directory listing gives them; the host considers each as a file.
+    /// `coreClrExists` is whether the CoreCLR library's name, in the directory, names something
+    /// `stat` finds: the host asks that apart from the listing, which omits some kinds of entry.
+    | Listing of names : string list * coreClrExists : bool
 
 /// An application in a directory.
 type internal HostPolicyAppDirectory =
@@ -723,7 +725,7 @@ module internal HostPolicy =
         let listing =
             match application with
             | Some {
-                       Manifest = HostPolicyAppManifest.Listing names
+                       Manifest = HostPolicyAppManifest.Listing (names, _)
                    } -> Some names
             | _ -> None
 

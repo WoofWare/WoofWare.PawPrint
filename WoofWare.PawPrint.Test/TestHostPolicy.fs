@@ -118,11 +118,20 @@ module TestHostPolicy =
         str.Length >= suffix.Length
         && strcaseEqual (str.Substring (str.Length - suffix.Length)) suffix
 
-    /// Whether CoreCLR takes two simple names for one: equal upper-cased, with dotless `ı` read as
-    /// `I`, as CoreCLR's Unix fold reads it.
+    /// Whether CoreCLR takes two simple names for one, when one of them is ASCII: equal with ASCII
+    /// letters upper-cased, and dotless `ı` and the long s read as `I` and `S`, which are the only
+    /// characters outside ASCII that CoreCLR's Unix fold (`minipal`'s `unicodedata.c`) takes to an
+    /// ASCII letter.
     let private collide (a : string) (b : string) : bool =
         let fold (s : string) : string =
-            s.Replace(char 0x131, 'I').ToUpperInvariant ()
+            s.ToCharArray ()
+            |> Array.map (fun c ->
+                if c >= 'a' && c <= 'z' then char (int c - 32)
+                elif c = char 0x131 then 'I'
+                elif c = char 0x17F then 'S'
+                else c
+            )
+            |> System.String
 
         fold a = fold b
 
@@ -203,7 +212,7 @@ module TestHostPolicy =
             let listing =
                 match appDirectory with
                 | Some {
-                           Manifest = HostPolicyAppManifest.Listing names
+                           Manifest = HostPolicyAppManifest.Listing (names, _)
                        } -> Some names
                 | _ -> None
 
@@ -509,18 +518,14 @@ module TestHostPolicy =
                     nativeItems.Add appDir |> ignore<bool>
                     nativeDirs.Add appDir
 
-                    // `file_exists_in_dir`. PawPrint refuses a listed name equal to the library's
-                    // only ignoring case, not knowing whether the filesystem folds case.
-                    if coreClrPath.Value.Length = 0 then
-                        let files = Option.defaultValue [] listing
-
-                        if List.contains coreClrName files then
-                            coreClrPath.Value <- appendPath appDir coreClrName
-                            coreClrLevel.Value <- 0
-                        else
-                            match files |> List.tryFind (strcaseEqual coreClrName) with
-                            | Some listed -> unreproducible (HostPolicyUnreproducible.CoreClrNameCaseOnly listed)
-                            | None -> ()
+                    // `file_exists_in_dir`, whose answer the input carries.
+                    match appDirectory with
+                    | Some {
+                               Manifest = HostPolicyAppManifest.Listing (_, true)
+                           } when coreClrPath.Value.Length = 0 ->
+                        coreClrPath.Value <- appendPath appDir coreClrName
+                        coreClrLevel.Value <- 0
+                    | _ -> ()
 
             for i in 1 .. fxCount - 1 do
                 for entry in entriesOf i DepsAssetType.Native do
@@ -617,7 +622,7 @@ module TestHostPolicy =
                 let expected =
                     appendPath (getDirectory coreClrPath.Value) "System.Private.CoreLib.dll"
 
-                if path <> expected then
+                if withoutDots path <> withoutDots expected then
                     unreproducible (HostPolicyUnreproducible.CoreLibNotBesideCoreClr (path, coreClrPath.Value))
 
             // PawPrint: CoreCLR runs the TPA's file of the entry assembly's name.
@@ -677,7 +682,8 @@ module TestHostPolicy =
     [<RequireQualifiedAccess>]
     type private AppModel =
         | Deps of ManifestSpec
-        | Listing of string list
+        /// The names, and whether the CoreCLR library exists in the directory.
+        | Listing of string list * bool
         | InMemory
 
     [<RequireQualifiedAccess>]
@@ -730,7 +736,8 @@ module TestHostPolicy =
         let onDisk =
             match case.App with
             | AppModel.Deps spec -> Some (appDirectory (HostPolicyAppManifest.DepsJson (ManifestSpec.render spec)))
-            | AppModel.Listing names -> Some (appDirectory (HostPolicyAppManifest.Listing names))
+            | AppModel.Listing (names, coreClrExists) ->
+                Some (appDirectory (HostPolicyAppManifest.Listing (names, coreClrExists)))
             | AppModel.InMemory -> None
 
         let framework (f : FrameworkModel) : HostPolicyFramework =
@@ -1250,7 +1257,14 @@ module TestHostPolicy =
                 | 1
                 | 4 ->
                     listingGen appNames platform withEntry (selfContained && withCore)
-                    |> Gen.map AppModel.Listing
+                    |> Gen.bind (fun names ->
+                        // Usually the listing's own answer; sometimes not, as for a link the
+                        // listing omits.
+                        Gen.frequency [ 19, Gen.constant false ; 1, Gen.constant true ]
+                        |> Gen.map (fun disagree ->
+                            AppModel.Listing (names, List.contains (coreClrFileName platform) names <> disagree)
+                        )
+                    )
                 | _ -> Gen.constant AppModel.InMemory
 
             let! settings =
@@ -1326,7 +1340,6 @@ module TestHostPolicy =
             "UsesRidGraph"
             "SetsAppPaths"
             "CoreClrFromApplication"
-            "CoreClrNameCaseOnly"
             "ProbeDirectoryHoldsPathListSeparator"
             "Tpa NonAsciiFileName"
             "UnmodelledSettings"
@@ -1629,9 +1642,9 @@ module TestHostPolicy =
                 let! case = caseGenOf shape
 
                 match case.App with
-                | AppModel.Listing names ->
+                | AppModel.Listing (names, coreClrExists) ->
                     let! shuffled = Gen.shuffle names
-                    return case, List.ofArray shuffled
+                    return case, (List.ofArray shuffled, coreClrExists)
                 | AppModel.Deps _
                 | AppModel.InMemory -> return failwith "logic error: a listing case without a listing"
             }
@@ -1777,12 +1790,14 @@ module TestHostPolicy =
             | "file deleted" -> appDeps (Some "9.0.0.0") (Some "9.0.225.6610")
             | "no deps.json" ->
                 onDisk (
-                    HostPolicyAppManifest.Listing
+                    HostPolicyAppManifest.Listing (
                         [
                             "Entry.dll"
                             abstractions + ".dll"
                             "Microsoft.Extensions.DependencyInjection.dll"
-                        ]
+                        ],
+                        false
+                    )
                 )
             | "tie" -> appDeps (Some "11.0.0.0") (Some "11.0.26.52348")
             | "file version + 1" -> appDeps (Some "11.0.0.0") (Some "11.0.26.52349")
@@ -2174,7 +2189,7 @@ module TestHostPolicy =
             (HostPolicyApplication.OnDisk
                 {
                     Directory = "app"
-                    Manifest = HostPolicyAppManifest.Listing [ "Entry.dll" ]
+                    Manifest = HostPolicyAppManifest.Listing ([ "Entry.dll" ], false)
                     EntryFileName = "Entry.dll"
                 })
             []
@@ -2211,7 +2226,7 @@ module TestHostPolicy =
     let ``Refused: two listed files of one stem and extension`` () =
         frameworkDependent
             EmulatedRuntime.Net10
-            (onDisk (HostPolicyAppManifest.Listing [ "Entry.dll" ; "X.dll" ; "X.DLL" ]))
+            (onDisk (HostPolicyAppManifest.Listing ([ "Entry.dll" ; "X.dll" ; "X.DLL" ], false)))
             []
             baseFramework
         |> expectRefusal (
@@ -2271,7 +2286,7 @@ module TestHostPolicy =
             (HostPolicyApplication.OnDisk
                 {
                     Directory = "/app:x"
-                    Manifest = HostPolicyAppManifest.Listing [ "Entry.dll" ]
+                    Manifest = HostPolicyAppManifest.Listing ([ "Entry.dll" ], false)
                     EntryFileName = "Entry.dll"
                 })
             []
@@ -2308,7 +2323,7 @@ module TestHostPolicy =
     let ``Refused: an exe in the TPA`` () =
         frameworkDependent
             EmulatedRuntime.Net10
-            (onDisk (HostPolicyAppManifest.Listing [ "Entry.dll" ; "X.exe" ]))
+            (onDisk (HostPolicyAppManifest.Listing ([ "Entry.dll" ; "X.exe" ], false)))
             []
             baseFramework
         |> expectRefusal (
@@ -2421,33 +2436,87 @@ module TestHostPolicy =
     let ``Refused: a framework-dependent application whose directory holds the CoreCLR library`` () =
         frameworkDependent
             EmulatedRuntime.Net10
-            (onDisk (HostPolicyAppManifest.Listing [ "Entry.dll" ; "libcoreclr.dylib" ]))
+            (onDisk (HostPolicyAppManifest.Listing ([ "Entry.dll" ; "libcoreclr.dylib" ], true)))
             []
             baseFramework
         |> expectRefusal (
             HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.CoreClrFromApplication "/app/libcoreclr.dylib")
         )
 
+    /// Measured by Codex on .NET 10: `file_exists_in_dir` found a `libcoreclr.dylib` linked to
+    /// `/dev/null`, which the directory listing omits; the host selected it, and failed to load
+    /// it. The function takes the existence probe's answer, not the listing's.
     [<Test>]
-    let ``Refused: a listed CoreCLR library whose name matches only ignoring case`` () =
+    let ``The CoreCLR library of a directory without deps.json is the one the existence probe finds`` () =
+        let application (coreClrExists : bool) : HostPolicyAppDirectory =
+            {
+                Directory = "/app"
+                Manifest = HostPolicyAppManifest.Listing ([ "Entry.dll" ; "System.Private.CoreLib.dll" ], coreClrExists)
+                EntryFileName = "Entry.dll"
+            }
+
+        let launch (coreClrExists : bool) : HostPolicyInput =
+            {
+                Runtime = EmulatedRuntime.Net10
+                Platform = HostPolicyPlatform.Linux
+                Launch = HostPolicyLaunch.SelfContained (application coreClrExists)
+                EntryAssemblyName = "Entry"
+                Settings = noSettings
+            }
+
+        HostPolicy.resolveTpa (launch true)
+        |> Result.map (fun r -> r.CoreClr)
+        |> shouldBe (Ok "/app/libcoreclr.so")
+
+        launch false
+        |> expectRefusal (HostPolicyRefusal.HostWouldFail HostPolicyFailure.CoreClrNotFound)
+
+        frameworkDependent
+            EmulatedRuntime.Net10
+            (onDisk (HostPolicyAppManifest.Listing ([ "Entry.dll" ], true)))
+            []
+            baseFramework
+        |> expectRefusal (
+            HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.CoreClrFromApplication "/app/libcoreclr.dylib")
+        )
+
+    /// Measured by Codex on .NET 10: the host keeps the `./` in the TPA, and launches.
+    [<Test>]
+    let ``A CoreLib listed at ./ is the one beside the CoreCLR library`` () =
         let application : HostPolicyAppDirectory =
             {
                 Directory = "/app"
                 Manifest =
-                    HostPolicyAppManifest.Listing [ "Entry.dll" ; "System.Private.CoreLib.dll" ; "LIBCORECLR.SO" ]
+                    HostPolicyAppManifest.DepsJson (
+                        ManifestSpec.render
+                            {
+                                Libraries =
+                                    [
+                                        entryLibrary
+                                        { coreLibrary HostPolicyPlatform.MacOS with
+                                            Runtime =
+                                                [
+                                                    { ManifestSpec.asset "System.Private.CoreLib.dll" with
+                                                        LocalPath = Some "./System.Private.CoreLib.dll"
+                                                    }
+                                                ]
+                                        }
+                                    ]
+                            }
+                    )
                 EntryFileName = "Entry.dll"
             }
 
         {
             Runtime = EmulatedRuntime.Net10
-            Platform = HostPolicyPlatform.Linux
+            Platform = HostPolicyPlatform.MacOS
             Launch = HostPolicyLaunch.SelfContained application
             EntryAssemblyName = "Entry"
             Settings = noSettings
         }
-        |> expectRefusal (
-            HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.CoreClrNameCaseOnly "LIBCORECLR.SO")
-        )
+        |> HostPolicy.resolveTpa
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa |> Map.tryFind "System.Private.CoreLib")
+        |> shouldBe (Ok (Some "/app/./System.Private.CoreLib.dll"))
 
     [<Test>]
     let ``Refused: the AppPaths switch`` () =
@@ -2524,7 +2593,11 @@ module TestHostPolicy =
                 "/fx/10.0.14"
                 (netCoreApp "10.0.14" [ versioned "Entry.dll" (Some "10.0.0.0") None ])
 
-        frameworkDependent EmulatedRuntime.Net10 (onDisk (HostPolicyAppManifest.Listing [ "Entry.dll" ])) [] lowest
+        frameworkDependent
+            EmulatedRuntime.Net10
+            (onDisk (HostPolicyAppManifest.Listing ([ "Entry.dll" ], false)))
+            []
+            lowest
         |> expectRefusal (
             HostPolicyRefusal.NotReproducible (
                 HostPolicyUnreproducible.EntryAssemblyShadowed ("Entry", "/fx/10.0.14/Entry.dll")
