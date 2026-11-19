@@ -961,7 +961,7 @@ checks (Q10 B); deleting the framework-overlap refusal once the locator's order 
 
 ## As built (stage 1)
 
-Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after the plan and decisions commits.
+Branch `host-binding-1-pack-deps-json`, on `origin/main` at `c81deb2de`, after the plan and decisions commits.
 
 * **The flake.** `frameworkPack` copies `runtimes/<rid>/lib/<tfm>/Microsoft.NETCore.App.deps.json` beside the
   DLLs it already copied. The comment above it says why. The fixed-output hashes are of the nupkgs, so none
@@ -1038,8 +1038,9 @@ The flake mutants kill the four pack cases; the test mutants kill the unit case 
 double mutants show that the name check is the only thing that catches a swap, and that the case-insensitive
 filter is what catches an upper-case extension.
 
-Suites on the .NET 10 host, each its own invocation, at `dca73fe83`: default 5990 (5951 passed, 39 skipped),
-`Guest` 250, `GuestSolo` 2, `GuestPure` 1210, `GuestImpure` 305, all passed.
+Suites on the .NET 10 host, each its own invocation, at the branch tip after the four Codex rounds, on
+`origin/main` at `c81deb2de`: default 5995 (5956 passed, 39 skipped), `Guest` 250, `GuestSolo` 2, `GuestPure` 1210,
+`GuestImpure` 306, all passed. (They also all passed before the Codex rounds, on `origin/main` at `2b38151e8`.)
 
 ### Codex review
 
