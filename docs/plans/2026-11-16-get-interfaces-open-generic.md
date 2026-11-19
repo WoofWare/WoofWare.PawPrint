@@ -1760,6 +1760,9 @@ the interpreter's package.
     both failed before the next commit.
 14. *instantiateTargets checks its arity before the open branch*: its steps 2 and 5.
 15. This section, after those decisions.
+16. *Tests: an open receiver's base chain and closed arguments, from Codex's second review*: tests alone; two red.
+17. *An open base is named by its definition; instantiateTargets loads the chain it reads*: the fix.
+18. This section, after Codex's second review.
 
 **The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
 variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
@@ -1885,6 +1888,8 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
 | (after commit 9) the receiver's base chain not loaded | the absent-base-argument test |
 | (after commit 9) rows that add no entry not converted | the re-declared-row test |
 | (after commit 14) the arity check moved back below the open branch | both wrong-arity tests |
+| (after commit 17) an open base described by its whole target | the base-chain cost test |
+| (after commit 17) `instantiateTargets` not loading the chain it reads | the cross-assembly guest |
 
 **Codex's first review (on commit 7).** It ran the focused tests and both guests, and found:
 
@@ -1937,6 +1942,27 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
 - *Suites* at commit 14, on `a32418d9a`, after the same whole-solution build, reference assemblies deleted and second
   build: default 5,970 (5,931 passed, 39 skipped); `Guest` 234 passed (817 s); `GuestSolo` 2 passed (285 s);
   `GuestPure` 1,209 passed (391 s); `GuestImpure` 305 passed (233 s). No existing test went red.
+
+**Codex's second review (on commit 15).** It found:
+
+- [P2] *A closed argument whose base is in an assembly not yet loaded.* For `C<T, U> : I<D<T>, U>`, where
+  `D<T> : LBase` and `LBase` is in another assembly, `GetInterfaces()` on `C<int, U>` closes `D<int>`, and
+  `instantiateTargets` read its kind with `signatureTypeKind`, which walks the base chain without loading it, so the
+  run stopped where the host answers. Valid metadata, so fixed (commits 16 and 17). The closed branch now loads the
+  definition's chain first through `TypeSystemState.lookupTypeDefn`. `instantiateOpenGenericTypeDefinition`, which
+  `MakeGenericType` uses, reads the kind the same way and is unchanged.
+- [P2] *Loading the base chain was exponential in a chain that passes `Pair<T, T>` on.*
+  `resolveBaseRuntimeTypeHandleTarget` formatted the whole target, eagerly, for its diagnostic, and commit 9 made
+  every open receiver walk the chain. The diagnostic now names the definition. A test written with `MetadataBuilder`
+  (one row and one extends clause per class) pins it: 102,496 bytes at depth 8 and 206,328 at 16, where it was
+  3.3 MB and 1.45 GB.
+- [P3] *The substitution law treated a variant parameter as constrained.* It compared all of a parameter's
+  attributes with `None`; it now masks the special constraints. The sweep has 1,749 receivers, 615 of them open (was
+  1,569 and 456), and passes.
+- [P2] *An open argument whose definition does not load.* For `C<T> : I<D<T>>`, where `D<T>` implements an interface
+  absent at run time, CoreCLR refuses to load `C<>` and PawPrint answers `I<D<T>>`: the open branch builds `D<T>`
+  without loading `D`. This is the load of an open construction's definition, which #2340 is about. It is recorded
+  there as a comment and not fixed here, as the decisions after the first review direct.
 
 **A flaky assertion found on the way, not this pull request's.** One run of the selection failed `A diamond of two
 chains passing Pair<A, A> on agrees with the host, in work linear in its depth` (PR 2's W2). It failed on the sketch
