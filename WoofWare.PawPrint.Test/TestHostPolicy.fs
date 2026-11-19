@@ -625,6 +625,12 @@ module TestHostPolicy =
                 if withoutDots path <> withoutDots expected then
                     unreproducible (HostPolicyUnreproducible.CoreLibNotBesideCoreClr (path, coreClrPath.Value))
 
+            // PawPrint: CoreCLR binds an entry assembly with a culture through the satellite
+            // directories.
+            match input.EntryAssemblyCulture with
+            | Some culture -> unreproducible (HostPolicyUnreproducible.EntryAssemblyHasCulture culture)
+            | None -> ()
+
             // PawPrint: CoreCLR runs the TPA's file of the entry assembly's name.
             match findIgnoringCase input.EntryAssemblyName with
             | None -> ()
@@ -673,6 +679,7 @@ module TestHostPolicy =
             | HostPolicyUnreproducible.Tpa r -> "Tpa " + tpaRefusalName r
             | HostPolicyUnreproducible.CoreLibAbsent -> "CoreLibAbsent"
             | HostPolicyUnreproducible.CoreLibNotBesideCoreClr _ -> "CoreLibNotBesideCoreClr"
+            | HostPolicyUnreproducible.EntryAssemblyHasCulture _ -> "EntryAssemblyHasCulture"
             | HostPolicyUnreproducible.EntryAssemblyShadowed _ -> "EntryAssemblyShadowed"
 
     // ---------------------------------------------------------------------------------------
@@ -711,6 +718,7 @@ module TestHostPolicy =
             Frameworks : FrameworkModel list
             Rids : string list
             EntryAssemblyName : string
+            EntryAssemblyCulture : string option
             Settings : HostPolicySettings
         }
 
@@ -770,6 +778,7 @@ module TestHostPolicy =
             Platform = case.Platform
             Launch = launch
             EntryAssemblyName = case.EntryAssemblyName
+            EntryAssemblyCulture = case.EntryAssemblyCulture
             Settings = case.Settings
         }
 
@@ -1303,6 +1312,7 @@ module TestHostPolicy =
                     ]
 
             let! entryAssemblyName = Gen.frequency [ 9, Gen.constant "Entry" ; 1, Gen.constant "A" ]
+            let! entryAssemblyCulture = Gen.frequency [ 49, Gen.constant None ; 1, Gen.constant (Some "fr") ]
 
             return
                 {
@@ -1314,6 +1324,7 @@ module TestHostPolicy =
                     Frameworks = frameworks
                     Rids = rids
                     EntryAssemblyName = entryAssemblyName
+                    EntryAssemblyCulture = entryAssemblyCulture
                     Settings = settings
                 }
         }
@@ -1353,6 +1364,7 @@ module TestHostPolicy =
             "CoreLibAbsent"
             "CoreLibNotBesideCoreClr"
             "EntryAssemblyShadowed"
+            "EntryAssemblyHasCulture"
         ]
 
     [<Test>]
@@ -1722,6 +1734,7 @@ module TestHostPolicy =
             Platform = HostPolicyPlatform.MacOS
             Launch = HostPolicyLaunch.FrameworkDependent (application, macRids, higher, lowest)
             EntryAssemblyName = "Entry"
+            EntryAssemblyCulture = None
             Settings = noSettings
         }
 
@@ -1961,6 +1974,7 @@ module TestHostPolicy =
             Platform = HostPolicyPlatform.MacOS
             Launch = HostPolicyLaunch.SelfContained application
             EntryAssemblyName = "Entry"
+            EntryAssemblyCulture = None
             Settings = noSettings
         }
         |> HostPolicy.resolveTpa
@@ -2460,6 +2474,7 @@ module TestHostPolicy =
                 Platform = HostPolicyPlatform.Linux
                 Launch = HostPolicyLaunch.SelfContained (application coreClrExists)
                 EntryAssemblyName = "Entry"
+                EntryAssemblyCulture = None
                 Settings = noSettings
             }
 
@@ -2511,6 +2526,7 @@ module TestHostPolicy =
             Platform = HostPolicyPlatform.MacOS
             Launch = HostPolicyLaunch.SelfContained application
             EntryAssemblyName = "Entry"
+            EntryAssemblyCulture = None
             Settings = noSettings
         }
         |> HostPolicy.resolveTpa
@@ -2579,6 +2595,15 @@ module TestHostPolicy =
                 HostPolicyUnreproducible.EntryAssemblyShadowed ("A", "/fx/10.0.14/A.dll")
             )
         )
+
+    /// Measured by Codex on .NET 10 and 11: CoreCLR looked for an entry assembly of culture `fr`
+    /// at `<app>/fr/Entry.dll`, and ran a different build found there.
+    [<Test>]
+    let ``Refused: an entry assembly with a culture`` () =
+        { frameworkDependent EmulatedRuntime.Net10 (appWith []) [] baseFramework with
+            EntryAssemblyCulture = Some "fr"
+        }
+        |> expectRefusal (HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.EntryAssemblyHasCulture "fr"))
 
     /// Measured on real .NET 10.0.14 and 11.0.0-rc.3: a directory with no `deps.json` holding an
     /// entry assembly named `System.Web.HttpUtility`. The host launched, and CoreCLR ran the

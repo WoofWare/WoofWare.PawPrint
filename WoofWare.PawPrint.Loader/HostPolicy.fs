@@ -94,6 +94,8 @@ type internal HostPolicyInput =
         Launch : HostPolicyLaunch
         /// The entry assembly's simple name, from its metadata.
         EntryAssemblyName : string
+        /// The entry assembly's culture, from its metadata, or `None` if it is neutral.
+        EntryAssemblyCulture : string option
         Settings : HostPolicySettings
     }
 
@@ -102,11 +104,14 @@ type internal HostPolicyResolution =
     {
         /// The TPA the host gives CoreCLR.
         Tpa : TrustedPlatformAssemblies
-        /// The CoreCLR library the host loads, as the host finds it, before it resolves links.
-        /// CoreCLR loads CoreLib from beside the library's real path. `resolveTpa` checks by
-        /// spelling that this is the TPA's `System.Private.CoreLib`, and cannot see links; a caller
-        /// which reads the filesystem must check that the CoreLib beside this file's real path is
-        /// the TPA's file of that name.
+        /// The CoreCLR library the host finds, before it resolves links. `resolveTpa` checks by
+        /// spelling that the TPA's `System.Private.CoreLib` is beside it, and cannot see links. The
+        /// host takes the directory of this file's real path, opens the CoreCLR library of its
+        /// platform's name there, and appends `System.Private.CoreLib.dll` in that directory to the
+        /// TPA string; CoreCLR loads CoreLib from beside that library's real path. So a caller which
+        /// reads the filesystem must check that the library of the platform's name exists in the
+        /// directory of this file's real path, that the path appended there holds no `:`, and that
+        /// the CoreLib beside the real path of that library is the TPA's file of that name.
         CoreClr : string
     }
 
@@ -183,6 +188,9 @@ type internal HostPolicyUnreproducible =
     /// The TPA's `System.Private.CoreLib` is not the one beside the CoreCLR library, which is the
     /// one CoreCLR loads.
     | CoreLibNotBesideCoreClr of coreLib : string * coreClr : string
+    /// The entry assembly has a culture, so CoreCLR binds it through the satellite directories
+    /// under the resource roots, which PawPrint does not model.
+    | EntryAssemblyHasCulture of culture : string
     /// The TPA maps the entry assembly's name to another file, which CoreCLR would run instead.
     | EntryAssemblyShadowed of name : string * path : string
 

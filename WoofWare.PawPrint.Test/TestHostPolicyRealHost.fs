@@ -322,9 +322,19 @@ public static class Program
 
                 let found = FrameworkUnderTest.resolveLinks resolution.CoreClr
 
-                let loaded =
-                    Path.Combine (Path.GetDirectoryName found, coreClrFileName)
-                    |> FrameworkUnderTest.resolveLinks
+                let fixedName = Path.Combine (Path.GetDirectoryName found, coreClrFileName)
+
+                if not (File.Exists fixedName) then
+                    Assert.Fail $"The host opens %s{fixedName}, which does not exist.\n%s{context ()}"
+
+                let appended =
+                    Path.Combine (Path.GetDirectoryName found, "System.Private.CoreLib.dll")
+
+                if appended.Contains ':' then
+                    Assert.Fail
+                        $"The host appends %s{appended} to the TPA string, which CoreCLR splits at ':'.\n%s{context ()}"
+
+                let loaded = FrameworkUnderTest.resolveLinks fixedName
 
                 let beside =
                     Path.Combine (Path.GetDirectoryName loaded, "System.Private.CoreLib.dll")
@@ -672,6 +682,7 @@ public static class Program
                                         List.last frameworks
                                     )
                                 EntryAssemblyName = guestName
+                                EntryAssemblyCulture = None
                                 Settings = gatherSettings ()
                             }
 
@@ -755,6 +766,7 @@ public static class Program
                                 EntryFileName = guestName + ".dll"
                             }
                     EntryAssemblyName = guestName
+                    EntryAssemblyCulture = None
                     Settings = gatherSettings ()
                 }
 
