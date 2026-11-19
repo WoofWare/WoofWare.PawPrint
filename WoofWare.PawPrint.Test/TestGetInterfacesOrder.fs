@@ -2122,6 +2122,8 @@ public struct S2<T> : IC<T[]> { }
         | AbsentInterface
         /// `GENERICINST int32 1 int32`: an instantiation whose head is not a type token.
         | Int32HeadedInstantiation
+        /// `[CoreLib]System.Int32` by its TypeRef, spelled `VALUETYPE` (`asValueType`) or `CLASS`.
+        | CoreLibInt32 of asValueType : bool
 
     [<RequireQualifiedAccess>]
     type private SketchKind =
@@ -2198,6 +2200,7 @@ public struct S2<T> : IC<T[]> { }
         let listRef = coreLibType "System.Collections.Generic" "List`1"
         let missingRef = coreLibType "System" "Missing"
         let absentRef = coreLibType "System" "IAbsent"
+        let int32Ref = coreLibType "System" "Int32"
 
         // `<Module>` is row 1, so the sketches are rows 2 onwards, in order.
         let handles =
@@ -2264,6 +2267,9 @@ public struct S2<T> : IC<T[]> { }
                 blob.WriteByte 0x08uy
                 blob.WriteCompressedInteger 1
                 blob.WriteByte 0x08uy
+            | Spelling.CoreLibInt32 asValueType ->
+                blob.WriteByte (if asValueType then 0x11uy else 0x12uy)
+                blob.WriteCompressedInteger (codedIndex int32Ref)
 
         // A row or base: a TypeDef or TypeRef token when the spelling has one, a TypeSpec otherwise.
         let typeDefOrRefOrSpec (spelling : Spelling) : Reflection.Metadata.EntityHandle =
@@ -2958,12 +2964,18 @@ public struct S2<T> : IC<T[]> { }
 
     // ----- A generic definition -----
 
-    /// What the host's `GetInterfaces()` and `ofInstantiation` answer for the generic definition
-    /// `receiver` of `sketches`, the latter at the definition's own variables, as the QCall asks it.
-    let private sketchDefinitionOutcome
+    /// What the host's `GetInterfaces()` answers for the generic definition `receiver` of `sketches`,
+    /// and what `ask` answers given the image loaded, the definition, and its own variables, which is
+    /// how the QCall asks about it.
+    let private withSketchDefinition<'a>
         (sketches : Sketch list)
         (receiver : string)
-        : Result<Type[], exn> * Result<RuntimeTypeHandleTarget list, TypeBindingFailure>
+        (ask :
+            IlMachineState
+                -> ResolvedTypeIdentity
+                -> Collections.Immutable.ImmutableArray<RuntimeTypeHandleTarget>
+                -> 'a)
+        : Result<Type[], exn> * 'a
         =
         let image = sketchImage sketches
 
@@ -2993,18 +3005,94 @@ public struct S2<T> : IC<T[]> { }
                     (fun i -> RuntimeTypeHandleTarget.GenericParameter (typeInfo.Identity, i))
                 |> Collections.Immutable.ImmutableArray.CreateRange
 
-            let _, pawPrintAnswer =
-                RuntimeTypeInterfaces.ofInstantiation
-                    loggerFactory
-                    bct
-                    "test"
-                    (coreState.WithLoadedAssembly dumped)
-                    typeInfo.Identity
-                    arguments
-
-            hostAnswer, pawPrintAnswer
+            hostAnswer, ask (coreState.WithLoadedAssembly dumped) typeInfo.Identity arguments
         finally
             context.Unload ()
+
+    /// What the host's `GetInterfaces()` and `ofInstantiation` answer for the generic definition
+    /// `receiver` of `sketches`, the latter at the definition's own variables.
+    let private sketchDefinitionOutcome
+        (sketches : Sketch list)
+        (receiver : string)
+        : Result<Type[], exn> * Result<RuntimeTypeHandleTarget list, TypeBindingFailure>
+        =
+        withSketchDefinition
+            sketches
+            receiver
+            (fun state identity arguments ->
+                snd (RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state identity arguments)
+            )
+
+    /// What the host's `GetInterfaces()` and the QCall's `ofReceiver` answer for the generic definition
+    /// `receiver` of `sketches`: PawPrint's interfaces, or why it stopped.
+    let private sketchDefinitionReceiver
+        (sketches : Sketch list)
+        (receiver : string)
+        : Result<Type[], exn> * Result<RuntimeTypeHandleTarget list, string>
+        =
+        withSketchDefinition
+            sketches
+            receiver
+            (fun state identity _ ->
+                try
+                    RuntimeTypeInterfaces.ofReceiver
+                        loggerFactory
+                        bct
+                        "test"
+                        state
+                        (RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity)
+                    |> snd
+                    |> Ok
+                with e ->
+                    Error e.Message
+            )
+
+    /// An open receiver's base chain is loaded, as a closed one's is, though its base adds no entry:
+    /// `C<T> : B<IAbsent>`, where `B<U>` has no interfaces and CoreLib declares no `IAbsent`. The host
+    /// refuses to load `C<>`.
+    [<Test>]
+    let ``An open receiver's base whose argument is absent is refused`` () : unit =
+        let host, pawPrint =
+            sketchDefinitionReceiver
+                [
+                    sketch "B`1" SketchKind.Class 1 []
+                    { sketch "C`1" SketchKind.Class 1 [] with
+                        Base = Some (Spelling.Named ("B`1", [ Spelling.AbsentInterface ]))
+                    }
+                ]
+                "C`1"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error message -> message |> shouldContainText "IAbsent"
+        | Ok interfaces -> failwith $"PawPrint answered %A{interfaces}"
+
+    /// Every row of an open receiver's map is loaded as it is spelled, as a closed receiver's is,
+    /// though it adds no entry: `C<T>`'s `I<class Int32>` names `B`'s `I<valuetype Int32>` again, and
+    /// only loading it finds the wrong kind. The host refuses to load `C<>`.
+    [<Test>]
+    let ``An open receiver's row that adds no entry is still loaded`` () : unit =
+        let host, pawPrint =
+            sketchDefinitionReceiver
+                [
+                    sketch "I`1" SketchKind.Interface 1 []
+                    sketch "B" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.CoreLibInt32 true ]) ]
+                    { sketch "C`1" SketchKind.Class 1 [ Spelling.Named ("I`1", [ Spelling.CoreLibInt32 false ]) ] with
+                        Base = Some (Spelling.Named ("B", []))
+                    }
+                ]
+                "C`1"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error message -> message |> shouldContainText "Int32"
+        | Ok interfaces -> failwith $"PawPrint answered %A{interfaces}"
 
     /// An open receiver's answer is its definition's map, which cannot compare a row whose arguments
     /// it cannot read with the others: a variable the definition does not have, or the wrong number of
@@ -3134,7 +3222,12 @@ public struct S2<T> : IC<T[]> { }
             ExpectedReturnCode = 0
         }
         |> CrossAssemblyHarness.runTestExpectingRefusal
-            [ "TODO" ; "open constructed types are not handled" ; "NativeRuntimeTypeFCall" ]
+            [
+                "TODO"
+                "open constructed types are not handled"
+                "NativeRuntimeTypeFCall"
+                "GetUtf8NameInternal"
+            ]
             []
             []
 
