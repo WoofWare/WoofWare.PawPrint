@@ -3,7 +3,8 @@
 Status: decided (see "Decisions"); the first four of five pull requests are built: the closed order (#1318, "As built
 (PR 1)", merged as #2322), the definition-level interface map ("As built (PR 2)", merged as #2337, on top of #2331,
 which shares the substitution comparison's work), open receivers (#2309, "As built (PR 3)", merged as #2344) and the
-name of an open construction (#2315, "As built (PR 4)"); the `dynamic` guest is not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
+name of an open construction (#2315, "As built (PR 4)"); the `dynamic` guest stops short of passing and is parked
+("PR 5: where the `dynamic` guest stops"). The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
 with a throwaway handler described under "PawPrint with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
@@ -2290,3 +2291,52 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
 
 **Codex's second review (on commit 6).** No findings. It ran the selection and the new guest again. Commits after 4
 change only a docstring and this plan, so the suites above stand.
+
+### PR 5: where the `dynamic` guest stops
+
+Measured 2026-11-19 on PR 4's branch (`4892aa1fb`). The guest does not pass under PawPrint, so it is parked rather
+than landed, and what comes next is the owner's decision. Nothing outside the test project changes.
+
+**The guest.** `sourcesPure/DynamicMemberAccess.cs`, six checks, each printing what it bound to and returning its own
+exit code: (1) `(int)d.Id + 1` on a user class and (2) `(int)s.Length` on a `string`, the Study's two operations;
+(3) a dynamic `List<int>` converted implicitly to `IEnumerable<int>` and (4) chosen by run-time overload resolution
+over `Sum(object)`; (5) `IList<int>.Contains(dynamic)` and (6) a user `IDerived<int>.Get(dynamic)`, each a member the
+receiver's static interface type has only through a base interface. It exits 0 on real .NET 10.0.14 and
+11.0.0-rc.3.
+
+**First stop, in the harness.** At check 1, on .NET 10's CoreLib and on .NET 11's alike, about 7 s into the run:
+"TODO: RuntimeTypeHandle.GetFirstIntroducedMethod for synthesised array handle ...; need to surface the array's
+intrinsic Get/Set/Address methods" (`VirtualSlotLayout.introducedMethodsOf`). The guest's stack, traced with a
+throwaway: `CallSite<T>.Create` → `MakeUpdateDelegate` → `CreateCustomUpdateDelegate` → `Expression.NotEqual` →
+`GetEqualityComparisonOperator` → `GetUserDefinedBinaryOperator` → `TypeExtensions.GetAnyStaticMethodValidated` →
+`Type.GetMethod` → `RuntimeTypeCache.GetMethodList` → `MemberInfoCache.PopulateMethods` →
+`RuntimeTypeHandle.GetIntroducedMethods`, on the call site's rules array (`T[]`). `MakeUpdateDelegate` takes the custom
+path because PawPrint seeds `IsDynamicCodeSupported` false (`AppContextProperties.runtimeBaseline`), as every
+`sourcesPure` case and the App run with.
+
+**Why the Study's run got further.** With `IsDynamicCodeSupported` set true in the guest's runtimeconfig (a
+`RuntimeHostConfigurationOption`, as the playground can set it), the Release App runs checks 1 to 4 to the end with
+real .NET's stdout, in 83 to 104 s and about 1.1 to 1.2 GB peak RSS. The Study's 163-277 s run presumably had the
+switch on; it does not say.
+
+**What the checks test.** A mutant answering `[]` for every generic definition in `RuntimeTypeInterfaces.ofReceiver`
+was run in the App with the switch on. A throwaway that logged each definition asked showed the binder reaching it 36
+times (`List<>`, `IEnumerable<>`, `CallSite<>`, `Expression<>`, `int`'s generic interfaces and others), so it is reached:
+
+| mutant | checks 1 to 4 (switch on, App) | checks 5 and 6 |
+|---|---|---|
+| a definition's interfaces answered empty | **survives**: exit 0, same stdout | not measurable: unmutated, both stop (below) |
+
+Checks 1 to 4 cannot see it: the binder decides a conversion from a run-time object with `Type.IsInstanceOfType`
+(`ExpressionBinder.ImplicitConversion.Bind`, read in its IL), not from the interfaces its symbol table holds, and
+checks 1 and 2 read members the receiver's class declares itself. What does read a definition's interfaces is member lookup on a
+receiver of interface type, which checks 5 and 6 do; unmutated, with the switch on, each stops at
+`RuntimeTypeHandle.GetFields` of the base interface over the derived interface's variable ("TODO: open constructed
+types are not handled at Native/NativeRuntimeTypeQCall.fs:2614"), the open construction that the definition's
+`GetInterfaces` answer handed the binder.
+
+**So** a guest that both passes and depends on `GetInterfaces` needs two features that are not this work: an array
+type's introduced methods (for the default, switch-off profile; with the switch on it is not reached), and
+`GetFields` of an open construction. The open choices are which of those to do, and whether the guest runs with the
+switch off (`sourcesPure`, as decision 9 has it) or on (a `sourcesImpure` case declaring it, as the `DynamicMethod`
+cases do).
