@@ -895,8 +895,9 @@ above, and that `nix flake check` on the Linux runner runs the new check (it ran
 Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`.
 
 **The oracle.** `RealRuntime.captureAssemblyInPlace : AppContextProperties -> string[] -> string -> CapturedRun`
-writes `runtimeConfigFor OracleFrameworks.NetCoreApp configProperties` as `<name>.runtimeconfig.json` into a
-scratch directory of its own, and runs `dotnet exec --runtimeconfig <that file> <dll> <args>` through `runCapturing`
+writes `runtimeConfigFor OracleFrameworks.NetCoreApp configProperties` as `guest.runtimeconfig.json` into a
+scratch directory of its own (a fixed name, since hostfxr, deriving the dev runtimeconfig's name from it, takes a
+backslash in a Unix file name for a separator), and runs `dotnet exec --runtimeconfig <that file> <dll> <args>` through `runCapturing`
 and the muxer of the framework under test, with the assembly's directory as the working directory. Nothing in the
 assembly's directory is read or written. The host looks for the dev runtimeconfig beside the runtimeconfig it is
 given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a `<name>.runtimeconfig.dev.json`
@@ -904,7 +905,7 @@ beside the assembly is not read either. `executeAssemblyInPlace` is `captureAsse
 AppContextProperties.empty` followed by the existing `echo`; its signature and its fourteen call sites are unchanged,
 and the overwrite of the runtimeconfig beside the assembly, with its staging file and rename, is deleted.
 
-Codex found, over eleven rounds, the ways in which the first version could report an ending for something other than
+Codex found, over twelve rounds, the ways in which the first version could report an ending for something other than
 the guest it was asked to run, or let the guest see the oracle's files. The function now refuses, with an exception
 rather than a `CapturedRun`:
 
@@ -916,9 +917,8 @@ rather than a `CapturedRun`:
   spelling, while after a symbolic link the operating system climbs from the link's target. An attempt to walk paths
   as the operating system does needed, round after round, more of `realpath`'s behaviour (search permission, Windows
   roots, drive-relative paths), so the oracle refuses the ambiguity instead. Without `..`, `Path.GetFullPath` only
-  joins a relative path to the test host's working directory and drops `.`. The assembly path may not hold a `.`
-  either, since a final one, as in `Guest.dll/.`, names a directory to the operating system and `Path.GetFullPath`
-  would drop it;
+  joins a relative path to the test host's working directory and drops `.`. The assembly path may not end in `.`
+  either, since `Guest.dll/.` names a directory to the operating system and `Path.GetFullPath` would drop the `.`;
 * an assembly file that is a symbolic link, which the host would run from its target's directory;
 * a temp directory that does not exist, which `Directory.CreateTempSubdirectory` creates on some platforms;
 * an assembly whose directory is the temp directory or above it, where the guest would see the scratch directory in
@@ -949,7 +949,8 @@ removes only what this call made; its path is absolute, since `TMPDIR` may be re
   run on .NET 11;
 * each refusal above: three host-owned property shapes, and one through `executeConcurrently` in
   `TestRealRuntimeConcurrent.fs`; a lone surrogate in a value and in a name; a path with `..` that would otherwise
-  have run a decoy; `EndsAsTold.dll/.`; an assembly file that is a symbolic link; an assembly directly in the temp
+  have run a decoy; `EndsAsTold.dll/.` (and a `.` inside a path, which is accepted); an assembly whose file name
+  holds a backslash, which runs (ignored on Windows); an assembly file that is a symbolic link; an assembly directly in the temp
   directory, through a symbolic link to it, and through another case of its name (ignored on a case-sensitive
   filesystem);
 * a relative path, with a directory in it, names the same assembly. Its assembly is laid out under the test host's
@@ -1011,12 +1012,13 @@ specifies and leaves the choice to the decider.
   `FabricatedGuest`) are in the default suite and in `Guest` (`TestFSharpPureCases`, `TestDelegateBindFormalSignature`,
   `TestOpcodeFaultsOnPawPrint`); `executeConcurrently`, which the property refusal reaches, has its caller with
   properties in `GuestSolo` (`TestAspNetTwoProcess`). `GuestPure` and `GuestImpure` reach the oracle only through
-  `executeWithRealRuntime` and its siblings, which this change leaves alone. All five ran on .NET 10 at the final
-  commit, and the default suite and `Guest` on .NET 11.
+  `executeWithRealRuntime` and its siblings, which this change leaves alone. All five ran on .NET 10, and the default
+  suite and `Guest` on .NET 11, after the last change to `FrameworkUnderTest`; the default suite on both runtimes and
+  `Guest` on .NET 10 ran again at the final commit, whose later changes are inside `captureAssemblyInPlace`.
 
 | suite | .NET 10.0.14 (host) | .NET 11 (`PAWPRINT_TEST_RUNTIME=Net11`) |
 |---|---|---|
-| default | 5903 total: 5864 passed, 39 skipped | 5903 total: 5875 passed, 28 skipped |
+| default | 5915 total: 5876 passed, 39 skipped | 5915 total: 5887 passed, 28 skipped |
 | `Guest` | 234 passed | 234 passed |
 | `GuestSolo` | 2 passed | not run |
 | `GuestPure` | 1208 passed | not run |
@@ -1047,7 +1049,9 @@ where a row says "the code before", the mutant is the code the red commit ran ag
 | ill-formed UTF-16 not refused (the code before) | the lone-surrogate test |
 | relative path not made absolute (the code before) | the relative-path test (`NormalExit 129`, the host's) |
 | `..` not refused | the `..` test (the decoy ran) |
-| `.` not refused | the `.` test |
+| final `.` not refused | the final-`.` test |
+| every `.` refused | the interior-`.` test |
+| runtimeconfig named after the assembly | the backslash test |
 | linked assembly file not refused | the linked-file test (its target, in the temp directory, ran) |
 | temp-directory refusal removed | the temp-directory tests (then four, the linked-file test among them) |
 | temp-directory refusal comparing spellings (the code before) | the symbolic-link, linked-file and other-case tests (each `NormalExit 0`) |
