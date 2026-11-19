@@ -80,20 +80,8 @@ module ReflectedTypeTarget =
 
         if closedArguments.Length <> arguments.Length then
             state, RuntimeTypeHandleTarget.openConstructed definition arguments
-        elif not arguments.IsEmpty then
-            let handle, state =
-                instantiateOpenGenericTypeDefinition
-                    loggerFactory
-                    baseClassTypes
-                    operation
-                    state
-                    definition
-                    closedArguments
-
-            state, RuntimeTypeHandleTarget.Closed handle
         else
 
-        // A definition with no variables is not instantiated: it is the type its TypeDef names.
         let assembly =
             state.LoadedAssembly definition.AssemblyFullName
             |> Option.defaultWith (fun () ->
@@ -102,9 +90,27 @@ module ReflectedTypeTarget =
 
         let typeInfo = assembly.TypeDefs.[definition.TypeDefinition.Get]
 
-        if not typeInfo.Generics.IsEmpty then
+        if typeInfo.Generics.Length <> arguments.Length then
             failwith
-                $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} declares %i{typeInfo.Generics.Length} generic parameters, but no arguments were supplied"
+                $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} declares %i{typeInfo.Generics.Length} generic parameters, but %i{arguments.Length} arguments were supplied"
+
+        let definitionDefn =
+            TypeDefn.FromDefinition (
+                definition,
+                LoadedTypeInfo.signatureTypeKind baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
+            )
+
+        // The definition over its own variables, closed under the arguments' handles: a handle is
+        // never re-spelled as the type it names, whose spelling can be exponentially larger than the
+        // handles that share its parts. A definition with no variables is the type its TypeDef names.
+        let spelling =
+            if arguments.IsEmpty then
+                definitionDefn
+            else
+                TypeDefn.GenericInstantiation (
+                    definitionDefn,
+                    ImmutableArray.CreateRange (List.init arguments.Length TypeDefn.GenericTypeParameter)
+                )
 
         let state, handle =
             IlMachineTypeResolution.concretizeType
@@ -112,12 +118,9 @@ module ReflectedTypeTarget =
                 baseClassTypes
                 state
                 definition.AssemblyFullName
+                (ImmutableArray.CreateRange closedArguments)
                 ImmutableArray.Empty
-                ImmutableArray.Empty
-                (TypeDefn.FromDefinition (
-                    definition,
-                    LoadedTypeInfo.signatureTypeKind baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
-                ))
+                spelling
 
         state, RuntimeTypeHandleTarget.Closed handle
 
