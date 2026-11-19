@@ -270,6 +270,16 @@ module TestGuestParking =
             assertFoldedIn $"%O{runtime} endings" TestConsumerCases.endingsEverywhere cases.Endings
             assertReasonsNotBlank $"%O{runtime}" (Map.toList cases.Parked)
 
+    /// The guest runs the first scenario of a name, so a second of the same name, listed by both the
+    /// guest and the fixture, would never run.
+    [<Test>]
+    let ``No two consumer scenarios share a name`` () : unit =
+        TestConsumerCases.scenarios
+        |> List.countBy id
+        |> List.filter (fun (_, count) -> count > 1)
+        |> List.map fst
+        |> shouldEqual []
+
     [<Test>]
     let ``Every consumer scenario a table names is a consumer scenario`` () : unit =
         let known = Set.ofList TestConsumerCases.scenarios
