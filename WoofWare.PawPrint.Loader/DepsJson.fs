@@ -140,13 +140,19 @@ module internal DepsVersion =
         else
             let digits = text.TrimStart '0'
 
-            if digits.Length = 0 then
-                Component.Number 0
-            // Ten digits or fewer fit an int64, so the comparison is exact.
-            elif digits.Length > 10 || Int64.Parse digits > int64 Int32.MaxValue then
+            if digits.Length > 10 then
                 Component.AboveInt32
             else
-                Component.Number (int digits)
+                // Ten digits or fewer fit an int64. Accumulated by hand, because .NET's number
+                // parsers read the current culture.
+                let value =
+                    digits
+                    |> Seq.fold (fun (acc : int64) (c : char) -> acc * 10L + int64 (int c - int '0')) 0L
+
+                if value > int64 Int32.MaxValue then
+                    Component.AboveInt32
+                else
+                    Component.Number (int value)
 
     /// `version_t::parse`, which the host applies to a non-empty version string. `Ok
     /// DepsVersion.Empty` when the host's parse fails. `Error ()` when the host would read a
