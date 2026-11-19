@@ -136,6 +136,20 @@ module TestTrustedPlatformAssemblies =
 
         TrustedPlatformAssemblies.tryFindIgnoringCase "C" tpa |> shouldBe None
 
+    /// CoreCLR's map hashes and compares names upper-cased, and the Kelvin sign is upper case
+    /// already, so it does not find `K` (measured by Codex on .NET 10). The long s uppers to `S`.
+    [<Test>]
+    let ``tryFindIgnoringCase compares upper-cased names`` () =
+        let tpa =
+            TrustedPlatformAssemblies.tryCreate (Map.ofList [ "K", "/app/K.dll" ; "S", "/app/S.dll" ])
+            |> Result.defaultWith (fun e -> failwith $"%A{e}")
+
+        TrustedPlatformAssemblies.tryFindIgnoringCase (string (char 0x212A)) tpa
+        |> shouldBe None
+
+        TrustedPlatformAssemblies.tryFindIgnoringCase (string (char 0x17F)) tpa
+        |> shouldBe (Some ("S", "/app/S.dll"))
+
     [<Test>]
     let ``tryFindIgnoringCase matches dotless i to I, as CoreCLR does on Unix`` () =
         let tpa =

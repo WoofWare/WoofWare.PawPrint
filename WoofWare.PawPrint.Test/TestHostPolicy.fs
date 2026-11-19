@@ -118,18 +118,30 @@ module TestHostPolicy =
         str.Length >= suffix.Length
         && strcaseEqual (str.Substring (str.Length - suffix.Length)) suffix
 
-    /// Whether CoreCLR could take two simple names for one: equal under either invariant casing,
-    /// or under upper casing once dotless `ı` is read as `I`, as CoreCLR's Unix fold reads it.
+    /// Whether CoreCLR takes two simple names for one: equal upper-cased, with dotless `ı` read as
+    /// `I`, as CoreCLR's Unix fold reads it.
     let private collide (a : string) (b : string) : bool =
-        let dotless (s : string) : string = s.Replace (char 0x131, 'I')
+        let fold (s : string) : string =
+            s.Replace(char 0x131, 'I').ToUpperInvariant ()
 
-        (dotless a).ToUpperInvariant () = (dotless b).ToUpperInvariant ()
-        || a.ToLowerInvariant () = b.ToLowerInvariant ()
+        fold a = fold b
+
+    /// `path` with its `.` components and repeated separators dropped: another spelling of the
+    /// same file, whatever links it passes.
+    let private withoutDots (path : string) : string =
+        let mutable p = path
+        let mutable previous = ""
+
+        while p <> previous do
+            previous <- p
+            p <- p.Replace("/./", "/").Replace ("//", "/")
+
+        p
 
     let private transcribe
         (cover : Label -> unit)
         (input : HostPolicyInput)
-        : Result<Map<string, string>, HostPolicyRefusal>
+        : Result<Map<string, string> * string, HostPolicyRefusal>
         =
         let refuse (refusal : HostPolicyRefusal) : 'a = raise (RefusedException refusal)
 
@@ -613,10 +625,10 @@ module TestHostPolicy =
             | None -> ()
             | Some (name, path) ->
                 match appDirectory with
-                | Some d when path = appendPath appDir d.EntryFileName -> ()
+                | Some d when withoutDots path = withoutDots (appendPath appDir d.EntryFileName) -> ()
                 | _ -> unreproducible (HostPolicyUnreproducible.EntryAssemblyShadowed (name, path))
 
-            Ok tpa
+            Ok (tpa, coreClrPath.Value)
         with :? RefusedException as e ->
             Error e.Refusal
 
@@ -632,7 +644,7 @@ module TestHostPolicy =
         | TpaRefusal.NameIsNotFileStem _ -> "NameIsNotFileStem"
         | TpaRefusal.NamesEqualIgnoringCase _ -> "NamesEqualIgnoringCase"
 
-    let private outcomeName (result : Result<Map<string, string>, HostPolicyRefusal>) : string =
+    let private outcomeName (result : Result<Map<string, string> * string, HostPolicyRefusal>) : string =
         match result with
         | Ok _ -> "Ok"
         | Error (HostPolicyRefusal.HostWouldFail failure) ->
@@ -1295,7 +1307,7 @@ module TestHostPolicy =
 
     let private resolve (case : Case) : Result<Map<string, string>, HostPolicyRefusal> =
         HostPolicy.resolveTpa (toInput case)
-        |> Result.map TrustedPlatformAssemblies.toMap
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa)
 
     // ---------------------------------------------------------------------------------------
     // Against the transcription.
@@ -1339,7 +1351,7 @@ module TestHostPolicy =
             cover (Label.Outcome (outcomeName expected))
 
             HostPolicy.resolveTpa input
-            |> Result.map TrustedPlatformAssemblies.toMap
+            |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa, r.CoreClr)
             |> shouldBe expected
 
         let coverage =
@@ -1795,8 +1807,8 @@ module TestHostPolicy =
 
         match HostPolicy.resolveTpa input with
         | Error e -> Assert.Fail $"%A{e}"
-        | Ok tpa ->
-            TrustedPlatformAssemblies.toMap tpa
+        | Ok resolution ->
+            TrustedPlatformAssemblies.toMap resolution.Tpa
             |> Map.tryFind abstractions
             |> shouldBe (Some expectedPath)
 
@@ -1805,23 +1817,53 @@ module TestHostPolicy =
 
     let private expectRefusal (refusal : HostPolicyRefusal) (input : HostPolicyInput) : unit =
         HostPolicy.resolveTpa input
-        |> Result.map TrustedPlatformAssemblies.toMap
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa)
         |> shouldBe (Error refusal)
 
     [<Test>]
     let ``A minimal framework-dependent launch gives the application and the framework`` () =
         frameworkDependent EmulatedRuntime.Net10 (appWith []) [] baseFramework
         |> HostPolicy.resolveTpa
-        |> Result.map TrustedPlatformAssemblies.toMap
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa, r.CoreClr)
         |> shouldBe (
             Ok (
                 Map.ofList
                     [
                         "Entry", "/app/Entry.dll"
                         "System.Private.CoreLib", "/fx/10.0.14/System.Private.CoreLib.dll"
-                    ]
+                    ],
+                "/fx/10.0.14/libcoreclr.dylib"
             )
         )
+
+    /// Measured by Codex on .NET 10: the host keeps the `./` in the TPA, and runs the guest.
+    [<Test>]
+    let ``An entry assembly listed at ./ is the entry assembly`` () =
+        let application =
+            onDisk (
+                HostPolicyAppManifest.DepsJson (
+                    ManifestSpec.render
+                        {
+                            Libraries =
+                                [
+                                    { ManifestSpec.library
+                                          "Entry/1.0.0"
+                                          [
+                                              { ManifestSpec.asset "Entry.dll" with
+                                                  LocalPath = Some "./Entry.dll"
+                                              }
+                                          ] with
+                                        Type = "project"
+                                    }
+                                ]
+                        }
+                )
+            )
+
+        frameworkDependent EmulatedRuntime.Net10 application [] baseFramework
+        |> HostPolicy.resolveTpa
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa |> Map.tryFind "Entry")
+        |> shouldBe (Ok (Some "/app/./Entry.dll"))
 
     [<Test>]
     let ``A second application entry resolving to the same path keeps the first one's versions`` () =
@@ -1842,7 +1884,7 @@ module TestHostPolicy =
 
         frameworkDependent EmulatedRuntime.Net10 application [] lowest
         |> HostPolicy.resolveTpa
-        |> Result.map (TrustedPlatformAssemblies.toMap >> Map.tryFind "X")
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa |> Map.tryFind "X")
         |> shouldBe (Ok (Some "/fx/10.0.14/X.dll"))
 
     [<Test>]
@@ -1869,7 +1911,7 @@ module TestHostPolicy =
 
         frameworkDependent EmulatedRuntime.Net10 application [] baseFramework
         |> HostPolicy.resolveTpa
-        |> Result.map (TrustedPlatformAssemblies.toMap >> Map.tryFind "X")
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa |> Map.tryFind "X")
         |> shouldBe (Ok (Some "/app/runtimes/osx/lib/net10.0/X.dll"))
 
     [<Test>]
@@ -1908,14 +1950,15 @@ module TestHostPolicy =
             Settings = noSettings
         }
         |> HostPolicy.resolveTpa
-        |> Result.map TrustedPlatformAssemblies.toMap
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa, r.CoreClr)
         |> shouldBe (
             Ok (
                 Map.ofList
                     [
                         "Entry", "/app/Entry.dll"
                         "System.Private.CoreLib", "/app/System.Private.CoreLib.dll"
-                    ]
+                    ],
+                "/app/libcoreclr.dylib"
             )
         )
 
@@ -2097,7 +2140,7 @@ module TestHostPolicy =
 
         frameworkDependent EmulatedRuntime.Net10 (appWith []) [] lowest
         |> HostPolicy.resolveTpa
-        |> Result.map TrustedPlatformAssemblies.toMap
+        |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa)
         |> shouldBe (
             Ok (
                 Map.ofList

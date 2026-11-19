@@ -95,6 +95,19 @@ type internal HostPolicyInput =
         Settings : HostPolicySettings
     }
 
+/// What `HostPolicy.resolveTpa` found.
+type internal HostPolicyResolution =
+    {
+        /// The TPA the host gives CoreCLR.
+        Tpa : TrustedPlatformAssemblies
+        /// The CoreCLR library the host loads, as the host finds it, before it resolves links.
+        /// CoreCLR loads CoreLib from beside the library's real path. `resolveTpa` checks by
+        /// spelling that this is the TPA's `System.Private.CoreLib`, and cannot see links; a caller
+        /// which reads the filesystem must check that the CoreLib beside this file's real path is
+        /// the TPA's file of that name.
+        CoreClr : string
+    }
+
 /// Which `deps.json` something came from.
 [<RequireQualifiedAccess>]
 type internal HostPolicyManifest =
@@ -684,7 +697,7 @@ module internal HostPolicy =
     ///
     /// Beyond the host's own rules, refuses a TPA whose `System.Private.CoreLib` is not the one
     /// beside the CoreCLR library, and one which maps the entry assembly's name to another file.
-    let resolveTpa (input : HostPolicyInput) : Result<TrustedPlatformAssemblies, HostPolicyRefusal> =
+    let resolveTpa (input : HostPolicyInput) : Result<HostPolicyResolution, HostPolicyRefusal> =
         let application, rids, frameworks =
             match input.Launch with
             | HostPolicyLaunch.FrameworkDependent (application, rids, higher, lowest) ->
@@ -811,6 +824,11 @@ module internal HostPolicy =
                             HostPolicyUnreproducible.EntryAssemblyShadowed (name, path)
                         )
                     )
-                | _ -> Ok tpa
+                | _ ->
+                    Ok
+                        {
+                            Tpa = tpa
+                            CoreClr = ""
+                        }
             )
         )

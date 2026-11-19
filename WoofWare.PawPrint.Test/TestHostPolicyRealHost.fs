@@ -66,8 +66,17 @@ public static class Program
     /// directory. This errs towards reporting one; the trace check in `compare` catches one
     /// missed here.
     let private gatherSettings () : HostPolicySettings =
+        // `shared_store::get_paths` names `<store>/<arch>/<tfm>`, and the host probes it only if it
+        // exists.
+        let version = Path.GetFileName (FrameworkUnderTest.sharedFrameworkDirectory ())
+
         let besideMuxer =
-            Path.Combine (Path.GetDirectoryName RealRuntime.muxerPath, "store")
+            Path.Combine (
+                Path.GetDirectoryName RealRuntime.muxerPath,
+                "store",
+                RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant (),
+                "net" + version.Substring (0, version.IndexOf '.') + ".0"
+            )
 
         {
             UseRidGraph = false
@@ -253,7 +262,24 @@ public static class Program
                     $"HostPolicy.resolveTpa says the host would fail (%A{failure}), but it ran the guest.\n%s{context ()}"
 
             Compared.HostFailedAsPredicted
-        | Ok tpa ->
+        | Ok resolution ->
+            let tpa = resolution.Tpa
+
+            // What the caller must check, since the function cannot see links: the CoreLib beside
+            // the CoreCLR library's real path is the TPA's.
+            match TrustedPlatformAssemblies.tryFindIgnoringCase "System.Private.CoreLib" tpa with
+            | None -> Assert.Fail $"HostPolicy.resolveTpa gave a TPA without CoreLib.\n%s{context ()}"
+            | Some (_, coreLib) ->
+                let real = FrameworkUnderTest.resolveLinks resolution.CoreClr
+
+                let beside =
+                    Path.Combine (Path.GetDirectoryName real, "System.Private.CoreLib.dll")
+                    |> FrameworkUnderTest.resolveLinks
+
+                if beside <> FrameworkUnderTest.resolveLinks coreLib then
+                    Assert.Fail
+                        $"CoreCLR loads CoreLib from %s{beside}, beside %s{real}, but the TPA's is %s{coreLib}.\n%s{context ()}"
+
             let output =
                 match run.Output with
                 | Some output -> output
