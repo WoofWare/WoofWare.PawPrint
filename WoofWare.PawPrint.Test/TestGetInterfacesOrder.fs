@@ -344,8 +344,10 @@ module TestGetInterfacesOrder =
     let private hasOpenInterface (receiver : Type) : bool =
         receiver.GetInterfaces () |> Array.exists (fun t -> t.ContainsGenericParameters)
 
-    /// Every generic type definition CoreLib declares, and three arrays over a variable, which answer
-    /// `System.Array`'s map as a closed array does.
+    /// Every generic type definition CoreLib declares; three arrays over a variable, which answer
+    /// `System.Array`'s map as a closed array does; and two open constructions over an interface's own
+    /// variables, whose entry over that interface is the interface applied to its own variables, which
+    /// is the interface's definition.
     [<Test>]
     let ``CoreLib: every generic definition agrees with the host`` () : unit =
         let stopwatch = Stopwatch.StartNew ()
@@ -364,8 +366,16 @@ module TestGetInterfacesOrder =
                 listT.MakeArrayType 2
             ]
 
+        let overInterfaceVariables =
+            [
+                typedefof<Collections.Generic.List<obj>>
+                    .MakeGenericType (typedefof<Collections.Generic.IList<obj>>.GetGenericArguments ())
+                typedefof<Collections.Generic.Dictionary<obj, obj>>
+                    .MakeGenericType (typedefof<Collections.Generic.IDictionary<obj, obj>>.GetGenericArguments ())
+            ]
+
         let _, failures =
-            compareAll [ hostCoreLib, corelib ] coreState (definitions @ arrays)
+            compareAll [ hostCoreLib, corelib ] coreState (definitions @ arrays @ overInterfaceVariables)
 
         let withOpenInterface = definitions |> List.filter hasOpenInterface |> List.length
 

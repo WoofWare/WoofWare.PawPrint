@@ -255,6 +255,12 @@ public static class Program
         if (!ReferenceEquals(xIc, Over(typeof(IC<>), typeof(X<>)))) return 24;
         if ((r = Check(124, xIc, Over(typeof(IA<>), typeof(X<>)), typeof(IB))) != 0) return r;
 
+        // An open construction over an interface's own variable: its entry over that interface is the
+        // interface applied to its own variable, which is the interface's definition.
+        Type listOverIlistT = Over(typeof(List<>), ilistT);
+        if (!ReferenceEquals(listOverIlistT.GetInterfaces()[0], typeof(IList<>))) return 25;
+        if ((r = Check(125, listOverIlistT, ListInterfaces(ilistT))) != 0) return r;
+
         return 0;
     }
 }
