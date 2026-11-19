@@ -1434,3 +1434,289 @@ Four rounds; the fourth found nothing.
 * **Round 4.** No findings. Codex also counted the runtime assets of the Linux packs' `deps.json` files (172 and
   141 on 10.0.14, 181 and 132 on 11.0.0-rc.3, for linux-x64 and linux-arm64), which match the macOS counts the
   real-file test asserts.
+
+## As built (stage 3)
+
+Branch `host-binding-3-tpa`, built on `host-binding-2-deps-json` and rebased onto `main` after #2358 merged. The tests came first, in a commit of their own,
+against a stub with the final types; so did the tests of each Codex finding fixed.
+
+### What it adds
+
+Two files in `WoofWare.PawPrint.Loader`, both `internal` until the owner confirms decision 2. Loader's public surface
+is unchanged: a reflection dump of `WoofWare.PawPrint.Loader.dll`'s exported types and members, built with and without
+the two files, is identical (1702 lines each).
+
+* **`TrustedPlatformAssemblies`** (`TrustedPlatformAssemblies.fs`): a map from simple name to path, with structural
+  equality, built only by `tryCreate : Map<string, string> -> Result<TrustedPlatformAssemblies, TpaRefusal>`. It holds
+  the map to what CoreCLR's reading of the TPA string accepts (`GetNextTPAPath`, `SetupBindingPaths`) and to what
+  PawPrint can bind from. `TpaRefusal` has a case for each: a relative path; a path holding NUL; one holding `:`, the
+  path-list separator; one ending with a space, which CoreCLR trims; a file name outside ASCII; a path not ending
+  `.dll`, `.exe`, `.ni.dll` or `.ni.exe`; a `.exe` or `.ni.*` file; a name which is not the file's stem; two names equal
+  ignoring case. Entries are checked in ordinal order of name, and the first refusal is returned. `toMap` reads the map
+  back. `tryFindIgnoringCase` looks a name up as CoreCLR's map does: upper-cased, with dotless `ı` and the long s read
+  as `I` and `S`.
+* **`HostPolicy.resolveTpa : HostPolicyInput -> Result<HostPolicyResolution, HostPolicyRefusal>`** (`HostPolicy.fs`).
+  The input is:
+  * `Runtime`: whose hostpolicy. The pins differ in what `get_dir_assemblies` takes (.NET 10: `.ni.dll`, `.dll`,
+    `.ni.exe`, `.exe`; .NET 11: `.dll`, `.exe`), and in what stage 2's parser reads.
+  * `Platform`: Linux or macOS, which names the CoreCLR library (`libcoreclr.so`, `libcoreclr.dylib`).
+  * `Launch`: `FrameworkDependent (application, rids, higher, lowest)` or `SelfContained application`. A self-contained
+    launch with frameworks, or a framework-dependent one without, is unrepresentable (decision 7); so is a
+    self-contained application held in memory.
+  * The application (decision 6): `OnDisk` (its directory, absolute and spelled as the host spells it, with links
+    resolved; either its `deps.json` bytes, or its listing together with whether `libcoreclr` exists there, which the
+    host asks with `file_exists_in_dir` apart from the listing; and the entry assembly's file name) or `InMemory`.
+  * `EntryAssemblyName` and `EntryAssemblyCulture`, from the entry image's metadata (Codex, stage 1 round 1).
+  * `Settings` (decision 10): `UseRidGraph`, `SetAppPaths`, additional probing paths, additional `deps.json` files,
+    shared stores, a servicing directory, each as the caller found it.
+
+  The result is the TPA and the CoreCLR library the host found, before links. The function reads no file and no
+  environment. It follows hostpolicy with no file existence checks: the frameworks in host order, the lowest read
+  without `runtimeTargets`, the application read without them when self-contained; `resolve_tpa_list` as a fold over
+  the entries the host meets (the application's, or its directory's files, then each framework's); then the native
+  and resource halves of `resolve_probe_dirs`, which find the CoreCLR library and the probe directories.
+
+### Refusals
+
+`HostPolicyRefusal` is `HostWouldFail of HostPolicyFailure` or `NotReproducible of HostPolicyUnreproducible`, checked in
+this order:
+
+| Phase | Refusal | Class | Source |
+|---|---|---|---|
+| settings | `UseRidGraph`; `SetAppPaths`; any additional probing path, additional `deps.json`, shared store or servicing directory | not reproducible | plan; decision 10; Codex round 1 (`SetAppPaths`) |
+| manifests, in `deps_resolver_t::valid`'s order (application, then frameworks highest first) | a framework without `deps.json` | host fails | `deps_resolver.h` |
+| | a `deps.json` with half a surrogate pair | host fails | rapidjson's `ParseStringToStream` refuses it |
+| | any other `DepsJsonError` | not reproducible | stage 2's split: malformed JSON fails the host, but comments, trailing content and deep nesting do not, and a number with an exponent fails only when rapidjson overflows; the rest is undefined behaviour or a disagreement between readers |
+| listing | two files of one extension with one stem (`X.dll`, `X.DLL`) | not reproducible | new: the host keeps the first its directory listing gives |
+| frameworks | two frameworks list one runtime name, or both name the CoreCLR library | not reproducible | Q4, decision 4; widened to the CoreCLR library, whose order decides the CoreLib rule |
+| walk | a name found again with another file name | host fails | `resolve_tpa_list` |
+| walk, natives | a framework entry in no framework, from its own down, whose `deps.json` has its package (except a missing `apphost`) | host fails | `probe_deps_entry`, `report_missing_assembly_in_manifest` |
+| natives | no CoreCLR library | host fails | `hostpolicy_context.cpp` |
+| natives | a framework-dependent application supplies the CoreCLR library | not reproducible | Codex, stage 1 round 2 and round 1 here: the host loads it, and CoreLib, from wherever its links lead |
+| TPA | a relative path; a path with no assembly extension (an empty file name included) | host fails | CoreCLR returns `E_INVALIDARG`; measured below |
+| TPA | NUL; `:`; a trailing space; a file name outside ASCII; `.exe` or `.ni.*`; a name not the stem; names equal ignoring case | not reproducible | plan; Codex, stage 1 round 1 (`:`) and rounds 1 here |
+| probe directories | a native or resource probe directory holding `:` | not reproducible | Codex round 1: a resource root with `:` made CoreCLR fail (`0x80070057`) |
+| CoreLib | none in the TPA; not beside the CoreCLR library, compared without `.` components | not reproducible | decision 1 |
+| entry | an entry assembly with a culture | not reproducible | Codex round 4: CoreCLR binds it through `<app>/<culture>/` |
+| entry | the TPA maps the entry assembly's name to another file, compared without `.` components (any file, in memory) | not reproducible | decision 1; fact 20 measured below |
+
+### Decisions taken here
+
+Each with the alternative weighed.
+
+* **Where the CoreCLR library is.** The CoreLib rule needs the directory CoreCLR loads CoreLib from. Options: take
+  decision 1's directory (the `Microsoft.NETCore.App` framework's, or the application's when self-contained) as given;
+  or find the library as `resolve_probe_dirs` does (the first native entry, application then frameworks, resolving to
+  a file of that name; with no application `deps.json`, the one the existence probe finds in the application's
+  directory). Chose the second: it is the host's own rule, it covers a self-contained application with no special
+  case, and it shows when an application supplies the library. It needs the platform as an input, for the file name.
+* **Links.** The host loads the CoreCLR library of its fixed name from the directory of the found library's real path,
+  and CoreCLR loads CoreLib from beside the real path of that (Codex, rounds 2 to 4). The function cannot see links.
+  Options: refuse every launch it cannot check, which is every self-contained one; take a resolved path as input,
+  which the caller cannot know before the function has chosen the library; or return the library it chose, and state
+  the check which the caller, holding the filesystem, must make. Chose the third: `HostPolicyResolution.CoreClr`'s
+  docstring states the check (the library of the platform's name exists in the directory of the found file's real
+  path; the CoreLib path the host appends there holds no `:`; the CoreLib beside that library's real path is the TPA's
+  file), and the real-host test makes it. The function still checks by spelling, and refuses a framework-dependent
+  application's own library outright.
+* **Paths are kept as the host builds them.** `./` and `../` stay in the path (`append_path`), and a `localPath` may
+  leave its directory; measured below. Only the CoreLib and entry comparisons drop `.` components (never `..`, which
+  climbs from a link's target). The metamorphic property "every path lies in its manifest's directory" is therefore
+  textual.
+* **Case.** CoreCLR's map hashes and compares names upper-cased with `minipal`'s table, which takes only dotless `ı`
+  and the long s from outside ASCII to an ASCII letter (read: `src/native/minipal/unicodedata.c`). .NET's
+  `ToUpperInvariant` takes only the long s (checked over every UTF-16 code unit), and not even that under invariant
+  globalization (Codex round 3). So TPA file names must be ASCII, and names fold explicitly, independent of the
+  process's globalization mode.
+* **Not in the input:** `DOTNET_RUNTIME_ID`, which decision 10 leaves to the App and the harness; the RID list is an
+  input, so a caller honouring it can put it first.
+
+### Measured
+
+On the macOS arm64 host, real .NET 10.0.14 and 11.0.0-rc.3.26522.148, from scratch probes:
+
+* **Fact 20.** A directory with no `deps.json` holding an entry assembly named `System.Web.HttpUtility` (version
+  1.0.0.0): the host launched, the TPA mapped the name to the framework's file (the trace: "Replacing deps entry"),
+  and CoreCLR ran the framework's assembly as the entry: `MissingMethodException: Entry point not found in assembly
+  'System.Web.HttpUtility, Version=10.0.0.0, ..., PublicKeyToken=cc7b13ffcd2ddd51'`, exit 134 (11.0.0.0 on .NET 11).
+  No MVID check fired. So the refusal is "not reproducible", and fact 20 as written (`FileLoadException` on an MVID
+  mismatch) does not hold for the entry assembly.
+* **Codex's stage 1 claims**, each on both runtimes:
+  * One name twice in the application, at one path, stated 1.0.0.0 then 99.0.0.0: the framework's file won (the
+    second entry did not replace the first, which kept 1.0.0.0). At two paths (a `localPath` on the second): the
+    application's 99.0.0.0 won.
+  * A `runtimepack` library's asset `sub/X.dll` with no `localPath`: `<app>/sub/X.dll`.
+  * `localPath` `./X.dll` and `../common/Y.dll`: `<app>/./X.dll` and `<app>/../common/Y.dll`, as written.
+  * An asset listed as `lib/` (an empty file name): "Failed to create CoreCLR, HRESULT: 0x80070057", exit 137.
+  * A `localPath` ending `.txt` for a name the framework lists: the extension check failed the launch, exit 140.
+* **Self-contained through `dotnet exec`.** A directory holding the framework's files, the guest, a self-contained
+  `deps.json` and a runtimeconfig naming `includedFrameworks` runs under the muxer as "a self-contained app"; so the
+  real-host self-contained case needs no apphost.
+
+### Tests
+
+* `TestTrustedPlatformAssemblies`: a unit case per `TpaRefusal`, acceptance cases, and `tryFindIgnoringCase` (any ASCII
+  case; dotless `ı` finds `I`; the long s finds `S`; the Kelvin sign does not find `K`).
+* `TestHostPolicy`:
+  * Against a transcription, line by line, of `resolve_tpa_list`, `get_dir_assemblies`, `probe_deps_entry` and both
+    halves of `resolve_probe_dirs`, with PawPrint's refusals written out beside it: 10 000 fixed and 10 000 fresh
+    cases, requiring equal outcomes (the TPA and the CoreCLR path, or the same refusal). The generator draws the
+    runtime and platform, the application's case, one to three frameworks, libraries keyed with and without `/`,
+    runtime, native, resource and RID-specific assets over a pool of names that collide (by case too, and with
+    dotless `ı`), versions below, equal to and above one another and unparsable, placeholders, `localPath`s (into a
+    subdirectory, `./`, `../`, absolute, another file, empty, ending with a space, holding `:`), libcoreclr placed
+    away from CoreLib, listings with case variants and with the existence probe disagreeing, malformed and missing
+    framework manifests, entry cultures, and each setting. Every outcome, each refusal included, is required at least
+    10 times in the fixed sample (the rarest, `CoreLibAbsent`, about 20), `Ok` over 1000 times, and nine events of the
+    walk 50 times each.
+  * Six metamorphic properties at the same count: permuting the frameworks above the lowest (frameworks with names of
+    their own, so that the overlap refusal does not dominate) leaves the TPA unchanged, and keeps a refusal a refusal;
+    an application entry stated at 999.0.0.0 wins its name; with no `deps.json`, each framework's names resolve into
+    its directory; every path lies in a manifest's directory; the names are distinct ignoring case; permuting the
+    directory listing leaves the TPA unchanged.
+  * The plan's measured table, one example per row and runtime (16), and unit cases: a minimal launch; one name twice
+    at one path; a RID-specific application entry at its listed path; a self-contained launch; `./Entry.dll`; a
+    CoreLib at `./`; the existence probe; a missing `apphost`; and one per refusal.
+* `TestHostPolicyRealHost`, in the default suite:
+  * 25 generated application directories per run, fresh seed (printed), each run on the framework under test through
+    `dotnet exec` with a guest that writes `TRUSTED_PLATFORM_ASSEMBLIES` and the location of the CoreLib it runs on.
+    Each directory has a generated `deps.json` (versions varied around the framework's, `localPath`s, RID-specific
+    assets for RIDs in and out of the host's list, names the framework has and has not, one entry in about seven
+    cases that makes the launch fail) or none, and `Microsoft.AspNetCore.App` is added in one case in four. Files are
+    junk or missing. The function's input comes from the child: its RID list and its frameworks' directories, as its
+    host trace names them. The comparison is with CoreCLR's map of the string (first path per name ignoring case), so
+    .NET 10's string and .NET 11's map rendering compare alike. A predicted host failure must fail the launch; a TPA
+    must match, its CoreLib must be the one the guest ran on, the caller's link check must hold, and the trace must
+    show no probe and no existence check the settings did not report. The child's environment loses the variables
+    that turn on probing, and `DOTNET_STARTUP_HOOKS`; both trace spellings are set. Measured: 20 to 24 of 25 cases
+    compare a TPA, the rest predict a host failure; about 2 to 3 s a run (25 launches), on both runtimes.
+  * One self-contained case: the framework directory's files copied beside the guest, with a self-contained
+    `deps.json`, launched through `dotnet exec` (about 1 s).
+* `TestFrameworkLocatorRatchet` allows the real-host guest's one `.Location`.
+
+The default suite at the branch tip, on the macOS arm64 host with .NET 10 under test: 6147 tests, 6108 passed, 39 skipped, Test Run Successful (at e2d6cce5e). The change touches
+no interpreter behaviour, so the Guest categories were not run. `fantomas` is clean, `scripts/footprint.py generate`
+changes nothing, and `scripts/check-docstring-attachment-branch.sh` passes.
+
+Wall time of the new fixtures, run alone on this host: each property test 7 to 12 s (NUnit runs them in parallel), the
+real-host test 2 to 3 s, the self-contained case about 1 s.
+
+Red runs: against the stub (`tryCreate` accepting everything, `resolveTpa` refusing everything as using the RID
+graph), 75 of 78 tests failed, each on the stub's answer; the three passes were the two maps `tryCreate` must accept
+and the RID-graph refusal. Each Codex round's tests were red first, as each test commit records.
+
+### Mutants
+
+Each was applied to `HostPolicy.fs` or `TrustedPlatformAssemblies.fs` alone, built, run against `TestHostPolicy`,
+`TestHostPolicyRealHost` and `TestTrustedPlatformAssemblies`, and reverted; the two the plan assigns to the real-host
+test (`localPath` ignored, and its RID-specific counterpart) ran against that test alone. The table is the final
+battery, at the branch tip: 50 mutants, 49 killed, 1 equivalent. An earlier battery, at the first implementation,
+found the apphost exception unexercised; its unit case came from that. The real-host test draws a fresh seed, so the
+mutants it kills it kills by the cases it happens to generate; each of those was killed in both batteries.
+
+| Source | Mutant | Killed by |
+|---|---|---|
+| plan | file version >= becomes > | table tie,Net11,framework; metamorphic: no deps.json; transcription; real host |
+| plan | file version ignored on equal assembly versions | table file version + 1,Net11,app; transcription; real host |
+| plan | assembly version ignored | metamorphic: application wins; table deps says 12,Net11,app; table deps says 12, file deleted,Net11,app; transcription; real host |
+| plan | application versions read from the file (9.0.0.0) instead of the deps.json | unit: A second application entry resolving to the same path keeps the first one's versions; table deps says 12,Net11,app; table deps says 12, file deleted,Net11,app; table file version + 1,Net11,app; transcription; real host |
+| plan | frameworks processed before the application | unit: A second application entry resolving to the same path keeps the first one's versions; unit: Refused: a name found again with another file name; table tie,Net11,framework; transcription; real host |
+| plan | no deps.json: listed files compare as equal to the framework's entry | **equivalent** (see below) |
+| plan | no deps.json: listed files given a version above the framework's | unit: Refused: an entry assembly on disk which the TPA maps to the framework's file; table no deps.json,Net11,framework; metamorphic: no deps.json; transcription; real host |
+| plan | placeholder not skipped | transcription |
+| plan | extension check removed | unit: Refused: a name found again with another file name; transcription |
+| plan | localPath ignored | real host |
+| plan | RID list order reversed | unit: An application's RID-specific entry without a localPath resolves to its listed path; metamorphic: no deps.json; transcription; real host |
+| plan | case-insensitive collision refusal removed | unit: Names equal ignoring case are refused; unit: Refused: two names equal ignoring case; metamorphic: distinct names; transcription |
+| plan | framework-overlap refusal removed | unit: Refused: two frameworks listing one name; unit: Refused: two frameworks naming the CoreCLR library; metamorphic: no deps.json; transcription |
+| decisions | CoreLib rule removed | unit: Refused: a CoreLib away from the CoreCLR library; unit: Refused: no CoreLib; transcription |
+| decisions | entry-assembly rule removed | unit: Refused: an entry assembly on disk which the TPA maps to the framework's file; unit: Refused: an in-memory entry assembly named as a framework assembly; transcription |
+| decisions | a non-empty existence-check list accepted | unit: Refused: settings which turn on existence checks; transcription |
+| decisions | the self-contained parse reads runtimeTargets | unit: A self-contained launch reads only the application; transcription |
+| decisions | the lowest framework read with runtimeTargets | metamorphic: no deps.json; transcription |
+| rule added | listing collision refusal removed | metamorphic: listing permuted; unit: Refused: two listed files of one stem and extension; transcription |
+| rule added | a native entry that resolves nowhere does not fail | unit: Refused: a native framework asset whose package no framework has; transcription |
+| rule added | the last CoreCLR library wins, not the first | unit: Refused: a framework-dependent application whose deps.json names the CoreCLR library; unit: Refused: a framework-dependent application whose directory holds the CoreCLR library; unit: The CoreCLR library of a directory without deps.json is the one the existence probe finds; transcription |
+| rule added | the CoreCLR library of a directory without deps.json is not looked for | metamorphic: paths in manifests; unit: Refused: a framework-dependent application whose directory holds the CoreCLR library; unit: The CoreCLR library of a directory without deps.json is the one the existence probe finds; metamorphic: distinct names; transcription |
+| rule added | the apphost exception removed | unit: A missing apphost asset does not fail the launch |
+| rule added | an unpaired surrogate classed as not reproducible | unit: Refused: a deps.json the host fails to parse; transcription |
+| rule added | a relative TPA path classed as not reproducible | unit: Refused: a relative path in the TPA; transcription |
+| rule added | a framework entry resolves only in its own framework | transcription |
+| rule added | an application's RID-specific entry without localPath probed at its file name | real host |
+| rule added | a later entry at the same path replaces the earlier one's versions | unit: A second application entry resolving to the same path keeps the first one's versions; transcription |
+| rule added | the application directory's trailing slashes kept | metamorphic: application wins; transcription |
+| rule added | .NET 11 takes .ni files from a directory listing | transcription |
+| rule added | tryFindIgnoringCase compares ordinally | unit: Refused: an in-memory entry assembly named as a framework assembly; transcription; unit: tryFindIgnoringCase compares upper-cased names; unit: tryFindIgnoringCase finds a name in any case; unit: tryFindIgnoringCase matches dotless i to I, as CoreCLR does on Unix |
+| TPA | TPA: relative path accepted | unit: A relative path is refused; unit: Refused: a relative path in the TPA; unit: The first refusal in ordinal order of name is returned; transcription |
+| TPA | TPA: path-list separator accepted | unit: A path holding the path-list separator is refused; unit: Refused: a TPA path holding the path-list separator; transcription |
+| TPA | TPA: trailing space accepted | unit: A path ending with a space is refused; unit: Refused: a TPA path ending with a space; transcription |
+| TPA | TPA: no assembly extension accepted | unit: A path with no assembly extension is refused("/app/"); unit: A path with no assembly extension is refused("/app/A"); unit: A path with no assembly extension is refused("/app/A.dll/"); unit: A path with no assembly extension is refused("/app/A.txt"); unit: Refused: a TPA path with no assembly extension; transcription |
+| TPA | TPA: .exe and .ni.dll accepted | unit: A path to a file other than a dll is refused("A","/app/A.EXE"); unit: A path to a file other than a dll is refused("A","/app/A.NI.Dll"); unit: A path to a file other than a dll is refused("A","/app/A.exe"); unit: A path to a file other than a dll is refused("A","/app/A.ni.dll"); unit: A path to a file other than a dll is refused("A","/app/A.ni.exe"); unit: A path to a file other than a dll is refused("A.ni","/app/A.ni.dll"); unit: A per-entry refusal comes before a collision; unit: Refused: an exe in the TPA; transcription |
+| TPA | TPA: a name other than the stem accepted | unit: A name which is not the file stem is refused("A","/app/A.dll.dll"); unit: A name which is not the file stem is refused("A","/app/B.dll"); unit: A name which is not the file stem is refused("A.dll","/app/A.dll"); unit: A name which is not the file stem is refused("a","/app/A.dll"); unit: Refused: a localPath naming another file; transcription |
+| TPA | TPA: dotless i not read as I | unit: tryFindIgnoringCase matches dotless i to I, as CoreCLR does on Unix |
+| TPA | TPA: long s not read as S | unit: tryFindIgnoringCase compares upper-cased names |
+| Codex rounds | TPA: NUL accepted | unit: A path holding NUL is refused |
+| Codex rounds | TPA: a file name outside ASCII accepted | unit: A file name outside ASCII is refused(305,"I"); unit: A file name outside ASCII is refused(383,"s"); unit: A file name outside ASCII is refused(8490,"K"); unit: Refused: a file name outside ASCII; transcription |
+| Codex rounds | SetAppPaths accepted | unit: Refused: the AppPaths switch; transcription |
+| Codex rounds | an application's CoreCLR library accepted | unit: Refused: a framework-dependent application whose deps.json names the CoreCLR library; unit: Refused: a framework-dependent application whose directory holds the CoreCLR library; unit: The CoreCLR library of a directory without deps.json is the one the existence probe finds; transcription |
+| Codex rounds | a probe directory holding ':' accepted | unit: Refused: a resource probe directory holding the path-list separator; transcription |
+| Codex rounds | resource roots not checked | unit: Refused: a resource probe directory holding the path-list separator; transcription |
+| Codex rounds | the CoreCLR library of a directory without deps.json taken from the listing | unit: The CoreCLR library of a directory without deps.json is the one the existence probe finds; transcription |
+| Codex rounds | the entry assembly's path compared by spelling | unit: An entry assembly listed at ./ is the entry assembly; transcription |
+| Codex rounds | CoreLib's path compared by spelling | unit: A CoreLib listed at ./ is the one beside the CoreCLR library |
+| Codex rounds | an entry assembly with a culture accepted | unit: Refused: an entry assembly with a culture; transcription |
+| Codex rounds | the CoreCLR path not returned | unit: A minimal framework-dependent launch gives the application and the framework; unit: A self-contained launch reads only the application; unit: The CoreCLR library of a directory without deps.json is the one the existence probe finds; transcription; real host, self-contained; real host |
+
+* *Equivalent:* a listed file's versions are empty, and a framework entry's are empty or parsed, so the later
+  framework entry replaces the listed file whether that compares below it or equal. Codex (stage 1 round 1) named the
+  witnesses this needs, a tie and a strictly higher local version; the second is the "version above the framework's"
+  mutant, killed.
+* *Frameworks before the application:* the metamorphic property "an application entry stated above every framework's
+  version wins" does not kill it, since that entry replaces the framework's in either order; the transcription, the
+  tie row and a unit case do.
+
+### For stage 5, and for the owner's questions
+
+* **Decision 1 (`GuestConfig` holds the TPA).** The TPA type is as the decision describes, with one addition: file
+  names must be ASCII. The CoreLib rule cannot be checked by the function alone, because the host follows links (see
+  "Links"). Stage 5's caller must make the check `HostPolicyResolution.CoreClr` states, or `GuestConfig` could hold a
+  TPA whose CoreLib is not the one CoreCLR loads. If `GuestConfig` is to carry the TPA alone, the check belongs where
+  the TPA is built (the App and `assembliesFor`), not at bind time. The entry-assembly rule needs the entry's metadata
+  name and culture, and the refusal belongs where image and TPA meet as well (Codex, stage 1 round 3).
+* **Decision 2 (Loader).** Nothing found argues for another home. The function needed only Domain's `EmulatedRuntime`
+  and stage 2's parser.
+* **Decision 3 (abbreviation).** Not touched here.
+* **Decision 4 (the locator returns frameworks in `hostfxr`'s order).** The function takes the frameworks in order and
+  refuses an overlap, so a wrong order gives a refusal, not a wrong TPA, on today's disjoint frameworks. The real-host
+  test takes the order and directories from the child's host trace; the App cannot.
+* **The App's gatherer** must: give the application directory with links resolved; answer the existence probe for
+  libcoreclr with `stat`, not from the listing (a link to a device is omitted by the listing and found by the probe);
+  pass the listing as `pal::readdir` gives it (Codex, stage 1 round 2: a directory named `X.dll` is admitted); merge
+  the frameworks' runtimeconfig properties before reading `SetAppPaths` (Codex, stage 1 round 5); pass only the
+  additional probing paths the host admits (Codex, stage 1 round 5); and treat an entry of any kind at a store or
+  servicing path as present (`pal::directory_exists` is `file_exists`).
+* **The real-host test runs on Linux CI too**, where the host's RID list (read from the trace) is checked for the first
+  time; it was run here only on macOS arm64.
+
+### Codex review
+
+Five rounds, against `host-binding-2-deps-json`. Every finding was acted on, tests first.
+
+* **Round 1** (nine findings): an application-local libcoreclr linking to the framework's loaded the framework's
+  CoreLib; CoreCLR's fold reads dotless `ı` as `I` (in names, and in `.nı.dll`); `SetAppPaths`; a resource root holding
+  `:`; a case-only libcoreclr in a listing; NUL in a TPA path; the real-host test's trace variables and inherited
+  settings. Fixed: the refusals above, the ASCII file-name rule, the resource walk, and the test's environment.
+* **Round 2** (five): a self-contained libcoreclr link to the installed runtime; `./Entry.dll` refused as shadowed;
+  the lookup folded lower case, which CoreCLR does not; a store of another architecture reported; a quadratic
+  collision scan. Fixed: `HostPolicyResolution.CoreClr` and its check, path comparisons without `.` components, the
+  upper-case fold, the store path, a one-pass scan.
+* **Round 3** (five): the fold depended on invariant globalization; the caller's check did not follow the host's
+  fixed-name library; CoreLib at `./` refused; libcoreclr found by the existence probe, not the listing; inherited
+  startup hooks. Fixed: an explicit fold, the two-step check, the input's existence probe (the case-only refusal went),
+  the hooks removed.
+* **Round 4** (three): an entry assembly with a culture binds through the satellite directories; the appended CoreLib
+  path holding `:`, and a missing fixed-name library, were not in the caller's check. Fixed: the culture refusal, and
+  the check's statement and the test's checks.
+* **Round 5** (two): the real-host guest's `.Location` broke `TestFrameworkLocatorRatchet` (all 24 cases; reproduced);
+  a regular file at the store path also sets up a store probe. Fixed: an allowance, and the gatherer's existence test.
+  No sixth round was run, as the brief allows five.
