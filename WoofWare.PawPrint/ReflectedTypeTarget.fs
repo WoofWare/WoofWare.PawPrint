@@ -100,6 +100,20 @@ module ReflectedTypeTarget =
             state, RuntimeTypeHandleTarget.openConstructed definition arguments
         else
 
+        // The definition's kind is read off its base chain, which may run into an assembly nothing has
+        // loaded yet; load the chain first, as concretisation does.
+        let typeSystem, chain =
+            TypeSystemState.lookupTypeDefn
+                loggerFactory
+                state.DotnetRuntimeDirs
+                baseClassTypes
+                state.TypeSystem
+                assembly
+                definition.TypeDefinition.Get
+
+        BindingStop.bound chain |> ignore<TypeDefn>
+        let state = state.WithTypeSystem typeSystem
+
         let definitionDefn =
             TypeDefn.FromDefinition (
                 definition,
