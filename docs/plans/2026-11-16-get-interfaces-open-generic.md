@@ -1,11 +1,12 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: decided (see "Decisions"); the first four of five pull requests are built: the closed order (#1318, "As built
+Status: decided (see "Decisions"); all five pull requests are built: the closed order (#1318, "As built
 (PR 1)", merged as #2322), the definition-level interface map ("As built (PR 2)", merged as #2337, on top of #2331,
-which shares the substitution comparison's work), open receivers (#2309, "As built (PR 3)", merged as #2344) and the
-name of an open construction (#2315, "As built (PR 4)"); the `dynamic` guest stops short of passing and is parked
-("PR 5: where the `dynamic` guest stops"). The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
-with a throwaway handler described under "PawPrint with a throwaway", since reverted.
+which shares the substitution comparison's work), open receivers (#2309, "As built (PR 3)", merged as #2344), the
+name of an open construction (#2315, "As built (PR 4)", merged as #2347) and the `dynamic` guests ("As built (PR 5)",
+after "PR 5: where the `dynamic` guest stops" and "Decisions after PR 5 stopped"), which finish the staging. The study
+below was measured 2026-11-16 on `main` at `c50428b33` (#2307), with a throwaway handler described under "PawPrint
+with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
 open receivers, but the study found that the closed receivers' answer is wrong today too (in order, and in dropping
@@ -2543,3 +2544,58 @@ pointer added beneath it. Where it is superseded:
 - "Autofac and Moq wait for #2092's consumer fixture" is unchanged.
 
 With PR 5 merged, #2309's staging is finished. This plan then has no open stage, only the two issues it points to.
+
+### As built (PR 5)
+
+The `dynamic` guests, as "Decisions after PR 5 stopped" decided them. Tests and this plan only; #2309 is closed and
+stays closed.
+
+**Commits.**
+
+1. *The dynamic guest, parked where it stops*: the six-check guest in `sourcesPure`, parked, and "PR 5: where the
+   `dynamic` guest stops". Its file and its park are replaced by commit 3; the measurements stand.
+2. *Plan for #2309: the decisions after PR 5 stopped*: that section, appended as decided, with the pointer under
+   decision 9.
+3. *Two dynamic guests in sourcesImpure*: the change.
+4. This section.
+
+**The guests**, both registered in `TestImpureCases` with `IsDynamicCodeSupported` true, as
+`ExpressionLambdaCompileEmitted.cs` is (`Oracle = OraclePolicy.Never`, `ExpectedReturnCode = 0`):
+
+- `sourcesImpure/DynamicMemberAccess.cs`, live: (1) `(int)d.Id + 1` on a user class, (2) `(int)s.Length` on a
+  `string`, (3) a dynamic `List<int>` converted implicitly to `IEnumerable<int>`, (4) `Sum(list)` choosing
+  `Sum(IEnumerable<int>)` over `Sum(object)`.
+- `sourcesImpure/DynamicBaseInterfaceMember.cs`, parked on every runtime on #2348: (1) `IList<int>.Contains(dynamic)`,
+  (2) a user `IDerived<int>.Get(dynamic)`, each a member found only through a base interface.
+
+`TestPureCases.fs` and `sourcesPure` are as `main` has them.
+
+**Measurements**, all run 2026-11-19 on `2b38151e8` (#2347) plus this branch.
+
+- *Real .NET.* Each file exits 0 on real .NET 10.0.14 and 11.0.0-rc.3 as written, printing each check's value. For
+  each check, the expectation perturbed (42 to 43, 5 to 6, 6 to 7, 6 to 7; 1 to 0, 20 to 21) exits with that check's
+  number on both: six perturbations, twelve runs.
+- *The harness, Release, `TestCategory=GuestImpure&Name~DynamicMemberAccess`.* Passes on each runtime: 103 s for the
+  case (114 s for the invocation) on .NET 10's CoreLib, 94 s (104 s) on .NET 11's; the test host's peak RSS was about
+  2.6 GB. Under the 3-minute rule, so it is a `GuestImpure` case.
+- *The parked guest's stop, `FullyQualifiedName~DynamicBaseInterfaceMember`, Release.* On each runtime, about 30 s in:
+  "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs:2614; got open constructed
+  System.Private.CoreLib/...[generic parameter #0 of System.Private.CoreLib/...]". The open construction is
+  CoreLib's, so the stop is check 1's binding (`ICollection<T>` over `IList<T>`'s variable, by its assembly); `Check`
+  prints only after its call returns, so neither check printed.
+- *Mutants against `DynamicMemberAccess.cs`*, each in the `OpenGenericTypeDefinition` arm of
+  `RuntimeTypeInterfaces.ofReceiver`, run in the Release harness on .NET 10's CoreLib, reverted and rebuilt after:
+
+  | mutant | outcome |
+  |---|---|
+  | every generic definition answers `[]` | **survives** (passes, 57 s) |
+  | every generic definition refused with a `failwith`, as before the third pull request | **killed**, 5 s in, at the refusal |
+
+  So the guest fails if `GetInterfaces` stops on a definition, and does not see what it answers.
+
+**Suites**, run at commit 3, each its own invocation, Debug, after a build of the test project, on a .NET 10 host: default 5,986 (5,946 passed, 39 skipped, 1 failed: `TestRealRuntimeStandardInput`'s "a guest that never reads
+and never exits is timed out", whose 60 s wait ran out after 76 s under the suite's load; alone it passes, 3 of 3);
+`GuestImpure` 306 passed (333 s) on .NET 10 and 306 passed (433 s) on .NET 11; `Guest` 250 passed (574 s);
+`GuestSolo` 2 passed (263 s); `GuestPure` 1,210 passed (545 s). Inside those Debug category runs, alongside the
+category's other cases, `DynamicMemberAccess.cs` took 4 m 40 s on .NET 10 and 6 m 6 s on .NET 11; CI runs
+Release, where the case alone took the times above.
