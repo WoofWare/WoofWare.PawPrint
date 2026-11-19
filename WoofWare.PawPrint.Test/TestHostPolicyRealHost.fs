@@ -61,40 +61,25 @@ public static class Program
         else
             HostPolicyPlatform.Linux
 
-    /// The settings of decision 10 as this host has them, read as the App would read them, and
-    /// erring towards reporting one. The trace check in `compare` catches one missed here.
-    let private gatherSettings (frameworkDependent : bool) : HostPolicySettings =
-        let env (name : string) : string option =
-            match Environment.GetEnvironmentVariable name with
-            | null
-            | "" -> None
-            | value -> Some value
-
+    /// The settings of decision 10 as the child has them. `launch` removes the variables which
+    /// give them, so only the filesystem can: a store beside the muxer, or the default servicing
+    /// directory. This errs towards reporting one; the trace check in `compare` catches one
+    /// missed here.
+    let private gatherSettings () : HostPolicySettings =
         let besideMuxer =
             Path.Combine (Path.GetDirectoryName RealRuntime.muxerPath, "store")
 
         {
             UseRidGraph = false
+            SetAppPaths = false
             AdditionalProbingPaths = []
-            AdditionalDepsJsons =
-                if frameworkDependent then
-                    Option.toList (env "DOTNET_ADDITIONAL_DEPS")
-                else
-                    []
-            SharedStores =
-                [
-                    yield! Option.toList (env "DOTNET_SHARED_STORE")
-                    if Directory.Exists besideMuxer then
-                        yield besideMuxer
-                ]
+            AdditionalDepsJsons = []
+            SharedStores = if Directory.Exists besideMuxer then [ besideMuxer ] else []
             ServicingDirectory =
-                match env "CORE_SERVICING" with
-                | Some dir -> Some dir
-                | None ->
-                    if Directory.Exists "/opt/coreservicing" then
-                        Some "/opt/coreservicing"
-                    else
-                        None
+                if Directory.Exists "/opt/coreservicing" then
+                    Some "/opt/coreservicing"
+                else
+                    None
         }
 
     /// What one run of the guest left behind.
@@ -130,9 +115,18 @@ public static class Program
         psi.UseShellExecute <- false
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
-        psi.Environment.["COREHOST_TRACE"] <- "1"
-        psi.Environment.["COREHOST_TRACE_VERBOSITY"] <- "4"
-        psi.Environment.["COREHOST_TRACEFILE"] <- trace
+        // The host prefers the `DOTNET_HOST_TRACE` variables to the `COREHOST_TRACE` ones; set
+        // both, so that neither inherited spelling decides the trace this parses.
+        for prefix in [ "DOTNET_HOST_TRACE" ; "COREHOST_TRACE" ] do
+            psi.Environment.[prefix] <- "1"
+            psi.Environment.[prefix + "_VERBOSITY"] <- "4"
+            psi.Environment.[prefix + "FILE"] <- trace
+
+        // The settings of decision 10 which the environment gives, removed so that the child runs
+        // with the settings `gatherSettings` reports.
+        for name in [ "CORE_SERVICING" ; "DOTNET_SHARED_STORE" ; "DOTNET_ADDITIONAL_DEPS" ] do
+            psi.Environment.Remove name |> ignore<bool>
+
         use proc = Process.Start psi
         let stdout = proc.StandardOutput.ReadToEndAsync ()
         let stderr = proc.StandardError.ReadToEndAsync ()
@@ -623,7 +617,7 @@ public static class Program
                                         List.last frameworks
                                     )
                                 EntryAssemblyName = guestName
-                                Settings = gatherSettings true
+                                Settings = gatherSettings ()
                             }
 
                         yield compare $"case %d{case}, seed %d{seed}: %s{description}" input run
@@ -706,7 +700,7 @@ public static class Program
                                 EntryFileName = guestName + ".dll"
                             }
                     EntryAssemblyName = guestName
-                    Settings = gatherSettings false
+                    Settings = gatherSettings ()
                 }
 
             match compare "self-contained" input run with

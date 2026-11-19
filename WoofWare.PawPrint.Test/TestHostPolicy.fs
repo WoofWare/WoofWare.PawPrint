@@ -118,9 +118,12 @@ module TestHostPolicy =
         str.Length >= suffix.Length
         && strcaseEqual (str.Substring (str.Length - suffix.Length)) suffix
 
-    /// Whether CoreCLR could take two simple names for one, under either invariant casing.
+    /// Whether CoreCLR could take two simple names for one: equal under either invariant casing,
+    /// or under upper casing once dotless `ı` is read as `I`, as CoreCLR's Unix fold reads it.
     let private collide (a : string) (b : string) : bool =
-        a.ToUpperInvariant () = b.ToUpperInvariant ()
+        let dotless (s : string) : string = s.Replace (char 0x131, 'I')
+
+        (dotless a).ToUpperInvariant () = (dotless b).ToUpperInvariant ()
         || a.ToLowerInvariant () = b.ToLowerInvariant ()
 
     let private transcribe
@@ -142,6 +145,9 @@ module TestHostPolicy =
 
             if settings.UseRidGraph then
                 unreproducible HostPolicyUnreproducible.UsesRidGraph
+
+            if settings.SetAppPaths then
+                unreproducible HostPolicyUnreproducible.SetsAppPaths
 
             let unmodelled =
                 [
@@ -449,7 +455,10 @@ module TestHostPolicy =
 
             // `resolve_probe_dirs` for native assets, which finds the CoreCLR library.
             let nativeItems = HashSet<string> StringComparer.Ordinal
+            // The directories in the order the host adds them, for PawPrint's check below.
+            let nativeDirs = List<string> ()
             let coreClrPath = ref ""
+            let coreClrLevel = ref -1
 
             let addPackageCacheEntry (entry : DepsEntry) (depsDir : string) (fxLevel : int) : unit =
                 if nativeItems.Contains entry.AssetName then
@@ -465,8 +474,10 @@ module TestHostPolicy =
                             && endsWithIgnoringCase candidate ("/" + coreClrName)
                         then
                             coreClrPath.Value <- candidate
+                            coreClrLevel.Value <- fxLevel
 
                         nativeItems.Add (getDirectory candidate) |> ignore<bool>
+                        nativeDirs.Add (getDirectory candidate)
                     | None ->
                         if
                             entry.AssetName = "apphost"
@@ -484,14 +495,20 @@ module TestHostPolicy =
 
                 if fxDeps.[0].IsNone then
                     nativeItems.Add appDir |> ignore<bool>
+                    nativeDirs.Add appDir
 
-                    // `file_exists_in_dir`. PawPrint takes a listed name equal ignoring case as
-                    // found, not knowing whether the filesystem folds case.
-                    if
-                        coreClrPath.Value.Length = 0
-                        && Option.defaultValue [] listing |> List.exists (strcaseEqual coreClrName)
-                    then
-                        coreClrPath.Value <- appendPath appDir coreClrName
+                    // `file_exists_in_dir`. PawPrint refuses a listed name equal to the library's
+                    // only ignoring case, not knowing whether the filesystem folds case.
+                    if coreClrPath.Value.Length = 0 then
+                        let files = Option.defaultValue [] listing
+
+                        if List.contains coreClrName files then
+                            coreClrPath.Value <- appendPath appDir coreClrName
+                            coreClrLevel.Value <- 0
+                        else
+                            match files |> List.tryFind (strcaseEqual coreClrName) with
+                            | Some listed -> unreproducible (HostPolicyUnreproducible.CoreClrNameCaseOnly listed)
+                            | None -> ()
 
             for i in 1 .. fxCount - 1 do
                 for entry in entriesOf i DepsAssetType.Native do
@@ -499,6 +516,33 @@ module TestHostPolicy =
 
             if coreClrPath.Value.Length = 0 then
                 fail HostPolicyFailure.CoreClrNotFound
+
+            // PawPrint: the host loads an application's CoreCLR library from wherever its links
+            // lead.
+            if isFrameworkDependent && coreClrLevel.Value = 0 then
+                unreproducible (HostPolicyUnreproducible.CoreClrFromApplication coreClrPath.Value)
+
+            // `resolve_probe_dirs` for resources, which only reports a resource it cannot find.
+            let resourceRoots = List<string> ()
+
+            let addResource (entry : DepsEntry) (depsDir : string) (fxLevel : int) : unit =
+                if not (isPlaceholder entry) then
+                    match probeDepsEntry entry depsDir fxLevel with
+                    | Some candidate -> resourceRoots.Add (getDirectory (getDirectory candidate))
+                    | None -> ()
+
+            match appDirectory with
+            | None -> ()
+            | Some _ ->
+                for entry in entriesOf 0 DepsAssetType.Resources do
+                    addResource entry appDir 0
+
+                if fxDeps.[0].IsNone then
+                    resourceRoots.Add appDir
+
+            for i in 1 .. fxCount - 1 do
+                for entry in entriesOf i DepsAssetType.Resources do
+                    addResource entry (fxDir i) i
 
             if
                 appDirectory.IsSome
@@ -515,10 +559,14 @@ module TestHostPolicy =
 
                 if not (path.StartsWith '/') then
                     fail (HostPolicyFailure.RuntimeRejectsTpa (TpaRefusal.RelativePath (name, path)))
+                elif path.Contains (char 0) then
+                    unreproducible (HostPolicyUnreproducible.Tpa (TpaRefusal.HoldsNul (name, path)))
                 elif path.Contains ':' then
                     unreproducible (HostPolicyUnreproducible.Tpa (TpaRefusal.HoldsPathListSeparator (name, path)))
                 elif path.EndsWith ' ' then
                     unreproducible (HostPolicyUnreproducible.Tpa (TpaRefusal.EndsWithSpace (name, path)))
+                elif fileName |> Seq.exists (fun c -> int c > 127) then
+                    unreproducible (HostPolicyUnreproducible.Tpa (TpaRefusal.NonAsciiFileName (name, path)))
                 elif
                     not (lowerFileName.EndsWith (".dll", StringComparison.Ordinal))
                     && not (lowerFileName.EndsWith (".exe", StringComparison.Ordinal))
@@ -541,6 +589,11 @@ module TestHostPolicy =
                     unreproducible (HostPolicyUnreproducible.Tpa (TpaRefusal.NamesEqualIgnoringCase (first, name)))
                 | None -> ()
             )
+
+            // PawPrint: CoreCLR splits its directory lists at `:`.
+            match Seq.append nativeDirs resourceRoots |> Seq.tryFind (fun d -> d.Contains ':') with
+            | Some directory -> unreproducible (HostPolicyUnreproducible.ProbeDirectoryHoldsPathListSeparator directory)
+            | None -> ()
 
             let findIgnoringCase (wanted : string) : (string * string) option =
                 tpa |> Map.toList |> List.tryFind (fun (n, _) -> collide n wanted)
@@ -570,6 +623,8 @@ module TestHostPolicy =
     let private tpaRefusalName (refusal : TpaRefusal) : string =
         match refusal with
         | TpaRefusal.RelativePath _ -> "RelativePath"
+        | TpaRefusal.HoldsNul _ -> "HoldsNul"
+        | TpaRefusal.NonAsciiFileName _ -> "NonAsciiFileName"
         | TpaRefusal.HoldsPathListSeparator _ -> "HoldsPathListSeparator"
         | TpaRefusal.EndsWithSpace _ -> "EndsWithSpace"
         | TpaRefusal.NoAssemblyExtension _ -> "NoAssemblyExtension"
@@ -591,6 +646,10 @@ module TestHostPolicy =
         | Error (HostPolicyRefusal.NotReproducible reason) ->
             match reason with
             | HostPolicyUnreproducible.UsesRidGraph -> "UsesRidGraph"
+            | HostPolicyUnreproducible.SetsAppPaths -> "SetsAppPaths"
+            | HostPolicyUnreproducible.CoreClrFromApplication _ -> "CoreClrFromApplication"
+            | HostPolicyUnreproducible.CoreClrNameCaseOnly _ -> "CoreClrNameCaseOnly"
+            | HostPolicyUnreproducible.ProbeDirectoryHoldsPathListSeparator _ -> "ProbeDirectoryHoldsPathListSeparator"
             | HostPolicyUnreproducible.UnmodelledSettings _ -> "UnmodelledSettings"
             | HostPolicyUnreproducible.DepsJsonUnreadable _ -> "DepsJsonUnreadable"
             | HostPolicyUnreproducible.ListingNamesCollide _ -> "ListingNamesCollide"
@@ -641,6 +700,7 @@ module TestHostPolicy =
     let private noSettings : HostPolicySettings =
         {
             UseRidGraph = false
+            SetAppPaths = false
             AdditionalProbingPaths = []
             AdditionalDepsJsons = []
             SharedStores = []
@@ -701,7 +761,16 @@ module TestHostPolicy =
         Text.Encoding.UTF8.GetBytes "{\"runtimeTarget\":\"\\ud800\"}"
 
     let private namePool : string list =
-        [ "A" ; "B" ; "a" ; "C.D" ; "System.Private.CoreLib" ; "Entry" ; "entry" ]
+        [
+            "A"
+            "B"
+            "a"
+            "C.D"
+            "System.Private.CoreLib"
+            "Entry"
+            "entry"
+            "Z" + string (char 0x131)
+        ]
 
     let private versionGen : Gen<string option> =
         Gen.elements
@@ -777,7 +846,13 @@ module TestHostPolicy =
         gen {
             let! path = Gen.elements paths
 
-            let! localPath = Gen.frequency [ 9, Gen.constant None ; 1, Gen.constant (Some ("sub/" + path)) ]
+            let! localPath =
+                Gen.frequency
+                    [
+                        18, Gen.constant None
+                        2, Gen.constant (Some ("sub/" + path))
+                        1, Gen.constant (Some ("c:native/" + path))
+                    ]
 
             return
                 { ManifestSpec.asset path with
@@ -836,6 +911,27 @@ module TestHostPolicy =
             let! runtime = Gen.listOfLength runtimeCount (runtimeAssetGen names noLocalPathWeight)
             let! nativeCount = Gen.frequency [ 6, Gen.constant 0 ; 2, Gen.constant 1 ; 1, Gen.constant 2 ]
             let! native = Gen.listOfLength nativeCount (nativeAssetGen nativePaths)
+            let! resourceCount = Gen.frequency [ 6, Gen.constant 0 ; 2, Gen.constant 1 ]
+
+            let resourceGen : Gen<ManifestAsset> =
+                gen {
+                    let! name = Gen.elements names
+                    let! culture = Gen.elements [ "en" ; "fr" ]
+
+                    let! localPath =
+                        Gen.frequency
+                            [
+                                8, Gen.constant None
+                                1, Gen.constant (Some $"d:res/%s{culture}/%s{name}.resources.dll")
+                            ]
+
+                    return
+                        { ManifestSpec.asset $"lib/net10.0/%s{culture}/%s{name}.resources.dll" with
+                            LocalPath = localPath
+                        }
+                }
+
+            let! resources = Gen.listOfLength resourceCount resourceGen
             let! ridCount = Gen.frequency [ 6, Gen.constant 0 ; 2, Gen.constant 1 ; 1, Gen.constant 2 ]
             let! ridSpecific = Gen.listOfLength ridCount (ridAssetGen names rids)
             let! inLibraries = Gen.frequency [ 19, Gen.constant true ; 1, Gen.constant false ]
@@ -846,6 +942,7 @@ module TestHostPolicy =
                     Type = libraryType
                     Runtime = runtime |> List.distinctBy (fun a -> a.Path)
                     Native = native |> List.distinctBy (fun a -> a.Path)
+                    Resources = resources |> List.distinctBy (fun a -> a.Path)
                     RidSpecific = ridSpecific |> List.distinctBy (fun r -> r.Asset.Path)
                     InLibraries = inLibraries
                 }
@@ -1023,7 +1120,14 @@ module TestHostPolicy =
                 }
 
             let! files = Gen.listOfLength count fileGen
-            let! coreClr = Gen.frequency [ 19, Gen.constant [] ; 1, Gen.constant [ coreClrFileName platform ] ]
+
+            let! coreClr =
+                Gen.frequency
+                    [
+                        18, Gen.constant []
+                        1, Gen.constant [ coreClrFileName platform ]
+                        1, Gen.constant [ (coreClrFileName platform).ToUpperInvariant () ]
+                    ]
 
             let core =
                 if withCore then
@@ -1134,6 +1238,11 @@ module TestHostPolicy =
                         1,
                         Gen.constant
                             { noSettings with
+                                SetAppPaths = true
+                            }
+                        1,
+                        Gen.constant
+                            { noSettings with
                                 AdditionalProbingPaths = [ "/probe" ]
                             }
                         1,
@@ -1188,6 +1297,11 @@ module TestHostPolicy =
             "RuntimeRejectsTpa RelativePath"
             "RuntimeRejectsTpa NoAssemblyExtension"
             "UsesRidGraph"
+            "SetsAppPaths"
+            "CoreClrFromApplication"
+            "CoreClrNameCaseOnly"
+            "ProbeDirectoryHoldsPathListSeparator"
+            "Tpa NonAsciiFileName"
             "UnmodelledSettings"
             "DepsJsonUnreadable"
             "ListingNamesCollide"
@@ -2231,7 +2345,7 @@ module TestHostPolicy =
         )
 
     [<Test>]
-    let ``Refused: an application whose deps.json selects a CoreCLR library away from the TPA's CoreLib`` () =
+    let ``Refused: a framework-dependent application whose deps.json names the CoreCLR library`` () =
         let application =
             appWith
                 [
@@ -2242,11 +2356,87 @@ module TestHostPolicy =
 
         frameworkDependent EmulatedRuntime.Net10 application [] baseFramework
         |> expectRefusal (
+            HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.CoreClrFromApplication "/app/libcoreclr.dylib")
+        )
+
+    [<Test>]
+    let ``Refused: a framework-dependent application whose directory holds the CoreCLR library`` () =
+        frameworkDependent
+            EmulatedRuntime.Net10
+            (onDisk (HostPolicyAppManifest.Listing [ "Entry.dll" ; "libcoreclr.dylib" ]))
+            []
+            baseFramework
+        |> expectRefusal (
+            HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.CoreClrFromApplication "/app/libcoreclr.dylib")
+        )
+
+    [<Test>]
+    let ``Refused: a listed CoreCLR library whose name matches only ignoring case`` () =
+        let application : HostPolicyAppDirectory =
+            {
+                Directory = "/app"
+                Manifest =
+                    HostPolicyAppManifest.Listing [ "Entry.dll" ; "System.Private.CoreLib.dll" ; "LIBCORECLR.SO" ]
+                EntryFileName = "Entry.dll"
+            }
+
+        {
+            Runtime = EmulatedRuntime.Net10
+            Platform = HostPolicyPlatform.Linux
+            Launch = HostPolicyLaunch.SelfContained application
+            EntryAssemblyName = "Entry"
+            Settings = noSettings
+        }
+        |> expectRefusal (
+            HostPolicyRefusal.NotReproducible (HostPolicyUnreproducible.CoreClrNameCaseOnly "LIBCORECLR.SO")
+        )
+
+    [<Test>]
+    let ``Refused: the AppPaths switch`` () =
+        { frameworkDependent EmulatedRuntime.Net10 (appWith []) [] baseFramework with
+            Settings =
+                { noSettings with
+                    SetAppPaths = true
+                }
+        }
+        |> expectRefusal (HostPolicyRefusal.NotReproducible HostPolicyUnreproducible.SetsAppPaths)
+
+    /// Measured by Codex on .NET 10 and 11: a resource root holding `:` made CoreCLR fail to start
+    /// (0x80070057).
+    [<Test>]
+    let ``Refused: a resource probe directory holding the path-list separator`` () =
+        let application =
+            appWith
+                [
+                    { ManifestSpec.library "Res/1.0" [] with
+                        Resources =
+                            [
+                                { ManifestSpec.asset "lib/net10.0/en/Res.resources.dll" with
+                                    LocalPath = Some "d:bad/en/Res.resources.dll"
+                                }
+                            ]
+                    }
+                ]
+
+        frameworkDependent EmulatedRuntime.Net10 application [] baseFramework
+        |> expectRefusal (
             HostPolicyRefusal.NotReproducible (
-                HostPolicyUnreproducible.CoreLibNotBesideCoreClr (
-                    "/fx/10.0.14/System.Private.CoreLib.dll",
-                    "/app/libcoreclr.dylib"
-                )
+                HostPolicyUnreproducible.ProbeDirectoryHoldsPathListSeparator "/app/d:bad/"
+            )
+        )
+
+    [<Test>]
+    let ``Refused: a file name outside ASCII`` () =
+        let name = "Ztest" + string (char 0x131)
+
+        frameworkDependent
+            EmulatedRuntime.Net10
+            (appWith [ ManifestSpec.library "Z/1.0" [ ManifestSpec.asset (name + ".dll") ] ])
+            []
+            baseFramework
+        |> expectRefusal (
+            HostPolicyRefusal.NotReproducible (
+                HostPolicyUnreproducible.Tpa (TpaRefusal.NonAsciiFileName (name, $"/app/%s{name}.dll"))
             )
         )
 

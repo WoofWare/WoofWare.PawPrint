@@ -31,6 +31,8 @@ type ManifestLibrary =
         Type : string
         Runtime : ManifestAsset list
         Native : ManifestAsset list
+        /// Resource assets, listed as `<dir>/<culture>/<name>.dll`.
+        Resources : ManifestAsset list
         RidSpecific : ManifestRidAsset list
         /// Whether `libraries` names the package; the host reads no other.
         InLibraries : bool
@@ -83,6 +85,7 @@ module ManifestSpec =
 
             addAssets "runtime" library.Runtime
             addAssets "native" library.Native
+            addAssets "resources" library.Resources
 
             if not library.RidSpecific.IsEmpty then
                 let o = JsonObject ()
@@ -131,6 +134,7 @@ module ManifestSpec =
             Type = "package"
             Runtime = runtime
             Native = []
+            Resources = []
             RidSpecific = []
             InLibraries = true
         }

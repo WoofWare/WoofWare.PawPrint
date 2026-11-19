@@ -8,10 +8,16 @@ type internal TpaRefusal =
     /// The path does not start with `/`. CoreCLR refuses a TPA holding a relative path, and the
     /// runtime does not start.
     | RelativePath of name : string * path : string
+    /// The path holds U+0000, which no Unix path, and no entry of the host's TPA string, can.
+    | HoldsNul of name : string * path : string
     /// The path holds `:`, which separates the entries of the host's TPA string.
     | HoldsPathListSeparator of name : string * path : string
     /// The path ends with a space, which CoreCLR drops from each entry of the TPA string.
     | EndsWithSpace of name : string * path : string
+    /// The file name holds a character outside ASCII. CoreCLR folds the case of names and
+    /// extensions with its own tables (on Unix, dotless `ı` matches `I`), which PawPrint does not
+    /// reproduce.
+    | NonAsciiFileName of name : string * path : string
     /// The path does not end `.dll`, `.exe`, `.ni.dll` or `.ni.exe` in any ASCII case, so CoreCLR
     /// reads no simple name from it, and the runtime does not start.
     | NoAssemblyExtension of name : string * path : string

@@ -84,23 +84,33 @@ module TestTrustedPlatformAssemblies =
         create [ "System.Xml", "/fx/System.Xml.dll" ; "system.xml", "/app/system.xml.dll" ]
         |> shouldBe (Error (TpaRefusal.NamesEqualIgnoringCase ("System.Xml", "system.xml")))
 
+    /// The Kelvin sign and the long s fold to ASCII letters under .NET's invariant casing; dotless
+    /// `ı` folds to `I` under CoreCLR's on Unix, so .NET 10 reads `Ztest.nı.dll` as a native image
+    /// of `Ztest`.
+    [<TestCase(0x212A, "K")>]
+    [<TestCase(0x17F, "s")>]
+    [<TestCase(0x131, "I")>]
+    let ``A file name outside ASCII is refused`` (codePoint : int, ascii : string) =
+        let letter = string (char codePoint)
+        let path = $"/app/%s{letter}.dll"
+
+        create [ ascii, $"/app/%s{ascii}.dll" ; letter, path ]
+        |> shouldBe (Error (TpaRefusal.NonAsciiFileName (letter, path)))
+
+        let nativeImage = $"/app/Ztest.n%s{letter}.dll"
+
+        create [ $"Ztest.n%s{letter}", nativeImage ]
+        |> shouldBe (Error (TpaRefusal.NonAsciiFileName ($"Ztest.n%s{letter}", nativeImage)))
+
     [<Test>]
-    let ``Names equal under invariant lower casing but not under upper casing are refused`` () =
-        // The Kelvin sign lowers to `k` under the invariant culture, and upper casing leaves it as
-        // it is.
-        let kelvin = string (char 0x212A)
-
-        create [ "K", "/app/K.dll" ; kelvin, $"/app/%s{kelvin}.dll" ]
-        |> shouldBe (Error (TpaRefusal.NamesEqualIgnoringCase ("K", kelvin)))
+    let ``A directory outside ASCII is accepted`` () =
+        let path = $"/Jos%s{string (char 0xE9)}/A.dll"
+        create [ "A", path ] |> shouldBe (Ok (Map.ofList [ "A", path ]))
 
     [<Test>]
-    let ``Names equal under invariant upper casing but not under lower casing are refused`` () =
-        // The long s uppers to `S` under the invariant culture, and lower casing leaves it as it
-        // is.
-        let longS = string (char 0x17F)
-
-        create [ "s", "/app/s.dll" ; longS, $"/app/%s{longS}.dll" ]
-        |> shouldBe (Error (TpaRefusal.NamesEqualIgnoringCase ("s", longS)))
+    let ``A path holding NUL is refused`` () =
+        let path = "/app/a" + string (char 0) + "b/A.dll"
+        create [ "A", path ] |> shouldBe (Error (TpaRefusal.HoldsNul ("A", path)))
 
     [<Test>]
     let ``The first refusal in ordinal order of name is returned`` () =
@@ -125,3 +135,12 @@ module TestTrustedPlatformAssemblies =
         |> shouldBe (Some ("B", "/app/B.dll"))
 
         TrustedPlatformAssemblies.tryFindIgnoringCase "C" tpa |> shouldBe None
+
+    [<Test>]
+    let ``tryFindIgnoringCase matches dotless i to I, as CoreCLR does on Unix`` () =
+        let tpa =
+            TrustedPlatformAssemblies.tryCreate (Map.ofList [ "ZtestI", "/app/ZtestI.dll" ])
+            |> Result.defaultWith (fun e -> failwith $"%A{e}")
+
+        TrustedPlatformAssemblies.tryFindIgnoringCase ("Ztest" + string (char 0x131)) tpa
+        |> shouldBe (Some ("ZtestI", "/app/ZtestI.dll"))

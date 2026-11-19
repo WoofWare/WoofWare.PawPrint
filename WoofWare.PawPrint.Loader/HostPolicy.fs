@@ -67,6 +67,10 @@ type internal HostPolicySettings =
     {
         /// `System.Runtime.Loader.UseRidGraph` is `true` in the runtimeconfig.
         UseRidGraph : bool
+        /// `Microsoft.NETCore.DotNetHostPolicy.SetAppPaths` is `true` in the merged runtimeconfig
+        /// properties, so CoreCLR also binds a name outside the TPA from the application's
+        /// directory.
+        SetAppPaths : bool
         /// The additional probing paths the host admits.
         AdditionalProbingPaths : string list
         /// The additional `deps.json` files or directories (`DOTNET_ADDITIONAL_DEPS`, or
@@ -137,6 +141,9 @@ type internal HostPolicyUnreproducible =
     /// The runtimeconfig sets `System.Runtime.Loader.UseRidGraph`, so the host selects RID-specific
     /// assets by the RID graph.
     | UsesRidGraph
+    /// The runtimeconfig sets `Microsoft.NETCore.DotNetHostPolicy.SetAppPaths`, so CoreCLR binds
+    /// names outside the TPA too.
+    | SetsAppPaths
     /// These settings turn on file existence checks, or add `deps.json` files.
     | UnmodelledSettings of settings : HostPolicySetting list
     /// The `deps.json` is one which the host's reader and PawPrint's might read differently, or
@@ -148,8 +155,18 @@ type internal HostPolicyUnreproducible =
     /// Two frameworks list one runtime asset name, or both name the CoreCLR library, so the
     /// answer depends on the order of the frameworks.
     | FrameworksOverlap of name : string * higher : string * lower : string
+    /// A framework-dependent application supplies the CoreCLR library, at `path`. The host loads
+    /// it, and CoreLib, from wherever its links lead, which PawPrint cannot see.
+    | CoreClrFromApplication of path : string
+    /// The application's directory, which has no `deps.json`, lists `listed`, which equals the
+    /// CoreCLR library's name only ignoring case; whether the host finds it depends on whether the
+    /// filesystem folds case.
+    | CoreClrNameCaseOnly of listed : string
     /// The host's TPA is one PawPrint cannot bind from as CoreCLR does.
     | Tpa of TpaRefusal
+    /// A native or resource probe directory holds `:`, which separates the entries of the host's
+    /// directory lists.
+    | ProbeDirectoryHoldsPathListSeparator of directory : string
     /// The TPA has no `System.Private.CoreLib`.
     | CoreLibAbsent
     /// The TPA's `System.Private.CoreLib` is not the one beside the CoreCLR library, which is the
@@ -603,8 +620,10 @@ module internal HostPolicy =
         | TpaRefusal.RelativePath _
         | TpaRefusal.NoAssemblyExtension _ ->
             HostPolicyRefusal.HostWouldFail (HostPolicyFailure.RuntimeRejectsTpa refusal)
+        | TpaRefusal.HoldsNul _
         | TpaRefusal.HoldsPathListSeparator _
         | TpaRefusal.EndsWithSpace _
+        | TpaRefusal.NonAsciiFileName _
         | TpaRefusal.NotDll _
         | TpaRefusal.NameIsNotFileStem _
         | TpaRefusal.NamesEqualIgnoringCase _ ->
