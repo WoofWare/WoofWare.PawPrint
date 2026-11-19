@@ -384,8 +384,8 @@ public static class Program
                     )
             )
 
-    /// A variable no test ever gives the guest, so it reads as null unless something other than
-    /// the environment the test states reached the guest.
+    /// A variable no test ever gives the guest, so it reads as the test host's value of it, which
+    /// is null unless the test host was started with it.
     [<Literal>]
     let private AbsentVariable = "WOOFWARE_TEST_ABSENT"
 
@@ -458,7 +458,7 @@ public static class Program
 
     /// Run `printsEnvironmentImage` at `dllPath` with `variables` as its environment entries,
     /// asking for each of them and for `AbsentVariable`, and check it printed exactly what it was
-    /// given.
+    /// given, and the test host's value of `AbsentVariable`, which the overlay does not unset.
     let private readsEnvironment (dllPath : string) (variables : Map<string, string>) : unit =
         let names = (variables |> Map.toList |> List.map fst) @ [ AbsentVariable ]
 
@@ -472,7 +472,11 @@ public static class Program
 
         let expected =
             names
-            |> List.map (fun name -> printedLine name (Map.tryFind name variables))
+            |> List.map (fun name ->
+                match Map.tryFind name variables with
+                | Some value -> printedLine name (Some value)
+                | None -> printedLine name (Option.ofObj (Environment.GetEnvironmentVariable name))
+            )
             |> String.concat ""
 
         (run.Result, run.Stdout, run.Stderr)
@@ -535,12 +539,14 @@ public static class Program
                         [| name |]
                         dllPath
 
-                (run.Result, run.Stdout, run.Stderr)
-                |> shouldEqual (RealRuntimeResult.NormalExit 0, printedLine name (Some replacement), "")
+                // Compared, not shown: if the overlay failed, the guest would print the test
+                // host's value, which may be a credential.
+                (run.Result, run.Stderr, run.Stdout = printedLine name (Some replacement))
+                |> shouldEqual (RealRuntimeResult.NormalExit 0, "", true)
             )
 
         // The overlay is on the child's environment alone.
-        Environment.GetEnvironmentVariable name |> shouldEqual hostValue
+        (Environment.GetEnvironmentVariable name = hostValue) |> shouldEqual true
 
     /// Prints the name of the culture `fr-FR` constructs, or the name of the exception
     /// constructing it throws.
@@ -576,6 +582,9 @@ public static class Program
     /// CoreLib reads `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` first and the AppContext property
     /// only when the variable is unset or unparseable, so a caller comparing with PawPrint, whose
     /// kernel sets the variable, must hand the oracle the variable and not only the property.
+    ///
+    /// Invariant mode constructs `fr-FR` anyway when predefined cultures are not required, which
+    /// a test host may have set by the same means, so the test requires them.
     [<Test>]
     let ``DOTNET_SYSTEM_GLOBALIZATION_INVARIANT in the environment decides over the AppContext property`` () : unit =
         laidOut
@@ -586,7 +595,10 @@ public static class Program
                 let run =
                     RealRuntime.captureAssemblyInPlace
                         (AppContextProperties.ofMap (Map.ofList [ "System.Globalization.Invariant", "false" ]))
-                        [ EnvironmentPal.nameValueEntry "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" "1" ]
+                        [
+                            EnvironmentPal.nameValueEntry "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" "1"
+                            EnvironmentPal.nameValueEntry "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY" "1"
+                        ]
                         [||]
                         dllPath
 
@@ -616,19 +628,9 @@ public static class Program
 """
                 ]
 
-    /// A child process's environment overlay maps names to values, so it cannot hold an entry with
-    /// no name, nor two values for one name, both of which PawPrint's kernel can hold.
-    [<TestCase("WOOFWARE_TEST_NO_EQUALS", "", "WOOFWARE_TEST_NO_EQUALS")>]
-    [<TestCase("=WOOFWARE_TEST_LEADING_EQUALS", "", "=WOOFWARE_TEST_LEADING_EQUALS")>]
-    [<TestCase("WOOFWARE_TEST_TWICE=1", "WOOFWARE_TEST_TWICE=2", "WOOFWARE_TEST_TWICE")>]
-    let ``an environment entry the overlay cannot express is refused, not run``
-        (first : string)
-        (second : string)
-        (named : string)
-        : unit
-        =
-        let entries = [ first ; second ] |> List.filter (fun entry -> entry <> "")
-
+    /// Run `marksImage` with `entries`, and return the message of the exception the oracle
+    /// raises, failing if it raises none or if the guest ran.
+    let private environmentRefusal (entries : string list) : string =
         laidOut
             "Marks"
             marksImage.Value
@@ -640,13 +642,39 @@ public static class Program
                     with e ->
                         Error e.Message
 
-                match outcome with
-                | Error message -> message |> shouldContainText named
-                | Ok run -> failwith $"expected the oracle to refuse the environment %A{entries}, but it ran: %A{run}"
-
                 File.Exists (Path.Combine (Path.GetDirectoryName dllPath, "ran"))
                 |> shouldEqual false
+
+                match outcome with
+                | Error message -> message
+                | Ok run -> failwith $"expected the oracle to refuse the environment %A{entries}, but it ran: %A{run}"
             )
+
+    /// A child process's environment overlay maps names to values, so it cannot hold an entry with
+    /// no name, nor two values for one name, both of which PawPrint's kernel can hold.
+    [<TestCase("WOOFWARE_TEST_NO_EQUALS", "", "WOOFWARE_TEST_NO_EQUALS")>]
+    [<TestCase("=WOOFWARE_TEST_LEADING_EQUALS", "", "=WOOFWARE_TEST_LEADING_EQUALS")>]
+    [<TestCase("WOOFWARE_TEST_TWICE=1", "WOOFWARE_TEST_TWICE=2", "WOOFWARE_TEST_TWICE")>]
+    let ``an environment entry the overlay cannot express is refused, not run``
+        (first : string)
+        (second : string)
+        (named : string)
+        : unit
+        =
+        [ first ; second ]
+        |> List.filter (fun entry -> entry <> "")
+        |> environmentRefusal
+        |> shouldContainText named
+
+    /// A NUL would end the entry early, and an unpaired surrogate has no UTF-8 encoding, so the
+    /// guest would see another value; PawPrint's kernel refuses both.
+    [<Test>]
+    let ``an environment entry no process could hold intact is refused, not run`` () : unit =
+        environmentRefusal [ "WOOFWARE_TEST_NUL=before" + string (char 0) + "after" ]
+        |> shouldContainText "WOOFWARE_TEST_NUL"
+
+        environmentRefusal [ "WOOFWARE_TEST_SURROGATE=a" + string (char 0xD800) ]
+        |> shouldContainText "WOOFWARE_TEST_SURROGATE"
 
     /// Writes two lines to stdout, the second with no newline and the first ended by "\r\n", one
     /// line to stderr, and exits 3; or, given the argument `throw`, writes one line to stdout and
@@ -1132,4 +1160,42 @@ public static class Program
                     |]
 
                 directoryContents dllPath |> shouldEqual before
+            )
+
+    /// The host would otherwise read `DOTNET_ROLL_FORWARD` over the runtimeconfig's roll-forward
+    /// policy and could run the guest on a later runtime than the framework under test.
+    [<Test>]
+    let ``environment entries asking to roll forward leave the guest on the framework under test`` () : unit =
+        laidOut
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let run =
+                    RealRuntime.captureAssemblyInPlace
+                        AppContextProperties.empty
+                        [
+                            EnvironmentPal.nameValueEntry "DOTNET_ROLL_FORWARD" "LatestMajor"
+                            EnvironmentPal.nameValueEntry "DOTNET_ROLL_FORWARD_TO_PRERELEASE" "1"
+                        ]
+                        [| "framework" |]
+                        dllPath
+
+                let printed =
+                    run.Stdout.Split Environment.NewLine
+                    |> Array.choose (fun line ->
+                        if line.StartsWith ("framework: ", StringComparison.Ordinal) then
+                            Some (FrameworkUnderTest.resolveLinks (line.Substring "framework: ".Length))
+                        else
+                            None
+                    )
+
+                (run.Result, run.Stderr, printed)
+                |> shouldEqual (
+                    RealRuntimeResult.NormalExit 0,
+                    "",
+                    [|
+                        FrameworkUnderTest.resolveLinks (FrameworkUnderTest.sharedFrameworkDirectory ())
+                    |]
+                )
             )
