@@ -1279,7 +1279,8 @@ default 5,905 (5,866 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 pass
 `GuestImpure` 304 passed. At commit 24, rebased onto `002ac9d86` (#2331): default 5,931 (5,892 passed, 39 skipped);
 `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 27, on
 `002ac9d86`: default 5,934 (5,895 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208
-passed; `GuestImpure` 304 passed.
+passed; `GuestImpure` 304 passed. Commits 28 to 31 change only tests and this plan; at commit 31 the default suite
+ran once more: 5,935 (5,896 passed, 39 skipped).
 
 **Time of the guest categories**, on the same machine, one category at a time, in seconds: on the base (#2322's tip),
 and at commits 3, 6, 10, 13, 16, 24 and 27.
