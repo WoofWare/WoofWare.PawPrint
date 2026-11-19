@@ -496,68 +496,45 @@ public static class Program
                 )
             )
 
-    /// Whether replacing this variable in the guest's environment leaves the muxer, the host and
-    /// the runtime able to start the guest as they otherwise would; and whether its name is plain
-    /// ASCII letters, digits and underscores, which `printsEnvironmentImage` prints as one line
-    /// whatever line endings `CapturedRun` rebuilds.
-    let private safeToReplace (name : string) : bool =
-        let plain =
-            name <> ""
-            && name |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '_')
-
-        let readByTheLaunch =
-            [ "DOTNET_" ; "COMPlus_" ; "CORECLR_" ; "DYLD_" ; "LD_" ]
-            |> List.exists (fun prefix -> name.StartsWith (prefix, StringComparison.OrdinalIgnoreCase))
-
-        plain
-        && not readByTheLaunch
-        && not (List.contains name [ "PATH" ; "HOME" ; "TMPDIR" ; "TMP" ; "TEMP" ])
-
+    /// The two variables are the test's own, set in the test host for its duration under names no
+    /// other test uses, so the test does not depend on what the test host was started with.
     [<Test>]
     let ``an environment entry replaces the test host's value of that variable, and leaves the others`` () : unit =
-        let hostVariables =
-            Environment.GetEnvironmentVariables ()
-            |> Seq.cast<Collections.DictionaryEntry>
-            |> Seq.map (fun entry -> string entry.Key, string entry.Value)
-            |> Seq.filter (fun (name, _) -> safeToReplace name)
-            |> Seq.sortWith (fun (a, _) (b, _) -> String.CompareOrdinal (a, b))
-            |> List.ofSeq
+        let suffix = Guid.NewGuid().ToString "N"
+        let replaced = "WOOFWARE_TEST_REPLACED_" + suffix
+        let inherited = "WOOFWARE_TEST_INHERITED_" + suffix
 
-        // One to replace, and one the entries do not name, which the guest inherits.
-        let (name, hostValue), (kept, keptValue) =
-            match hostVariables with
-            | first :: second :: _ -> first, second
-            | _ ->
-                failwith
-                    "the test host's environment holds fewer than two plainly named variables that the guest's launch does not read"
+        try
+            Environment.SetEnvironmentVariable (replaced, "the test host's value")
+            Environment.SetEnvironmentVariable (inherited, "inherited from the test host")
 
-        let replacement =
-            if hostValue = "replaced by the oracle test" then
-                "replaced again by the oracle test"
-            else
-                "replaced by the oracle test"
+            laidOut
+                "PrintsEnvironment"
+                printsEnvironmentImage.Value
+                None
+                (fun dllPath ->
+                    let run =
+                        RealRuntime.captureAssemblyInPlace
+                            AppContextProperties.empty
+                            [ EnvironmentPal.nameValueEntry replaced "the entry's value" ]
+                            [| replaced ; inherited |]
+                            dllPath
 
-        laidOut
-            "PrintsEnvironment"
-            printsEnvironmentImage.Value
-            None
-            (fun dllPath ->
-                let run =
-                    RealRuntime.captureAssemblyInPlace
-                        AppContextProperties.empty
-                        [ EnvironmentPal.nameValueEntry name replacement ]
-                        [| name ; kept |]
-                        dllPath
+                    (run.Result, run.Stdout, run.Stderr)
+                    |> shouldEqual (
+                        RealRuntimeResult.NormalExit 0,
+                        printedLine replaced (Some "the entry's value")
+                        + printedLine inherited (Some "inherited from the test host"),
+                        ""
+                    )
+                )
 
-                // Compared, not shown: the guest prints test host values, which may be credentials.
-                (run.Result,
-                 run.Stderr,
-                 run.Stdout = printedLine name (Some replacement) + printedLine kept (Some keptValue))
-                |> shouldEqual (RealRuntimeResult.NormalExit 0, "", true)
-            )
-
-        // The overlay is on the child's environment alone.
-        (Environment.GetEnvironmentVariable name = hostValue) |> shouldEqual true
+            // The overlay is on the child's environment alone.
+            Environment.GetEnvironmentVariable replaced
+            |> shouldEqual "the test host's value"
+        finally
+            Environment.SetEnvironmentVariable (replaced, null)
+            Environment.SetEnvironmentVariable (inherited, null)
 
     /// Prints the name of the culture `fr-FR` constructs, or the name of the exception
     /// constructing it throws.
