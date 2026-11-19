@@ -368,7 +368,19 @@ module TestFrameworkUnderTest =
 
     /// A `deps.json`'s bytes as a JSON document.
     let private parseDepsJson (bytes : byte[]) : JsonDocument =
-        JsonDocument.Parse (ReadOnlyMemory bytes)
+        // The host's JSON parser skips a UTF-8 byte order mark; `JsonDocument` does not.
+        let start =
+            if
+                bytes.Length >= 3
+                && bytes.[0] = 0xEFuy
+                && bytes.[1] = 0xBBuy
+                && bytes.[2] = 0xBFuy
+            then
+                3
+            else
+                0
+
+        JsonDocument.Parse (ReadOnlyMemory (bytes, start, bytes.Length - start))
 
     /// The name of a `deps.json`'s runtime target.
     let private runtimeTargetName (root : JsonElement) : string =
@@ -419,11 +431,17 @@ module TestFrameworkUnderTest =
                     match package.TryGetProperty "runtime" with
                     | true, runtime ->
                         for asset in runtime.EnumerateObject () do
+                            // `deps_asset_t` reads `\` as `/` in both paths.
+                            let relativePath = asset.Name.Replace ('\\', '/')
+
                             // `resolve_tpa_list` skips a placeholder.
-                            if not (asset.Name.EndsWith ("/_._", StringComparison.OrdinalIgnoreCase)) then
+                            if not (relativePath.EndsWith ("/_._", StringComparison.OrdinalIgnoreCase)) then
                                 let localPath =
                                     match asset.Value.TryGetProperty "localPath" with
-                                    | true, localPath -> localPath.GetString ()
+                                    | true, localPath ->
+                                        match localPath.GetString () with
+                                        | null -> null
+                                        | localPath -> localPath.Replace ('\\', '/')
                                     | false, _ -> null
 
                                 // `deps_entry_t::to_dir_path`, for a runtime asset.
@@ -438,12 +456,19 @@ module TestFrameworkUnderTest =
                                                 StringComparison.OrdinalIgnoreCase
                                             )
                                         then
-                                            asset.Name
+                                            relativePath
                                         else
-                                            Path.GetFileName asset.Name
+                                            Path.GetFileName relativePath
                                     | localPath -> localPath
 
-                                yield Path.GetFileName asset.Name, probed
+                                // A leading `./` names the framework directory itself.
+                                let rec withoutDotSlash (path : string) : string =
+                                    if path.StartsWith ("./", StringComparison.Ordinal) then
+                                        withoutDotSlash (path.Substring 2)
+                                    else
+                                        path
+
+                                yield Path.GetFileName relativePath, withoutDotSlash probed
                     | false, _ -> ()
                 | false, _ -> ()
         ]
