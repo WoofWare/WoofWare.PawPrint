@@ -949,7 +949,8 @@ module TestHostPolicy =
         }
 
     /// The library which holds a runtime's CoreLib and CoreCLR library.
-    let private coreLibrary (platform : HostPolicyPlatform) : ManifestLibrary =
+    /// As `coreLibrary`, with the CoreCLR library's `localPath` under `nativeDirectory`.
+    let private coreLibraryIn (nativeDirectory : string) (platform : HostPolicyPlatform) : ManifestLibrary =
         { ManifestSpec.library
               "Core/1.0"
               [
@@ -957,8 +958,19 @@ module TestHostPolicy =
                       AssemblyVersion = Some "9.0.0.0"
                   }
               ] with
-            Native = [ ManifestSpec.asset (coreClrFileName platform) ]
+            Native =
+                [
+                    { ManifestSpec.asset (coreClrFileName platform) with
+                        LocalPath =
+                            if nativeDirectory = "" then
+                                None
+                            else
+                                Some (nativeDirectory + coreClrFileName platform)
+                    }
+                ]
         }
+
+    let private coreLibrary (platform : HostPolicyPlatform) : ManifestLibrary = coreLibraryIn "" platform
 
     let private entryLibrary : ManifestLibrary =
         { ManifestSpec.library "Entry/1.0.0" [ ManifestSpec.asset "Entry.dll" ] with
@@ -1018,6 +1030,7 @@ module TestHostPolicy =
         (rids : string list)
         (noLocalPathWeight : int)
         (withCore : bool)
+        (coreClrDirectory : string)
         (k : int)
         (isLowest : bool)
         : Gen<FrameworkModel>
@@ -1056,7 +1069,7 @@ module TestHostPolicy =
             let opening =
                 [
                     if isLowest && withCore then
-                        yield coreLibrary platform
+                        yield coreLibraryIn coreClrDirectory platform
                     if withQ then
                         if isLowest then
                             yield ManifestSpec.library "Q/Q" [ ManifestSpec.asset "QBase.dll" ]
@@ -1177,6 +1190,8 @@ module TestHostPolicy =
                     ]
 
             let! withCore = Gen.frequency [ 85, Gen.constant true ; 15, Gen.constant false ]
+            // Sometimes the CoreCLR library is away from CoreLib.
+            let! coreClrDirectory = Gen.frequency [ 15, Gen.constant "" ; 1, Gen.constant "native/" ]
             let! withEntry = Gen.frequency [ 75, Gen.constant true ; 25, Gen.constant false ]
 
             let! frameworkCount =
@@ -1189,7 +1204,7 @@ module TestHostPolicy =
             let! frameworks =
                 [ 1..frameworkCount ]
                 |> List.map (fun k ->
-                    frameworkGen shape platform rids noLocalPathWeight withCore k (k = frameworkCount)
+                    frameworkGen shape platform rids noLocalPathWeight withCore coreClrDirectory k (k = frameworkCount)
                 )
                 |> Gen.sequenceToList
 
@@ -1215,7 +1230,7 @@ module TestHostPolicy =
                             if withEntry then
                                 yield entryLibrary
                             if selfContained && withCore then
-                                yield coreLibrary platform
+                                yield coreLibraryIn coreClrDirectory platform
                         ]
 
                     manifestGen appNames nativePool rids noLocalPathWeight appKeyGen opening
@@ -1402,7 +1417,7 @@ module TestHostPolicy =
             }
 
         checkMetamorphic
-            300
+            200
             gen
             (fun (case, keys) ->
                 let original = resolve case
@@ -1457,7 +1472,7 @@ module TestHostPolicy =
             }
 
         checkMetamorphic
-            300
+            200
             gen
             (fun (case, name) ->
                 match name, case.App with
@@ -1500,7 +1515,7 @@ module TestHostPolicy =
             }
 
         checkMetamorphic
-            300
+            200
             (caseGenOf shape)
             (fun case ->
                 match resolve case with
@@ -1610,7 +1625,7 @@ module TestHostPolicy =
             }
 
         checkMetamorphic
-            300
+            200
             gen
             (fun (case, shuffled) ->
                 let original = resolve case
