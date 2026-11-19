@@ -1313,14 +1313,16 @@ Branch `test-consumer-guests`, on `main` after #2338.
   each package assembly's file version; and, with `RuntimeConfig.parse`, that its `runtimeconfig.json` gives both stated
   properties the fixture's values. Each scenario runs under `BoundedRun.run` at the default bound along
   `runtimeDirsFor KernelConfig.Default.UnixPlatform` with the publish first, and alongside through
-  `captureAssemblyInPlace`. The endings, the stdout lines and empty stderr are compared as decision 6 says. Then the
-  scenario's witness line, if it has one, must be in PawPrint's stdout. Three more tests: the publish checks alone;
-  `list` on real .NET equals the fixture's list; an unknown name exits 2 on real .NET. A parked scenario's real-runtime
-  ending is checked as the F# cases do.
+  `captureAssemblyInPlace`. The real runtime must end as the scenario's expected ending says, and then
+  `DifferentialOracle.compareOutcomes` compares the two endings, as every differential fixture does. The stdout lines
+  and empty stderr are compared as decision 6 says. Then the scenario's witness line, if it has one, must be in
+  PawPrint's stdout. Three more tests: the publish checks alone; `list` on real .NET equals the fixture's list; an
+  unknown name exits 2 on real .NET. A parked scenario's real-runtime ending is checked as the F# cases do, and a
+  method-level `[<Explicit>]` test runs a parked scenario as an unparked one runs, for a filter that names it.
 * `TestGuestParking`: the consumer tables are folded on every runtime, with reasons; every scenario a table names
-  (parks, endings, witnesses) is a scenario; every scenario's library prefix is one of the four, and each library has a
-  witness.
-* `ci.yaml`: the `test-guest` Build step restores the guest project, with a comment. `flake.nix`: `offline-restore`
+  (parks, endings, witnesses) is a scenario; no two scenarios share a name; the scenarios' library prefixes are exactly
+  the four libraries; and on every runtime, each library has a witness among the scenarios not parked there.
+* `ci.yaml`: the `test-guest` Build step restores the guest project on the `Guest` legs, with a comment. `flake.nix`: `offline-restore`
   publishes it as the fixture does. `WoofWare.PawPrint.Test/AGENTS.md`: one paragraph.
 
 **Choices the decisions left open.**
@@ -1423,9 +1425,9 @@ were run against it. The guest fixture's runs used `TestCategory=Guest` with a n
 | a scenario parked that is not a scenario | every scenario a table names |
 | a scenario parked both everywhere and on .NET 11 | the folding test (`GuestTable.fold` refuses) and the names test |
 | a scenario parked with a blank reason | the folding test |
-| `fie-generic`'s witness removed | every library has a witness |
+| `fie-generic`'s witness removed | every library has a running witness |
 | a witness naming a scenario that does not exist | every scenario a table names |
-| a scenario with a fifth library's prefix | every library has a witness (its prefix check) |
+| a scenario with a fifth library's prefix | every library has a running witness (its prefix check) |
 | `InvariantGlobalization` removed from the guest project | the publish test (the drift check: the property is absent) |
 | Moq at 4.20.70 | the publish test (`deps.json` names `Moq/4.20.70`) |
 | the publish directory not emptied first, with a stray file left in it | the publish test (the exact entries) |
@@ -1436,10 +1438,45 @@ were run against it. The guest fixture's runs used `TestCategory=Guest` with a n
 | `Math.Log10` answers one more, one call or ten | none: an equivalent mutant (above) |
 | `Math.Log10` answers the natural logarithm, ten calls | `fie-mhhfail` |
 | `Math.Log10` answers 0, ten calls | `fie-mhhfail` |
+| `moq-basic` parked on .NET 11 alone | before Codex's first round, none; after, every library has a running witness |
+| a fifth library listed with no scenario | before Codex's second round, none; after, every library has a running witness |
+| `castle-class` named twice in the fixture | before Codex's third round, none; after, no two scenarios share a name |
 
-**Suites**, on .NET 10.0.14 on macOS. The default suite had 5968 tests: 5929 passed and 39 were skipped. `Guest` had
-250 tests (the 234 before, and this fixture's 16), all passed; `TestFSharpPureCases`, which the shared publish helper
-touches, is among them. That run predates the two scenario changes, which touch only the guest project, so the
-fixture alone was run again afterwards, and passed on both .NET 10 and .NET 11 (16 of 16 each). `GuestPure`,
-`GuestImpure` and `GuestSolo` were not run, since nothing they use changed. `TestFrameworkLocatorRatchet` passed (24
-tests) before the change and inside the default suite after it.
+Two temporary scenarios checked the ending comparison, against the code before Codex's first round and after it.
+`probe-unhandled` throws out of `Main` and is declared `UnhandledException`. `probe-exit` calls `Environment.Exit(7)` and
+is declared `ExitCode 7`. Before, both failed (PawPrint's ending was reported as an error). After, both passed. With
+`moq-basic` parked everywhere, a category filter ran only its real-runtime check. A filter naming it ran the parked
+PawPrint test too, which passed in 19 s.
+
+**Suites**, on .NET 10.0.14 on macOS. `Guest` had 250 tests (the 234 before, and this fixture's 16), all passed;
+`TestFSharpPureCases`, which the shared publish helper touches, is among them. That run predates the scenario changes
+and the fixes from Codex's review, which touch only the guest project, `TestConsumerCases` and `TestGuestParking`. At
+the final code, the default suite had 5969 tests: 5930 passed and 39 were skipped. The fixture passed 16 of 16 on
+.NET 10 and on .NET 11. `GuestPure`, `GuestImpure` and `GuestSolo` were not run, since nothing they use changed.
+`TestFrameworkLocatorRatchet` passed (24 tests) before the change and inside the default suite after it.
+
+**Codex review.**
+
+* Round 1, five findings. Addressed: the fixture's ending check rejected a declared unhandled exception and an
+  `Environment.Exit` (now `compareOutcomes`); a witness parked on one runtime still counted there; a parked scenario
+  could not be run by name; the restore ran on every `test-guest` leg. Not addressed: the shared publish directory
+  (below).
+* Round 2, two findings. Addressed: a library with no scenario passed the coverage check. Not addressed: the shared
+  publish directory again.
+* Round 3, two findings. Addressed: two scenarios sharing a name. Not addressed: the shared publish directory, which
+  Codex reproduced. With Net10 and Net11 runs overlapping in one checkout and the second publish delayed, the second
+  host deleted the publish directory while the first was reading it, and `castle-class` and `castle-target` failed with
+  `DirectoryNotFoundException`.
+
+**Left for a decision: concurrent runs of one checkout share the publish directory.** `GuestPublish.publish` empties
+and rewrites `<project>/bin/Release/pawprint-test-publish` once per test host. A second test host started on the same
+checkout while the first is running deletes the first host's guest. `TestFSharpPureCases` has had the same exposure
+since it was written. It is not only the output directory: both hosts' `dotnet publish` also build into the project's
+shared `obj/` and `bin/Release/net10.0/`. CI runs each leg in a checkout of its own, so this concerns only local runs.
+The decisions do not cover it, and the options differ in structure:
+
+* a publish directory per test host below the project's `bin/` (still names joined below the repository root, as
+  "Decisions before PR 3" asks), with a separate intermediate directory too, removed when the host's tests finish;
+* a lock between processes: exclusive while publishing, shared while running scenarios;
+* leave it, and say in `WoofWare.PawPrint.Test/AGENTS.md` that two hosts must not run these fixtures from one checkout
+  at once.
