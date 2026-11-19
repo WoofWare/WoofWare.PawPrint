@@ -3047,6 +3047,83 @@ public struct S2<T> : IC<T[]> { }
                     Error e.Message
             )
 
+    /// Whether `answer` is a stop that names an instantiation of a two-parameter definition given one
+    /// argument.
+    let private stopsOnPairArity (answer : Result<'a, string>) : unit =
+        match answer with
+        | Error message ->
+            message |> shouldContainText "declares 2 generic parameter"
+            message |> shouldContainText "but 1 argument"
+        | Ok answered -> failwith $"PawPrint answered %A{answered}"
+
+    /// An open receiver's entry nests an instantiation with the wrong number of arguments:
+    /// `C<T> : I<Pair<T>>`, for a two-parameter `Pair`. The host refuses to load `C<>`; converting the
+    /// entry stops on the arity, as closing it does for `C<int>`.
+    [<Test>]
+    let ``An open receiver's entry with a nested instantiation of the wrong arity is refused`` () : unit =
+        let host, pawPrint =
+            withSketchDefinition
+                [
+                    sketch "I`1" SketchKind.Interface 1 []
+                    sketch "Pair`2" SketchKind.Class 2 []
+                    sketch
+                        "C`1"
+                        SketchKind.Class
+                        1
+                        [ Spelling.Named ("I`1", [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ]) ]) ]
+                ]
+                "C`1"
+                (fun state identity arguments ->
+                    try
+                        match
+                            RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state identity arguments
+                        with
+                        | _, Ok targets -> Ok targets
+                        | _, Error failure -> Error (TypeBindingFailure.describe failure)
+                    with e ->
+                        Error e.Message
+                )
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        stopsOnPairArity pawPrint
+
+    /// The same nested instantiation in an extends clause, `C<T> : B<Pair<T>>`, read by
+    /// `resolveBaseRuntimeTypeHandleTarget`, which shares the conversion's canonical form. The host
+    /// refuses to load `C<>`.
+    [<Test>]
+    let ``An open base with a nested instantiation of the wrong arity is refused`` () : unit =
+        let host, pawPrint =
+            withSketchDefinition
+                [
+                    sketch "B`1" SketchKind.Class 1 []
+                    sketch "Pair`2" SketchKind.Class 2 []
+                    { sketch "C`1" SketchKind.Class 1 [] with
+                        Base = Some (Spelling.Named ("B`1", [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ]) ]))
+                    }
+                ]
+                "C`1"
+                (fun state identity _ ->
+                    try
+                        IlMachineState.resolveBaseRuntimeTypeHandleTarget
+                            loggerFactory
+                            bct
+                            state
+                            (RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity)
+                        |> snd
+                        |> Ok
+                    with e ->
+                        Error e.Message
+                )
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        stopsOnPairArity pawPrint
+
     /// An open receiver's base chain is loaded, as a closed one's is, though its base adds no entry:
     /// `C<T> : B<IAbsent>`, where `B<U>` has no interfaces and CoreLib declares no `IAbsent`. The host
     /// refuses to load `C<>`.
