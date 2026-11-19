@@ -1,7 +1,7 @@
 # Regression guests for the libraries that run under PawPrint (issues #2092 and #2314)
 
-Status: decided 2026-11-16 (see "Decisions"). PR 1 and PR 2 are built (see "As built (PR 1)" and "As built (PR 2)" at
-the end); PR 3 is not started.
+Status: decided 2026-11-16 (see "Decisions"). PR 1, PR 2, PR 2b and PR 3 are built (see the "As built" sections at the
+end).
 
 Measured 2026-11-16 on `origin/main` at `418a1b8df`. Real .NET means 10.0.14 on the macOS host. PawPrint runs used
 the test project's own harness (`BoundedRun.runWith`, Release build) through a throwaway NUnit fixture that was never
@@ -1290,3 +1290,156 @@ amendment, and the choice is PR 3's to make.
 | refusal made after the guest has run | the same four, each at the marker file |
 | encodability check removed | the NUL/surrogate test |
 | `--roll-forward Disable` dropped | the roll-forward test |
+
+### As built (PR 3)
+
+Branch `test-consumer-guests`, on `main` after #2338.
+
+**What it adds.**
+
+* `WoofWare.PawPrint.Test.ConsumerCases/`: a C# `Exe`, `net10.0`, `IsPackable` false, `PlatformTarget` AnyCPU,
+  `NuGetAudit` false, `TreatWarningsAsErrors` kept, with the four packages at exact versions and the comment decision 1
+  asks for. It declares the dynamic-code switch (`RuntimeHostConfigurationOption`) and `InvariantGlobalization`. Its
+  `Program.cs` runs one of the thirteen scenarios per argument. It prints the names for `list`, exits 2 for anything
+  else, 1 when a value it computed is wrong (`CHECK FAILED: ...`), and 3 when a scenario throws (`GUEST EXCEPTION ...`).
+* The project in `WoofWare.PawPrint.slnx`; a `FootprintInput` in the test project; `nix/deps.json` refreshed (the five
+  packages added, nothing else changed); `.github/test-footprint.json` regenerated (one path added; no `version.json`
+  changed).
+* `GuestPublish.fs` (decision 7): the repository walk, the framework-dependent publish into
+  `<project>/bin/Release/pawprint-test-publish`, and the check for files named as a framework's. `TestFSharpPureCases`
+  uses it with the same project, directory and framework check as before.
+* `TestConsumerCases.fs`, category `Guest`. The publish happens once, and then it is checked: its exact top-level
+  entries; the packages its `deps.json` names (`Castle.Core/5.1.1` and so on, with `System.Diagnostics.EventLog/6.0.0`);
+  each package assembly's file version; and, with `RuntimeConfig.parse`, that its `runtimeconfig.json` gives both stated
+  properties the fixture's values. Each scenario runs under `BoundedRun.run` at the default bound along
+  `runtimeDirsFor KernelConfig.Default.UnixPlatform` with the publish first, and alongside through
+  `captureAssemblyInPlace`. The endings, the stdout lines and empty stderr are compared as decision 6 says. Then the
+  scenario's witness line, if it has one, must be in PawPrint's stdout. Three more tests: the publish checks alone;
+  `list` on real .NET equals the fixture's list; an unknown name exits 2 on real .NET. A parked scenario's real-runtime
+  ending is checked as the F# cases do.
+* `TestGuestParking`: the consumer tables are folded on every runtime, with reasons; every scenario a table names
+  (parks, endings, witnesses) is a scenario; every scenario's library prefix is one of the four, and each library has a
+  witness.
+* `ci.yaml`: the `test-guest` Build step restores the guest project, with a comment. `flake.nix`: `offline-restore`
+  publishes it as the fixture does. `WoofWare.PawPrint.Test/AGENTS.md`: one paragraph.
+
+**Choices the decisions left open.**
+
+* **`DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1` is stated** on both sides, beside
+  `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`. Under invariant mode it is already the default, so PawPrint's guest sees
+  no difference. Without it, a test host that sets it to `0` would let the real runtime construct cultures that
+  PawPrint's guest cannot, which PR 2b's globalisation test found.
+* **The witness lines.** The study named only `castle-class`'s proxy type name. Each library now has one scenario
+  (`castle-class`, `moq-basic`, `nsub-basic`, `fie-generic`) that prints
+  `generated type <FullName> in a dynamic assembly: <Assembly.IsDynamic>` for the object the library returned. A type in
+  a dynamic assembly can only be one the library emitted at run time. The table maps a scenario to its exact line, and
+  libraries are named by the scenario's prefix (`castle-`, `moq-`, `nsub-`, `fie-`).
+* **Self-checks.** Each scenario compares the values it computes with what it expects. A failure prints `CHECK FAILED`
+  and exits 1. The three failure-message scenarios also exit 1 if nothing threw.
+* **The repository walk starts from `AppContext.BaseDirectory`**, as `TestCiSelectsEveryExplicitFixture`'s does,
+  rather than from the test assembly's file. So `TestFrameworkLocatorRatchet` loses `TestFSharpPureCases.fs`'s
+  allowance and gains none. The ratchet passed before and after.
+* **The framework check covers each directory a scenario can bind from ahead of the publish's siblings**: the shared
+  framework and, in the devshell, the pack of the kernel's flavour (`runtimeDirsFor` less `runtimeDirs`).
+* **File versions are compared by their four parts.** On Unix, `FileVersionInfo.FileVersion` is the attribute's text
+  (`5.1.1` for Castle.Core), so the first run failed on `5.1.1` against `5.1.1.0`.
+* **Two scenarios were changed so that two of the plan's mutation checks can fail** (see "What the plan got wrong").
+  The Castle interceptor prints the declaring type of `invocation.MethodInvocationTarget` for a proxy with a target.
+  `fie-mhhfail` makes ten distinct calls (`Act(1)` to `Act(10)`) and expects `Act(11)`, rather than one call.
+
+**What the plan got wrong, measured.**
+
+* *"With `RuntimeTypeHandle_GetInterfaceMethodImplementation` made to answer the interface method itself, `fie-callto`
+  must fail."* It did not, and with the scenarios as the study measured them, neither did any other scenario. Six
+  scenarios do reach the QCall: a probe that fails there fails `castle-generic`, `moq-strict` and the four FakeItEasy
+  scenarios. But neither library shows what it got back. Castle invokes the method it got back on the target, and an
+  interface method dispatches to the same body. FakeItEasy compares mapped methods with each other, so both sides of
+  the comparison move together. With the interceptor printing `MethodInvocationTarget`'s declaring type, the mutant
+  fails `castle-generic` and `castle-target` (`intercept Get on IRepo`1` against `on RepoImpl`). No FakeItEasy
+  scenario kills it.
+* *"With `Math.Log10` broken, `fie-mhhfail` must fail."* With a single call it cannot. FakeItEasy pads each call's
+  number with `WriteSpaces(digits(last) - digits(this))`, where `digits(n) = (int)Math.Log10(n) + 1`. Over one call,
+  that is zero whatever `Log10` answers. With ten calls, the first nine are padded by one space. That kills a
+  `Log10` that answers the natural logarithm, and one that answers 0. A `Log10` that answers one more than it should
+  is an equivalent mutant for every use FakeItEasy makes of it, because only differences of digit counts reach the
+  output. A `Log10` that throws was already killed by the original scenario (probe: `fie-mhhfail` alone fails).
+
+**Measured.**
+
+* Red, with the fixture committed and the guest project not yet in the tree: 16 of 16 failed
+  (`Cannot publish WoofWare.PawPrint.Test.ConsumerCases: project file ... does not exist`). Then, with the project, the
+  file-version check failed all 16 (`5.1.1` against `5.1.1.0`), before the comparison by parts.
+* Decision 5's two measurements. Real .NET 11: the fixture ran under `PAWPRINT_TEST_RUNTIME=Net11` with every scenario
+  passing, both before and after the scenario changes. Each scenario's real .NET 11 stdout was also byte-identical to
+  real .NET 10's. Stability: each scenario was run twenty times on real .NET 10.0.14 and twenty times on
+  11.0.0-rc.3, each run its own process, with the fixture's two environment entries. That gave one distinct stdout and
+  one exit code (0) per scenario per runtime, and stderr always empty. The measurement was repeated after the scenario
+  changes. No scenario needed rewriting.
+* Wall time per scenario on this machine (18-core M-series, shared with other agents), four NUnit workers, with the
+  fixture's own publish included in the first. The whole fixture took 1 min 44 s on .NET 10 and 1 min 42 s on .NET 11:
+
+  | scenario | .NET 10 | .NET 11 |
+  |---|---:|---:|
+  | `castle-generic` | 23.4 s | 28.3 s |
+  | `castle-class` | 18.0 s | 22.0 s |
+  | `castle-target` | 21.2 s | 25.8 s |
+  | `moq-basic` | 25.5 s | 30.3 s |
+  | `moq-verifyfail` | 24.8 s | 26.0 s |
+  | `moq-strict` | 24.7 s | 25.1 s |
+  | `nsub-basic` | 23.0 s | 23.6 s |
+  | `nsub-fail` | 24.3 s | 24.4 s |
+  | `nsub-class` | 14.7 s | 13.6 s |
+  | `fie-callto` | 42.3 s | 37.7 s |
+  | `fie-mhhfail` | 44.5 s | 39.8 s |
+  | `fie-generic` | 48.4 s | 42.3 s |
+  | `fie-wrap` | 47.0 s | 41.3 s |
+
+  The CI TRX times are recorded in the pull request once CI has run.
+* The leak checks of "Making the leak checks automatic":
+  * `scripts/check-package-dependencies.py` over a local `nix develop -c dotnet pack --configuration Release`: exit 0,
+    "All 6 packages depend on exactly what scripts/package-dependencies.json says."
+  * `dotnet list <project> package --include-transitive` for each of the six packed projects, at `origin/main` (an
+    exported tree) and at this branch: identical (91 lines).
+  * `footprint.py generate`: `.github/test-footprint.json` gains `WoofWare.PawPrint.Test.ConsumerCases`; no
+    `version.json` changes.
+  * `footprint.py verify packages`: every footprint builds alone, as the whole tree does.
+  * `git diff --stat origin/main -- nix/deps.json`: 25 lines added, the five packages and nothing else.
+  * `nix path-info -r` of the default package, at `origin/main` and at this branch: one path each, the package itself,
+    so the runtime closure did not grow. Its hash moves, as any change to `flake.nix` moves it.
+* `nix build .#checks.aarch64-darwin.offline-restore`: passes, and its log shows the consumer project restored from the
+  pinned packages and published.
+* After a plain `dotnet restore` of the guest project, as the `test-guest` Build step runs it, the fixture's
+  `dotnet publish` restored in 0.9 ms with nothing fetched.
+
+**Mutation testing.** Each mutant was applied to a clean tree holding the fixture's final code, and the named tests
+were run against it. The guest fixture's runs used `TestCategory=Guest` with a name filter.
+
+| mutant | tests that failed |
+|---|---|
+| `moq-basic` prints the witness line for `new Concrete()` instead of the mock (both sides agree) | `moq-basic`: its witness line is missing |
+| the guest lists a fourteenth scenario the fixture does not have | the `list` test |
+| the fixture misspells `castle-class` as `castle-clas` | `castle-clas` (real .NET exits 2, 0 expected) and the `list` test |
+| the guest exits 0 for an unknown name | the unknown-name test |
+| a scenario parked that is not a scenario | every scenario a table names |
+| a scenario parked both everywhere and on .NET 11 | the folding test (`GuestTable.fold` refuses) and the names test |
+| a scenario parked with a blank reason | the folding test |
+| `fie-generic`'s witness removed | every library has a witness |
+| a witness naming a scenario that does not exist | every scenario a table names |
+| a scenario with a fifth library's prefix | every library has a witness (its prefix check) |
+| `InvariantGlobalization` removed from the guest project | the publish test (the drift check: the property is absent) |
+| Moq at 4.20.70 | the publish test (`deps.json` names `Moq/4.20.70`) |
+| the publish directory not emptied first, with a stray file left in it | the publish test (the exact entries) |
+| `nsub-class` writes a line to stderr (both sides agree) | `nsub-class`: stderr not empty on an exit 0 |
+| the dynamic-code property removed from PawPrint's `GuestConfig.AppContext` | all thirteen scenarios (PawPrint exits 3) |
+| `GetInterfaceMethodImplementation` answers the interface method, scenarios as the study had them | none: survives (above) |
+| the same, with the interceptor printing `MethodInvocationTarget` | `castle-generic`, `castle-target` |
+| `Math.Log10` answers one more, one call or ten | none: an equivalent mutant (above) |
+| `Math.Log10` answers the natural logarithm, ten calls | `fie-mhhfail` |
+| `Math.Log10` answers 0, ten calls | `fie-mhhfail` |
+
+**Suites**, on .NET 10.0.14 on macOS. The default suite had 5968 tests: 5929 passed and 39 were skipped. `Guest` had
+250 tests (the 234 before, and this fixture's 16), all passed; `TestFSharpPureCases`, which the shared publish helper
+touches, is among them. That run predates the two scenario changes, which touch only the guest project, so the
+fixture alone was run again afterwards, and passed on both .NET 10 and .NET 11 (16 of 16 each). `GuestPure`,
+`GuestImpure` and `GuestSolo` were not run, since nothing they use changed. `TestFrameworkLocatorRatchet` passed (24
+tests) before the change and inside the default suite after it.
