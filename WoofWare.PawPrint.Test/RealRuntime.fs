@@ -167,7 +167,9 @@ module RealRuntime =
     /// Fails on properties that no runtimeconfig can deliver to the guest as given: a name the
     /// hosting layer populates for itself, which the host refuses before the guest starts (with
     /// an exit code that would read as the guest's), and a name or value that is not well-formed
-    /// UTF-16, which has no UTF-8 encoding.
+    /// UTF-16, which has no UTF-8 encoding. Fails too on `APP_PATHS`, which PawPrint refuses to
+    /// seed (`AppContextProperties.appPathsRefusal`), because there would be no PawPrint run to
+    /// compare the oracle's with.
     let private runtimeConfigFor (frameworks : OracleFrameworks) (configProperties : AppContextProperties) : string =
         match RuntimeConfig.combine AppContextProperties.empty configProperties with
         | Ok _ -> ()

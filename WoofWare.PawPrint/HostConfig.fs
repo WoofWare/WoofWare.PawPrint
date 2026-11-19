@@ -71,6 +71,9 @@ type GuestConfig =
         /// runtime rather than the host and so is not a host's to withhold. A
         /// name appearing in both is taken from here — see
         /// `AppContextProperties.withRuntimeBaseline` for why that direction.
+        ///
+        /// Refused when the run starts if it sets `APP_PATHS`, which PawPrint's
+        /// binder does not model: see `AppContextProperties.appPathsRefusal`.
         AppContext : AppContextProperties
     }
 

@@ -107,7 +107,8 @@ module internal ProgramStartup =
     /// reads from that CoreLib.
     ///
     /// Fails loudly, before any guest code runs, if `launch.Argv` or `launch.AssemblyPath`
-    /// contains a NUL (`CommandLineArgsInit.validate`).
+    /// contains a NUL (`CommandLineArgsInit.validate`), or if `launch.AppContext` sets
+    /// `APP_PATHS` (`AppContextProperties.appPathsRefusal`).
     ///
     /// `launch.PctSeed = Some s` selects the PCT scheduling policy seeded with `s`; `None` keeps
     /// the default round-robin policy. Applied before any cctor frame is pushed so the very first
@@ -138,6 +139,14 @@ module internal ProgramStartup =
         // the phase that installs it runs inside a tick, and this is the host's mistake, not
         // something the guest did.
         CommandLineArgsInit.validate exePath argv
+
+        // Every seed of AppContext passes here, whether its properties came through
+        // `RuntimeConfig.combine` or were built by hand, so this is where the refusal holds.
+        match AppContextProperties.appPathsRefusal launch.AppContext with
+        | None -> ()
+        | Some reason ->
+            failwith
+                $"the launch's AppContext properties (GuestConfig.AppContext, or ProgramLaunch.AppContext under MultiProgram) cannot be seeded: %s{reason}"
 
         let state =
             IlMachineState.initial loggerFactory dotnetRuntimeDirs dumped

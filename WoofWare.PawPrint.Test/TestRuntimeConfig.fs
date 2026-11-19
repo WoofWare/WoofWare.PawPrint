@@ -214,52 +214,184 @@ module TestRuntimeConfig =
         combineOk Map.empty (Map.ofList [ "STARTUP_HOOKS", "/hooks/one.dll" ])
         |> shouldEqual (Map.ofList [ "STARTUP_HOOKS", "/hooks/one.dll" ])
 
+    let private combineResult
+        (dev : Map<string, string>)
+        (main : Map<string, string>)
+        : Result<Map<string, string>, RuntimeConfigError>
+        =
+        RuntimeConfig.combine (AppContextProperties.ofMap dev) (AppContextProperties.ofMap main)
+        |> Result.map AppContextProperties.toMap
+
+    /// The host's own refusal: the pair of `APP_PATHS` and the switch is a duplicate property.
+    let private shouldBeHostDuplicateOfAppPaths (result : Result<Map<string, string>, RuntimeConfigError>) : unit =
+        match result with
+        | Error (RuntimeConfigError.HostWouldReject message) -> message |> shouldContainText "APP_PATHS"
+        | other -> failwith $"expected the host to reject APP_PATHS as a duplicate, but got %A{other}"
+
+    /// PawPrint's own refusal: the binder does not model application paths.
+    let private shouldRefuseAppPaths (result : Result<Map<string, string>, RuntimeConfigError>) : unit =
+        match result with
+        | Error (RuntimeConfigError.NotReproducible message) ->
+            message |> shouldContainText "APP_PATHS"
+            message |> shouldContainText "does not model application paths"
+        | other -> failwith $"expected APP_PATHS to be refused as not reproducible, but got %A{other}"
+
     [<Test>]
     let ``APP_PATHS is host-owned only when the SetAppPaths switch asks for it`` () =
         // The conditional case: `APP_PATHS` is added after the loop and only when
-        // `Microsoft.NETCore.DotNetHostPolicy.SetAppPaths` is true, so on its own it is a
-        // perfectly ordinary property and only the pair is fatal.
-        combineOk Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ])
-        |> shouldEqual (Map.ofList [ "APP_PATHS", "/somewhere" ])
+        // `Microsoft.NETCore.DotNetHostPolicy.SetAppPaths` is true, so only the pair is a
+        // duplicate. Alone, a real host passes it to CoreCLR, and PawPrint refuses it for its
+        // own reason (see the section on application paths below).
+        combineResult Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ])
+        |> shouldRefuseAppPaths
 
-        combineError Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ; SetAppPathsSwitch, "true" ])
-        |> shouldContainText "APP_PATHS"
+        combineResult Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ; SetAppPathsSwitch, "true" ])
+        |> shouldBeHostDuplicateOfAppPaths
 
         // The switch is compared case-insensitively in both name and value (`pal::strcasecmp`),
-        // and anything other than "true" leaves APP_PATHS alone.
-        combineError
+        // and anything other than "true" leaves APP_PATHS to the config.
+        combineResult
             Map.empty
             (Map.ofList
                 [
                     "APP_PATHS", "/somewhere"
                     "microsoft.netcore.dotnethostpolicy.setapppaths", "TRUE"
                 ])
-        |> shouldContainText "APP_PATHS"
+        |> shouldBeHostDuplicateOfAppPaths
 
-        combineOk Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ; SetAppPathsSwitch, "false" ])
-        |> Map.containsKey "APP_PATHS"
-        |> shouldEqual true
+        combineResult Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ; SetAppPathsSwitch, "false" ])
+        |> shouldRefuseAppPaths
 
     [<Test>]
     let ``the APP_PATHS pair is fatal even when split across the two sidecars`` () =
-        // Neither file is objectionable alone, which is exactly why this check cannot live in
+        // Neither file is a duplicate alone, which is exactly why this check cannot live in
         // the per-file parser: a real host merges first and only then discovers the pair.
-        combineError (Map.ofList [ "APP_PATHS", "/somewhere" ]) (Map.ofList [ SetAppPathsSwitch, "true" ])
-        |> shouldContainText "APP_PATHS"
+        combineResult (Map.ofList [ "APP_PATHS", "/somewhere" ]) (Map.ofList [ SetAppPathsSwitch, "true" ])
+        |> shouldBeHostDuplicateOfAppPaths
 
-        combineError (Map.ofList [ SetAppPathsSwitch, "true" ]) (Map.ofList [ "APP_PATHS", "/somewhere" ])
-        |> shouldContainText "APP_PATHS"
+        combineResult (Map.ofList [ SetAppPathsSwitch, "true" ]) (Map.ofList [ "APP_PATHS", "/somewhere" ])
+        |> shouldBeHostDuplicateOfAppPaths
 
     [<Test>]
     let ``the main config can switch APP_PATHS back off`` () =
         // The merged value is what a real host sees, and the main config overrides the dev
         // one, so a dev sidecar asking for APP_PATHS that main turns off is not the fatal
-        // pair. Checking the dev file on its own would have got this backwards.
-        combineOk
+        // pair. Checking the dev file on its own would have got this backwards. What remains
+        // is a config-supplied APP_PATHS, which PawPrint refuses for its own reason.
+        combineResult
             (Map.ofList [ "APP_PATHS", "/somewhere" ; SetAppPathsSwitch, "true" ])
             (Map.ofList [ SetAppPathsSwitch, "false" ])
-        |> Map.containsKey "APP_PATHS"
-        |> shouldEqual true
+        |> shouldRefuseAppPaths
+
+    // ------------------------------------------------------------------
+    // Application paths, which PawPrint's binder does not model.
+    // ------------------------------------------------------------------
+
+    // CoreCLR reads the property named exactly `APP_PATHS` into its binder
+    // (`CorHost2::CreateAppDomainWithManager` in `corhost.cpp`, compared with `u16_strcmp`), and
+    // the binder probes those directories for any name the trusted platform assemblies lack.
+    // Measured on real .NET 10.0.14 and 11.0.0-rc.3 (2026-11-19): a config whose `APP_PATHS`
+    // names a directory holding an assembly which no `deps.json` names binds that assembly by
+    // name, and the same config spelled `app_paths` or `App_Paths` does not.
+
+    [<Test>]
+    let ``a config setting APP_PATHS is refused: the binder does not model application paths`` () =
+        combineResult Map.empty (Map.ofList [ "APP_PATHS", "/somewhere" ])
+        |> shouldRefuseAppPaths
+
+        // The dev sidecar's properties reach CoreCLR too.
+        combineResult (Map.ofList [ "APP_PATHS", "/somewhere" ]) Map.empty
+        |> shouldRefuseAppPaths
+
+        // Even a value that lists no directory. It binds nothing extra, but .NET 11 reads it
+        // back from the binder, so `AppContext.GetData("APP_PATHS")` is null there (measured
+        // 2026-11-19, where .NET 10 returns the empty string), and PawPrint does not model that.
+        combineResult Map.empty (Map.ofList [ "APP_PATHS", "" ]) |> shouldRefuseAppPaths
+
+    [<Test>]
+    let ``another spelling of APP_PATHS is an ordinary property`` () =
+        for name in
+            [
+                "app_paths"
+                "App_Paths"
+                "APP_PATHS "
+                " APP_PATHS"
+                "APP-PATHS"
+                "APP_PATH"
+            ] do
+            combineOk Map.empty (Map.ofList [ name, "/somewhere" ])
+            |> shouldEqual (Map.ofList [ name, "/somewhere" ])
+
+    [<Test>]
+    let ``only the exact spelling of APP_PATHS is refused, over every casing of it`` () =
+        // CoreCLR compares with `u16_strcmp`, so every recasing but the identity is an ordinary
+        // property. The name has eight letters, so all 256 casings are enumerated: the identity
+        // is one of them, and an insensitive comparison fails on each of the other 255.
+        let letterPositions =
+            "APP_PATHS"
+            |> Seq.indexed
+            |> Seq.filter (fun (_, c) -> Char.IsLetter c)
+            |> Seq.map fst
+            |> Seq.toList
+
+        letterPositions.Length |> shouldEqual 8
+
+        let casing (mask : int) : string =
+            "APP_PATHS"
+            |> Seq.mapi (fun i c ->
+                match List.tryFindIndex ((=) i) letterPositions with
+                | Some bit when (mask >>> bit) &&& 1 = 1 -> Char.ToLowerInvariant c
+                | _ -> c
+            )
+            |> Seq.toArray
+            |> System.String
+
+        let names = [ 0..255 ] |> List.map casing
+        names |> List.distinct |> List.length |> shouldEqual 256
+
+        for name in names do
+            let result = combineResult Map.empty (Map.ofList [ name, "/somewhere" ])
+
+            if String.Equals (name, "APP_PATHS", StringComparison.Ordinal) then
+                shouldRefuseAppPaths result
+            else
+                match result with
+                | Ok props -> props |> shouldEqual (Map.ofList [ name, "/somewhere" ])
+                | Error e -> failwith $"expected %s{name} to be an ordinary property, but got %s{e.Message}"
+
+    [<Test>]
+    let ``a hand-built GuestConfig cannot carry APP_PATHS past the refusal`` () =
+        // The refusal is where every AppContext seed passes, not only where a runtimeconfig is
+        // read: a host can build `GuestConfig.AppContext` with `ofMap` and never call `combine`.
+        let image =
+            Roslyn.compile [ "class AppPathsHandBuilt { static int Main() { return 0; } }" ]
+
+        // The default kernel's flavour, so that `APP_PATHS` is the only thing wrong with this run.
+        let dotnetRuntimes =
+            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+
+        let _, loggerFactory = LoggerFactory.makeTest ()
+        use loggerFactory = loggerFactory
+
+        use peImage = new MemoryStream (image)
+
+        let hostConfig =
+            { HostConfig.Default dotnetRuntimes with
+                Guest =
+                    { GuestConfig.Default dotnetRuntimes with
+                        AppContext = AppContextProperties.ofMap (Map.ofList [ "APP_PATHS", "/somewhere" ])
+                    }
+            }
+
+        let exn =
+            Assert.Throws<exn> (fun () ->
+                Program.run loggerFactory (Some "AppPathsHandBuilt.cs") peImage hostConfig
+                |> ExpectRun.ended
+                |> ignore<RunOutcome>
+            )
+
+        exn.Message |> shouldContainText "GuestConfig.AppContext"
+        exn.Message |> shouldContainText "does not model application paths"
 
     // ------------------------------------------------------------------
     // Document structure.
@@ -949,6 +1081,16 @@ module TestRuntimeConfig =
             (fun dll ->
                 let exn = Assert.Throws<exn> (fun () -> HostRuntimeConfig.forAssembly dll |> ignore)
                 exn.Message |> shouldContainText "APP_PATHS"
+            )
+
+    [<Test>]
+    let ``a config setting APP_PATHS stops the launch`` () =
+        withSidecars
+            (Some (document """{ "APP_PATHS": "/somewhere" }"""))
+            None
+            (fun dll ->
+                let exn = Assert.Throws<exn> (fun () -> HostRuntimeConfig.forAssembly dll |> ignore)
+                exn.Message |> shouldContainText "does not model application paths"
             )
 
     [<Test>]

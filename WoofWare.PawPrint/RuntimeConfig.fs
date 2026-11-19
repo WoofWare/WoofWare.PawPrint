@@ -152,6 +152,37 @@ module AppContextProperties =
     let withRuntimeBaseline (hostProperties : AppContextProperties) : AppContextProperties =
         overlay runtimeBaseline hostProperties
 
+    /// The property in which CoreCLR's binder takes its application paths.
+    [<Literal>]
+    let internal AppPathsName = "APP_PATHS"
+
+    /// Why PawPrint refuses to seed a guest with `properties` because they set `APP_PATHS`,
+    /// or `None` if they do not set it.
+    ///
+    /// `properties` must not contain `APP_PATHS`, whatever its value. CoreCLR reads the
+    /// property of exactly that name into its binder, which then probes the directories it
+    /// lists for any assembly that the trusted platform assemblies do not provide. PawPrint's
+    /// binder does not model application paths, so with that property a guest could bind an
+    /// assembly on CoreCLR which it cannot bind under PawPrint. Any other spelling, such as
+    /// `app_paths`, is an ordinary property, as it is to CoreCLR.
+    ///
+    /// A value that lists no directory, such as the empty string, is refused too. It binds
+    /// nothing extra, but from .NET 11 `AppContext.GetData` reads `APP_PATHS` back from the
+    /// binder, and so returns null for it, which PawPrint does not model either.
+    ///
+    /// `RuntimeConfig.combine` refuses a config for which this is `Some`, and so does the
+    /// start of every run, for properties a host built by hand.
+    ///
+    /// This checks `APP_PATHS` and nothing else. `None` does not mean every other property
+    /// is one PawPrint can seed faithfully.
+    let internal appPathsRefusal (properties : AppContextProperties) : string option =
+        // `Map` compares strings ordinally, as CoreCLR's `u16_strcmp` does.
+        if properties.Values.ContainsKey AppPathsName then
+            Some
+                $"the AppContext property %s{AppPathsName} is set. CoreCLR's binder probes the directories it lists for any assembly the trusted platform assemblies do not provide, and PawPrint's binder does not model application paths, so the guest could bind an assembly on CoreCLR which it cannot bind under PawPrint. Remove the property."
+        else
+            None
+
 /// Why a `runtimeconfig.json` did not yield properties.
 type RuntimeConfigError =
     /// The file is one a real host also refuses: malformed JSON, no `runtimeOptions`, a
@@ -160,8 +191,10 @@ type RuntimeConfigError =
     | HostWouldReject of message : string
     /// The file is one a real host reads and acts on, but whose properties PawPrint cannot
     /// reproduce exactly — a value rapidjson's `Writer` would format in a way we do not
-    /// implement, or bytes that are not valid UTF-8. A real launch proceeds (or fails later,
-    /// on a name the hosting layer owns); either way, ignoring this file is not what it does.
+    /// implement, bytes that are not valid UTF-8, or `APP_PATHS`, which PawPrint's binder does
+    /// not model (`AppContextProperties.appPathsRefusal`). A real launch proceeds (or fails
+    /// later, on a name the hosting layer owns); either way, ignoring this file is not what it
+    /// does.
     | NotReproducible of message : string
 
     member this.Message : string =
@@ -219,9 +252,10 @@ module RuntimeConfig =
             ]
 
     /// The opt-in switch that makes `hostpolicy` set `APP_PATHS` itself, at which point a
-    /// config-supplied `APP_PATHS` becomes a duplicate and the launch fails. Without it,
-    /// `APP_PATHS` is an ordinary property. Compared case-insensitively in both name and
-    /// value, as `pal::strcasecmp` does.
+    /// config-supplied `APP_PATHS` becomes a duplicate and the launch fails. Without it, a
+    /// config-supplied `APP_PATHS` reaches CoreCLR's binder, which `combine` refuses for
+    /// PawPrint's own reason (`AppContextProperties.appPathsRefusal`). Compared
+    /// case-insensitively in both name and value, as `pal::strcasecmp` does.
     ///
     /// hostpolicy's loop *assigns* rather than accumulates — `set_app_paths = (value ==
     /// "true")` on each case-insensitive name match — so where several differently-cased
@@ -234,9 +268,6 @@ module RuntimeConfig =
     /// `APP_PATHS`, and refuses it, rather than picking one of the two outcomes and running.
     [<Literal>]
     let private SetAppPathsSwitch = "Microsoft.NETCore.DotNetHostPolicy.SetAppPaths"
-
-    [<Literal>]
-    let private AppPathsName = "APP_PATHS"
 
     /// Refuse a config that claims a name the hosting layer owns.
     ///
@@ -261,8 +292,8 @@ module RuntimeConfig =
             )
 
         let claimed =
-            if setAppPathsRequested && values.ContainsKey AppPathsName then
-                AppPathsName :: claimed
+            if setAppPathsRequested && values.ContainsKey AppContextProperties.AppPathsName then
+                AppContextProperties.AppPathsName :: claimed
             else
                 claimed
 
@@ -621,9 +652,14 @@ module RuntimeConfig =
     /// `SetAppPaths` in the other is exactly that — and a host-owned name in the *dev* file is
     /// as fatal as in the main one, even though a dev file's own parse failures are ignored.
     ///
+    /// The merged set is then refused as `NotReproducible` if it sets `APP_PATHS`
+    /// (`AppContextProperties.appPathsRefusal`). That check comes second, because a
+    /// real host refuses a duplicate before CoreCLR sees any property.
+    ///
     /// Any caller assembling properties from files should come through here rather than
     /// calling `AppContextProperties.overlay` directly, which does the merge but not the
-    /// checks. A host supplying its own property bag via `ofMap` is trusted and does not.
+    /// checks. A host supplying its own property bag via `ofMap` skips the hosting layer's
+    /// checks, but a run still refuses what `appPathsRefusal` refuses.
     let combine
         (devConfig : AppContextProperties)
         (mainConfig : AppContextProperties)
@@ -633,3 +669,11 @@ module RuntimeConfig =
         |> AppContextProperties.toMap
         |> rejectHostOwnedNames
         |> Result.map AppContextProperties.ofMap
+        |> Result.bind (fun properties ->
+            match AppContextProperties.appPathsRefusal properties with
+            | None -> Ok properties
+            | Some reason ->
+                RuntimeConfigError.NotReproducible
+                    $"the runtimeconfig.json files for this app cannot be reproduced: %s{reason}"
+                |> Error
+        )
