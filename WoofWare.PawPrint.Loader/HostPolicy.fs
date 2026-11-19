@@ -283,6 +283,8 @@ module internal HostPolicy =
     let private unmodelledSettings (settings : HostPolicySettings) : Result<unit, HostPolicyRefusal> =
         if settings.UseRidGraph then
             Error (HostPolicyRefusal.NotReproducible HostPolicyUnreproducible.UsesRidGraph)
+        elif settings.SetAppPaths then
+            Error (HostPolicyRefusal.NotReproducible HostPolicyUnreproducible.SetsAppPaths)
         else
             let unmodelled =
                 List.concat
@@ -564,31 +566,45 @@ module internal HostPolicy =
                 else
                     Ok tpa
 
-    /// The CoreCLR library the host loads: the first native entry, of the application then the
-    /// frameworks, that resolves to a file of its name; or, with no application `deps.json`, the
-    /// one in the application's directory. Fails as the host does on a native entry it cannot
-    /// resolve.
-    let private coreClrPath
+    /// What the host's native probe finds.
+    type private NativeProbe =
+        {
+            /// The CoreCLR library the host loads.
+            CoreClr : string
+            /// The index of the manifest which gave it: 0 for the application.
+            CoreClrLevel : int
+            /// The native probe directories, in the order the host adds them.
+            Directories : string list
+        }
+
+    /// The native half of `resolve_probe_dirs`. The CoreCLR library the host loads is the first
+    /// native entry, of the application then the frameworks, that resolves to a file of its name;
+    /// or, with no application `deps.json`, the one in the application's directory. Fails as the
+    /// host does on a native entry it cannot resolve.
+    let private probeNatives
         (manifests : Manifest[])
         (coreClr : string)
         (sources : NativeSource list)
         (listing : string list)
-        : Result<string, HostPolicyRefusal>
+        : Result<NativeProbe, HostPolicyRefusal>
         =
         let found =
             sources
             |> List.fold
-                (fun (state : Result<string option, HostPolicyRefusal>) source ->
+                (fun (state : Result<(string * int) option * string list, HostPolicyRefusal>) source ->
                     match state, source with
                     | Error _, _ -> state
                     | Ok _, NativeSource.Entry (_, entry) when DepsEntry.isPlaceholder entry -> state
-                    | Ok found, NativeSource.Entry (level, entry) ->
+                    | Ok (found, directories), NativeSource.Entry (level, entry) ->
                         match probe manifests level entry with
                         | Some path ->
-                            match found with
-                            | None when path.EndsWith ("/" + coreClr, StringComparison.OrdinalIgnoreCase) ->
-                                Ok (Some path)
-                            | _ -> state
+                            let found =
+                                match found with
+                                | None when path.EndsWith ("/" + coreClr, StringComparison.OrdinalIgnoreCase) ->
+                                    Some (path, level)
+                                | _ -> found
+
+                            Ok (found, directoryOf path :: directories)
                         | None when
                             entry.AssetName = "apphost"
                             && entry.LibraryName.EndsWith (
@@ -598,21 +614,53 @@ module internal HostPolicy =
                             ->
                             state
                         | None -> Error (notFound manifests level entry)
-                    | Ok (Some _), NativeSource.ApplicationDirectory -> state
-                    | Ok None, NativeSource.ApplicationDirectory ->
-                        // `file_exists_in_dir`. PawPrint takes a listed name equal ignoring case
-                        // as found, not knowing whether the filesystem folds case.
-                        if listing |> List.exists (equalsIgnoringAsciiCase coreClr) then
-                            Ok (Some (join manifests.[0].Directory coreClr))
-                        else
-                            state
+                    | Ok (found, directories), NativeSource.ApplicationDirectory ->
+                        let appDirectory = manifests.[0].Directory
+                        let directories = appDirectory :: directories
+
+                        match found with
+                        | Some _ -> Ok (found, directories)
+                        | None ->
+                            // `file_exists_in_dir`.
+                            if List.contains coreClr listing then
+                                Ok (Some (join appDirectory coreClr, 0), directories)
+                            else
+                                match listing |> List.tryFind (equalsIgnoringAsciiCase coreClr) with
+                                // Found only if the filesystem folds case, which PawPrint does not
+                                // know.
+                                | Some listed ->
+                                    Error (
+                                        HostPolicyRefusal.NotReproducible (
+                                            HostPolicyUnreproducible.CoreClrNameCaseOnly listed
+                                        )
+                                    )
+                                | None -> Ok (None, directories)
                 )
-                (Ok None)
+                (Ok (None, []))
 
         match found with
         | Error e -> Error e
-        | Ok None -> Error (HostPolicyRefusal.HostWouldFail HostPolicyFailure.CoreClrNotFound)
-        | Ok (Some path) -> Ok path
+        | Ok (None, _) -> Error (HostPolicyRefusal.HostWouldFail HostPolicyFailure.CoreClrNotFound)
+        | Ok (Some (path, level), directories) ->
+            Ok
+                {
+                    CoreClr = path
+                    CoreClrLevel = level
+                    Directories = List.rev directories
+                }
+
+    /// The resource half of `resolve_probe_dirs`: each resource entry's root (the directory above
+    /// its culture's), and, with no application `deps.json`, the application's directory. The
+    /// host only reports a resource it cannot find.
+    let private resourceRoots (manifests : Manifest[]) (sources : NativeSource list) : string list =
+        sources
+        |> List.choose (fun source ->
+            match source with
+            | NativeSource.Entry (_, entry) when DepsEntry.isPlaceholder entry -> None
+            | NativeSource.Entry (level, entry) ->
+                probe manifests level entry |> Option.map (directoryOf >> directoryOf)
+            | NativeSource.ApplicationDirectory -> Some manifests.[0].Directory
+        )
 
     let private ofTpaRefusal (refusal : TpaRefusal) : HostPolicyRefusal =
         match refusal with
@@ -688,13 +736,13 @@ module internal HostPolicy =
                         for e in entriesOf DepsAssetType.Runtime manifests.[level] -> TpaSource.Entry (level, e)
                 ]
 
-            let nativeSources =
+            let probeSources (assetType : DepsAssetType) : NativeSource list =
                 [
-                    for e in entriesOf DepsAssetType.Native app -> NativeSource.Entry (0, e)
+                    for e in entriesOf assetType app -> NativeSource.Entry (0, e)
                     if listing.IsSome then
                         yield NativeSource.ApplicationDirectory
                     for level in frameworkLevels do
-                        for e in entriesOf DepsAssetType.Native manifests.[level] -> NativeSource.Entry (level, e)
+                        for e in entriesOf assetType manifests.[level] -> NativeSource.Entry (level, e)
                 ]
 
             tpaSources
@@ -702,15 +750,41 @@ module internal HostPolicy =
                 (fun state source -> state |> Result.bind (fun tpa -> step manifests tpa source))
                 (Ok Map.empty)
             |> Result.bind (fun tpa ->
-                coreClrPath manifests coreClr nativeSources (Option.defaultValue [] listing)
-                |> Result.map (fun coreClrPath -> tpa, coreClrPath)
+                probeNatives manifests coreClr (probeSources DepsAssetType.Native) (Option.defaultValue [] listing)
+                |> Result.map (fun natives -> tpa, natives)
             )
-            |> Result.bind (fun (tpa, coreClrPath) ->
+            |> Result.bind (fun (tpa, natives) ->
+                match application with
+                // The host loads the library from wherever its links lead, and CoreLib from
+                // beside that.
+                | Some _ when natives.CoreClrLevel = 0 && rids.IsSome ->
+                    Error (
+                        HostPolicyRefusal.NotReproducible (
+                            HostPolicyUnreproducible.CoreClrFromApplication natives.CoreClr
+                        )
+                    )
+                | _ -> Ok (tpa, natives)
+            )
+            |> Result.bind (fun (tpa, natives) ->
                 tpa
                 |> Map.map (fun _ resolved -> resolved.Path)
                 |> TrustedPlatformAssemblies.tryCreate
                 |> Result.mapError ofTpaRefusal
-                |> Result.map (fun tpa -> tpa, coreClrPath)
+                |> Result.map (fun tpa -> tpa, natives)
+            )
+            |> Result.bind (fun (tpa, natives) ->
+                // CoreCLR splits its lists of directories at `:`.
+                natives.Directories
+                @ resourceRoots manifests (probeSources DepsAssetType.Resources)
+                |> List.tryFind (fun directory -> directory.Contains ':')
+                |> function
+                    | Some directory ->
+                        Error (
+                            HostPolicyRefusal.NotReproducible (
+                                HostPolicyUnreproducible.ProbeDirectoryHoldsPathListSeparator directory
+                            )
+                        )
+                    | None -> Ok (tpa, natives.CoreClr)
             )
             |> Result.bind (fun (tpa, coreClrPath) ->
                 // CoreCLR loads the CoreLib beside the CoreCLR library, whatever the TPA says.

@@ -44,11 +44,16 @@ type internal TrustedPlatformAssemblies =
 [<RequireQualifiedAccess>]
 module internal TrustedPlatformAssemblies =
 
+    /// `name` upper-cased as CoreCLR's Unix fold would at least: invariant upper casing, which
+    /// leaves dotless `ı` as it is, with `ı` read as `I`.
+    let private upperFold (name : string) : string =
+        name.Replace(char 0x131, 'I').ToUpperInvariant ()
+
     /// Whether CoreCLR's case-insensitive map could take `a` and `b` for one name. CoreCLR folds
-    /// case with its own tables, so this errs towards a collision: equal under either invariant
-    /// casing.
+    /// case with its own tables, so this errs towards a collision: equal under `upperFold`, or
+    /// under invariant lower casing.
     let private equalIgnoringCase (a : string) (b : string) : bool =
-        String.Equals (a.ToUpperInvariant (), b.ToUpperInvariant (), StringComparison.Ordinal)
+        String.Equals (upperFold a, upperFold b, StringComparison.Ordinal)
         || String.Equals (a.ToLowerInvariant (), b.ToLowerInvariant (), StringComparison.Ordinal)
 
     /// `OrdinalIgnoreCase` folds no non-ASCII character to an ASCII one, so against an ASCII
@@ -59,28 +64,31 @@ module internal TrustedPlatformAssemblies =
     /// What `GetNextTPAPath` (`src/coreclr/binder/utils.cpp`) makes of `path`, and whether it
     /// gives `name`.
     let private checkEntry (name : string) (path : string) : TpaRefusal option =
+        let fileName = path.Substring (path.LastIndexOf '/' + 1)
+
         if not (path.StartsWith '/') then
             Some (TpaRefusal.RelativePath (name, path))
+        elif path.Contains (char 0) then
+            Some (TpaRefusal.HoldsNul (name, path))
         elif path.Contains ':' then
             Some (TpaRefusal.HoldsPathListSeparator (name, path))
         elif path.EndsWith ' ' then
             Some (TpaRefusal.EndsWithSpace (name, path))
+        elif fileName |> Seq.exists (fun c -> c > '\u007F') then
+            Some (TpaRefusal.NonAsciiFileName (name, path))
         elif not (endsWithIgnoringCase ".dll" path || endsWithIgnoringCase ".exe" path) then
             Some (TpaRefusal.NoAssemblyExtension (name, path))
         elif endsWithIgnoringCase ".exe" path || endsWithIgnoringCase ".ni.dll" path then
             Some (TpaRefusal.NotDll (name, path))
+        // The path ends `.dll`, so its file name is at least that long.
+        elif String.Equals (fileName.Substring (0, fileName.Length - 4), name, StringComparison.Ordinal) then
+            None
         else
-            // The path ends `.dll`, so its file name is at least that long.
-            let fileName = path.Substring (path.LastIndexOf '/' + 1)
-
-            if String.Equals (fileName.Substring (0, fileName.Length - 4), name, StringComparison.Ordinal) then
-                None
-            else
-                Some (TpaRefusal.NameIsNotFileStem (name, path))
+            Some (TpaRefusal.NameIsNotFileStem (name, path))
 
     /// A TPA mapping each name of `paths` to its path, or why CoreCLR would not bind it so.
-    /// Each name must be its path's file name without `.dll`; each path absolute, free of `:`, not
-    /// ending with a space; and no two names equal ignoring case. The entries are checked in
+    /// Each name must be its path's file name without `.dll`, in ASCII; each path absolute, free
+    /// of `:` and NUL, not ending with a space; and no two names equal ignoring case. The entries are checked in
     /// ordinal order of name, and the first refusal is returned.
     let tryCreate (paths : Map<string, string>) : Result<TrustedPlatformAssemblies, TpaRefusal> =
         match paths |> Map.toSeq |> Seq.tryPick (fun (name, path) -> checkEntry name path) with
@@ -88,7 +96,7 @@ module internal TrustedPlatformAssemblies =
         | None ->
 
         let names = paths |> Map.keys |> Array.ofSeq
-        let upper = names |> Array.map (fun n -> n.ToUpperInvariant ())
+        let upper = names |> Array.map upperFold
         let lower = names |> Array.map (fun n -> n.ToLowerInvariant ())
 
         let collision =
