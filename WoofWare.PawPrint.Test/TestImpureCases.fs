@@ -967,7 +967,7 @@ module TestImpureCases =
                 ExpectsUnhandledException = false
                 AssertTerminalState = None
             },
-            """C# `dynamic` calling, with a dynamic argument, a method that the receiver's static interface type has only through a base interface (`ICollection<T>.Contains` on an `IList<int>`; a user `IBase<T>.Get` on an `IDerived<int>`). The binder looks the member up on the interface's definition, whose interfaces are open constructions since #2309, and reflection asks each for its fields: "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs" (`RuntimeTypeHandle.GetFields`, #2348; measured on .NET 10's and 11's CoreLib). Nothing past that stop has been measured. When this passes, it must be shown to fail with a definition's interfaces answered empty, which `DynamicMemberAccess.cs` survives. Verified to exit 0 on real .NET 10 and 11."""
+            """C# `dynamic` calling, with a dynamic argument, a method that the receiver's static interface type has only through a base interface (`ICollection<T>.Contains` on an `IList<int>`; a user `IBase<T>.Get` on an `IDerived<int>`). The binder looks the member up on the interface's definition, whose interfaces are open constructions since #2309, and reflection asks each for its fields: "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs" (`RuntimeTypeHandle.GetFields`, #2348; measured on .NET 10's and 11's CoreLib). Nothing past that stop has been measured. When this passes, it must be shown to fail with a definition's interfaces answered empty, as `DynamicMemberAccess.cs`'s inference check does. Verified to exit 0 on real .NET 10 and 11."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
@@ -6639,10 +6639,11 @@ module TestImpureCases =
             }
             {
                 // C# `dynamic` with dynamic code supported, as real .NET runs it: the runtime binder
-                // builds its symbol table and binds a property read, a conversion and an overload
-                // resolution, and `System.Linq.Expressions` compiles the rules. With the switch false
-                // the first call site stops before the binder runs (#2349). Measured to exit 0 on
-                // real .NET 10 and 11, and each check's perturbed expectation exits with its number.
+                // builds its symbol table and binds a property read, a conversion, an overload
+                // resolution and a type inference, and `System.Linq.Expressions` compiles the rules.
+                // With the switch false the first call site stops before the binder runs (#2349).
+                // Measured to exit 0 on real .NET 10 and 11, and each check's perturbed expectation
+                // exits with its number.
                 FileName = "DynamicMemberAccess.cs"
                 ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default

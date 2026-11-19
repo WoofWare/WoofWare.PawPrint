@@ -3,11 +3,13 @@
 // binder builds its own symbol table from reflection, and asks each generic definition it loads
 // (`List<>`, `IEnumerable<>` and their kin) for its interfaces with `Type.GetInterfaces()`.
 //
-// These four checks do not depend on what it is told: the binder decides a conversion from a
-// run-time object with `Type.IsInstanceOfType`, not from its symbol table, and checks 1 and 2 read
-// members the receiver's class declares itself. So this guest tests that the binder runs at all, not
-// what `GetInterfaces` answers. `DynamicBaseInterfaceMember.cs` holds the checks that do depend on
-// the answers.
+// Checks 1 to 4 do not depend on what it is told: the binder decides a conversion from a run-time
+// object with `Type.IsInstanceOfType`, not from its symbol table, and checks 1 and 2 read members
+// the receiver's class declares itself. They test that the binder runs at all. Check 5 does depend
+// on it: to infer `T` in `CountOf<T>(IEnumerable<T>)` from a `List<int>`, the binder reads
+// `List<int>`'s interfaces from those its symbol table holds for `List<>`, and without
+// `IEnumerable<T>` among them it chooses `CountOf(object)`. `DynamicBaseInterfaceMember.cs` holds
+// checks that look a member up through a base interface.
 //
 // It is impure because it needs `IsDynamicCodeSupported` true, which is what real .NET runs with.
 // With PawPrint's default, false, the first call site stops before the binder runs (#2349).
@@ -34,6 +36,16 @@ public static class Program
 
     // Applicable to anything, so it is chosen only when the `IEnumerable<int>` overload is not.
     static int Sum(object o) => -1;
+
+    static int CountOf<T>(IEnumerable<T> xs)
+    {
+        int count = 0;
+        foreach (T x in xs) count++;
+        return count;
+    }
+
+    // Chosen only when `T` cannot be inferred for the generic overload.
+    static int CountOf(object o) => -1;
 
     static int Check(int code, string what, int actual, int expected)
     {
@@ -67,6 +79,12 @@ public static class Program
         // only if `List<int>` converts to `IEnumerable<int>`.
         int viaOverload = Sum(list);
         r = Check(4, "Sum(list)", viaOverload, 6);
+        if (r != 0) return r;
+
+        // Type inference at run time: `T` is inferred from the interfaces the binder's symbol table
+        // gives `List<int>`, which it substitutes into those `GetInterfaces` gave for `List<>`.
+        int viaInference = CountOf(list);
+        r = Check(5, "CountOf(list)", viaInference, 3);
         if (r != 0) return r;
 
         return 0;
