@@ -399,7 +399,9 @@ module IlMachineRuntimeMetadata =
                         loggerFactory
                         baseClassTypes
                         "resolveBaseRuntimeTypeHandleTarget"
-                        $"the extends clause of %O{target}"
+                        // Named by its definition: an open target can share its arguments, and
+                        // formatting it whole would visit each shared argument once per occurrence.
+                        $"the extends clause of %s{typeInfo.Namespace}.%s{typeInfo.Name} in %s{identity.AssemblyFullName}"
                         baseAssy
                         environment
                         state

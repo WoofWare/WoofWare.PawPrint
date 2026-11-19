@@ -725,6 +725,8 @@ module ConcreteInterfaceDispatch =
     /// whose base chain does not load, or whose spelling names the interface with the wrong kind or
     /// a generic interface with no instantiation; failing those, the first row that names a variable
     /// its context does not supply, gives the wrong number of arguments, or names no interface.
+    /// Not every extends clause CoreCLR refuses is refused: one spelled as a bare TypeSpec, or naming
+    /// a value type, is read as if it were well formed (#2336).
     let internal interfaceMapOfDefinition
         (loggerFactory : ILoggerFactory)
         (dotnetRuntimeDirs : string seq)

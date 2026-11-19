@@ -20,13 +20,16 @@ open WoofWare.PawPrint
 ///
 /// The host's `Type.GetInterfaces()` over the same image is the oracle, except for an array, where
 /// the QCall answers `System.Array`'s map and managed code appends an SZ array's generic
-/// interfaces. Three corpora go through it: CoreLib's exported closed types, interfaces included;
-/// generated hierarchies; and shapes C# refuses to compile, built from a library in two versions,
-/// which are the only ones where a declared interface's parents are missing from the type's own
-/// rows.
+/// interfaces. Four corpora go through it: CoreLib's exported closed types, interfaces included;
+/// CoreLib's generic definitions and instantiations of them, closed and open; generated
+/// hierarchies, with their definitions and open constructions; and shapes C# refuses to compile,
+/// built from a library in two versions, which are the only ones where a declared interface's
+/// parents are missing from the type's own rows.
 ///
-/// A generic definition whose base class has interfaces is refused (#2309), and its tests assert
-/// what the real runtime answers.
+/// An open receiver's answer is its definition's map converted to targets over the receiver's
+/// arguments (`RuntimeTypeInterfaces.ofInstantiation`), and a closed receiver's is
+/// `interfaceMapOf`'s; every closed receiver of every corpus also checks that the first, given the
+/// receiver's closed arguments, gives the second's handles.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestGetInterfacesOrder =
@@ -71,7 +74,7 @@ module TestGetInterfacesOrder =
         | i -> message.Substring (0, i)
 
     /// Compare PawPrint's answer for `receiver` with the host's, giving why they differ, if they do.
-    let private compareReceiver
+    let private compareAnswer
         (images : HostTypeTarget.Images)
         (state : IlMachineState)
         (receiver : Type)
@@ -120,6 +123,63 @@ module TestGetInterfacesOrder =
                 |> String.concat ", "
 
             state, Some $"%O{receiver}:\n    PawPrint [%s{named}]\n    host     [%s{render host}]"
+
+    /// For a closed receiver with a TypeDef row, its definition's map converted to targets with the
+    /// receiver's closed arguments (`ofInstantiation`) against `interfaceMapOf`'s handles, giving why
+    /// they differ, if they do; nothing for any other receiver.
+    let private crossCheck
+        (state : IlMachineState)
+        (receiver : Type)
+        (receiverTarget : RuntimeTypeHandleTarget)
+        : IlMachineState * string option
+        =
+        match receiverTarget with
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle) ->
+            let before = state
+
+            try
+                let ty =
+                    AllConcreteTypes.lookup handle state.TypeSystem.ConcreteTypes
+                    |> Option.defaultWith (fun () -> failwith $"%O{handle} is not registered")
+
+                let state, closed =
+                    InterfaceDispatch.interfaceMapOf loggerFactory bct "test" state handle
+
+                let expected =
+                    closed |> List.map (fun entry -> RuntimeTypeHandleTarget.Closed entry.Interface)
+
+                let arguments =
+                    ty.Generics
+                    |> Seq.map RuntimeTypeHandleTarget.Closed
+                    |> Collections.Immutable.ImmutableArray.CreateRange
+
+                match RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state ty.Identity arguments with
+                | state, Ok actual when actual = expected -> state, None
+                | state, Ok actual ->
+                    state, Some $"%O{receiver}: by targets %A{actual}\n    interfaceMapOf %A{expected}"
+                | state, Error failure ->
+                    state, Some $"%O{receiver}: by targets refused %s{TypeBindingFailure.describe failure}"
+            with e ->
+                before, Some $"%O{receiver}: the cross-check threw %s{firstLine e.Message}"
+        | _ -> state, None
+
+    /// Compare PawPrint's answer for `receiver` with the host's, giving why they differ, if they do;
+    /// for a closed receiver, `crossCheck` too.
+    let private compareReceiver
+        (images : HostTypeTarget.Images)
+        (state : IlMachineState)
+        (receiver : Type)
+        : IlMachineState * string option
+        =
+        let state, answer = compareAnswer images state receiver
+
+        match answer with
+        | Some _ -> state, answer
+        | None ->
+            let state, receiverTarget =
+                HostTypeTarget.target loggerFactory bct images state receiver
+
+            crossCheck state receiver receiverTarget
 
     let private report (label : string) (failures : string list) : unit =
         if not failures.IsEmpty then
@@ -261,6 +321,240 @@ module TestGetInterfacesOrder =
 
         failures |> shouldEqual []
         Assert.That (checkedTypes, Is.GreaterThanOrEqualTo 500)
+
+    /// The receivers of `receivers`, compared with the host one by one, the state threaded through.
+    let private compareAll
+        (images : HostTypeTarget.Images)
+        (state : IlMachineState)
+        (receivers : Type list)
+        : IlMachineState * string list
+        =
+        ((state, []), receivers)
+        ||> List.fold (fun (state, failures) receiver ->
+            match compareReceiver images state receiver with
+            | state, Some failure -> state, failure :: failures
+            | state, None -> state, failures
+        )
+        |> fun (state, failures) -> state, List.rev failures
+
+    let private dictionaryVariables : Type[] =
+        typedefof<Collections.Generic.Dictionary<obj, obj>>.GetGenericArguments ()
+
+    /// Some interface of `receiver` mentions a variable.
+    let private hasOpenInterface (receiver : Type) : bool =
+        receiver.GetInterfaces () |> Array.exists (fun t -> t.ContainsGenericParameters)
+
+    /// Every generic type definition CoreLib declares; three arrays over a variable, which answer
+    /// `System.Array`'s map as a closed array does; and two open constructions over an interface's own
+    /// variables, whose entry over that interface is the interface applied to its own variables, which
+    /// is the interface's definition.
+    [<Test>]
+    let ``CoreLib: every generic definition agrees with the host`` () : unit =
+        let stopwatch = Stopwatch.StartNew ()
+
+        let definitions =
+            hostCoreLib.GetTypes ()
+            |> Array.filter (fun t -> t.IsGenericTypeDefinition)
+            |> List.ofArray
+
+        let listT = typedefof<Collections.Generic.List<obj>>.GetGenericArguments().[0]
+
+        let arrays =
+            [
+                listT.MakeArrayType ()
+                typedefof<Collections.Generic.List<obj>>.MakeGenericType(dictionaryVariables.[0]).MakeArrayType ()
+                listT.MakeArrayType 2
+            ]
+
+        let overInterfaceVariables =
+            [
+                typedefof<Collections.Generic.List<obj>>
+                    .MakeGenericType (typedefof<Collections.Generic.IList<obj>>.GetGenericArguments ())
+                typedefof<Collections.Generic.Dictionary<obj, obj>>
+                    .MakeGenericType (typedefof<Collections.Generic.IDictionary<obj, obj>>.GetGenericArguments ())
+            ]
+
+        let _, failures =
+            compareAll [ hostCoreLib, corelib ] coreState (definitions @ arrays @ overInterfaceVariables)
+
+        let withOpenInterface = definitions |> List.filter hasOpenInterface |> List.length
+
+        TestContext.Progress.WriteLine
+            $"CoreLib definitions: %d{definitions.Length}, %d{withOpenInterface} with an interface over a variable, %d{stopwatch.ElapsedMilliseconds} ms"
+
+        report "CoreLib definitions" failures
+        // A .NET 10 host has 421 definitions, 124 of them with an interface over a variable.
+        Assert.That (definitions.Length, Is.GreaterThanOrEqualTo 300)
+        Assert.That (withOpenInterface, Is.GreaterThanOrEqualTo 100)
+
+    /// The instantiations of `definition` the substitution law is checked at: all `object`, all
+    /// `int`, alternating `string` and `long`, and, for a definition with no constraints (variance is
+    /// not one), all
+    /// `Dictionary<,>`'s `K`, alternating its `V` and `K`, and the definition's own variables reversed.
+    /// An instantiation the host refuses (a constraint it violates) is left out.
+    let private lawInstantiations (definition : Type) : Type list =
+        let variables = definition.GetGenericArguments ()
+        let n = variables.Length
+
+        let unconstrained =
+            variables
+            |> Array.forall (fun v ->
+                v.GenericParameterAttributes
+                &&& Reflection.GenericParameterAttributes.SpecialConstraintMask = Reflection.GenericParameterAttributes.None
+                && v.GetGenericParameterConstraints().Length = 0
+            )
+
+        let alternate (a : Type) (b : Type) : Type list =
+            List.init n (fun i -> if i % 2 = 0 then a else b)
+
+        [
+            yield List.replicate n typeof<obj>
+            yield List.replicate n typeof<int>
+            yield alternate typeof<string> typeof<int64>
+            if unconstrained then
+                yield List.replicate n dictionaryVariables.[0]
+                yield alternate dictionaryVariables.[1] dictionaryVariables.[0]
+                yield List.ofArray (Array.rev variables)
+        ]
+        |> List.choose (fun arguments ->
+            try
+                Some (definition.MakeGenericType (Array.ofList arguments))
+            with :? ArgumentException ->
+                None
+        )
+        |> List.distinct
+
+    /// The substitution law, at PawPrint's level: every instantiation of a CoreLib definition, closed
+    /// or open, answers as the host does.
+    [<Test>]
+    let ``CoreLib: instantiations of every generic definition agree with the host`` () : unit =
+        let stopwatch = Stopwatch.StartNew ()
+
+        let receivers =
+            hostCoreLib.GetTypes ()
+            |> Array.filter (fun t -> t.IsGenericTypeDefinition)
+            |> List.ofArray
+            |> List.collect lawInstantiations
+
+        let _, failures = compareAll [ hostCoreLib, corelib ] coreState receivers
+
+        let openReceivers =
+            receivers
+            |> List.filter (fun t -> t.ContainsGenericParameters && not t.IsGenericTypeDefinition)
+
+        let openWithOpenInterface =
+            openReceivers |> List.filter hasOpenInterface |> List.length
+
+        TestContext.Progress.WriteLine
+            $"CoreLib instantiations: %d{receivers.Length}, %d{openReceivers.Length} open, %d{openWithOpenInterface} of them with an interface over a variable, %d{stopwatch.ElapsedMilliseconds} ms"
+
+        report "CoreLib instantiations" failures
+        // About half of what a .NET 10 host reaches.
+        Assert.That (receivers.Length, Is.GreaterThanOrEqualTo 800)
+        Assert.That (openWithOpenInterface, Is.GreaterThanOrEqualTo 85)
+
+    /// The canonical forms of an open receiver's entries, named outright: an entry over the
+    /// receiver's variables is an open construction over those variables, a non-generic interface is
+    /// closed, a definition applied to its own variables is the definition, and a closed receiver
+    /// whose arguments make two entries one type lists that type twice.
+    [<Test>]
+    let ``An open receiver's entries are in canonical form`` () : unit =
+        let source =
+            """
+using System;
+public interface IA<T> { }
+public interface IB { }
+public interface IC<T> : IA<T>, IB { }
+public interface IX<T> : IC<T>, IEquatable<IX<T>> { }
+public class BaseA<T> : IA<T> { }
+public class Dup<T, U> : BaseA<T>, IA<U> { }
+"""
+
+        let image =
+            Roslyn.compileAssembly "CanonicalForms" OutputKind.DynamicallyLinkedLibrary [] [ source ]
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let identityOf (assembly : DumpedAssembly) (ns : string) (name : string) : ResolvedTypeIdentity =
+            (assembly.TypeDefs.Values
+             |> Seq.find (fun typeInfo -> typeInfo.Namespace = ns && typeInfo.Name = name))
+                .Identity
+
+        let state = coreState.WithLoadedAssembly dumped
+
+        let listIdentity = identityOf corelib "System.Collections.Generic" "List`1"
+
+        let state, list =
+            RuntimeTypeInterfaces.ofReceiver
+                loggerFactory
+                bct
+                "test"
+                state
+                (RuntimeTypeHandleTarget.OpenGenericTypeDefinition listIdentity)
+
+        list.[0]
+        |> shouldEqual (
+            RuntimeTypeHandleTarget.OpenConstructed (
+                identityOf corelib "System.Collections.Generic" "IList`1",
+                [ RuntimeTypeHandleTarget.GenericParameter (listIdentity, 0) ]
+            )
+        )
+
+        match list.[3] with
+        | RuntimeTypeHandleTarget.Closed handle ->
+            let ty =
+                AllConcreteTypes.lookup handle state.TypeSystem.ConcreteTypes
+                |> Option.defaultWith (fun () -> failwith $"%O{handle} is not registered")
+
+            ty.Identity
+            |> shouldEqual (identityOf corelib "System.Collections" "IEnumerable")
+        | other -> failwith $"List<>'s fourth interface, IEnumerable, came back as %O{other}"
+
+        let ixIdentity = identityOf dumped "" "IX`1"
+
+        let state, ix =
+            RuntimeTypeInterfaces.ofReceiver
+                loggerFactory
+                bct
+                "test"
+                state
+                (RuntimeTypeHandleTarget.OpenGenericTypeDefinition ixIdentity)
+
+        ix.[3]
+        |> shouldEqual (
+            RuntimeTypeHandleTarget.OpenConstructed (
+                identityOf corelib "System" "IEquatable`1",
+                [ RuntimeTypeHandleTarget.OpenGenericTypeDefinition ixIdentity ]
+            )
+        )
+
+        let state, dupIntInt =
+            HostTypeTarget.target loggerFactory bct [] state typeof<int>
+            |> fun (state, intTarget) ->
+                match intTarget with
+                | RuntimeTypeHandleTarget.Closed intHandle ->
+                    let dupIdentity = identityOf dumped "" "Dup`2"
+
+                    RuntimeTypeInterfaces.ofInstantiation
+                        loggerFactory
+                        bct
+                        "test"
+                        state
+                        dupIdentity
+                        (Collections.Immutable.ImmutableArray.Create (
+                            RuntimeTypeHandleTarget.Closed intHandle,
+                            RuntimeTypeHandleTarget.Closed intHandle
+                        ))
+                | other -> failwith $"int came back as %O{other}"
+
+        ignore<IlMachineState> state
+
+        match dupIntInt with
+        | Ok [ RuntimeTypeHandleTarget.Closed first ; RuntimeTypeHandleTarget.Closed second ] ->
+            first |> shouldEqual second
+        | other -> failwith $"Dup<int, int> answered %A{other}"
 
     // ----- Generated hierarchies -----
 
@@ -616,8 +910,9 @@ module TestGetInterfacesOrder =
 
         source.ToString ()
 
-    /// The closed receivers asked about: each declaration at all-`int`, all-`string`, and with the
-    /// two mixed.
+    /// The receivers asked about: each declaration at all-`int`, all-`string`, and with the two mixed;
+    /// and each generic declaration as its definition, as an open construction over `Dictionary<,>`'s
+    /// `K` alone and alternating with `int`, and its base class where that is open.
     let private pool (decls : Decl list) (host : Reflection.Assembly) : Type list =
         decls
         |> List.indexed
@@ -640,14 +935,27 @@ module TestGetInterfacesOrder =
             if n = 0 then
                 [ definition ]
             else
-                [
-                    List.replicate n typeof<int>
-                    List.replicate n typeof<string>
-                    List.init n (fun i -> if i % 2 = 0 then typeof<int> else typeof<string>)
-                    List.init n (fun i -> if i % 2 = 0 then typeof<string> else typeof<int>)
-                ]
-                |> List.distinct
-                |> List.map (fun arguments -> definition.MakeGenericType (Array.ofList arguments))
+                let k = dictionaryVariables.[0]
+
+                let instantiations =
+                    [
+                        List.replicate n typeof<int>
+                        List.replicate n typeof<string>
+                        List.init n (fun i -> if i % 2 = 0 then typeof<int> else typeof<string>)
+                        List.init n (fun i -> if i % 2 = 0 then typeof<string> else typeof<int>)
+                        List.replicate n k
+                        List.init n (fun i -> if i % 2 = 0 then k else typeof<int>)
+                    ]
+                    |> List.distinct
+                    |> List.map (fun arguments -> definition.MakeGenericType (Array.ofList arguments))
+
+                let openBase =
+                    match definition.BaseType with
+                    | null -> []
+                    | baseType when baseType.ContainsGenericParameters -> [ baseType ]
+                    | _ -> []
+
+                definition :: instantiations @ openBase
         )
 
     /// What a generated receiver reached, read from the host's side alone.
@@ -657,12 +965,28 @@ module TestGetInterfacesOrder =
         | ValueTypeReceiver
         | InterfaceReceiver
         | NestedReceiver
+        | DefinitionReceiver
+        | OpenConstructionReceiver
+        /// An interface whose argument is a generic definition, which is how CoreCLR represents the
+        /// definition applied to its own variables.
+        | DefinitionArgument
 
     let private labels (images : HostTypeTarget.Images) (receiver : Type) : Label list =
         if receiver.GetInterfaces().Length = 0 then
             []
         else
             [
+                if receiver.IsGenericTypeDefinition then
+                    yield Label.DefinitionReceiver
+                elif receiver.ContainsGenericParameters then
+                    yield Label.OpenConstructionReceiver
+                if
+                    receiver.GetInterfaces ()
+                    |> Array.exists (fun i ->
+                        i.GetGenericArguments () |> Array.exists (fun a -> a.IsGenericTypeDefinition)
+                    )
+                then
+                    yield Label.DefinitionArgument
                 if hasDuplicate receiver then
                     yield Label.Duplicate
                 if declaresOverInterfacefulBase images receiver then
@@ -731,7 +1055,8 @@ module TestGetInterfacesOrder =
 
         TestContext.Progress.WriteLine $"generated hierarchies: %d{stopwatch.ElapsedMilliseconds} ms"
 
-        // About half of what the fixed sample reaches.
+        // About half of what the fixed sample reached over closed receivers alone, and for the labels
+        // only an open receiver reaches, about half of what it reaches now.
         for label, floor in
             [
                 Label.Duplicate, 68
@@ -739,6 +1064,9 @@ module TestGetInterfacesOrder =
                 Label.ValueTypeReceiver, 65
                 Label.InterfaceReceiver, 210
                 Label.NestedReceiver, 100
+                Label.DefinitionReceiver, 210
+                Label.OpenConstructionReceiver, 340
+                Label.DefinitionArgument, 29
             ] do
             Assert.That (coverage.Count label, Is.GreaterThanOrEqualTo floor, $"%A{label}")
 
@@ -796,8 +1124,8 @@ public struct S2<T> : IC<T[]> { }
                 [ MetadataReference.CreateFromImage expansionLibraryBefore.Value ]
                 [ expansionClasses ])
 
-    /// Each closed receiver of the classes, and one generic definition, from the classes' host
-    /// assembly.
+    /// Each closed receiver of the classes, and each generic definition, from the classes' host
+    /// assembly: a type with no arguments listed is the definition itself.
     let private expansionReceivers : (string * Type list) list =
         [
             "C`1", [ typeof<int> ]
@@ -807,12 +1135,21 @@ public struct S2<T> : IC<T[]> { }
             "IF`1", [ typeof<int> ]
             "Der`1", [ typeof<int> ]
             "CClosed", []
-            // A generic definition whose rows are all closed, answered by the definition arm.
             "CClosedG`1", []
             "C2`1", [ typeof<int> ]
             "Der2`1", [ typeof<int> ]
             "D2`2", [ typeof<int> ; typeof<string> ]
             "S2`1", [ typeof<int> ]
+            "C`1", []
+            "CE`1", []
+            "S`1", []
+            "IF`1", []
+            "Der`1", []
+            "C2`1", []
+            "Der2`1", []
+            "D2`2", []
+            "S2`1", []
+            "C`1", [ dictionaryVariables.[0] ]
         ]
 
     [<Test>]
@@ -856,6 +1193,9 @@ public struct S2<T> : IC<T[]> { }
                     else
                         definition.MakeGenericType (Array.ofList arguments)
                 )
+
+            // `Der<>`'s open base, `LBase<T>` over `Der`'s `T`, whose map comes from the library.
+            let receivers = receivers @ [ hostClasses.GetType("Der`1").BaseType ]
 
             for receiver in receivers do
                 let after, failure = compareReceiver images state receiver
@@ -1784,6 +2124,8 @@ public struct S2<T> : IC<T[]> { }
         | AbsentInterface
         /// `GENERICINST int32 1 int32`: an instantiation whose head is not a type token.
         | Int32HeadedInstantiation
+        /// `[CoreLib]System.Int32` by its TypeRef, spelled `VALUETYPE` (`asValueType`) or `CLASS`.
+        | CoreLibInt32 of asValueType : bool
 
     [<RequireQualifiedAccess>]
     type private SketchKind =
@@ -1860,6 +2202,7 @@ public struct S2<T> : IC<T[]> { }
         let listRef = coreLibType "System.Collections.Generic" "List`1"
         let missingRef = coreLibType "System" "Missing"
         let absentRef = coreLibType "System" "IAbsent"
+        let int32Ref = coreLibType "System" "Int32"
 
         // `<Module>` is row 1, so the sketches are rows 2 onwards, in order.
         let handles =
@@ -1926,6 +2269,9 @@ public struct S2<T> : IC<T[]> { }
                 blob.WriteByte 0x08uy
                 blob.WriteCompressedInteger 1
                 blob.WriteByte 0x08uy
+            | Spelling.CoreLibInt32 asValueType ->
+                blob.WriteByte (if asValueType then 0x11uy else 0x12uy)
+                blob.WriteCompressedInteger (codedIndex int32Ref)
 
         // A row or base: a TypeDef or TypeRef token when the spelling has one, a TypeSpec otherwise.
         let typeDefOrRefOrSpec (spelling : Spelling) : Reflection.Metadata.EntityHandle =
@@ -2620,59 +2966,564 @@ public struct S2<T> : IC<T[]> { }
 
     // ----- A generic definition -----
 
+    /// What the host's `GetInterfaces()` answers for the generic definition `receiver` of `sketches`,
+    /// and what `ask` answers given the image loaded, the definition, and its own variables, which is
+    /// how the QCall asks about it.
+    let private withSketchDefinition<'a>
+        (sketches : Sketch list)
+        (receiver : string)
+        (ask :
+            IlMachineState
+                -> ResolvedTypeIdentity
+                -> Collections.Immutable.ImmutableArray<RuntimeTypeHandleTarget>
+                -> 'a)
+        : Result<Type[], exn> * 'a
+        =
+        let image = sketchImage sketches
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("sketchDefinition", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let hostAnswer =
+                try
+                    host.GetType(receiver, true).GetInterfaces () |> Ok
+                with e ->
+                    Error e
+
+            let typeInfo =
+                dumped.TypeDefs.Values |> Seq.find (fun typeInfo -> typeInfo.Name = receiver)
+
+            let arguments =
+                Seq.init
+                    typeInfo.Generics.Length
+                    (fun i -> RuntimeTypeHandleTarget.GenericParameter (typeInfo.Identity, i))
+                |> Collections.Immutable.ImmutableArray.CreateRange
+
+            hostAnswer, ask (coreState.WithLoadedAssembly dumped) typeInfo.Identity arguments
+        finally
+            context.Unload ()
+
+    /// What the host's `GetInterfaces()` and `ofInstantiation` answer for the generic definition
+    /// `receiver` of `sketches`, the latter at the definition's own variables.
+    let private sketchDefinitionOutcome
+        (sketches : Sketch list)
+        (receiver : string)
+        : Result<Type[], exn> * Result<RuntimeTypeHandleTarget list, TypeBindingFailure>
+        =
+        withSketchDefinition
+            sketches
+            receiver
+            (fun state identity arguments ->
+                snd (RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state identity arguments)
+            )
+
+    /// What the host's `GetInterfaces()` and the QCall's `ofReceiver` answer for the generic definition
+    /// `receiver` of `sketches`: PawPrint's interfaces, or why it stopped.
+    let private sketchDefinitionReceiver
+        (sketches : Sketch list)
+        (receiver : string)
+        : Result<Type[], exn> * Result<RuntimeTypeHandleTarget list, string>
+        =
+        withSketchDefinition
+            sketches
+            receiver
+            (fun state identity _ ->
+                try
+                    RuntimeTypeInterfaces.ofReceiver
+                        loggerFactory
+                        bct
+                        "test"
+                        state
+                        (RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity)
+                    |> snd
+                    |> Ok
+                with e ->
+                    Error e.Message
+            )
+
+    /// Whether `answer` is a stop that names an instantiation of a two-parameter definition given one
+    /// argument.
+    let private stopsOnPairArity (answer : Result<'a, string>) : unit =
+        match answer with
+        | Error message ->
+            message |> shouldContainText "declares 2 generic parameter"
+            message |> shouldContainText "but 1 argument"
+        | Ok answered -> failwith $"PawPrint answered %A{answered}"
+
+    /// An open receiver's entry nests an instantiation with the wrong number of arguments:
+    /// `C<T> : I<Pair<T>>`, for a two-parameter `Pair`. The host refuses to load `C<>`; converting the
+    /// entry stops on the arity, as closing it does for `C<int>`.
+    [<Test>]
+    let ``An open receiver's entry with a nested instantiation of the wrong arity is refused`` () : unit =
+        let host, pawPrint =
+            withSketchDefinition
+                [
+                    sketch "I`1" SketchKind.Interface 1 []
+                    sketch "Pair`2" SketchKind.Class 2 []
+                    sketch
+                        "C`1"
+                        SketchKind.Class
+                        1
+                        [ Spelling.Named ("I`1", [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ]) ]) ]
+                ]
+                "C`1"
+                (fun state identity arguments ->
+                    try
+                        match
+                            RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state identity arguments
+                        with
+                        | _, Ok targets -> Ok targets
+                        | _, Error failure -> Error (TypeBindingFailure.describe failure)
+                    with e ->
+                        Error e.Message
+                )
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        stopsOnPairArity pawPrint
+
+    /// The same nested instantiation in an extends clause, `C<T> : B<Pair<T>>`, read by
+    /// `resolveBaseRuntimeTypeHandleTarget`, which shares the conversion's canonical form. The host
+    /// refuses to load `C<>`.
+    [<Test>]
+    let ``An open base with a nested instantiation of the wrong arity is refused`` () : unit =
+        let host, pawPrint =
+            withSketchDefinition
+                [
+                    sketch "B`1" SketchKind.Class 1 []
+                    sketch "Pair`2" SketchKind.Class 2 []
+                    { sketch "C`1" SketchKind.Class 1 [] with
+                        Base = Some (Spelling.Named ("B`1", [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ]) ]))
+                    }
+                ]
+                "C`1"
+                (fun state identity _ ->
+                    try
+                        IlMachineState.resolveBaseRuntimeTypeHandleTarget
+                            loggerFactory
+                            bct
+                            state
+                            (RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity)
+                        |> snd
+                        |> Ok
+                    with e ->
+                        Error e.Message
+                )
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        stopsOnPairArity pawPrint
+
+    /// An open receiver's base chain is loaded, as a closed one's is, though its base adds no entry:
+    /// `C<T> : B<IAbsent>`, where `B<U>` has no interfaces and CoreLib declares no `IAbsent`. The host
+    /// refuses to load `C<>`.
+    [<Test>]
+    let ``An open receiver's base whose argument is absent is refused`` () : unit =
+        let host, pawPrint =
+            sketchDefinitionReceiver
+                [
+                    sketch "B`1" SketchKind.Class 1 []
+                    { sketch "C`1" SketchKind.Class 1 [] with
+                        Base = Some (Spelling.Named ("B`1", [ Spelling.AbsentInterface ]))
+                    }
+                ]
+                "C`1"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error message -> message |> shouldContainText "IAbsent"
+        | Ok interfaces -> failwith $"PawPrint answered %A{interfaces}"
+
+    /// Every row of an open receiver's map is loaded as it is spelled, as a closed receiver's is,
+    /// though it adds no entry: `C<T>`'s `I<class Int32>` names `B`'s `I<valuetype Int32>` again, and
+    /// only loading it finds the wrong kind. The host refuses to load `C<>`.
+    [<Test>]
+    let ``An open receiver's row that adds no entry is still loaded`` () : unit =
+        let host, pawPrint =
+            sketchDefinitionReceiver
+                [
+                    sketch "I`1" SketchKind.Interface 1 []
+                    sketch "B" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.CoreLibInt32 true ]) ]
+                    { sketch "C`1" SketchKind.Class 1 [ Spelling.Named ("I`1", [ Spelling.CoreLibInt32 false ]) ] with
+                        Base = Some (Spelling.Named ("B", []))
+                    }
+                ]
+                "C`1"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error message -> message |> shouldContainText "a signature spells it"
+        | Ok interfaces -> failwith $"PawPrint answered %A{interfaces}"
+
+    /// An open receiver's answer is its definition's map, which cannot compare a row whose arguments
+    /// it cannot read with the others: a variable the definition does not have, or the wrong number of
+    /// arguments. The host refuses to load the definition.
+    [<TestCase false>]
+    [<TestCase true>]
+    let ``An open receiver's row whose arguments cannot be read is refused`` (wrongArity : bool) : unit =
+        let row =
+            if wrongArity then
+                Spelling.Named ("I`1", [ Spelling.Var 0 ; Spelling.Var 0 ])
+            else
+                Spelling.Named ("I`1", [ Spelling.Var 1 ])
+
+        let host, pawPrint =
+            sketchDefinitionOutcome
+                [
+                    sketch "I`1" SketchKind.Interface 1 []
+                    sketch "G`1" SketchKind.Class 1 [ row ]
+                ]
+                "G`1"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint, wrongArity with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)), true
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.TypeParameterOutOfScope _)), false -> ()
+        | other, _ -> failwith $"PawPrint answered %A{other}"
+
+    /// An open receiver whose definition's extends clause names a variable the definition does not
+    /// have. This is one malformed extends clause the definition's map refuses; it does not refuse
+    /// every one CoreCLR refuses (#2336).
+    [<Test>]
+    let ``An open receiver whose extends clause names a variable it lacks is refused`` () : unit =
+        let host, pawPrint =
+            sketchDefinitionOutcome
+                [
+                    sketch "B`1" SketchKind.Class 1 []
+                    { sketch "G`1" SketchKind.Class 1 [] with
+                        Base = Some (Spelling.Named ("B`1", [ Spelling.Var 1 ]))
+                    }
+                ]
+                "G`1"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.TypeParameterOutOfScope _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `ofInstantiation` of `receiver` in `pairChain depth`, at its own variables if it is generic:
+    /// the host's count of its interfaces, how many PawPrint answered, and the bytes the call allocated
+    /// on this thread, measured after a first call has registered every type it closes.
+    let private conversionCost (sketches : Sketch list) (receiver : string) : int * int * int64 =
+        let image = sketchImage sketches
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("conversionCost", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let hostCount = host.GetType(receiver, true).GetInterfaces().Length
+
+            let typeInfo =
+                dumped.TypeDefs.Values |> Seq.find (fun typeInfo -> typeInfo.Name = receiver)
+
+            let arguments =
+                Seq.init
+                    typeInfo.Generics.Length
+                    (fun i -> RuntimeTypeHandleTarget.GenericParameter (typeInfo.Identity, i))
+                |> Collections.Immutable.ImmutableArray.CreateRange
+
+            let convert (state : IlMachineState) =
+                match
+                    RuntimeTypeInterfaces.ofInstantiation loggerFactory bct "test" state typeInfo.Identity arguments
+                with
+                | state, Ok targets -> state, targets
+                | _, Error failure -> failwith $"PawPrint refused: %s{TypeBindingFailure.describe failure}"
+
+            let state, _ = convert (coreState.WithLoadedAssembly dumped)
+            let before = GC.GetAllocatedBytesForCurrentThread ()
+            let _, targets = convert state
+            let allocated = GC.GetAllocatedBytesForCurrentThread () - before
+            hostCount, targets.Length, allocated
+        finally
+            context.Unload ()
+
+    /// Converting a definition's map to targets converts each context the map shares once. The chain's
+    /// image holds one row per interface, each of constant size, so what it holds is linear in its
+    /// depth, and so is the work: sixteen levels cost at most 32 times what eight do, where converting
+    /// each occurrence of a shared context afresh gives about 256. The closed `C` takes the path where
+    /// every argument is closed; the definition `N<depth>` the path over its own variables.
+    ///
+    /// This measures the conversion alone. Registering the targets as guest `Type`s, as the QCall then
+    /// does, is not linear in a shared chain (#2339).
+    [<TestCase "C">]
+    [<TestCase "N">]
+    let ``Converting a chain passing Pair<A, A> and Pair<A, B> on costs work linear in its depth``
+        (receiver : string)
+        : unit
+        =
+        let name (depth : int) =
+            if receiver = "C" then "C" else $"N%d{depth}`2"
+
+        let host8, pawPrint8, allocated8 = conversionCost (pairChain 8) (name 8)
+        pawPrint8 |> shouldEqual host8
+        let host16, pawPrint16, allocated16 = conversionCost (pairChain 16) (name 16)
+        pawPrint16 |> shouldEqual host16
+
+        TestContext.Progress.WriteLine $"%s{receiver}: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
+    /// `K0<T> : IOne`, and `Kk<T> : K(k-1)<Pair<T, T>>` up to `depth`: a base chain whose every level
+    /// passes its argument on twice, so the bases' targets share their halves.
+    let private pairBaseChain (depth : int) : Sketch list =
+        [
+            yield sketch "IOne" SketchKind.Interface 0 []
+            yield sketch "Pair`2" SketchKind.Class 2 []
+            yield sketch "K0`1" SketchKind.Class 1 [ Spelling.Named ("IOne", []) ]
+            for k in 1..depth do
+                yield
+                    { sketch $"K%d{k}`1" SketchKind.Class 1 [] with
+                        Base =
+                            Some (
+                                Spelling.Named (
+                                    $"K%d{k - 1}`1",
+                                    [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ; Spelling.Var 0 ]) ]
+                                )
+                            )
+                    }
+        ]
+
+    /// Loading an open receiver's base chain costs work linear in what the image holds: one row and
+    /// one extends clause per class, each of constant size. Sixteen levels cost at most 32 times what
+    /// eight do, where describing each base by its whole target gives about 256. The answer is the one
+    /// interface `IOne`.
+    [<Test>]
+    let ``Loading an open base chain passing Pair<T, T> on costs work linear in its depth`` () : unit =
+        let host8, pawPrint8, allocated8 = conversionCost (pairBaseChain 8) "K8`1"
+        pawPrint8 |> shouldEqual host8
+        let host16, pawPrint16, allocated16 = conversionCost (pairBaseChain 16) "K16`1"
+        pawPrint16 |> shouldEqual host16
+        host16 |> shouldEqual 1
+
+        TestContext.Progress.WriteLine $"base chain: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
+    /// `C<int, U>`'s entry `I<D<int>, U>` closes `D<int>`, whose base `LBase` is in an assembly nothing
+    /// has loaded yet: closing it loads that assembly, as concretisation does, and the host answers.
+    [<Test>]
+    let ``An open receiver's closed argument whose base is in an assembly not yet loaded is answered`` () : unit =
+        {
+            Assemblies =
+                [
+                    CrossAssemblySpec.library "OpenReceiverBaseLib" [] [ "public class LBase { }" ]
+                    CrossAssemblySpec.entryPoint
+                        "OpenReceiverBaseEntry"
+                        [ "OpenReceiverBaseLib" ]
+                        [
+                            """
+using System;
+
+public interface I<A, B> { }
+public class D<T> : LBase { }
+public class C<T, U> : I<D<T>, U> { }
+
+public static class Program
+{
+    public static int Main()
+    {
+        Type u = typeof(C<,>).GetGenericArguments()[1];
+        Type[] interfaces = typeof(C<,>).MakeGenericType(typeof(int), u).GetInterfaces();
+        if (interfaces.Length != 1) return 1;
+        if (!ReferenceEquals(interfaces[0], typeof(I<,>).MakeGenericType(typeof(D<int>), u))) return 2;
+        return 0;
+    }
+}
+"""
+                        ]
+                ]
+            EntryAssemblyName = "OpenReceiverBaseEntry"
+            ExpectedReturnCode = 0
+        }
+        |> CrossAssemblyHarness.runTest
+
+    /// `G<int, U>`'s entry is read over a context with an open argument, so through the open walk,
+    /// though the entry itself is closed: its function pointer's `void` return carries a custom
+    /// modifier (`SuppressGCTransition`), and a `void` under modifiers returns nothing, as concretising
+    /// the closed type reads it. Real .NET 10 and 11 hand back, as the entry's argument, the `typeof` of
+    /// the closed array. The entry is not compared with `typeof(I<...>)`, whose `ldtoken` PawPrint
+    /// refuses: it does not concretise an instantiation whose argument carries a custom modifier.
+    [<Test>]
+    let ``An open receiver's entry over a function pointer returning modified void is the closed type`` () : unit =
+        {
+            Assemblies =
+                [
+                    CrossAssemblySpec.entryPoint
+                        "OpenReceiverModifiedVoid"
+                        []
+                        [
+                            """
+using System;
+
+public interface I<A> { }
+public unsafe class G<T, U> : I<delegate* unmanaged[SuppressGCTransition]<T, void>[]> { }
+
+public static unsafe class Program
+{
+    public static int Main()
+    {
+        Type u = typeof(G<,>).GetGenericArguments()[1];
+        Type[] interfaces = typeof(G<,>).MakeGenericType(typeof(int), u).GetInterfaces();
+        if (interfaces.Length != 1) return 1;
+        if (!interfaces[0].IsGenericType || interfaces[0].GetGenericTypeDefinition() != typeof(I<>)) return 2;
+        if (!ReferenceEquals(interfaces[0].GetGenericArguments()[0], typeof(delegate* unmanaged[SuppressGCTransition]<int, void>[]))) return 3;
+        return 0;
+    }
+}
+"""
+                        ]
+                ]
+            EntryAssemblyName = "OpenReceiverModifiedVoid"
+            ExpectedReturnCode = 0
+        }
+        |> CrossAssemblyHarness.runTest
+
+    /// The same function pointer in a row `G<int, U>` inherits from its interface `J<X>`, which is read
+    /// in `J<int>`'s context, every argument of which is closed. Real .NET 10 and 11 answer `J<int>` and
+    /// the `I<...>` whose argument is the `typeof` of the closed array; reading the row must not
+    /// concretise its whole spelling, which PawPrint refuses for an instantiation whose argument carries
+    /// a custom modifier.
+    [<Test>]
+    let ``An open receiver's inherited entry over a function pointer returning modified void is answered`` () : unit =
+        {
+            Assemblies =
+                [
+                    CrossAssemblySpec.entryPoint
+                        "OpenReceiverInheritedModifiedVoid"
+                        []
+                        [
+                            """
+using System;
+
+public interface I<A> { }
+public unsafe interface J<X> : I<delegate* unmanaged[SuppressGCTransition]<X, void>[]> { }
+public class G<T, U> : J<T> { }
+
+public static unsafe class Program
+{
+    public static int Main()
+    {
+        Type u = typeof(G<,>).GetGenericArguments()[1];
+        Type[] interfaces = typeof(G<,>).MakeGenericType(typeof(int), u).GetInterfaces();
+        if (interfaces.Length != 2) return 1;
+        if (!ReferenceEquals(interfaces[0], typeof(J<int>))) return 2;
+        if (!interfaces[1].IsGenericType || interfaces[1].GetGenericTypeDefinition() != typeof(I<>)) return 3;
+        if (!ReferenceEquals(interfaces[1].GetGenericArguments()[0], typeof(delegate* unmanaged[SuppressGCTransition]<int, void>[]))) return 4;
+        return 0;
+    }
+}
+"""
+                        ]
+                ]
+            EntryAssemblyName = "OpenReceiverInheritedModifiedVoid"
+            ExpectedReturnCode = 0
+        }
+        |> CrossAssemblyHarness.runTest
+
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
-    /// expects; PawPrint must refuse at the definition arm's `TODO`.
-    let private refusesDefinitionOverInterfacefulBase (name : string) (program : string) : unit =
+    /// expects; PawPrint must stop where managed code asks `GetUtf8NameInternal` for the name of an
+    /// open construction (#2315).
+    let private refusesOpenConstructionName (name : string) (program : string) : unit =
         {
             Assemblies = [ CrossAssemblySpec.entryPoint name [] [ program ] ]
             EntryAssemblyName = name
             ExpectedReturnCode = 0
         }
-        |> CrossAssemblyHarness.runTestExpectingRefusal [ "TODO" ; "RuntimeTypeHandle.GetInterfaces" ; "#2309" ] [] []
+        |> CrossAssemblyHarness.runTestExpectingRefusal
+            [
+                "TODO"
+                "open constructed types are not handled"
+                "NativeRuntimeTypeFCall"
+                "GetUtf8NameInternal"
+            ]
+            []
+            []
 
-    /// Every generic delegate's base class, `MulticastDelegate`, has interfaces.
+    /// The QCall answers an array over a variable with `System.Array`'s map; managed code then names
+    /// each SZ-array interface it appends, `IList<T>` first (#2315).
     [<Test>]
-    let ``A generic delegate definition is refused`` () : unit =
+    let ``An array over a variable stops at the name of an open construction`` () : unit =
         """
 using System;
-using System.Runtime.Serialization;
+using System.Collections;
+using System.Collections.Generic;
 
 public static class Program
 {
     public static int Main()
     {
-        Type[] interfaces = typeof(Action<>).GetInterfaces();
-        if (interfaces.Length != 2) return 1;
-        if (interfaces[0] != typeof(ICloneable)) return 2;
-        if (interfaces[1] != typeof(ISerializable)) return 3;
+        Type t = typeof(List<>).GetGenericArguments()[0];
+        Type[] interfaces = t.MakeArrayType().GetInterfaces();
+        Type[] expected =
+        {
+            typeof(ICloneable), typeof(IList), typeof(ICollection), typeof(IEnumerable),
+            typeof(IStructuralComparable), typeof(IStructuralEquatable),
+            typeof(IList<>).MakeGenericType(t), typeof(ICollection<>).MakeGenericType(t),
+            typeof(IEnumerable<>).MakeGenericType(t), typeof(IReadOnlyList<>).MakeGenericType(t),
+            typeof(IReadOnlyCollection<>).MakeGenericType(t),
+        };
+        if (interfaces.Length != expected.Length) return 1;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            if (!ReferenceEquals(interfaces[i], expected[i])) return 2 + i;
+        }
         return 0;
     }
 }
 """
-        |> refusesDefinitionOverInterfacefulBase "DefinitionOverDelegate"
+        |> refusesOpenConstructionName "ArrayOverVariable"
 
+    /// `GetInterface(name)` names every interface the receiver has, so on an open receiver it names
+    /// an open construction (#2315).
     [<Test>]
-    let ``A generic definition over a closed base with interfaces is refused`` () : unit =
+    let ``GetInterface by name on a definition stops at the name of an open construction`` () : unit =
         """
 using System;
-
-public interface IB { }
-public class ClosedBase : IB { }
-public class OverClosed<T> : ClosedBase, IDisposable { public void Dispose() { } }
+using System.Collections.Generic;
 
 public static class Program
 {
     public static int Main()
     {
-        Type[] interfaces = typeof(OverClosed<>).GetInterfaces();
-        if (interfaces.Length != 2) return 1;
-        if (interfaces[0] != typeof(IB)) return 2;
-        if (interfaces[1] != typeof(IDisposable)) return 3;
+        Type t = typeof(List<>).GetGenericArguments()[0];
+        Type found = typeof(List<>).GetInterface("IList`1");
+        if (!ReferenceEquals(found, typeof(IList<>).MakeGenericType(t))) return 1;
         return 0;
     }
 }
 """
-        |> refusesDefinitionOverInterfacefulBase "DefinitionOverClosedBase"
+        |> refusesOpenConstructionName "GetInterfaceByNameOnDefinition"
 
     /// A definition whose base classes have no interfaces answers its own closed rows, each followed
     /// by its parents, whether its base is `object`, a closed class, or an open construction over its

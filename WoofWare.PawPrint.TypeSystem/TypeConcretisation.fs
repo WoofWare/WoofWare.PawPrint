@@ -1155,6 +1155,18 @@ module TypeConcretization =
             concretizeNamedDefinition loadAssembly ctx currentAssemblyFullName identity spelled
         )
 
+    /// A decoded return column as it is at run time: a `void` under custom modifiers returns
+    /// nothing, so `Returns (modified void)` is <c>MethodReturnType.Void</c>, and every other column is
+    /// unchanged. Concretisation applies it (`concretizeReturnColumn`), and so must any translation that
+    /// builds a function pointer's return without concretising it, or the two name one type twice.
+    let internal runtimeReturnColumn (returnType : MethodReturnType<TypeDefn>) : MethodReturnType<TypeDefn> =
+        match returnType with
+        | MethodReturnType.Returns ty ->
+            match TypeDefn.stripCustomModifiers ty with
+            | TypeDefn.Void -> MethodReturnType.Void
+            | _ -> returnType
+        | MethodReturnType.Void -> returnType
+
     /// Does this signature type carry an ECMA-335 custom modifier (`modreq`/`modopt`) anywhere
     /// inside it? Concretisation refuses a generic instantiation with a type argument that does,
     /// the one position where dropping a modifier is unrecoverable (see
@@ -1373,16 +1385,13 @@ module TypeConcretization =
         // The translations that must NOT do this read the decoded signature instead, and so are
         // unaffected: `signaturesEquivalent` below, which compares what the blobs say, and
         // `concreteHandleToTypeDefn`, which runs the other way.
-        match returnType with
+        match runtimeReturnColumn returnType with
         | MethodReturnType.Void -> ctx, Ok MethodReturnType.Void
         | MethodReturnType.Returns ty ->
-            match TypeDefn.stripCustomModifiers ty with
-            | TypeDefn.Void -> ctx, Ok MethodReturnType.Void
-            | _ ->
-                let handle, ctx =
-                    concretizeType ctx loadAssembly assemblyFullName typeGenerics methodGenerics ty
+            let handle, ctx =
+                concretizeType ctx loadAssembly assemblyFullName typeGenerics methodGenerics ty
 
-                ctx, handle |> Result.map MethodReturnType.Returns
+            ctx, handle |> Result.map MethodReturnType.Returns
 
     and private concretizeGenericInstantiation
         (ctx : ConcretizationContext<DumpedAssembly>)

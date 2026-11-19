@@ -57,6 +57,77 @@ module ReflectedTypeTarget =
 
         instantiatedHandle, state
 
+    /// `definition` applied to `arguments`, one per variable it declares, in canonical form. Every
+    /// argument closed (true of no arguments, for a definition that declares none) is a closed type,
+    /// concretised into `AllConcreteTypes`; otherwise `RuntimeTypeHandleTarget.openConstructed`,
+    /// which collapses the definition applied to its own variables to the definition.
+    ///
+    /// The wrong number of arguments stops the run, whichever the result. A closed result is checked
+    /// as concretisation checks it. An open result has its arity checked and nothing else: neither
+    /// the arguments CoreCLR admits in no instantiation (a pointer, a byref, a function pointer), nor
+    /// the `CLASS` or `VALUETYPE` kind the instantiation was spelled with, which a target does not
+    /// record (#2340).
+    let instantiateTargets
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (definition : ResolvedTypeIdentity)
+        (arguments : RuntimeTypeHandleTarget list)
+        : IlMachineState * RuntimeTypeHandleTarget
+        =
+        let closedArguments =
+            arguments
+            |> List.choose (fun target ->
+                match target with
+                | RuntimeTypeHandleTarget.Closed handle -> Some handle
+                | _ -> None
+            )
+
+        let assembly =
+            state.LoadedAssembly definition.AssemblyFullName
+            |> Option.defaultWith (fun () ->
+                failwith $"%s{operation}: assembly %s{definition.AssemblyFullName} is not loaded"
+            )
+
+        let typeInfo = assembly.TypeDefs.[definition.TypeDefinition.Get]
+
+        if typeInfo.Generics.Length <> arguments.Length then
+            failwith
+                $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} declares %i{typeInfo.Generics.Length} generic parameters, but %i{arguments.Length} arguments were supplied"
+
+        if closedArguments.Length <> arguments.Length then
+            state, RuntimeTypeHandleTarget.openConstructed definition arguments
+        else
+
+        // The definition spelled over its own variables (bare, if it has none), its base chain loaded
+        // first, since its kind is read off that chain, which may run into an assembly nothing has
+        // loaded yet. Closed under the arguments' handles, so a handle is never re-spelled as the type
+        // it names, whose spelling can be exponentially larger than the handles that share its parts.
+        let typeSystem, spelling =
+            TypeSystemState.lookupTypeDefn
+                loggerFactory
+                state.DotnetRuntimeDirs
+                baseClassTypes
+                state.TypeSystem
+                assembly
+                definition.TypeDefinition.Get
+
+        let spelling = BindingStop.bound spelling
+        let state = state.WithTypeSystem typeSystem
+
+        let state, handle =
+            IlMachineTypeResolution.concretizeType
+                loggerFactory
+                baseClassTypes
+                state
+                definition.AssemblyFullName
+                (ImmutableArray.CreateRange closedArguments)
+                ImmutableArray.Empty
+                spelling
+
+        state, RuntimeTypeHandleTarget.Closed handle
+
     /// What one axis of a reflected type's generic environment -- the type variables, or the
     /// method variables -- denotes.
     ///
@@ -302,36 +373,12 @@ module ReflectedTypeTarget =
                     state, target :: acc
                 )
 
-            let argumentTargets = List.rev argumentTargets
-
-            let closedArguments =
-                argumentTargets
-                |> List.choose (fun target ->
-                    match target with
-                    | RuntimeTypeHandleTarget.Closed handle -> Some handle
-                    | _ -> None
-                )
-
-            if closedArguments.Length = argumentTargets.Length then
-                // Every variable mentioned here named a closed argument of an `Open` axis --
-                // `Base<!0>` read under `Derived<int, T>` -- so this is a closed type, which
-                // `openConstructed` refuses to spell and `AllConcreteTypes` must hold instead.
-                let handle, state =
-                    instantiateOpenGenericTypeDefinition
-                        loggerFactory
-                        baseClassTypes
-                        operation
-                        state
-                        definition
-                        closedArguments
-
-                state, RuntimeTypeHandleTarget.Closed handle
-            else
-                // `openConstructed` is what keeps this canonical: it collapses the typical
-                // instantiation -- the CRTP `where T : ISelf<T>`, and a definition naming itself in
-                // its own method signatures -- back to the bare definition, exactly as CoreCLR's
-                // class loader does, so the guest sees one `Type` object rather than two.
-                state, RuntimeTypeHandleTarget.openConstructed definition argumentTargets
+            // Every variable mentioned here may have named a closed argument of an `Open` axis --
+            // `Base<!0>` read under `Derived<int, T>` -- which makes this a closed type. Otherwise the
+            // typical instantiation -- the CRTP `where T : ISelf<T>`, and a definition naming itself
+            // in its own method signatures -- collapses to the bare definition, exactly as CoreCLR's
+            // class loader does, so the guest sees one `Type` object rather than two.
+            instantiateTargets loggerFactory baseClassTypes operation state definition (List.rev argumentTargets)
         | TypeDefn.Byref element
         | TypeDefn.Pointer element
         | TypeDefn.OneDimensionalArrayLowerBoundZero element
@@ -360,6 +407,13 @@ module ReflectedTypeTarget =
             // canonical if that ever changes.
             state, RuntimeTypeHandleTarget.composite shape elementTarget
         | TypeDefn.FunctionPointer signature ->
+            // A `void` return under custom modifiers returns nothing, as concretising the closed
+            // pointer reads it; read otherwise, the two would be two `Type`s for one type.
+            let signature =
+                { signature with
+                    ReturnType = TypeConcretization.runtimeReturnColumn signature.ReturnType
+                }
+
             let state, signature =
                 TypeMethodSignature.map
                     state
