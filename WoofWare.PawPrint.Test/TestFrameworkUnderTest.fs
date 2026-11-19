@@ -373,12 +373,13 @@ module TestFrameworkUnderTest =
                     TestCaseData(runtime, flavour).SetArgDisplayNames (FrameworkUnderTest.name runtime, $"%A{flavour}")
         ]
 
-    /// The path of every runtime asset which the host reads from `Microsoft.NETCore.App`'s
-    /// `deps.json`, whose target is `targetName`. The host parses the lowest framework in
-    /// self-contained mode (`deps_resolver.h`, `deps_json_t::load_self_contained`): for each
-    /// package that `libraries` declares, the `runtime` assets that the target lists for it.
-    /// `runtimeTargets` is not read in that mode.
-    let private runtimeAssets (root : JsonElement) (targetName : string) : string list =
+    /// Every runtime asset which the host reads from `Microsoft.NETCore.App`'s `deps.json`, whose
+    /// target is `targetName`, as the file name the asset is listed under and the path, relative to
+    /// the framework directory, at which the host looks for it. The host parses the lowest
+    /// framework in self-contained mode (`deps_resolver.h`, `deps_json_t::load_self_contained`):
+    /// for each package that `libraries` declares, the `runtime` assets that the target lists for
+    /// it. `runtimeTargets` is not read in that mode.
+    let private runtimeAssets (root : JsonElement) (targetName : string) : (string * string) list =
         let target = root.GetProperty("targets").GetProperty targetName
 
         [
@@ -388,7 +389,7 @@ module TestFrameworkUnderTest =
                     match package.TryGetProperty "runtime" with
                     | true, runtime ->
                         for asset in runtime.EnumerateObject () do
-                            yield asset.Name
+                            yield Path.GetFileName asset.Name, asset.Name
                     | false, _ -> ()
                 | false, _ -> ()
         ]
@@ -416,7 +417,43 @@ module TestFrameworkUnderTest =
 }"""
 
         use document = JsonDocument.Parse json
-        runtimeAssets document.RootElement "T/rid" |> shouldEqual [ "A.dll" ]
+        runtimeAssets document.RootElement "T/rid" |> shouldEqual [ "A.dll", "A.dll" ]
+
+    /// `deps_entry_t::to_dir_path`: a runtime asset is at its `localPath` when it has one; else, in
+    /// a `runtimepack` library, at its listed path; else at its listed path's file name.
+    [<Test>]
+    let ``A pack's runtime asset is where the host looks for it`` () : unit =
+        let json =
+            """{
+  "runtimeTarget": { "name": "T/rid" },
+  "targets": {
+    "T/rid": {
+      "Package/1.0.0": {
+        "runtime": {
+          "A.dll": { "localPath": "sub/A.dll" },
+          "lib/net10.0/B.dll": {},
+          "D.dll": { "localPath": "" }
+        }
+      },
+      "Pack/1.0.0": { "runtime": { "lib/net10.0/C.dll": {} } }
+    }
+  },
+  "libraries": {
+    "Package/1.0.0": { "type": "package", "serviceable": true, "sha512": "" },
+    "Pack/1.0.0": { "type": "runtimepack", "serviceable": false, "sha512": "" }
+  }
+}"""
+
+        use document = JsonDocument.Parse json
+
+        runtimeAssets document.RootElement "T/rid"
+        |> shouldEqual
+            [
+                "A.dll", "sub/A.dll"
+                "B.dll", "B.dll"
+                "D.dll", "D.dll"
+                "C.dll", "lib/net10.0/C.dll"
+            ]
 
     /// Each pinned pack is a `Microsoft.NETCore.App` for its RID, with the `deps.json` its nupkg
     /// ships. Every assembly in the directory is a runtime asset of that `deps.json`, and every
@@ -446,7 +483,13 @@ module TestFrameworkUnderTest =
 
         assemblies |> shouldContain "System.Private.CoreLib.dll"
 
-        let listed = runtimeAssets root targetName
+        let assets = runtimeAssets root targetName
+
+        // Each asset is a file of its own name directly in the pack, so its TPA name is that
+        // file's stem.
+        assets |> List.filter (fun (name, path) -> name <> path) |> shouldEqual []
+
+        let listed = assets |> List.map snd
 
         // Each difference is compared with the empty list, so a failure names exactly the
         // offending files rather than printing both lists in full.
