@@ -325,20 +325,31 @@ module TestRuntimeConfig =
     [<Test>]
     let ``only the exact spelling of APP_PATHS is refused, over every casing of it`` () =
         // CoreCLR compares with `u16_strcmp`, so every recasing but the identity is an ordinary
-        // property. Generated as a mask over the letters, so the identity is one case among many
-        // and an insensitive comparison fails on every other.
-        let property (mask : bool list) : unit =
-            let name =
-                "APP_PATHS"
-                |> Seq.mapi (fun i c ->
-                    if List.tryItem i mask |> Option.defaultValue false then
-                        Char.ToLowerInvariant c
-                    else
-                        c
-                )
-                |> Seq.toArray
-                |> System.String
+        // property. The name has eight letters, so all 256 casings are enumerated: the identity
+        // is one of them, and an insensitive comparison fails on each of the other 255.
+        let letterPositions =
+            "APP_PATHS"
+            |> Seq.indexed
+            |> Seq.filter (fun (_, c) -> Char.IsLetter c)
+            |> Seq.map fst
+            |> Seq.toList
 
+        letterPositions.Length |> shouldEqual 8
+
+        let casing (mask : int) : string =
+            "APP_PATHS"
+            |> Seq.mapi (fun i c ->
+                match List.tryFindIndex ((=) i) letterPositions with
+                | Some bit when (mask >>> bit) &&& 1 = 1 -> Char.ToLowerInvariant c
+                | _ -> c
+            )
+            |> Seq.toArray
+            |> System.String
+
+        let names = [ 0..255 ] |> List.map casing
+        names |> List.distinct |> List.length |> shouldEqual 256
+
+        for name in names do
             let result = combineResult Map.empty (Map.ofList [ name, "/somewhere" ])
 
             if String.Equals (name, "APP_PATHS", StringComparison.Ordinal) then
@@ -347,8 +358,6 @@ module TestRuntimeConfig =
                 match result with
                 | Ok props -> props |> shouldEqual (Map.ofList [ name, "/somewhere" ])
                 | Error e -> failwith $"expected %s{name} to be an ordinary property, but got %s{e.Message}"
-
-        Check.One (config, property)
 
     [<Test>]
     let ``a hand-built GuestConfig cannot carry APP_PATHS past the refusal`` () =
