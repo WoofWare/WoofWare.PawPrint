@@ -514,7 +514,7 @@ public static class Program
         && not (List.contains name [ "PATH" ; "HOME" ; "TMPDIR" ; "TMP" ; "TEMP" ])
 
     [<Test>]
-    let ``an environment entry replaces the test host's value of that variable`` () : unit =
+    let ``an environment entry replaces the test host's value of that variable, and leaves the others`` () : unit =
         let hostVariables =
             Environment.GetEnvironmentVariables ()
             |> Seq.cast<Collections.DictionaryEntry>
@@ -523,12 +523,13 @@ public static class Program
             |> Seq.sortWith (fun (a, _) (b, _) -> String.CompareOrdinal (a, b))
             |> List.ofSeq
 
-        let name, hostValue =
+        // One to replace, and one the entries do not name, which the guest inherits.
+        let (name, hostValue), (kept, keptValue) =
             match hostVariables with
-            | first :: _ -> first
-            | [] ->
+            | first :: second :: _ -> first, second
+            | _ ->
                 failwith
-                    "the test host's environment holds no plainly named variable that the guest's launch does not read"
+                    "the test host's environment holds fewer than two plainly named variables that the guest's launch does not read"
 
         let replacement =
             if hostValue = "replaced by the oracle test" then
@@ -545,12 +546,13 @@ public static class Program
                     RealRuntime.captureAssemblyInPlace
                         AppContextProperties.empty
                         [ EnvironmentPal.nameValueEntry name replacement ]
-                        [| name |]
+                        [| name ; kept |]
                         dllPath
 
-                // Compared, not shown: if the overlay failed, the guest would print the test
-                // host's value, which may be a credential.
-                (run.Result, run.Stderr, run.Stdout = printedLine name (Some replacement))
+                // Compared, not shown: the guest prints test host values, which may be credentials.
+                (run.Result,
+                 run.Stderr,
+                 run.Stdout = printedLine name (Some replacement) + printedLine kept (Some keptValue))
                 |> shouldEqual (RealRuntimeResult.NormalExit 0, "", true)
             )
 
