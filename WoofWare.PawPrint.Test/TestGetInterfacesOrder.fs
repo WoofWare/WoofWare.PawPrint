@@ -3368,6 +3368,47 @@ public static class Program
         }
         |> CrossAssemblyHarness.runTest
 
+    /// `G<int, U>`'s entry is read over a context with an open argument, so through the open walk,
+    /// though the entry itself is closed: its function pointer's `void` return carries a custom
+    /// modifier (`SuppressGCTransition`), and a `void` under modifiers returns nothing, as concretising
+    /// the closed type reads it. Real .NET 10 and 11 hand back, as the entry's argument, the `typeof` of
+    /// the closed array. The entry is not compared with `typeof(I<...>)`, whose `ldtoken` PawPrint
+    /// refuses: it does not concretise an instantiation whose argument carries a custom modifier.
+    [<Test>]
+    let ``An open receiver's entry over a function pointer returning modified void is the closed type`` () : unit =
+        {
+            Assemblies =
+                [
+                    CrossAssemblySpec.entryPoint
+                        "OpenReceiverModifiedVoid"
+                        []
+                        [
+                            """
+using System;
+
+public interface I<A> { }
+public unsafe class G<T, U> : I<delegate* unmanaged[SuppressGCTransition]<T, void>[]> { }
+
+public static unsafe class Program
+{
+    public static int Main()
+    {
+        Type u = typeof(G<,>).GetGenericArguments()[1];
+        Type[] interfaces = typeof(G<,>).MakeGenericType(typeof(int), u).GetInterfaces();
+        if (interfaces.Length != 1) return 1;
+        if (!interfaces[0].IsGenericType || interfaces[0].GetGenericTypeDefinition() != typeof(I<>)) return 2;
+        if (!ReferenceEquals(interfaces[0].GetGenericArguments()[0], typeof(delegate* unmanaged[SuppressGCTransition]<int, void>[]))) return 3;
+        return 0;
+    }
+}
+"""
+                        ]
+                ]
+            EntryAssemblyName = "OpenReceiverModifiedVoid"
+            ExpectedReturnCode = 0
+        }
+        |> CrossAssemblyHarness.runTest
+
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
     /// expects; PawPrint must stop where managed code asks `GetUtf8NameInternal` for the name of an
     /// open construction (#2315).
