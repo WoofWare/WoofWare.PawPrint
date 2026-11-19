@@ -1027,6 +1027,33 @@ package.
 The branch was then rebased onto `002ac9d86` (#2331, the comparison pull request), and W1 and W2 went green with no
 change here.
 
+25. *Plan for #2309: the second pull request after the comparison pull request*: this section, before the sixth review.
+26. *Tests: an interface walked once per map; an extends clause naming no class*, from Codex's sixth review; the sketch
+    oracle now compares PawPrint's entries, as host types, with the host's answer in order. Two cases were red.
+27. *Interface map: walk a head once per question; an extends clause naming no class*: the fix.
+
+**Codex's sixth review, under the decisions' reopening rule.** It found:
+
+- [P1] Two unreadable rows naming the same interface walked that interface's map twice, so a ladder of interfaces
+  with two such rows a level doubled the work at every level (Codex: 2.7 MB at depth 8, 45.4 MB at depth 12; the
+  test: 679,280 bytes at depth 6 against 45,896,672 at depth 12). Unbounded work on metadata, so fixed here: within
+  one question (one call of `interfaceMapOf` or `interfaceMapOfDefinition`) the walk keeps the definitions whose walk
+  has succeeded, and a row whose head is one of them does not walk it again. A succeeded walk cannot fail on another
+  path: its other failures do not depend on the path, and a recursive load reaching it from a path here would have met
+  itself in its own walk. After: 76,064 bytes at depth 6 against 122,616 at depth 12.
+- [P2] An extends TypeSpec naming no class (`int32[]`) threw from `nominalIdentityOfSpelling` through
+  `interfaceMapOfDefinition`. A host exception, so fixed here: `MethodTableLayout.baseOfDefinition` refuses such a
+  clause as `Unmodelled`. A row naming such a class is refused already on the closed path, by the Loader's base-chain
+  loading, and a test pins that. The same finding's `C extends valuetype V<int>`, answered by
+  `interfaceMapOfDefinition` where .NET refuses, is neither a hang, a host exception nor valid metadata, and is not
+  fixed here; `main`'s closed path answers it too.
+- [P2] A cyclic base chain with a TypeRef edge does not end in `interfaceMapOfDefinition`, because
+  `baseOfDefinition` resolves a TypeRef through `TypeResolution.resolveTypeFromRef`, which primes the whole base chain
+  with no guard against a cycle. That is #2330's mechanism, in the Loader, and is left to it.
+- [P2] The sketch oracle compared only how many interfaces each side answered. It now compares them, in order, as host
+  types over the same image, outside the allocation measured; the chain, the diamond and the four non-cycle shapes
+  pass it unchanged.
+
 **The function.** `ConcreteInterfaceDispatch.interfaceMapOfDefinition` takes a definition's identity and returns a
 `DefinitionInterfaceMap`: its entries (`DefinitionInterfaceMapEntry`, the decision's five fields, in the definition's
 own vocabulary) and every InterfaceImpl row it read (`DefinitionInterfaceMapRow`: the row's spelling, in the same
@@ -1137,7 +1164,7 @@ substitutions, and nothing else, of five CoreLib interface receivers (`IList<int
 rows' parents, so an entry such as `IList<T>`'s `IEnumerable<T>` now comes from the interface's own row (spelled
 `!0`) rather than from expanding `ICollection<T>` (spelled `!0` in `ICollection`'s context, over `IList`'s `!0`); the
 two denote the same types, and the handles, order, flags, registrations and loads are unchanged. With only that rule
-put back to value types, commit 2's dump is identical to the base in all five files. After the fixes of commits 6, 10, 13, 16 and 22, and the rebase onto #2331,
+put back to value types, commit 2's dump is identical to the base in all five files. After the fixes of commits 6, 10, 13, 16, 22 and 27, and the rebase onto #2331,
 the dump (with the deep chain's two receivers added in a sixth file) is identical to commit 2's in all five files it
 shares with it, and so is the probe below; the sixth is identical across all of them.
 
@@ -1207,6 +1234,8 @@ tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindin
 | (after commit 22) the in-progress check removed from the walk's entry | the base-chain cycle test (commit 23; stack overflow); it survived before that test existed, since every other path into the walk meets the head check first |
 | (after commit 22) the in-progress set global rather than local to the path | the diamond, and both cases of the earlier-absent-argument test |
 | (after commit 22) the row classification accepting a non-nominal head | both `int32`-head tests |
+| (after commit 27) a head walked again for every row naming it | the wrong-arity ladder |
+| (after commit 27) an extends clause's shape not checked | the definition-level `D : int32[]` test |
 | the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
 | the rule widened to every CoreLib type | none: equivalent, the same reason |
 | the rule keyed on the interface being expanded, not the type being built | none: equivalent, as the decisions record |
@@ -1221,17 +1250,19 @@ passed; `GuestImpure` 304 passed. At commit 13, on `3a6d1c53c`: default 5,901 (5
 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 16, on `3a6d1c53c`:
 default 5,905 (5,866 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed;
 `GuestImpure` 304 passed. At commit 24, rebased onto `002ac9d86` (#2331): default 5,931 (5,892 passed, 39 skipped);
-`Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed.
+`Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 27, on
+`002ac9d86`: default 5,934 (5,895 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208
+passed; `GuestImpure` 304 passed.
 
 **Time of the guest categories**, on the same machine, one category at a time, in seconds: on the base (#2322's tip),
-and at commits 3, 6, 10, 13, 16 and 24.
+and at commits 3, 6, 10, 13, 16, 24 and 27.
 
-| category | base | commit 3 | commit 6 | commit 10 | commit 13 | commit 16 | commit 24 |
-|---|---|---|---|---|---|---|---|
-| `Guest` | 1,092 | 1,179 | 1,698 | 1,395 | 1,175 | 1,515 | 1,131 |
-| `GuestSolo` | 545 | 747 | 1,193 | 637 | 648 | 665 | 586 |
-| `GuestPure` | 910 | 717 | 796 | 842 | 715 | 776 | 864 |
-| `GuestImpure` | 883 | 289 | 408 | 396 | 687 | 693 | 687 |
+| category | base | commit 3 | commit 6 | commit 10 | commit 13 | commit 16 | commit 24 | commit 27 |
+|---|---|---|---|---|---|---|---|---|
+| `Guest` | 1,092 | 1,179 | 1,698 | 1,395 | 1,175 | 1,515 | 1,131 | 956 |
+| `GuestSolo` | 545 | 747 | 1,193 | 637 | 648 | 665 | 586 | 499 |
+| `GuestPure` | 910 | 717 | 796 | 842 | 715 | 776 | 864 | 532 |
+| `GuestImpure` | 883 | 289 | 408 | 396 | 687 | 693 | 687 | 416 |
 
 The machine was shared with other runs, and the differences go both ways by more than any change in this branch could
 explain (`GuestImpure` took 505 to 560 s in PR 1's runs; `GuestSolo`, two tests, ranged from 545 to 1,193 s here), so
