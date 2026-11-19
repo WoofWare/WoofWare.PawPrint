@@ -1948,6 +1948,37 @@ module TestHostPolicy =
             )
         )
 
+    /// `resolve_probe_dirs` lets an `apphost` asset of a `*.Microsoft.NETCore.DotNetAppHost` package
+    /// go missing, where it fails the launch for any other native asset.
+    [<Test>]
+    let ``A missing apphost asset does not fail the launch`` () =
+        let lowest =
+            framework
+                "Microsoft.NETCore.App"
+                "/fx/10.0.14"
+                {
+                    Libraries =
+                        (netCoreApp "10.0.14" []).Libraries
+                        @ [
+                            { ManifestSpec.library "Runtime.osx-arm64.Microsoft.NETCore.DotNetAppHost" [] with
+                                Native = [ ManifestSpec.asset "apphost" ]
+                            }
+                        ]
+                }
+
+        frameworkDependent EmulatedRuntime.Net10 (appWith []) [] lowest
+        |> HostPolicy.resolveTpa
+        |> Result.map TrustedPlatformAssemblies.toMap
+        |> shouldBe (
+            Ok (
+                Map.ofList
+                    [
+                        "Entry", "/app/Entry.dll"
+                        "System.Private.CoreLib", "/fx/10.0.14/System.Private.CoreLib.dll"
+                    ]
+            )
+        )
+
     [<Test>]
     let ``Refused: no CoreCLR library`` () =
         let lowest =
