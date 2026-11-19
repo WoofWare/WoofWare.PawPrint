@@ -3,6 +3,7 @@ namespace WoofWare.PawPrint.Test
 open System
 open System.Collections.Immutable
 open System.IO
+open System.Text.Json
 open FsCheck
 open FsCheck.FSharp
 open FsUnitTyped
@@ -358,3 +359,72 @@ module TestFrameworkUnderTest =
             Assembly.readFile NullLoggerFactory.Instance (FrameworkUnderTest.selected ()).CoreLibPath
 
         FrameworkUnderTest.assertServes (stateHaving (Some corelib))
+
+    /// The runtime identifier of the runtime pack which `flake.nix` pins for `flavour`.
+    let private packRid (flavour : SimulatedUnixFlavour) : string =
+        match flavour with
+        | SimulatedUnixFlavour.Linux -> "linux-x64"
+        | SimulatedUnixFlavour.Darwin -> "osx-arm64"
+
+    let pinnedPacks : TestCaseData list =
+        [
+            for runtime in EmulatedRuntime.supported do
+                for flavour in [ SimulatedUnixFlavour.Linux ; SimulatedUnixFlavour.Darwin ] do
+                    TestCaseData(runtime, flavour).SetArgDisplayNames (FrameworkUnderTest.name runtime, $"%A{flavour}")
+        ]
+
+    /// The path of every runtime asset which a `deps.json` lists under the target `targetName`:
+    /// each library's `runtime` assets, and its `runtimeTargets` assets of type `runtime`.
+    let private runtimeAssets (root : JsonElement) (targetName : string) : string list =
+        let target = root.GetProperty("targets").GetProperty targetName
+
+        [
+            for library in target.EnumerateObject () do
+                match library.Value.TryGetProperty "runtime" with
+                | true, runtime ->
+                    for asset in runtime.EnumerateObject () do
+                        yield asset.Name
+                | false, _ -> ()
+
+                match library.Value.TryGetProperty "runtimeTargets" with
+                | true, runtimeTargets ->
+                    for asset in runtimeTargets.EnumerateObject () do
+                        if asset.Value.GetProperty("assetType").GetString () = "runtime" then
+                            yield asset.Name
+                | false, _ -> ()
+        ]
+
+    /// Each pinned pack is a `Microsoft.NETCore.App` for its RID, with the `deps.json` its nupkg
+    /// ships. Every assembly in the directory is a runtime asset of that `deps.json`, and every
+    /// runtime asset is an assembly in the directory.
+    [<TestCaseSource(nameof pinnedPacks)>]
+    let ``A pinned runtime pack's deps.json lists exactly the pack's assemblies``
+        (runtime : EmulatedRuntime)
+        (flavour : SimulatedUnixFlavour)
+        : unit
+        =
+        let pack = FrameworkUnderTest.requireFrameworkPackDirectoryOf flavour runtime
+        let depsPath = Path.Combine (pack, "Microsoft.NETCore.App.deps.json")
+
+        if not (File.Exists depsPath) then
+            failwith
+                $"%s{pack} holds no Microsoft.NETCore.App.deps.json: flake.nix's frameworkPack must copy it out of the runtime pack"
+
+        use document = JsonDocument.Parse (File.ReadAllBytes depsPath)
+        let root = document.RootElement
+        let targetName = root.GetProperty("runtimeTarget").GetProperty("name").GetString ()
+
+        targetName
+        |> shouldEqual $".NETCoreApp,Version=v%i{EmulatedRuntime.major runtime}.0/%s{packRid flavour}"
+
+        let assemblies =
+            Directory.GetFiles (pack, "*.dll")
+            |> Seq.map Path.GetFileName
+            |> Seq.sortWith (fun a b -> String.CompareOrdinal (a, b))
+            |> List.ofSeq
+
+        assemblies |> shouldContain "System.Private.CoreLib.dll"
+
+        runtimeAssets root targetName
+        |> List.sortWith (fun a b -> String.CompareOrdinal (a, b))
+        |> shouldEqual assemblies
