@@ -719,7 +719,8 @@ module TestDepsJson =
     let private ridPool : string list =
         [ "osx-arm64" ; "osx" ; "unix-arm64" ; "unix" ; "any" ; "linux-x64" ]
 
-    /// `assetType` spellings: the host compares them ignoring ASCII case only.
+    /// `assetType` spellings: the host compares them ignoring ASCII case only. `ſ` (long s)
+    /// upper-cases to `S` under `ToUpperInvariant`.
     let private assetTypeSpellings : (string * DepsAssetType option) list =
         [
             "runtime", Some DepsAssetType.Runtime
@@ -731,6 +732,7 @@ module TestDepsJson =
             "RESOURCES", Some DepsAssetType.Resources
             "runtıme", None
             "natİve", None
+            "reſources", None
             "culture", None
         ]
 
