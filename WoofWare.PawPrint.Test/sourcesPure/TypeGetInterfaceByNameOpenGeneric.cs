@@ -37,6 +37,13 @@ public class Outer<T>
     public class Inner<U> : IPair<T, U> { }
 }
 
+public class Holder
+{
+    public interface INested<T> { }
+}
+
+public class UsesNested<T> : Holder.INested<T> { }
+
 public static class Program
 {
     static string Render(Type[] types)
@@ -158,6 +165,10 @@ public static class Program
         Type ilistTArray = ilistT.MakeArrayType();
         if ((r = Is(19, "IList<>'s T[], seventh interface", ilistTArray.GetInterfaces()[6], typeof(IList<>))) != 0) return r;
         if ((r = Same(20, "IList<>'s T[]", ilistTArray.GetInterfaces(), SzArrayInterfaces(ilistT))) != 0) return r;
+
+        // A nested interface's name is its own, without its declaring type's.
+        Type usesNestedT = typeof(UsesNested<>).GetGenericArguments()[0];
+        if ((r = Is(21, "UsesNested<>.GetInterface(INested`1)", typeof(UsesNested<>).GetInterface("INested`1"), Over(typeof(Holder.INested<>), usesNestedT))) != 0) return r;
 
         return 0;
     }
