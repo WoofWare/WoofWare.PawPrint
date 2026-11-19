@@ -90,9 +90,10 @@ public static class Program
             SetAppPaths = false
             AdditionalProbingPaths = []
             AdditionalDepsJsons = []
-            SharedStores = if Directory.Exists besideMuxer then [ besideMuxer ] else []
+            // The host's `pal::directory_exists` is its `file_exists`: an entry of any kind counts.
+            SharedStores = if Path.Exists besideMuxer then [ besideMuxer ] else []
             ServicingDirectory =
-                if Directory.Exists "/opt/coreservicing" then
+                if Path.Exists "/opt/coreservicing" then
                     Some "/opt/coreservicing"
                 else
                     None
