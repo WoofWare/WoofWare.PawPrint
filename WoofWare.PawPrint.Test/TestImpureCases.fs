@@ -7812,6 +7812,25 @@ module TestImpureCases =
                 AssertTerminalState = Some assertInterfaceImplRows
             }
             {
+                // `Type.GetInterfaces()` on a generic definition `TypeBuilder` made, whose two
+                // InterfaceImpl rows leave `IC<T>`'s parents to expansion, and on an instantiation of
+                // it. Dynamic-code switch overridden to true like its siblings; verified by hand to exit
+                // 0 on real .NET 10 and 11.
+                FileName = "TypeBuilderGenericGetInterfaces.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
                 // `Type.GetInterfaceMap` over created types: a proxy-shaped MethodImpl naming a private
                 // method, an implicit implementation by name, and an abstract class implementing nothing,
                 // whose row has no target. Dynamic-code switch overridden to true like its siblings;

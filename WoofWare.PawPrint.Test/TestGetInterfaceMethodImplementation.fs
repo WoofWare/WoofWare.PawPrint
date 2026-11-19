@@ -187,8 +187,8 @@ public static class Program
 """
         |> refusesOpenReceiver "OpenReceiverClosedInterface"
 
-    /// A generic definition with its own open interface, which this guest builds by hand because
-    /// PawPrint's `GetInterfaces` refuses an open interface row.
+    /// A generic definition with its own open interface, built by `MakeGenericType` over the
+    /// definition's variables.
     [<Test>]
     let ``A generic definition's open interface is refused`` () : unit =
         """
@@ -214,3 +214,32 @@ public static class Program
 }
 """
         |> refusesOpenReceiver "OpenReceiverOpenInterface"
+
+    /// The same map, asked through public API alone: `GetInterfaces` gives the definition's open
+    /// interface, which reaches this QCall with the definition as its receiver.
+    [<Test>]
+    let ``A generic definition's open interface from GetInterfaces is refused`` () : unit =
+        """
+using System;
+using System.Reflection;
+
+public interface IG<T> { T Get(); }
+public class CGen<T> : IG<T> { public T Get() => default; }
+
+public static class Program
+{
+    public static int Main()
+    {
+        Type[] interfaces = typeof(CGen<>).GetInterfaces();
+        if (interfaces.Length != 1) return 1;
+        InterfaceMapping map = typeof(CGen<>).GetInterfaceMap(interfaces[0]);
+        if (map.TargetMethods.Length != 1) return 2;
+        MethodInfo target = map.TargetMethods[0];
+        if (target.Name != "Get") return 3;
+        if (target.DeclaringType != typeof(CGen<>)) return 4;
+        if (target.ReflectedType != typeof(CGen<>)) return 5;
+        return 0;
+    }
+}
+"""
+        |> refusesOpenReceiver "OpenReceiverOpenInterfaceFromGetInterfaces"
