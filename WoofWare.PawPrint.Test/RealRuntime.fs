@@ -125,7 +125,7 @@ module RealRuntime =
 
     /// The `dotnet` muxer. Deriving it from the framework directory rather than from `PATH` keeps
     /// the guest on the framework under test even when several SDKs are installed.
-    let private muxerPath : string =
+    let muxerPath : string =
         let exeName =
             if RuntimeInformation.IsOSPlatform OSPlatform.Windows then
                 "dotnet.exe"
