@@ -1,10 +1,12 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: decided (see "Decisions"); the first four of five pull requests are built: the closed order (#1318, "As built
+Status: decided (see "Decisions"); all five pull requests are built: the closed order (#1318, "As built
 (PR 1)", merged as #2322), the definition-level interface map ("As built (PR 2)", merged as #2337, on top of #2331,
-which shares the substitution comparison's work), open receivers (#2309, "As built (PR 3)", merged as #2344) and the
-name of an open construction (#2315, "As built (PR 4)"); the `dynamic` guest is not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
-with a throwaway handler described under "PawPrint with a throwaway", since reverted.
+which shares the substitution comparison's work), open receivers (#2309, "As built (PR 3)", merged as #2344), the
+name of an open construction (#2315, "As built (PR 4)", merged as #2347) and the `dynamic` guests ("As built (PR 5)",
+after "PR 5: where the `dynamic` guest stops" and "Decisions after PR 5 stopped"), which finish the staging. The study
+below was measured 2026-11-16 on `main` at `c50428b33` (#2307), with a throwaway handler described under "PawPrint
+with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
 open receivers, but the study found that the closed receivers' answer is wrong today too (in order, and in dropping
@@ -814,6 +816,8 @@ because its risks are the harness's (a reference to `Microsoft.CSharp`, the runn
 it in the harness first: it goes in `GuestSolo` if a single run takes about as long as that category's other tests. If
 it takes much longer than the Release App's three to five minutes, stop and ask before adding it. Autofac and Moq wait
 for #2092's consumer fixture.
+
+Superseded in part on 2026-11-19: see "Decisions after PR 5 stopped".
 
 ### 10. The swapped-library shapes: (a), fixed shapes, but with the host as the oracle
 
@@ -2290,3 +2294,357 @@ the solution built again, each suite its own invocation on a .NET 10 host: defau
 
 **Codex's second review (on commit 6).** No findings. It ran the selection and the new guest again. Commits after 4
 change only a docstring and this plan, so the suites above stand.
+
+### PR 5: where the `dynamic` guest stops
+
+Measured 2026-11-19 on PR 4's branch (`4892aa1fb`). The guest does not pass under PawPrint, so it is parked rather
+than landed, and what comes next is the owner's decision. Nothing outside the test project changes.
+
+**The guest.** `sourcesPure/DynamicMemberAccess.cs`, six checks, each printing what it bound to and returning its own
+exit code: (1) `(int)d.Id + 1` on a user class and (2) `(int)s.Length` on a `string`, the Study's two operations;
+(3) a dynamic `List<int>` converted implicitly to `IEnumerable<int>` and (4) chosen by run-time overload resolution
+over `Sum(object)`; (5) `IList<int>.Contains(dynamic)` and (6) a user `IDerived<int>.Get(dynamic)`, each a member the
+receiver's static interface type has only through a base interface. It exits 0 on real .NET 10.0.14 and
+11.0.0-rc.3.
+
+**First stop, in the harness.** At check 1, on .NET 10's CoreLib and on .NET 11's alike, about 7 s into the run:
+"TODO: RuntimeTypeHandle.GetFirstIntroducedMethod for synthesised array handle ...; need to surface the array's
+intrinsic Get/Set/Address methods" (`VirtualSlotLayout.introducedMethodsOf`). The guest's stack, traced with a
+throwaway: `CallSite<T>.Create` → `MakeUpdateDelegate` → `CreateCustomUpdateDelegate` → `Expression.NotEqual` →
+`GetEqualityComparisonOperator` → `GetUserDefinedBinaryOperator` → `TypeExtensions.GetAnyStaticMethodValidated` →
+`Type.GetMethod` → `RuntimeTypeCache.GetMethodList` → `MemberInfoCache.PopulateMethods` →
+`RuntimeTypeHandle.GetIntroducedMethods`, on the call site's rules array (`T[]`). `MakeUpdateDelegate` takes the custom
+path because PawPrint seeds `IsDynamicCodeSupported` false (`AppContextProperties.runtimeBaseline`), as every
+`sourcesPure` case and the App run with.
+
+**Why the Study's run got further.** With `IsDynamicCodeSupported` set true in the guest's runtimeconfig (a
+`RuntimeHostConfigurationOption`, as the playground can set it), the Release App runs checks 1 to 4 to the end with
+real .NET's stdout, in 83 to 104 s and about 1.1 to 1.2 GB peak RSS. The Study's 163-277 s run presumably had the
+switch on; it does not say.
+
+**What the checks test.** A mutant answering `[]` for every generic definition in `RuntimeTypeInterfaces.ofReceiver`
+was run in the App with the switch on. A throwaway that logged each definition asked showed the binder reaching it 36
+times (`List<>`, `IEnumerable<>`, `CallSite<>`, `Expression<>`, `int`'s generic interfaces and others), so it is reached:
+
+| mutant | checks 1 to 4 (switch on, App) | checks 5 and 6 |
+|---|---|---|
+| a definition's interfaces answered empty | **survives**: exit 0, same stdout | not measurable: unmutated, both stop (below) |
+
+Checks 1 to 4 cannot see it: the binder decides a conversion from a run-time object with `Type.IsInstanceOfType`
+(`ExpressionBinder.ImplicitConversion.Bind`, read in its IL), not from the interfaces its symbol table holds, and
+checks 1 and 2 read members the receiver's class declares itself. What does read a definition's interfaces is member lookup on a
+receiver of interface type, which checks 5 and 6 do; unmutated, with the switch on, each stops at
+`RuntimeTypeHandle.GetFields` of the base interface over the derived interface's variable ("TODO: open constructed
+types are not handled at Native/NativeRuntimeTypeQCall.fs:2614"), the open construction that the definition's
+`GetInterfaces` answer handed the binder.
+
+**So** a guest that both passes and depends on `GetInterfaces` needs two features that are not this work: an array
+type's introduced methods (for the default, switch-off profile; with the switch on it is not reached), and
+`GetFields` of an open construction. What was decided is under "Decisions after PR 5 stopped".
+
+### Decisions after PR 5 stopped
+
+Decided 2026-11-19 by the delegated decider, from "PR 5: where the `dynamic` guest stops", the guest as committed,
+CoreLib's source and the issue tracker. Nothing was run for these decisions; where a claim comes from reading
+alone, it says so.
+
+Three facts that the section above does not state, and which the decisions rest on:
+
+- **#2309 is already closed.** The third pull request closed it, and the fourth (#2347) has merged. So PR 5 neither
+  closes nor reopens anything.
+- **Real .NET runs with `IsDynamicCodeSupported` true.** The switch-off profile is PawPrint's baseline, not CoreCLR's
+  default. A `dynamic` guest with the switch on is therefore the configuration in which real .NET was measured, and
+  the suite already holds such pairs: `sourcesPure/ExpressionLambdaCompile.cs` (interpreted) beside
+  `sourcesImpure/ExpressionLambdaCompileEmitted.cs` (emitted, switch on).
+- **The second stop is probably not particular to `dynamic`** (by reading, not run).
+  `MemberInfoCache.PopulateFields` asks every interface of the reflected type for its fields, and a definition's
+  interfaces are now open constructions, so `typeof(IDerived<>).GetFields()` should reach the same refusal.
+  #2348 says so and asks for that to be the fix's first test.
+
+#### 1. What PR 5 ships: two guests with the switch on, one passing and one parked
+
+Options:
+
+- **(a) The guest parked, as committed: `sourcesPure`, switch off, all six checks.** It runs nothing in CI. Its
+  reason names two stops, but the first of them hides everything behind it in the switch-off profile: past the array
+  stop, the binder's expression trees are interpreted, and nobody has measured where that gets to. So "un-park when
+  an array type's introduced methods and an open construction's fields are answered" promises more than is known,
+  and checks 1 to 4, which pass today with the switch on, would guard nothing.
+- **(b) Split by what stops: checks 1 to 4 as a passing `sourcesImpure` guest with the switch on, and checks 5 and 6
+  as a second `sourcesImpure` guest, parked on #2348.**
+- **(c) Drop PR 5.** Nothing lands; the issues carry the guest's text. This loses a passing end-to-end run of the
+  C# binder, and the checks that would test #2309 become a code block in an issue instead of a parked case that
+  `TestGuestParking` keeps in view.
+- **(d) Replace the `dynamic` guest by a small reflection guest that does what the binder does** (`GetMember` on
+  an interface definition, then on its base interfaces). It would be fast and would depend on `GetInterfaces`, but
+  it also stops at `GetFields`, so it cannot pass today either, and it is the first test of
+  #2348, not of this pull request.
+
+**Chosen: (b).**
+
+What the passing guest tests, stated without flattery: it does *not* test what `GetInterfaces` answers (the `[]`
+mutant survives it). It tests that C# `dynamic` runs under PawPrint at all: the binder builds its symbol table (36
+`GetInterfaces` calls on definitions, which stopped the run at the first open one before the third pull request;
+the second mutant below checks that), binds a property
+read, a conversion and an overload resolution, and `System.Linq.Expressions` compiles the rules. No other guest
+runs `Microsoft.CSharp`. That is worth about a hundred seconds of one runner's time; it is not worth describing as
+a test of #2309's answers, and the pull request must not describe it so.
+
+What the parked guest is for: it is the only consumer check found that reads a definition's interfaces for their
+content. It is one fix away from running, the fix has an issue, and its reason can say exactly that.
+
+Why the switch-off profile gets no guest: its first stop has an issue (#2349) with a
+reproduction that needs no `dynamic`, and what lies behind that stop is unmeasured. A parked case whose condition for
+un-parking is unknown records less than the issue does. The issue asks for `DynamicMemberAccess.cs` to be tried with
+the switch off once it is fixed.
+
+Category and running time. Decision 9's rule stands, applied to the passing guest: 83 to 104 s in the Release App is
+well under that rule's three to five minutes and well under `GuestSolo`'s tests, so it is a case of
+`TestImpureCases` (`GuestImpure`), not a fixture of its own. That is conditional on the harness measurement below:
+**if the one case takes more than 3 minutes in a Release run of the harness on either runtime, stop and report the
+number** instead of adding it or building a `GuestSolo` fixture for it.
+
+##### Instructions for the implementer
+
+Work in the branch `test-2309-dynamic-guest`. It was cut from the fourth pull request's branch, which has since been
+squash-merged, so first rebase the one commit onto `origin/main`
+(`git rebase --onto origin/main 4892aa1fb test-2309-dynamic-guest`, run in that branch's worktree). If the plan
+conflicts, keep `main`'s text for everything before "PR 5: where the `dynamic` guest stops". Then amend or add
+commits so that the pull request's diff against `main` is the following, and nothing outside the test project and
+this plan.
+
+1. **`sourcesImpure/DynamicMemberAccess.cs`** (moved from `sourcesPure`): checks 1 to 4 only, with exit codes 1 to
+   4. Drop `IBase`, `IDerived` and `Impl`. Rewrite the header comment: say that the binder builds its symbol table
+   from reflection and asks each generic definition for its interfaces; that these four checks do not depend on what
+   it is told (a conversion is decided with `Type.IsInstanceOfType`, and checks 1 and 2 read members the receiver's
+   class declares), so the guest tests that the binder runs, not `GetInterfaces`' answers; that it is impure because
+   it needs `IsDynamicCodeSupported` true, which is what real .NET runs with, and that with PawPrint's default the
+   first call site stops (#2349); and that `DynamicBaseInterfaceMember.cs` holds the
+   checks that do depend on the answers.
+2. **`sourcesImpure/DynamicBaseInterfaceMember.cs`** (new): checks 5 and 6, renumbered 1 and 2, with `IBase`,
+   `IDerived`, `Impl` and the `Check` helper. Its header says what the old one said about these two checks.
+3. **`TestImpureCases.fs`**: both cases with `IsDynamicCodeSupported` true, written as
+   `ExpressionLambdaCompileEmitted.cs`'s case is (same oracle policy, `ExpectedReturnCode = 0`).
+   `DynamicMemberAccess.cs` is a live case. `DynamicBaseInterfaceMember.cs` is parked on every runtime, with this
+   reason, corrected to whatever the harness measures:
+
+   > C# `dynamic` calling, with a dynamic argument, a method that the receiver's static interface type has only
+   > through a base interface (`ICollection<T>.Contains` on an `IList<int>`; a user `IBase<T>.Get` on an
+   > `IDerived<int>`). The binder looks the member up on the interface's definition, whose interfaces are open
+   > constructions since #2309, and reflection asks each for its fields: "TODO: open constructed types are not
+   > handled at Native/NativeRuntimeTypeQCall.fs" (`RuntimeTypeHandle.GetFields`, #2348;
+   > measured on .NET 10's and 11's CoreLib). Nothing past that stop has been measured. When this passes, it must
+   > be shown to fail with a definition's interfaces answered empty, which `DynamicMemberAccess.cs` survives.
+   > Verified to exit 0 on real .NET 10 and 11.
+
+4. **`TestPureCases.fs`**: remove the parked `DynamicMemberAccess.cs` entry. The pull request leaves `sourcesPure`
+   and `TestPureCases.fs` as `main` has them.
+5. **This plan**: keep "PR 5: where the `dynamic` guest stops" as the record of the measurements, changing only its
+   last sentence ("The open choices are ...") to point at this section. Append this section, with the placeholders
+   replaced by the filed issues' numbers. Add an "As built (PR 5)" section with the measurements below. Update the
+   status sentence at the top of the plan, which says the `dynamic` guest is not started. Under decision 9, add one
+   line: "Superseded in part on 2026-11-19: see 'Decisions after PR 5 stopped'."
+
+Measurements to make and record in "As built (PR 5)" and in the pull request body:
+
+- **Real .NET.** Each of the two files exits 0 on real .NET 10 and 11 as written, with the stdout the cases expect;
+  and for each check, a perturbed expectation exits with that check's number.
+- **The harness, Release, each runtime**
+  (`--filter "TestCategory=GuestImpure&Name~DynamicMemberAccess"`): the case passes, and how long it takes. Apply the
+  3-minute rule above.
+- **The parked guest's stop**, on each runtime, by naming it directly
+  (`--filter "FullyQualifiedName~DynamicBaseInterfaceMember"`): the message, and that neither check prints before
+  it. The earlier measurement was of the six-check file under the App, not of this file under the harness.
+- **Two mutants against `DynamicMemberAccess.cs`**, each reverted and rebuilt afterwards:
+  - `RuntimeTypeInterfaces.ofReceiver` answers `[]` for every generic definition: expected to **survive**, as
+    measured before. Record it as surviving.
+  - the same arm refuses (a `failwith`), which is the behaviour before the third pull request: expected to be
+    **killed**. If it survives, the claim "the guest fails if `GetInterfaces` stops on a definition" is false; say
+    so, and do not make it.
+- **The whole suite once**: the default tests, then `GuestImpure` as a whole category on each runtime (the guest
+  peaks above 1 GB in the App, and the fixture's cases run in parallel in a test host whose heap is capped, so a pass
+  of the single case does not show that the category still fits), then `Guest`, `GuestSolo` and `GuestPure` as
+  AGENTS.md lists them. Guest and non-guest selections go in separate invocations.
+- `fantomas`, and `scripts/footprint.py generate` in case the new files change a footprint.
+
+The pull request body must say:
+
+- that it is tests and the plan only, the fifth and last pull request of #2309's staging, and that #2309 is already
+  closed and stays closed;
+- what the passing guest tests and what it does not, in the terms above, with both mutants' outcomes;
+- that the second guest is parked, on which issue, and that it becomes the consumer test of #2309's answers only
+  when it passes and kills the `[]` mutant;
+- that C# `dynamic` under PawPrint's default profile still stops at its first call site, with the issue;
+- the running time on each runtime and the category;
+- every measurement in the list above, each marked as run, with its date.
+
+File the two issues from `issues/` before opening the pull request, since the parked reason and this plan name
+them. Then add this comment to #2309:
+
+> The `dynamic` consumer from "Who reaches it" now gets past `GetInterfaces`. With `IsDynamicCodeSupported` true,
+> property reads, conversions and overload resolution run to the end (`sourcesImpure/DynamicMemberAccess.cs`,
+> #PR). A member found through a base interface stops next at `RuntimeTypeHandle.GetFields` of an open
+> construction (#2348); the guest for it is parked. With PawPrint's default,
+> `IsDynamicCodeSupported` false, the first call site stops before the binder runs
+> (#2349). The passing guest does not depend on what `GetInterfaces` answers, so this
+> issue's tests of the answers remain `TypeGetInterfacesOpenGeneric.cs` and the property tests.
+
+#### 2. Which issues to file: two, one for each refusal
+
+Options:
+
+- **(a) One issue, "C# `dynamic` under PawPrint", listing both stops.** It matches how the stops were found, but
+  it ties together two primitives that share no code, and neither could be closed by one pull request. AGENTS.md
+  asks for the primitive to be implemented, not the consumer that happens to call it.
+- **(b) One issue for each refusal, each with a reproduction that does not need `dynamic`, and each naming
+  `dynamic` as a measured consumer.**
+- **(c) No new issues; the parked reason is the record.** The array stop would then be recorded nowhere, since
+  no guest is parked on it.
+
+**Chosen: (b).** The files are `issues/getfields-open-construction.md` and `issues/array-introduced-methods.md`. A
+search of open and closed issues on 2026-11-19 for the two messages, `GetFirstIntroducedMethod`,
+`RuntimeTypeHandle_GetFields`, "array GetMethods" and "C# dynamic" found neither covered. (#2315 and #2318 concern
+other queries on open constructions; #849 is the Reflection.Emit survey.)
+
+- **#2348 is the one that makes the guest a real test of #2309.** It is the first
+  stop of checks 5 and 6, which are the checks that read a definition's interfaces. It is also reached, by reading, by
+  ordinary reflection on any generic definition whose interfaces mention its own variables, with the switch on or
+  off, which makes it the wider of the two.
+- **#2349** matters to `dynamic` only under the switch-off profile, where it is the first
+  of an unknown number of stops. It is a real gap for `Type.GetMethod` on an array whoever asks, and the larger piece
+  of work, because the array's methods have no metadata rows for a handle to name.
+
+Order, if both are done: `GetFields` first. It is independent of the other, likely smaller for the common case, and
+it is the one after which a consumer guest can test this plan's feature. The array issue does not block it and is
+not blocked by it. Whether and when either is scheduled is the owner's decision; neither is part of #2309's staging.
+
+#### 3. #2309 stays closed, and decision 9 is amended, not rewritten
+
+Options:
+
+- **(a) Reopen #2309 until a consumer guest depends on its answers.** That keeps one issue open on someone else's
+  feature (`GetFields`), and makes "closed" mean "every consumer runs", which no issue here means.
+- **(b) Leave it closed; the remaining work lives in the two new issues and the parked guest.**
+
+**Chosen: (b).** The issue is "`Type.GetInterfaces` stops on a generic type definition", and it no longer does. Its
+answers are tested where a wrong order, a missing duplicate or a wrong identity each fail their own check:
+`TypeGetInterfacesOpenGeneric.cs`, `TypeGetInterfacesOrder.cs`, the `TypeBuilder` guest and the property tests
+against the host. The `dynamic` guest was always a confirmation from a consumer, and decision 9 already put its risks
+on the harness's side. What is honest to record is that the confirmation is partial: the consumer runs, and no
+consumer check yet reads the answers. The comment above records that on the issue, and
+#2348 carries the step that completes it (un-park, then kill the `[]` mutant).
+
+Decision 9's text is left as written, since it is the record of what was decided on the day, with the one-line
+pointer added beneath it. Where it is superseded:
+
+- "`sourcesPure/DynamicMemberAccess.cs`, both operations" becomes two `sourcesImpure` guests with the switch on, for
+  the reasons in decision 1 above;
+- the running-time rule is unchanged, and was applied: `GuestImpure`, with a stop if the harness run exceeds 3
+  minutes;
+- "Autofac and Moq wait for #2092's consumer fixture" is unchanged.
+
+With PR 5 merged, #2309's staging is finished. This plan then has no open stage, only the two issues it points to.
+
+### As built (PR 5)
+
+The `dynamic` guests, as "Decisions after PR 5 stopped" decided them, with one check added after Codex's first
+review (below). Tests and this plan only; #2309 is closed and stays closed.
+
+**Commits.**
+
+1. *The dynamic guest, parked where it stops*: the six-check guest in `sourcesPure`, parked, and "PR 5: where the
+   `dynamic` guest stops". Its file and its park are replaced by commit 3; the measurements stand.
+2. *Plan for #2309: the decisions after PR 5 stopped*: that section, appended as decided, with the pointer under
+   decision 9.
+3. *Two dynamic guests in sourcesImpure*: the change.
+4. This section.
+5. *DynamicMemberAccess.cs: a check the binder answers from GetInterfaces*: check 5, from Codex's first review.
+6. This section again, for commit 5.
+7. *DynamicBaseInterfaceMember.cs: receivers whose classes lack the member*, from Codex's second review.
+8. This section again, for commit 7.
+
+**The guests**, both registered in `TestImpureCases` with `IsDynamicCodeSupported` true, as
+`ExpressionLambdaCompileEmitted.cs` is (`Oracle = OraclePolicy.Never`, `ExpectedReturnCode = 0`):
+
+- `sourcesImpure/DynamicMemberAccess.cs`, live: (1) `(int)d.Id + 1` on a user class, (2) `(int)s.Length` on a
+  `string`, (3) a dynamic `List<int>` converted implicitly to `IEnumerable<int>`, (4) `Sum(list)` choosing
+  `Sum(IEnumerable<int>)` over `Sum(object)`, (5) `CountOf(list)` choosing `CountOf<T>(IEnumerable<T>)`, with `T`
+  inferred as `int`, over `CountOf(object)`.
+- `sourcesImpure/DynamicBaseInterfaceMember.cs`, parked on every runtime on #2348: (1) `IList<int>.Contains(dynamic)`
+  on an `int[]`, (2) a user `IDerived<int>.Get(dynamic)` on a class implementing `IBase<int>.Get` explicitly, each a
+  member found only through a base interface. Neither run-time class has the member as a public method of its own,
+  so a binder that looked on the class instead of the static interface type would fail too (since commit 7).
+
+`TestPureCases.fs` and `sourcesPure` are as `main` has them.
+
+**What the live guest tests.** Checks 1 to 4 test that the binder runs: it builds its symbol table (asking 36
+generic definitions for their interfaces), binds a property read, a conversion and an overload resolution, and
+`System.Linq.Expressions` compiles the rules. They do not depend on what `GetInterfaces` answers, as measured in "PR
+5: where the `dynamic` guest stops". Check 5 does: to infer `T` from a `List<int>`, the binder reads `List<int>`'s
+interfaces from those its symbol table holds for `List<>`, and with none it chooses `CountOf(object)`. So the
+statement in "Decisions after PR 5 stopped" that the passing guest does not test what `GetInterfaces` answers held
+for the four checks it was made about, and does not hold for the guest as built: it now sees an empty answer for a
+definition. It does not see every wrong answer; only the `[]` mutant below was run against check 5.
+
+**Measurements**, all run 2026-11-19 on `2b38151e8` (#2347) plus this branch.
+
+- *Real .NET.* Each file exits 0 on real .NET 10.0.14 and 11.0.0-rc.3 as written, printing each check's value. For
+  each check, the expectation perturbed (42 to 43, 5 to 6, 6 to 7, 6 to 7, 3 to 4; 1 to 0, 20 to 21) exits with that
+  check's number on both: seven perturbations, fourteen runs.
+- *The harness, Release, `TestCategory=GuestImpure&Name~DynamicMemberAccess`.* Passes on each runtime. With all five
+  checks: 106 s for the case (114 s for the invocation) on .NET 10's CoreLib, 77 s (85 s) on .NET 11's; with checks 1
+  to 4 only, 103 s and 94 s. The test host's peak RSS was about 2.6 to 2.7 GB. Under the 3-minute rule, so it is a
+  `GuestImpure` case.
+- *The parked guest's stop, `FullyQualifiedName~DynamicBaseInterfaceMember`, Release.* On each runtime, about 30 s in:
+  "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs:2614; got open constructed
+  System.Private.CoreLib/...[generic parameter #0 of System.Private.CoreLib/...]". The open construction is
+  CoreLib's, so the stop is check 1's binding (`ICollection<T>` over `IList<T>`'s variable, by its assembly); `Check`
+  prints only after its call returns, so neither check printed. After commit 7 the stop is the same on each runtime, about 50 s in.
+- *The parked guest's class-lookup controls, real .NET.* With each receiver declared `dynamic` instead, so that the
+  binder looks on the run-time class, each check fails on .NET 10 and 11 with `RuntimeBinderException` ("'System.Array'
+  does not contain a definition for 'Contains'", "'Impl' does not contain a definition for 'Get'"); as written, and
+  with each expectation perturbed, the file behaves as above.
+- *Mutants against `DynamicMemberAccess.cs`*, each in the `OpenGenericTypeDefinition` arm of
+  `RuntimeTypeInterfaces.ofReceiver`, run in the Release harness on .NET 10's CoreLib, reverted and rebuilt after:
+
+  | mutant | checks 1 to 4 (commit 3) | checks 1 to 5 (commit 5) |
+  |---|---|---|
+  | every generic definition answers `[]` | **survives** (passes, 57 s) | **killed** at check 5: exit 5, 53 s in |
+  | every generic definition refused with a `failwith`, as before the third pull request | **killed**, 5 s in, at the refusal | **killed**, 5 s in, at the refusal |
+
+**Suites**, each its own invocation, Debug, after a build of the test project, on a .NET 10 host.
+
+- At commit 3: default 5,986 (5,946 passed, 39 skipped, 1 failed: `TestRealRuntimeStandardInput`'s "a guest that
+  never reads and never exits is timed out", whose 60 s wait ran out after 76 s under the suite's load; alone it
+  passes, 3 of 3); `GuestImpure` 306 passed (333 s) on .NET 10 and 306 passed (433 s) on .NET 11; `Guest` 250 passed
+  (574 s); `GuestSolo` 2 passed (263 s); `GuestPure` 1,210 passed (545 s). Inside those Debug category runs,
+  alongside the category's other cases, `DynamicMemberAccess.cs` took 4 m 40 s on .NET 10 and 6 m 6 s on .NET 11; CI
+  runs Release, where the case alone took the times above.
+- At commit 5, which changes one guest and two comments in `TestImpureCases.fs`: default 5,986 (5,947 passed, 39 skipped); `GuestImpure` 306 passed on .NET 10 (636 s) and 306 passed on .NET 11 (499 s). The machine's load average was about 30 during these runs, and in them `DynamicMemberAccess.cs` took 9 m 12 s on .NET 10 and 7 m 13 s on .NET 11, the longest case in the category, whose next longest took 3 m 50 s and 2 m 53 s. `Guest`, `GuestSolo` and
+  `GuestPure` were not rerun, since commit 5 changes nothing they run.
+
+**Codex's first review (on commit 4).** One finding, fixed:
+
+- [P2] Check 4's overload names `IEnumerable<int>`, so it passes with a definition's interfaces answered empty; a
+  generic overload `Sum<T>(IEnumerable<T>)` makes the binder infer `T` from `List<int>`'s interfaces, and Codex
+  measured that variant under PawPrint failing with the `[]` mutant. Added as check 5 (commit 5) rather than by
+  changing check 4, so that checks 1 to 4 stay as measured and decided; the mutants were rerun (table above).
+
+**Codex's second review (on commit 6).** Two findings, both addressed:
+
+- [P2] The parked guest's receivers (a `List<int>` and an `Impl` with a public `Get`) have the member as a public
+  method of their classes, so after #2348 it could pass with binding looking on the run-time class; Codex ran a copy
+  with both receivers `dynamic` and it exited 0 on real .NET 10. Fixed in commit 7 (an `int[]`, and `Get` implemented
+  explicitly), with the controls above.
+- [P3] The comment for #2309 drafted under "Decisions after PR 5 stopped" says the passing guest does not depend on
+  what `GetInterfaces` answers, which check 5 has made false. That section is the decider's record and is left as
+  written; the comment to post is this, with `#PR` replaced:
+
+  > The `dynamic` consumer from "Who reaches it" now gets past `GetInterfaces`. With `IsDynamicCodeSupported` true,
+  > property reads, conversions, overload resolution and generic type inference run to the end
+  > (`sourcesImpure/DynamicMemberAccess.cs`, #PR). The inference check depends on the answer: with a generic
+  > definition's interfaces answered empty, it fails. A member found through a base interface stops next at
+  > `RuntimeTypeHandle.GetFields` of an open construction (#2348); the guest for it is parked. With PawPrint's
+  > default, `IsDynamicCodeSupported` false, the first call site stops before the binder runs (#2349). The tests of
+  > the order, the duplicates and the identities in this issue's answers remain `TypeGetInterfacesOpenGeneric.cs`
+  > and the property tests.

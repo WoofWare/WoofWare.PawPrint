@@ -952,6 +952,22 @@ module TestImpureCases =
                 AssertTerminalState = None
             },
             """Invalid IL is never an `InvalidProgramException` under PawPrint (#2278): where the JIT refuses a body (a `pop` of an empty stack, a branch past the end or into an instruction), PawPrint stops the run when the offset executes, for a metadata method and a dynamic one alike, and a restricted-skip-visibility method's `CreateDelegate` returns where real .NET raises. Measured to exit 0 on real .NET 10 and 11, and a control expecting another HResult exits 1 on both. Each check exercises the unrestricted control first, so the run stops at its first invocation: "stack shape: Invalid (Dynamic { RegistryId = 1L }) is executing offset 0, which is invalid IL: StackUnderflow (0, Nullary Pop, 0)" (measured; the registry id is 8 on .NET 11). Un-parked by raising invalid IL as the JIT does, at `CreateDelegate` for the restricted method; no stage of docs/plans/2026-10-24-jit-import-at-method-entry.md does that."""
+            {
+                FileName = "DynamicBaseInterfaceMember.cs"
+                ExpectedReturnCode = 0
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            },
+            """C# `dynamic` calling, with a dynamic argument, a method that the receiver's static interface type has only through a base interface (`ICollection<T>.Contains` on an `IList<int>` holding an `int[]`; a user `IBase<T>.Get`, implemented explicitly, on an `IDerived<int>`), so that neither binds by looking on the run-time class. The binder looks the member up on the interface's definition, whose interfaces are open constructions since #2309, and reflection asks each for its fields: "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs" (`RuntimeTypeHandle.GetFields`, #2348; measured on .NET 10's and 11's CoreLib). Nothing past that stop has been measured. When this passes, it must be shown to fail with a definition's interfaces answered empty, as `DynamicMemberAccess.cs`'s inference check does. Verified to exit 0 on real .NET 10 and 11."""
         ]
 
     /// Is this the concrete handle for `System.Runtime.ExceptionServices.ExceptionDispatchInfo`?
@@ -6609,6 +6625,27 @@ module TestImpureCases =
                 // control compiling a lambda that returns 4 exits 4 on both.
                 FileName = "ExpressionLambdaCompileEmitted.cs"
                 ExpectedReturnCode = 3
+                KernelConfig = KernelConfig.Default
+                AppContext =
+                    AppContextProperties.ofMap (
+                        Map.ofList
+                            [
+                                "System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported", "true"
+                            ]
+                    )
+                Oracle = OraclePolicy.Never
+                ExpectsUnhandledException = false
+                AssertTerminalState = None
+            }
+            {
+                // C# `dynamic` with dynamic code supported, as real .NET runs it: the runtime binder
+                // builds its symbol table and binds a property read, a conversion, an overload
+                // resolution and a type inference, and `System.Linq.Expressions` compiles the rules.
+                // With the switch false the first call site stops before the binder runs (#2349).
+                // Measured to exit 0 on real .NET 10 and 11, and each check's perturbed expectation
+                // exits with its number.
+                FileName = "DynamicMemberAccess.cs"
+                ExpectedReturnCode = 0
                 KernelConfig = KernelConfig.Default
                 AppContext =
                     AppContextProperties.ofMap (
