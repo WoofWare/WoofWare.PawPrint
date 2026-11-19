@@ -268,6 +268,17 @@ module internal HostPolicy =
         | -1 -> trimmed + "/"
         | separator -> trimmed.Substring(0, separator).TrimEnd '/' + "/"
 
+    /// `path` without its `.` components and repeated `/`s: another spelling of the same file,
+    /// whatever links the path passes through. `..` components are kept, since after a link they
+    /// climb from the link's target.
+    let private withoutDotComponents (path : string) : string =
+        let components =
+            path.Split '/'
+            |> Array.filter (fun c -> c <> "" && c <> ".")
+            |> String.concat "/"
+
+        if path.StartsWith '/' then "/" + components else components
+
     /// `pal::strcasecmp` equality against an ASCII string: `OrdinalIgnoreCase` folds no non-ASCII
     /// character to an ASCII one.
     let private equalsIgnoringAsciiCase (a : string) (b : string) : bool =
@@ -809,16 +820,17 @@ module internal HostPolicy =
                             HostPolicyUnreproducible.CoreLibNotBesideCoreClr (path, coreClrPath)
                         )
                     )
-                | Some _ -> Ok tpa
+                | Some _ -> Ok (tpa, coreClrPath)
             )
-            |> Result.bind (fun tpa ->
+            |> Result.bind (fun (tpa, coreClrPath) ->
                 // CoreCLR runs the TPA's file of the entry assembly's name, not the file it was
                 // given (measured on .NET 10 and 11).
                 let entryPath =
-                    application |> Option.map (fun d -> join app.Directory d.EntryFileName)
+                    application
+                    |> Option.map (fun d -> withoutDotComponents (join app.Directory d.EntryFileName))
 
                 match TrustedPlatformAssemblies.tryFindIgnoringCase input.EntryAssemblyName tpa with
-                | Some (name, path) when Some path <> entryPath ->
+                | Some (name, path) when Some (withoutDotComponents path) <> entryPath ->
                     Error (
                         HostPolicyRefusal.NotReproducible (
                             HostPolicyUnreproducible.EntryAssemblyShadowed (name, path)
@@ -828,7 +840,7 @@ module internal HostPolicy =
                     Ok
                         {
                             Tpa = tpa
-                            CoreClr = ""
+                            CoreClr = coreClrPath
                         }
             )
         )

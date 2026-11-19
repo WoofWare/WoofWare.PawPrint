@@ -49,12 +49,11 @@ module internal TrustedPlatformAssemblies =
     let private upperFold (name : string) : string =
         name.Replace(char 0x131, 'I').ToUpperInvariant ()
 
-    /// Whether CoreCLR's case-insensitive map could take `a` and `b` for one name. CoreCLR folds
-    /// case with its own tables, so this errs towards a collision: equal under `upperFold`, or
-    /// under invariant lower casing.
+    /// Whether CoreCLR's case-insensitive map, which hashes and compares names upper-cased, takes
+    /// `a` and `b` for one name. Exact when one of them is ASCII: the only characters outside ASCII
+    /// which either fold upper-cases to an ASCII letter are dotless `ı` and the long s.
     let private equalIgnoringCase (a : string) (b : string) : bool =
         String.Equals (upperFold a, upperFold b, StringComparison.Ordinal)
-        || String.Equals (a.ToLowerInvariant (), b.ToLowerInvariant (), StringComparison.Ordinal)
 
     /// `OrdinalIgnoreCase` folds no non-ASCII character to an ASCII one, so against an ASCII
     /// suffix it ignores ASCII case alone, as CoreCLR's `EndsWithCaseInsensitive` does there.
@@ -95,24 +94,20 @@ module internal TrustedPlatformAssemblies =
         | Some refusal -> Error refusal
         | None ->
 
-        let names = paths |> Map.keys |> Array.ofSeq
-        let upper = names |> Array.map upperFold
-        let lower = names |> Array.map (fun n -> n.ToLowerInvariant ())
-
+        // The names are ASCII by now, so folding is an equivalence: the first spelling of each
+        // folded name is the earliest name it collides with.
         let collision =
-            seq {
-                for k in 0 .. names.Length - 1 do
-                    match
-                        seq { 0 .. k - 1 }
-                        |> Seq.tryFind (fun j ->
-                            String.Equals (upper.[j], upper.[k], StringComparison.Ordinal)
-                            || String.Equals (lower.[j], lower.[k], StringComparison.Ordinal)
-                        )
-                    with
-                    | Some j -> yield TpaRefusal.NamesEqualIgnoringCase (names.[j], names.[k])
-                    | None -> ()
-            }
-            |> Seq.tryHead
+            paths
+            |> Map.keys
+            |> Seq.fold
+                (fun (first : Map<string, string>, found : TpaRefusal option) name ->
+                    match found, Map.tryFind (upperFold name) first with
+                    | Some _, _ -> first, found
+                    | None, Some earlier -> first, Some (TpaRefusal.NamesEqualIgnoringCase (earlier, name))
+                    | None, None -> Map.add (upperFold name) name first, None
+                )
+                (Map.empty, None)
+            |> snd
 
         match collision with
         | Some refusal -> Error refusal
