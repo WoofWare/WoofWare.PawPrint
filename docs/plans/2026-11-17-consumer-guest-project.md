@@ -990,7 +990,9 @@ specifies and leaves the choice to the decider.
   oracle refuses exactly what PawPrint refuses.
 * Every entry overlays the test host's environment, so a `DOTNET_*` variable there reaches the real runtime: Codex
   measured `DOTNET_STARTUP_HOOKS` being prepended to a supplied `STARTUP_HOOKS`. The globalisation paragraph above is
-  the same exposure; clearing such variables would change every entry.
+  the same exposure; clearing such variables would change every entry. A relative `TMPDIR` is another: the child
+  reads it against the assembly's directory, and Codex saw the guest's own runtime create its `clr-debug-pipe-*` files
+  there while it ran.
 * For an assembly lying directly in the temp directory, the scratch directory exists beside it for a moment before
   the refusal removes it. The refusal needs it to exist, since its random name is what makes the check sound, and no
   guest runs in that window.
