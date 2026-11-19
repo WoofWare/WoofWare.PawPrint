@@ -351,13 +351,19 @@ module TestConsumerCases =
 
             reraise ()
 
-    [<TestCaseSource(nameof scenarios)>]
-    let ``Consumer scenario`` (scenario : string) : unit =
-        match (onRuntime (FrameworkUnderTest.runtime ())).Parked.TryFind scenario with
-        | Some reason -> Assert.Inconclusive $"Consumer scenario '%s{scenario}' is parked: %s{reason}"
-        | None -> ()
+    /// The scenarios not parked on the runtime under test.
+    let running () : string list =
+        let parked = (onRuntime (FrameworkUnderTest.runtime ())).Parked
+        scenarios |> List.filter (fun scenario -> not (parked.ContainsKey scenario))
 
-        runScenario scenario
+    [<TestCaseSource(nameof running)>]
+    let ``Consumer scenario`` (scenario : string) : unit = runScenario scenario
+
+    /// Each parked scenario, run as an unparked one is. Method-level `Explicit`, so a category
+    /// filter skips it and a filter naming the scenario runs it, to see whether it now passes.
+    [<TestCaseSource(nameof unimplemented)>]
+    [<Explicit>]
+    let ``Consumer scenario, parked`` (scenario : string) : unit = runScenario scenario
 
     /// The checks of the publish, which every other test here makes first, by themselves.
     [<Test>]
