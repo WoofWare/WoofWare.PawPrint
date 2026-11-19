@@ -10,9 +10,19 @@
     "hash": "sha256-9mfcPuHk6ui2L5RZI7U0D8DLvLr7JGAkiwN7rbdtT3Y="
   },
   {
+    "pname": "Castle.Core",
+    "version": "5.1.1",
+    "hash": "sha256-oVkQB+ON7S6Q27OhXrTLaxTL0kWB58HZaFFuiw4iTrE="
+  },
+  {
     "pname": "CommandLineParser",
     "version": "2.9.1",
     "hash": "sha256-ApU9y1yX60daSjPk3KYDBeJ7XZByKW8hse9NRZGcjeo="
+  },
+  {
+    "pname": "FakeItEasy",
+    "version": "8.0.0",
+    "hash": "sha256-33jjJjtF/BcEwomaKAflAM1btDTibR0LMBJiN7ESMiw="
   },
   {
     "pname": "fantomas",
@@ -345,6 +355,11 @@
     "hash": "sha256-1cxHWcvHRD7orQ3EEEPPxVGEkTpxom1/zoICC9SInJs="
   },
   {
+    "pname": "Moq",
+    "version": "4.20.72",
+    "hash": "sha256-+uAc/6xtzij9YnmZrhZwc+4vUgx6cppZsWQli3CGQ8o="
+  },
+  {
     "pname": "Myriad.Core",
     "version": "0.8.3",
     "hash": "sha256-vBOxfq8QriX/yUtaXN69rEQaY/psRNJWxqATLidrt2g="
@@ -363,6 +378,11 @@
     "pname": "Newtonsoft.Json",
     "version": "13.0.3",
     "hash": "sha256-hy/BieY4qxBWVVsDqqOPaLy1QobiIapkbrESm6v2PHc="
+  },
+  {
+    "pname": "NSubstitute",
+    "version": "5.1.0",
+    "hash": "sha256-ORpubFd6VoRjA9ZeyZdJPY/xnQXM90O6McMswt8VVG4="
   },
   {
     "pname": "NUnit",
@@ -413,6 +433,11 @@
     "pname": "System.Diagnostics.DiagnosticSource",
     "version": "9.0.2",
     "hash": "sha256-vhlhNgWeEosMB3DyneAUgH2nlpHORo7vAIo5Bx5Dgrc="
+  },
+  {
+    "pname": "System.Diagnostics.EventLog",
+    "version": "6.0.0",
+    "hash": "sha256-zUXIQtAFKbiUMKCrXzO4mOTD5EUphZzghBYKXprowSM="
   },
   {
     "pname": "System.Management",

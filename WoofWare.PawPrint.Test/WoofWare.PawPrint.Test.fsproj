@@ -23,6 +23,7 @@
     <Compile Include="TestPublishedXmlDocumentation.fs" />
     <Compile Include="Assembly.fs" />
     <Compile Include="FrameworkUnderTest.fs" />
+    <Compile Include="GuestPublish.fs" />
     <Compile Include="HostImage.fs" />
     <Compile Include="ParkedOn.fs" />
     <Compile Include="Net11Frontier.fs" />
@@ -547,6 +548,7 @@
     <Compile Include="TestTraceSourceLocations.fs" />
     <Compile Include="TestPureCases.fs" />
     <Compile Include="TestFSharpPureCases.fs" />
+    <Compile Include="TestConsumerCases.fs" />
     <Compile Include="TestImpureCases.fs" />
     <Compile Include="TestSignalTerminatedCases.fs" />
     <Compile Include="TestLibcKillRefusals.fs" />
@@ -649,6 +651,8 @@
     <FootprintInput Include="..\WoofWare.PawPrint.slnx;..\*\*.fsproj;..\*\*.csproj" />
     <!-- TestFSharpPureCases builds this project. -->
     <FootprintInput Include="..\WoofWare.PawPrint.Test.FSharpPureCases" />
+    <!-- TestConsumerCases builds this project. -->
+    <FootprintInput Include="..\WoofWare.PawPrint.Test.ConsumerCases" />
   </ItemGroup>
 
   <ItemGroup>

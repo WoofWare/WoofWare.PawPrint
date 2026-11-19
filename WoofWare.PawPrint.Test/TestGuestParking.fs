@@ -263,6 +263,77 @@ module TestGuestParking =
         |> shouldEqual []
 
     [<Test>]
+    let ``Consumer scenarios parked or ending specially everywhere are so on every runtime`` () : unit =
+        for runtime in everyRuntime do
+            let cases = TestConsumerCases.onRuntime runtime
+            assertFoldedIn $"%O{runtime} parks" TestConsumerCases.parkedEverywhere cases.Parked
+            assertFoldedIn $"%O{runtime} endings" TestConsumerCases.endingsEverywhere cases.Endings
+            assertReasonsNotBlank $"%O{runtime}" (Map.toList cases.Parked)
+
+    /// The guest runs the first scenario of a name, so a second of the same name, listed by both the
+    /// guest and the fixture, would never run.
+    [<Test>]
+    let ``No two consumer scenarios share a name`` () : unit =
+        TestConsumerCases.scenarios
+        |> List.countBy id
+        |> List.filter (fun (_, count) -> count > 1)
+        |> List.map fst
+        |> shouldEqual []
+
+    [<Test>]
+    let ``Every consumer scenario a table names is a consumer scenario`` () : unit =
+        let known = Set.ofList TestConsumerCases.scenarios
+
+        [
+            for runtime in everyRuntime do
+                let cases = TestConsumerCases.onRuntime runtime
+                yield! Map.keys cases.Parked
+                yield! Map.keys cases.Endings
+            yield! Map.keys TestConsumerCases.generatedTypeWitnesses
+        ]
+        |> List.filter (fun name -> not (known.Contains name))
+        |> List.distinct
+        |> shouldEqual []
+
+    /// Agreement with the real runtime cannot show that a library emitted code: both sides could
+    /// take a path that never does. So on every runtime, each library with a scenario that runs
+    /// there has a scenario running there whose run must print a line that only a generated type
+    /// produces. A parked scenario runs only on the real runtime, so it witnesses nothing.
+    [<Test>]
+    let ``Every consumer library has a running scenario that shows it generated a type`` () : unit =
+        let libraries = Set.ofList TestConsumerCases.libraries
+
+        // Every scenario names a known library, and every library has a scenario.
+        TestConsumerCases.scenarios
+        |> List.map TestConsumerCases.libraryOf
+        |> Set.ofList
+        |> shouldEqual libraries
+
+        for runtime in everyRuntime do
+            let parked = (TestConsumerCases.onRuntime runtime).Parked
+
+            let running (scenario : string) : bool = not (parked.ContainsKey scenario)
+
+            let active =
+                TestConsumerCases.scenarios
+                |> List.filter running
+                |> List.map TestConsumerCases.libraryOf
+                |> Set.ofList
+
+            let witnessed =
+                TestConsumerCases.generatedTypeWitnesses
+                |> Map.keys
+                |> Seq.filter running
+                |> Seq.map TestConsumerCases.libraryOf
+                |> Set.ofSeq
+
+            let unwitnessed = Set.difference active witnessed |> Set.toList
+
+            if not unwitnessed.IsEmpty then
+                failwith
+                    $"On %O{runtime}, these libraries have running scenarios but no running scenario that shows a generated type: %A{unwitnessed}"
+
+    [<Test>]
     let ``Impure cases parked everywhere are so on every runtime, and every registered case runs or is parked``
         ()
         : unit
