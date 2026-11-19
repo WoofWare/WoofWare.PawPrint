@@ -30,6 +30,10 @@ open WoofWare.PawPrint
 /// arguments (`RuntimeTypeInterfaces.ofInstantiation`), and a closed receiver's is
 /// `interfaceMapOf`'s; every closed receiver of every corpus also checks that the first, given the
 /// receiver's closed arguments, gives the second's handles.
+///
+/// Every receiver of every corpus also checks the name `GetUtf8NameInternal` answers for each type
+/// managed code names when it looks an interface up by name, against the host's
+/// `RuntimeTypeHandle.GetUtf8Name`: each entry, and an SZ array's appended generic interfaces.
 [<TestFixture>]
 [<Parallelizable(ParallelScope.All)>]
 module TestGetInterfacesOrder =
@@ -163,8 +167,73 @@ module TestGetInterfacesOrder =
                 before, Some $"%O{receiver}: the cross-check threw %s{firstLine e.Message}"
         | _ -> state, None
 
+    /// The host's `RuntimeTypeHandle.GetUtf8Name`, which reads the name `GetUtf8NameInternal` answers.
+    let private hostUtf8Name : Type -> string =
+        let runtimeType = typeof<obj>.GetType ()
+
+        let getUtf8Name =
+            match
+                typeof<RuntimeTypeHandle>
+                    .GetMethod (
+                        "GetUtf8Name",
+                        Reflection.BindingFlags.NonPublic ||| Reflection.BindingFlags.Static,
+                        [| runtimeType |]
+                    )
+            with
+            | null -> failwith "the host's RuntimeTypeHandle has no GetUtf8Name(RuntimeType)"
+            | m -> m
+
+        fun (t : Type) -> (getUtf8Name.Invoke ((null : obj), [| box t |])).ToString ()
+
+    /// The types whose names managed code asks for when it looks `receiver`'s interfaces up by name:
+    /// every entry of the QCall's answer and, for an SZ array whose element is not a pointer, the
+    /// generic interfaces `AddSpecialInterface` appends over its element.
+    let private namedByGetInterface (receiver : Type) : Type list =
+        let special =
+            if receiver.IsSZArray && not (receiver.GetElementType ()).IsPointer then
+                receiver.GetInterfaces ()
+                |> Array.skip (typeof<Array>.GetInterfaces ()).Length
+                |> List.ofArray
+            else
+                []
+
+        hostAnswer receiver @ special
+
+    /// Compare the name PawPrint's `GetUtf8NameInternal` answers for each type `namedByGetInterface`
+    /// gives with the host's, giving why they differ, if they do.
+    let private compareNames
+        (images : HostTypeTarget.Images)
+        (state : IlMachineState)
+        (receiver : Type)
+        : IlMachineState * string option
+        =
+        let before = state
+
+        try
+            let state, mismatches =
+                ((state, []), namedByGetInterface receiver)
+                ||> List.fold (fun (state, mismatches) iface ->
+                    let state, target = HostTypeTarget.target loggerFactory bct images state iface
+                    let expected = hostUtf8Name iface
+                    let actual = NativeRuntimeTypeFCall.utf8Name "test" state target
+
+                    if actual = expected then
+                        state, mismatches
+                    else
+                        state, $"%O{iface} is %s{actual}, host %s{expected}" :: mismatches
+                )
+
+            match mismatches with
+            | [] -> state, None
+            | mismatches ->
+                let shown = mismatches |> List.rev |> String.concat "; "
+                state, Some $"%O{receiver}: names differ: %s{shown}"
+        with e ->
+            before, Some $"%O{receiver}: naming threw %s{firstLine e.Message}"
+
     /// Compare PawPrint's answer for `receiver` with the host's, giving why they differ, if they do;
-    /// for a closed receiver, `crossCheck` too.
+    /// for a closed receiver, `crossCheck` too; and the name of each interface managed code names
+    /// when it looks one up by name.
     let private compareReceiver
         (images : HostTypeTarget.Images)
         (state : IlMachineState)
@@ -179,7 +248,9 @@ module TestGetInterfacesOrder =
             let state, receiverTarget =
                 HostTypeTarget.target loggerFactory bct images state receiver
 
-            crossCheck state receiver receiverTarget
+            match crossCheck state receiver receiverTarget with
+            | state, Some failure -> state, Some failure
+            | state, None -> compareNames images state receiver
 
     let private report (label : string) (failures : string list) : unit =
         if not failures.IsEmpty then
@@ -3452,28 +3523,19 @@ public static unsafe class Program
         |> CrossAssemblyHarness.runTest
 
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
-    /// expects; PawPrint must stop where managed code asks `GetUtf8NameInternal` for the name of an
-    /// open construction (#2315).
-    let private refusesOpenConstructionName (name : string) (program : string) : unit =
+    /// expects; PawPrint must answer the same.
+    let private agreesOn (name : string) (program : string) : unit =
         {
             Assemblies = [ CrossAssemblySpec.entryPoint name [] [ program ] ]
             EntryAssemblyName = name
             ExpectedReturnCode = 0
         }
-        |> CrossAssemblyHarness.runTestExpectingRefusal
-            [
-                "TODO"
-                "open constructed types are not handled"
-                "NativeRuntimeTypeFCall"
-                "GetUtf8NameInternal"
-            ]
-            []
-            []
+        |> CrossAssemblyHarness.runTest
 
     /// The QCall answers an array over a variable with `System.Array`'s map; managed code then names
-    /// each SZ-array interface it appends, `IList<T>` first (#2315).
+    /// each SZ-array interface it appends, `IList<T>` first, an open construction (#2315).
     [<Test>]
-    let ``An array over a variable stops at the name of an open construction`` () : unit =
+    let ``An array over a variable answers its eleven interfaces`` () : unit =
         """
 using System;
 using System.Collections;
@@ -3502,12 +3564,12 @@ public static class Program
     }
 }
 """
-        |> refusesOpenConstructionName "ArrayOverVariable"
+        |> agreesOn "ArrayOverVariable"
 
     /// `GetInterface(name)` names every interface the receiver has, so on an open receiver it names
     /// an open construction (#2315).
     [<Test>]
-    let ``GetInterface by name on a definition stops at the name of an open construction`` () : unit =
+    let ``GetInterface by name on a definition answers an open construction`` () : unit =
         """
 using System;
 using System.Collections.Generic;
@@ -3523,7 +3585,7 @@ public static class Program
     }
 }
 """
-        |> refusesOpenConstructionName "GetInterfaceByNameOnDefinition"
+        |> agreesOn "GetInterfaceByNameOnDefinition"
 
     /// A definition whose base classes have no interfaces answers its own closed rows, each followed
     /// by its parents, whether its base is `object`, a closed class, or an open construction over its
