@@ -7,6 +7,65 @@ open NativeRuntimeTypeHelpers
 
 [<RequireQualifiedAccess>]
 module NativeRuntimeTypeFCall =
+    /// The name `RuntimeTypeHandle.GetUtf8NameInternal` answers for `target`: the Name column of the
+    /// TypeDef row that its MethodTable's `GetCl()` names. Fails for a target with no such row: an
+    /// array, a TypeDesc or a type variable, which the managed wrapper `RuntimeTypeHandle.GetUtf8Name`
+    /// refuses before calling the FCall, and the class that owns a module's `Reflection.Emit` dynamic
+    /// methods, which the wrapper lets through and which has no metadata to read.
+    let internal utf8Name (operation : string) (state : IlMachineState) (target : RuntimeTypeHandleTarget) : string =
+        // Only a type with a TypeDef row has a name to read. CoreCLR asserts exactly
+        // this (`_ASSERTE(!IsNilToken(tkTypeDef))`) and relies on the managed wrapper
+        // RuntimeTypeHandle.GetUtf8Name (RuntimeHandles.cs:667-673) having already
+        // thrown ArgumentException for TypeDescs and for arrays — whose MethodTables
+        // are synthesised and carry a nil token. Reaching here with one of those shapes
+        // means the wrapper's guard was bypassed, so fail rather than invent a name.
+        match target with
+        | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
+            RuntimeTypeHandleTarget.refuseMetadataQuery operation scopeAssembly
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as typeHandle) ->
+            match IlMachineState.tryGetConcreteTypeInfo state typeHandle with
+            | Some (_, typeInfo) -> typeInfo.Name
+            | None -> failwith $"%s{operation}: concrete type handle was not registered: %O{typeHandle}"
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition definition
+        | RuntimeTypeHandleTarget.OpenConstructed (definition, _) ->
+            // A MethodTable's `GetCl()` is its generic definition's TypeDef token for every
+            // instantiation, open or closed: CoreCLR's MethodTable for `typeof(G<>)` (`G` over its own
+            // variables) and for an open construction such as `IList<T>` over `List<>`'s `T` both
+            // carry it, and the managed wrapper lets both through, being neither a TypeDesc nor an
+            // array. So each answers the definition's name, as a closed instantiation does.
+            let assembly =
+                state.LoadedAssembly definition.AssemblyFullName
+                |> Option.defaultWith (fun () ->
+                    failwith
+                        $"%s{operation}: assembly for generic type definition is not loaded: %s{definition.AssemblyFullName}"
+                )
+
+            assembly.TypeDefs.[definition.TypeDefinition.Get].Name
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
+            ContinuationType.unasked operation layout
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _ as typeHandle)
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _ as typeHandle) ->
+            failwith
+                $"%s{operation}: array type %O{typeHandle} reached the FCall; arrays have no TypeDef row, and the managed wrapper throws ArgumentException for them before this point"
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _ as typeHandle)
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer _ as typeHandle)
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _ as typeHandle) ->
+            failwith
+                $"%s{operation}: TypeDesc handle %O{typeHandle} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
+        | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) ->
+            failwith
+                $"%s{operation}: array type %O{target} reached the FCall; arrays have no TypeDef row, and the managed wrapper throws ArgumentException for them before this point"
+        | RuntimeTypeHandleTarget.Composite ((CompositeShape.Byref | CompositeShape.Pointer), _)
+        | RuntimeTypeHandleTarget.FunctionPointer _ ->
+            failwith
+                $"%s{operation}: TypeDesc handle %O{target} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
+        | RuntimeTypeHandleTarget.GenericParameter (declaringType, position) ->
+            failwith
+                $"%s{operation}: generic parameter #%i{position} of %O{declaringType.TypeDefinition.Get} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
+        | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, position) ->
+            failwith
+                $"%s{operation}: method generic parameter #%i{position} of method %O{declaringMethod.Get} on %O{declaringType.TypeDefinition.Get} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
+
     let tryExecute (ctx : NativeCallContext) : NativeHandlerResult option =
         let state = ctx.State
         let instruction = ctx.Instruction
@@ -236,70 +295,7 @@ module NativeRuntimeTypeFCall =
                     operation
                     (instruction.Arguments.[0] |> EvalStackValue.ofCliType)
 
-            // Only a type with a TypeDef row has a name to read. CoreCLR asserts exactly
-            // this (`_ASSERTE(!IsNilToken(tkTypeDef))`) and relies on the managed wrapper
-            // RuntimeTypeHandle.GetUtf8Name (RuntimeHandles.cs:667-673) having already
-            // thrown ArgumentException for TypeDescs and for arrays — whose MethodTables
-            // are synthesised and carry a nil token. Reaching here with one of those shapes
-            // means the wrapper's guard was bypassed, so fail rather than invent a name.
-            let name =
-                match typeHandleTarget with
-                | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
-                    RuntimeTypeHandleTarget.refuseMetadataQuery operation scopeAssembly
-                | RuntimeTypeHandleTarget.OpenConstructed _ as openConstructed ->
-                    failwith
-                        $"TODO: open constructed types are not handled at Native/NativeRuntimeTypeFCall.fs:%s{__LINE__}; got %O{openConstructed}"
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as typeHandle) ->
-                    match IlMachineState.tryGetConcreteTypeInfo state typeHandle with
-                    | Some (_, typeInfo) -> typeInfo.Name
-                    | None -> failwith $"%s{operation}: concrete type handle was not registered: %O{typeHandle}"
-                | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity ->
-                    // CoreCLR's canonical MethodTable for an open definition (`G<__Canon>`)
-                    // carries the definition's own TypeDef token, and the managed wrapper
-                    // lets it through: it is neither a TypeDesc nor an array. So
-                    // `typeof(G<>)` legitimately names itself, and our identity already
-                    // holds exactly the token `GetCl()` would return.
-                    //
-                    // Not covered by a test: every route that would deliver an open
-                    // definition here is blocked further upstream today —
-                    // `PopulateNestedClasses`' name filter (`RuntimeType.CoreCLR.cs:1130`)
-                    // needs nested-type enumeration, which fails in
-                    // `NativeMetadataImport.tryExecuteQCall`, and `PopulateInterfaces` on an
-                    // open definition needs bound-shared interface MTs, which
-                    // `RuntimeTypeHandle_GetInterfaces` refuses. Handling it is still right:
-                    // the alternative is failing loudly on input CoreCLR accepts.
-                    let assembly =
-                        state.LoadedAssembly identity.AssemblyFullName
-                        |> Option.defaultWith (fun () ->
-                            failwith
-                                $"%s{operation}: assembly for open generic type definition is not loaded: %s{identity.AssemblyFullName}"
-                        )
-
-                    assembly.TypeDefs.[identity.TypeDefinition.Get].Name
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
-                    ContinuationType.unasked operation layout
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _ as typeHandle)
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _ as typeHandle) ->
-                    failwith
-                        $"%s{operation}: array type %O{typeHandle} reached the FCall; arrays have no TypeDef row, and the managed wrapper throws ArgumentException for them before this point"
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _ as typeHandle)
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer _ as typeHandle)
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _ as typeHandle) ->
-                    failwith
-                        $"%s{operation}: TypeDesc handle %O{typeHandle} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
-                | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) ->
-                    failwith
-                        $"%s{operation}: array type %O{typeHandleTarget} reached the FCall; arrays have no TypeDef row, and the managed wrapper throws ArgumentException for them before this point"
-                | RuntimeTypeHandleTarget.Composite ((CompositeShape.Byref | CompositeShape.Pointer), _)
-                | RuntimeTypeHandleTarget.FunctionPointer _ ->
-                    failwith
-                        $"%s{operation}: TypeDesc handle %O{typeHandleTarget} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
-                | RuntimeTypeHandleTarget.GenericParameter (declaringType, position) ->
-                    failwith
-                        $"%s{operation}: generic parameter #%i{position} of %O{declaringType.TypeDefinition.Get} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
-                | RuntimeTypeHandleTarget.MethodGenericParameter (declaringType, declaringMethod, position) ->
-                    failwith
-                        $"%s{operation}: method generic parameter #%i{position} of method %O{declaringMethod.Get} on %O{declaringType.TypeDefinition.Get} reached the FCall; the managed wrapper throws ArgumentException for `IsTypeDesc` before this point"
+            let name = utf8Name operation state typeHandleTarget
 
             let namePtr, state =
                 NativeCall.allocateNullTerminatedUtf8 ctx.BaseClassTypes name state
