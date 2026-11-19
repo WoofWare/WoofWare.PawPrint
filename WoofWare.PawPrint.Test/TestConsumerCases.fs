@@ -267,20 +267,6 @@ module TestConsumerCases =
         |> strict.GetString
         |> asLines
 
-    /// How a run ended, as a scenario's expected ending can state it, or how it ended otherwise.
-    let private pawPrintEnding (runEnd : RunEnd) : Result<GuestEnding, string> =
-        match runEnd with
-        | RunEnd.Ended (RunOutcome.NormalExit (state, _, _)) -> Ok (GuestEnding.ExitCode state.LatchedExitCode)
-        | RunEnd.Ended (RunOutcome.GuestUnhandledException (state, _, exn, _)) ->
-            Error $"ended by an unhandled exception:\n%s{UnhandledExceptionReport.describe state exn}"
-        | RunEnd.Ended (RunOutcome.ProcessExit (state, _, _)) ->
-            Error $"called Environment.Exit with code %d{state.LatchedExitCode}"
-        | RunEnd.Ended (RunOutcome.Aborted (_, _, fatal, _)) ->
-            let message = fatal.Message |> Option.defaultValue "<no message>"
-            Error $"aborted (%O{fatal.Code}): %s{message}"
-        | RunEnd.Ended (RunOutcome.SignalTerminated (_, signal, coreDumped)) ->
-            Error $"was killed by %O{signal} (core dumped: %b{coreDumped})"
-
     let private runScenario (scenario : string) : unit =
         let guest = published.Force ()
         let image = File.ReadAllBytes guest.Dll
@@ -328,11 +314,23 @@ module TestConsumerCases =
             | Ok () -> ()
             | Error message -> failwith $"%s{message}\n%s{report}"
 
-            match pawPrintEnding pawPrint with
-            | Ok ending when ending = expected -> ()
-            | Ok ending ->
-                failwith $"PawPrint ended %A{ending} for %s{scenario}, but %A{expected} was expected.\n%s{report}"
-            | Error how -> failwith $"PawPrint %s{how} for %s{scenario}, but %A{expected} was expected.\n%s{report}"
+            // The real runtime has ended as expected, so this is the comparison every differential
+            // fixture makes: PawPrint ended the same way, an `Environment.Exit` counting as a normal
+            // exit, with its kernel's termination status agreeing.
+            let expectedExitCode, expectsUnhandledException =
+                match expected with
+                | GuestEnding.ExitCode code -> code, false
+                | GuestEnding.UnhandledException -> 0, true
+
+            try
+                DifferentialOracle.compareOutcomes
+                    scenario
+                    expectedExitCode
+                    expectsUnhandledException
+                    real.Result
+                    pawPrint
+            with e ->
+                failwith $"%s{e.Message}\n%s{report}"
 
             if pawPrintStdout <> real.Stdout then
                 failwith
