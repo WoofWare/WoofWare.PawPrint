@@ -1204,3 +1204,75 @@ devshell sets. They are accepted as written and do not touch PR 3.
 
 PR 1 (merged or in flight as before) and PR 2 (#2332) are unchanged. **PR 2b**: the environment parameter and its
 four tests. **PR 3**: as decided, with decision 6 amended. One in flight at a time.
+
+### As built (PR 2b)
+
+Branch `test-oracle-environment`, on `main` after #2332. Everything is in `RealRuntime.fs` and
+`TestRealRuntimeInPlace.fs`.
+
+**The oracle.** `captureAssemblyInPlace : AppContextProperties -> string list -> string[] -> string -> CapturedRun`,
+as decision 1 says. The entries go through `oracleEnvironment` first, before any check of the path or any scratch
+directory, and the overlay replaces the empty one `runCapturing` was given. `executeAssemblyInPlace` passes `[]`.
+The docstring says what decision 1 asks it to.
+
+Two changes beyond decision 1, each from Codex's first review and each committed red first:
+
+* `oracleEnvironment` also refuses an entry `EnvironmentPal.tryEncodeEntry` refuses. `ProcessStartInfo` delivers a
+  value with a NUL truncated and an unpaired surrogate as U+FFFD, where PawPrint's kernel refuses both. The function
+  is shared, so `executeWithTimeoutAndSeed` and `executeConcurrently` refuse them too; their callers hand the same
+  entries to `KernelConfig.Environment`, which already refused them.
+* `dotnet exec` is given `--roll-forward Disable`. The host prefers `DOTNET_ROLL_FORWARD`, whether from the entries
+  or the test host, to the runtimeconfig's `rollForward`. With `DOTNET_ROLL_FORWARD=LatestMajor` and
+  `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`, the .NET 10 leg ran the guest on .NET 11. The host prefers the command
+  line to the environment.
+
+**The tests**, in the default suite:
+
+* decision 1's four. The property test expects, for `WOOFWARE_TEST_ABSENT`, whatever the test host holds, since
+  the overlay does not unset it. The replacement test takes the first two host variables whose names are plain
+  ASCII letters, digits and underscores and that the launch does not read. It replaces the first and checks that
+  the guest inherits the second. It compares what the guest printed without showing it, since host variables may be
+  credentials. The globalisation test also states `DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1`,
+  because a test host that set it to `0` would let invariant mode construct `fr-FR`. The refusal test covers no
+  `=`, a leading `=`, and one name twice. In each case it checks that the guest wrote no marker file.
+* an entry with a NUL and one with an unpaired surrogate are refused, not run;
+* entries asking to roll forward leave the guest on the framework under test.
+
+**For PR 3.** PR 3's shared environment should also state
+`DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1` for the same reason. On PawPrint's side it changes
+nothing, since under invariant mode that setting already defaults to true. Codex raised this against decision 6's
+amendment, and the choice is PR 3's to make.
+
+**Codex findings not addressed here.**
+
+* An entry, or a test host variable, can stop the host before `Main`, and the host's exit code then reads as the
+  guest's. `DOTNET_ROLL_FORWARD=junk` gives `NormalExit 147`, and `DOTNET_DISABLE_RUNTIME_VERSIONS` naming the
+  framework under test gives `NormalExit 150`. This is the general gap of decision 2, which declined to special-case
+  exit codes. The inherited case is #2334. A list of variables to refuse would be option B's unmeasured list.
+* An entry such as `LC_ALL=en_US.ISO-8859-1` changes the guest's console encoding, but `runCapturing` decodes as
+  UTF-8, so non-ASCII output is lost. An inherited locale does the same, which belongs to #2334.
+* On Windows, `oracleEnvironment` accepts two names differing only in case, which `ProcessStartInfo.Environment`
+  merges. This predates PR 2b in every oracle entry, and no CI job runs on Windows.
+
+**Measured.**
+
+* Red, against a `captureAssemblyInPlace` that took the parameter and ignored it: six of 27 tests in the file
+  failed. These were the property test, the replacement test, the globalisation test (`constructed fr-FR`) and the
+  three refusal cases. The NUL/surrogate test and the roll-forward test were each red against the code before their
+  fix. The NUL/surrogate test failed because the guest ran. The roll-forward test ran on .NET 11. The test fix for a
+  host variable whose name holds a carriage return was red and then green with such a variable inherited.
+* At the final commit, on .NET 10.0.14 on macOS, the default suite had 5965 tests: 5926 passed and 39 were
+  skipped. `Guest` had 234 tests, all passed. The file's 29 tests also pass on .NET 11
+  (`PAWPRINT_TEST_RUNTIME=Net11`).
+
+**Mutation testing**, each mutant applied to the final `RealRuntime.fs`, with the file's tests run against it:
+
+| mutant | tests that failed |
+|---|---|
+| environment not passed (`Map.empty` to `runCapturing`) | the property, replacement and globalisation tests |
+| the host's value wins over the entry (`runCapturing` sets only names the host lacks) | the replacement test |
+| the child's environment cleared before the overlay | the replacement test (the inherited variable) |
+| refusal removed (bad entries skipped, last duplicate wins) | the three refusal cases, and the NUL/surrogate test |
+| refusal made after the guest has run | the same four, each at the marker file |
+| encodability check removed | the NUL/surrogate test |
+| `--roll-forward Disable` dropped | the roll-forward test |
