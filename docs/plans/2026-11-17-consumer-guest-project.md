@@ -1062,3 +1062,231 @@ where a row says "the code before", the mutant is the code the red commit ran ag
 The surviving mutant survives because no test can see the scratch directory: other tests create and remove their own
 beside it at the same moment, so a listing of the temp directory before and after a run cannot tell whose is whose.
 The scratch directories of `executeWithTimeoutAndSeed` and `executeConcurrently` are untested in the same way.
+
+### Decisions before PR 3
+
+Decided 2026-11-19 by the delegated decider, against `test-capturing-oracle` at `7121dd52f` (#2332, enqueued).
+Three things were checked while deciding:
+
+* **The environment variable wins** (read, and measured again on real .NET 10.0.14 in the devshell).
+  `AppContextConfigHelper.GetBooleanConfig (switchName, envVariable)` in the pinned source returns the variable's
+  value whenever it is `0`, `1`, `true` or `false`, and reads the property only otherwise. Measured with a guest
+  that constructs `CultureInfo("fr-FR")`: property `true` with the variable `0` constructs it; property `false`
+  with the variable `1` throws `CultureNotFoundException`; property `true` with the variable unset throws. The
+  devshell does not set the variable, so today an oracle child with no property runs with the host's ICU.
+* **PawPrint's guest never sees the host's environment** (read). Its environment is
+  `EmulatedKernel.defaultEnvironment` (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`) and then
+  `KernelConfig.Environment`, an entry of which displaces a default of the same name. `runCapturing` overlays its
+  `environment` on the test host's own, and `captureAssemblyInPlace` passes `Map.empty`.
+* **`APP_PATHS` naming a relative path exits 137** (measured: `Failed to create CoreCLR, HRESULT: 0x80070057`, and
+  137 is the low byte of `CoreClrInitFailure`, `0x80008089`). `ApplicationContext::SetupBindingPaths` in
+  `coreclr/binder/applicationcontext.cpp` returns `E_INVALIDARG` for a relative entry. An absolute value runs.
+
+#### 1. The oracle takes the guest's environment, in a PR of its own before PR 3
+
+Options considered:
+
+* **A. `captureAssemblyInPlace` takes the environment, and the fixture states it once for both sides.** The
+  parameter is `environment : string list`, in `KernelConfig.Environment`'s form, through the existing
+  `oracleEnvironment`, exactly as `executeWithTimeoutAndSeed` and `executeConcurrently` take theirs.
+  `TestAspNetTwoProcess` already works this way and already names this variable. It changes no existing caller's
+  behaviour. It closes the globalisation gap completely, because an overlaid name replaces the host's value. It
+  leaves every variable the fixture does not name inherited.
+* **B. Every oracle child starts from the environment PawPrint's kernel holds, not from the host's.** Either strip
+  `DOTNET_*` and `COMPlus_*` in `runCapturing`, or clear the environment and add back what the muxer needs. This is
+  what "real .NET as the guest would be launched" finally means, and it also answers `DOTNET_STARTUP_HOOKS` and
+  `TMPDIR`. It changes about 1750 guest oracle runs and the default suite's at once, needs an allow-list nobody has
+  measured (the muxer's own variables, the devshell's, the CI job's four `DOTNET_*` settings), and turns real .NET
+  invariant in every existing comparison, some of which may pass today only by the difference.
+* **C. Accept and document.** No code. The fixture then compares two runs which it knows can differ by the
+  developer's shell, in a project whose purpose is that they cannot.
+
+**A, now. B is filed as an issue (#2334) and is not part of this
+plan.** A is right however B is later settled: B needs a way to say what the guest's environment is, and A's
+parameter is that. If A proves wrong it is one parameter with one caller. B's blast radius is every oracle
+comparison in the repository, and it should not arrive as a side effect of a guest project. C is rejected: the gap
+is a wrong answer that depends on the machine, and closing it costs one parameter.
+
+**Its own PR ("PR 2b"), branched from `origin/main` once #2332 has merged; PR 3 waits for it.** It touches
+`RealRuntime.fs` and `TestRealRuntimeInPlace.fs` only, runs in the default suite, and has its own red tests. PR 3
+is already the largest of the three, and an oracle change inside it would be reviewed as part of a guest project.
+
+Shape:
+
+* `captureAssemblyInPlace : AppContextProperties -> string list -> string[] -> string -> CapturedRun`. The
+  environment is a required parameter, not an optional one or a second function, so that each caller says what it
+  runs with. `executeAssemblyInPlace` passes `[]`; its signature and its fourteen callers do not change.
+* The docstring says what `executeWithTimeoutAndSeed`'s says: the entries are overlaid on the test host's
+  environment, the two environments still differ in every variable the caller did not name, and an entry the
+  overlay cannot express is refused. It also says that the oracle does not add the kernel's default environment,
+  so a caller comparing with PawPrint names `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` itself.
+
+Tests, in `TestRealRuntimeInPlace.fs`, committed red first against a `captureAssemblyInPlace` which takes the
+parameter and ignores it:
+
+* `the guest reads each environment variable it was given`: an FsCheck property, at most 15 cases, over up to four
+  distinct generated names with values free of NUL; the guest prints `Environment.GetEnvironmentVariable` of each
+  name as UTF-16 hex, and null for a name it was not given.
+* `an environment entry replaces the test host's value of that variable`: choose a variable present in the test
+  host's environment at run time and give the guest another value for it. The test must not set a variable in the
+  test host's own process, which other tests running beside it would see.
+* `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT in the environment decides over the AppContext property`: property
+  `System.Globalization.Invariant` = `false`, entry `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`; the guest's
+  `new CultureInfo("fr-FR")` throws `CultureNotFoundException`. This is the fact decision 6 had backwards, pinned on
+  both runtimes' legs. It needs no ICU once green, since the variable wins. The other direction (property `true`,
+  variable `0`) is not tested: it needs the host's ICU to load.
+* `an environment entry the overlay cannot express is refused, not run`: an entry with no `=`, and one name twice,
+  each failing before any process starts.
+
+Mutation checks for the PR body: the environment not passed (the first three fail); the host's value winning over
+the entry (the second fails). Run the default suite on both runtimes and `Guest` on .NET 10, as PR 2 did at its
+final commit.
+
+**Decision 6 is amended as follows.**
+
+* Strike "The property takes precedence over the environment variable in CoreLib, so stating it on both sides makes
+  them agree whatever the machine." What makes the two sides agree is the variable.
+* `TestConsumerCases.fs` states two values, each handed to both sides: the two AppContext properties as before, and
+  `environment = [ EnvironmentPal.nameValueEntry "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" "1" ]`, which goes to
+  `KernelConfig.Environment` and to `captureAssemblyInPlace`. It is stated, not left to the kernel's default, so
+  that a reader sees what both sides ran with and a change to the default cannot separate them silently.
+* The `System.Globalization.Invariant` property stays, on both sides and in the guest project
+  (`InvariantGlobalization`), with the drift check as decided. Its purpose is now only that a hand run of the publish
+  under `dotnet`, in a shell that does not set the variable, is invariant too. The fixture's docstring says which of
+  the two decides.
+* The fixture's docstring states what remains: every variable it does not name reaches the real runtime from the
+  test host, with a reference to the issue for B, #2334.
+* The thirteen scenarios print nothing that depends on culture, so removing the environment from the oracle call
+  will not turn any of them red. Do not claim that mutation in PR 3's body. PR 2b's third test is the guard.
+
+#### 2. `APP_PATHS` naming a relative path: file an issue, and change nothing in PR 2b or PR 3
+
+Filed as #2333.
+
+PR 3 hands the oracle two fixed properties, and neither is `APP_PATHS`, so no consumer scenario can meet this. The
+fix belongs in `RuntimeConfig.combine`, in the published `WoofWare.PawPrint` package: it is a launch rule, and
+teaching it there makes PawPrint refuse the configuration and, through `runtimeConfigFor`, the oracle too. That is a
+feature of its own, with its own questions (which platform's notion of "relative", the path separator, empty
+entries, `PLATFORM_RESOURCE_ROOTS` under the same check), and "one feature per PR" keeps it out of both.
+
+Not fixed by special-casing exit code 137 in the oracle: 137 is also a guest's own exit code and the shell's
+spelling of SIGKILL, and the general gap (a host that refused to start reads as a guest that exited) is recorded in
+the issue, not solved by one more number.
+
+#### 3. What else in "As built (PR 2)" changes PR 3
+
+Four things, none of which changes the staging beyond PR 2b:
+
+* **The oracle call has four arguments**, as above.
+* **The refusals constrain where the shared publish helper may put the publish and how it spells the path.** The
+  path handed to the oracle must hold no `..`, must not end in `.`, must not be a symbolic link, and its directory
+  must not be the temp directory or above it. `TestFSharpPureCases` publishes under the project's `bin/Release`,
+  and it passed under PR 2, so the helper keeps that: it must not move the publish to a temp directory, and it
+  builds the path by joining names below the repository root that the walk found, never by climbing with `..`. A
+  checkout that itself lies above the temp directory is refused with a message that says so; that is correct.
+* **`TestFrameworkLocatorRatchet` reads guest sources in the test project.** It flagged `Assembly.Location` in PR
+  2's embedded guest. `TestConsumerCases.fs` holds no guest source, and the scenarios' C# lives in the guest
+  project, so run the ratchet's fixture early in PR 3 and expect no new allowance; if one is needed, say why in the
+  PR body.
+* **Nothing needs an `OracleFrameworks` parameter.** The oracle's runtimeconfig names `Microsoft.NETCore.App`
+  alone, which is all the thirteen scenarios and #2314's container need. A guest that needs
+  `Microsoft.AspNetCore.App` adds the parameter in its own PR.
+
+Unchanged: the comparison of lines and not bytes, the empty-stderr requirement, the drift check against the
+publish's `runtimeconfig.json`, the two measurements of decision 5 (now made through the four-argument call, with
+the environment stated), and the oracle's 120-second bound, which no scenario approaches.
+
+The remaining findings in PR 2's list (the scratch directory's moment of existence, the writable working directory,
+`resolveLinks` and a `..` inside a link's target) concern the oracle's own tests and a `TMPDIR` no CI job or
+devshell sets. They are accepted as written and do not touch PR 3.
+
+#### Staging, revised
+
+PR 1 (merged or in flight as before) and PR 2 (#2332) are unchanged. **PR 2b**: the environment parameter and its
+four tests. **PR 3**: as decided, with decision 6 amended. One in flight at a time.
+
+### As built (PR 2b)
+
+Branch `test-oracle-environment`, on `main` after #2332. Everything is in `RealRuntime.fs` and
+`TestRealRuntimeInPlace.fs`.
+
+**The oracle.** `captureAssemblyInPlace : AppContextProperties -> string list -> string[] -> string -> CapturedRun`,
+as decision 1 says. The entries go through `oracleEnvironment` first, before any check of the path or any scratch
+directory, and the overlay replaces the empty one `runCapturing` was given. `executeAssemblyInPlace` passes `[]`.
+The docstring says what decision 1 asks it to.
+
+Two changes beyond decision 1, each from Codex's first review and each committed red first:
+
+* `oracleEnvironment` also refuses an entry `EnvironmentPal.tryEncodeEntry` refuses. `ProcessStartInfo` delivers a
+  value with a NUL truncated and an unpaired surrogate as U+FFFD, where PawPrint's kernel refuses both. The function
+  is shared, so `executeWithTimeoutAndSeed` and `executeConcurrently` refuse them too; their callers hand the same
+  entries to `KernelConfig.Environment`, which already refused them.
+* `dotnet exec` is given `--roll-forward Disable`. The host prefers `DOTNET_ROLL_FORWARD`, whether from the entries
+  or the test host, to the runtimeconfig's `rollForward`. With `DOTNET_ROLL_FORWARD=LatestMajor` and
+  `DOTNET_ROLL_FORWARD_TO_PRERELEASE=1`, the .NET 10 leg ran the guest on .NET 11. The host prefers the command
+  line to the environment. This pins only the framework version the host selects. Other variables given as entries
+  can still change which files the runtime loads (see `CORE_SERVICING` below), and the docstring says the oracle
+  does not police them.
+
+**The tests**, in the default suite:
+
+* decision 1's four. The property test expects, for `WOOFWARE_TEST_ABSENT`, whatever the test host holds, since
+  the overlay does not unset it. The replacement test sets two variables of its own in the test host, under names
+  unique to the run, and unsets them afterwards. It replaces one through an entry and checks that the guest inherits
+  the other, both with known values, and that the test host's value is unchanged. So it reads nothing the test host
+  was started with. This departs from decision 1, which said the test must not set a variable in the test host.
+  The names are unique, so no other test reads them. Taking existing host variables instead failed on a test host
+  started with few variables, and risked showing a credential. The globalisation test also states `DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1`,
+  because a test host that set it to `0` would let invariant mode construct `fr-FR`. The refusal test covers no
+  `=`, a leading `=`, and one name twice. In each case it checks that the guest wrote no marker file.
+* an entry with a NUL and one with an unpaired surrogate are refused, not run;
+* entries asking to roll forward leave the guest on the framework under test.
+
+**For PR 3.** PR 3's shared environment should also state
+`DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY=1` for the same reason. On PawPrint's side it changes
+nothing, since under invariant mode that setting already defaults to true. Codex raised this against decision 6's
+amendment, and the choice is PR 3's to make.
+
+**Codex findings not addressed here.**
+
+* An entry, or a test host variable, can stop the host before `Main`, and the host's exit code then reads as the
+  guest's. `DOTNET_ROLL_FORWARD=junk` gives `NormalExit 147`, and `DOTNET_DISABLE_RUNTIME_VERSIONS` naming the
+  framework under test gives `NormalExit 150`. This is the general gap of decision 2, which declined to special-case
+  exit codes. The inherited case is #2334. A list of variables to refuse would be option B's unmeasured list.
+* An entry such as `LC_ALL=en_US.ISO-8859-1` changes the guest's console encoding, but `runCapturing` decodes as
+  UTF-8, so non-ASCII output is lost (stdout and stderr alike). Codex raised it again in its fifth round, as an
+  entry the caller writes rather than an inherited variable. An inherited locale does the same; both belong to
+  #2334.
+* On Windows, `oracleEnvironment` accepts two names differing only in case, which `ProcessStartInfo.Environment`
+  merges. This predates PR 2b in every oracle entry, and no CI job runs on Windows. Codex's fifth round added that
+  the property test's generator can draw such a pair, so on Windows that test would fail depending on its seed.
+* An entry `CORE_SERVICING` naming a servicing package backed by another runtime replaces the framework's files
+  despite `--roll-forward Disable`. Codex measured a guest on the .NET 10 leg reporting `Environment.Version`
+  11.0.0 and the .NET 11 CoreLib. This is #2334.
+* An entry `TMPDIR=./` makes the guest's own runtime create its `clr-debug-pipe-*` files in the assembly's
+  directory, where the guest sees them while it runs, and which a listing after the run misses. `reachesScratch`
+  checks only the test host's temp directory. This is #2334.
+
+**Measured.**
+
+* Red, against a `captureAssemblyInPlace` that took the parameter and ignored it: six of 27 tests in the file
+  failed. These were the property test, the replacement test, the globalisation test (`constructed fr-FR`) and the
+  three refusal cases. The NUL/surrogate test and the roll-forward test were each red against the code before their
+  fix. The NUL/surrogate test failed because the guest ran. The roll-forward test ran on .NET 11. The replacement
+  test with its own variables passes with the test host started from only `PATH`, `HOME`, `TMPDIR` and
+  `DOTNET_ROOT`.
+* At the final commit, on .NET 10.0.14 on macOS, the default suite had 5965 tests: 5926 passed and 39 were
+  skipped. `Guest` had 234 tests, all passed. The file's 29 tests also pass on .NET 11
+  (`PAWPRINT_TEST_RUNTIME=Net11`).
+
+**Mutation testing**, each mutant applied to the final `RealRuntime.fs`, with the file's tests run against it:
+
+| mutant | tests that failed |
+|---|---|
+| environment not passed (`Map.empty` to `runCapturing`) | the property, replacement and globalisation tests |
+| the host's value wins over the entry (`runCapturing` sets only names the host lacks) | the replacement test |
+| the child's environment cleared before the overlay | the replacement test (the inherited variable read null) |
+| refusal removed (bad entries skipped, last duplicate wins) | the three refusal cases, and the NUL/surrogate test |
+| refusal made after the guest has run | the same four, each at the marker file |
+| encodability check removed | the NUL/surrogate test |
+| `--roll-forward Disable` dropped | the roll-forward test |

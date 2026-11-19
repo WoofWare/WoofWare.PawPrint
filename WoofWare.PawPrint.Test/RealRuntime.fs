@@ -276,10 +276,18 @@ module RealRuntime =
     /// on an entry with no `=`, an entry beginning with `=`, and a second entry
     /// naming a variable: the oracle would otherwise run with a different
     /// environment from the one PawPrint's kernel holds for the same
-    /// description.
+    /// description. It also fails on an entry no process could hold intact
+    /// (see `EnvironmentPal.tryEncodeEntry`), which PawPrint's kernel refuses
+    /// and the child would receive altered.
     let private oracleEnvironment (entries : string list) : Map<string, string> =
         (Map.empty, entries)
         ||> List.fold (fun acc entry ->
+            match EnvironmentPal.tryEncodeEntry entry with
+            | Ok _ -> ()
+            | Error problem ->
+                failwith
+                    $"RealRuntime: the oracle cannot give a guest %s{problem}, since it would reach the guest altered"
+
             match entry.IndexOf '=' with
             | index when index > 0 ->
                 let name = entry.Substring (0, index)
@@ -1017,14 +1025,32 @@ module RealRuntime =
     /// directory with `..` in it is refused. An assembly in the temp directory, or in a
     /// directory above it, is refused, since the scratch directories go there.
     ///
+    /// `environment` holds `KernelConfig.Environment`-style entries, and the variables they set
+    /// are overlaid on the test host's environment in the guest process, as for
+    /// `executeWithTimeoutAndSeed`: a name here replaces the test host's value of it. The guest's
+    /// environment still differs from PawPrint's in every variable the entries do not name, which
+    /// reaches the real runtime from the test host. The oracle does not add the defaults PawPrint's
+    /// kernel seeds, so a caller comparing with PawPrint names
+    /// `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` itself; CoreLib reads that variable in preference to
+    /// the `System.Globalization.Invariant` property. Entries the overlay cannot express are
+    /// refused before any process starts; see `oracleEnvironment`. Roll-forward is disabled on the
+    /// host's command line, which the host prefers to the environment, so `DOTNET_ROLL_FORWARD`,
+    /// from the entries or the test host, cannot move the guest to another framework version. The
+    /// oracle does not police any other variable: an entry naming a host or runtime variable such
+    /// as `CORE_SERVICING`, `TMPDIR` or a locale variable can change where the runtime's files come
+    /// from, where it writes files of its own, and how the guest's output is encoded (issue #2334).
+    ///
     /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
     /// caller comparing them claims the same lines, not the same bytes.
     let captureAssemblyInPlace
         (configProperties : AppContextProperties)
+        (environment : string list)
         (args : string[])
         (dllPath : string)
         : CapturedRun
         =
+        let environment = oracleEnvironment environment
+
         // `Path.GetFullPath`, and so `File.Exists`, collapse `..` by its spelling, while the
         // operating system, after a symbolic link, climbs from the link's target; so a path with
         // `..` in it is refused rather than read two ways. Without it, `Path.GetFullPath` only
@@ -1124,12 +1150,21 @@ module RealRuntime =
             let configPath = Path.Combine (scratch, "guest.runtimeconfig.json")
             File.WriteAllText (configPath, runtimeConfigFor OracleFrameworks.NetCoreApp configProperties)
 
+            // The runtimeconfig already disables roll-forward, but the host prefers
+            // `DOTNET_ROLL_FORWARD`, which `environment` or the test host may set, to it; the
+            // command line is the one setting the host prefers to the environment.
             runCapturing
                 guestTimeout
                 muxerPath
-                ("exec" :: "--runtimeconfig" :: configPath :: dllPath :: List.ofArray args)
+                ("exec"
+                 :: "--roll-forward"
+                 :: "Disable"
+                 :: "--runtimeconfig"
+                 :: configPath
+                 :: dllPath
+                 :: List.ofArray args)
                 directory
-                Map.empty
+                environment
                 StandardStreamsConfig.piped
                 name
         finally
@@ -1139,10 +1174,10 @@ module RealRuntime =
             | :? IOException
             | :? UnauthorizedAccessException -> ()
 
-    /// `captureAssemblyInPlace` with no AppContext properties, echoing what the guest wrote on
-    /// the calling thread.
+    /// `captureAssemblyInPlace` with no AppContext properties and no environment entries, echoing
+    /// what the guest wrote on the calling thread.
     let executeAssemblyInPlace (args : string[]) (dllPath : string) : RealRuntimeResult =
-        let run = captureAssemblyInPlace AppContextProperties.empty args dllPath
+        let run = captureAssemblyInPlace AppContextProperties.empty [] args dllPath
         echo run
         run.Result
 

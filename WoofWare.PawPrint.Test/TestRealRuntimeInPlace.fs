@@ -215,7 +215,7 @@ public static class Program
         let names = (properties |> Map.toList |> List.map fst) @ [ AbsentProperty ]
 
         let run =
-            RealRuntime.captureAssemblyInPlace (AppContextProperties.ofMap properties) (Array.ofList names) dllPath
+            RealRuntime.captureAssemblyInPlace (AppContextProperties.ofMap properties) [] (Array.ofList names) dllPath
 
         let expected =
             names
@@ -251,6 +251,7 @@ public static class Program
                 let run =
                     RealRuntime.captureAssemblyInPlace
                         (AppContextProperties.ofMap (Map.ofList [ "WoofWare.Test.Given", "given" ]))
+                        []
                         [| "WoofWare.Test.Given" ; BesideProperty |]
                         dllPath
 
@@ -277,7 +278,9 @@ public static class Program
 
                 let outcome =
                     try
-                        Ok (RealRuntime.captureAssemblyInPlace (AppContextProperties.ofMap properties) names dllPath)
+                        Ok (
+                            RealRuntime.captureAssemblyInPlace (AppContextProperties.ofMap properties) [] names dllPath
+                        )
                     with e ->
                         Error e.Message
 
@@ -346,6 +349,7 @@ public static class Program
                                                 (AppContextProperties.ofMap (
                                                     Map.ofList [ "WoofWare.Test.Concurrent", value ]
                                                 ))
+                                                []
                                                 [| "WoofWare.Test.Concurrent" |]
                                                 dllPath
                                         ),
@@ -379,6 +383,286 @@ public static class Program
                         )
                     )
             )
+
+    /// A variable no test ever gives the guest, so it reads as the test host's value of it, which
+    /// is null unless the test host was started with it.
+    [<Literal>]
+    let private AbsentVariable = "WOOFWARE_TEST_ABSENT"
+
+    /// Prints a line `<name>=<value>` for each environment variable its arguments name, the value
+    /// as the four-digit hex of each UTF-16 code unit (so that any value is one line of ASCII), or
+    /// `null`.
+    let private printsEnvironmentImage : Lazy<byte[]> =
+        lazy
+            Roslyn.compileAssembly
+                "PrintsEnvironment"
+                OutputKind.ConsoleApplication
+                []
+                [
+                    """
+using System;
+using System.Text;
+
+public static class Program
+{
+    public static int Main(string[] args)
+    {
+        foreach (var name in args)
+        {
+            string value = Environment.GetEnvironmentVariable(name);
+            string shown;
+            if (value is null)
+            {
+                shown = "null";
+            }
+            else
+            {
+                var hex = new StringBuilder();
+                foreach (char c in value)
+                {
+                    hex.Append(((int)c).ToString("X4"));
+                }
+                shown = hex.ToString();
+            }
+            Console.WriteLine(name + "=" + shown);
+        }
+        return 0;
+    }
+}
+"""
+                ]
+
+    /// A variable's name: the test's own prefix, so that no name collides with one the test host,
+    /// the muxer or the runtime gives meaning to.
+    let private genVariableName : Gen<string> =
+        gen {
+            let! length = Gen.choose (1, 12)
+
+            let! chars =
+                Gen.listOfLength
+                    length
+                    (Gen.elements ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_" |> List.ofSeq))
+
+            return "WOOFWARE_TEST_GENERATED_" + System.String (Array.ofList chars)
+        }
+
+    /// Distinct variables with their values. The values are `genValue`'s: free of NUL, which no
+    /// environment entry can hold, and of lone surrogates, which have no UTF-8 encoding.
+    let private genVariables : Gen<Map<string, string>> =
+        gen {
+            let! count = Gen.choose (0, 4)
+            let! names = Gen.listOfLength count genVariableName
+            let! values = Gen.listOfLength count genValue
+            return List.zip names values |> Map.ofList
+        }
+
+    /// Run `printsEnvironmentImage` at `dllPath` with `variables` as its environment entries,
+    /// asking for each of them and for `AbsentVariable`, and check it printed exactly what it was
+    /// given, and the test host's value of `AbsentVariable`, which the overlay does not unset.
+    let private readsEnvironment (dllPath : string) (variables : Map<string, string>) : unit =
+        let names = (variables |> Map.toList |> List.map fst) @ [ AbsentVariable ]
+
+        let entries =
+            variables
+            |> Map.toList
+            |> List.map (fun (name, value) -> EnvironmentPal.nameValueEntry name value)
+
+        let run =
+            RealRuntime.captureAssemblyInPlace AppContextProperties.empty entries (Array.ofList names) dllPath
+
+        let expected =
+            names
+            |> List.map (fun name ->
+                match Map.tryFind name variables with
+                | Some value -> printedLine name (Some value)
+                | None -> printedLine name (Option.ofObj (Environment.GetEnvironmentVariable name))
+            )
+            |> String.concat ""
+
+        (run.Result, run.Stdout, run.Stderr)
+        |> shouldEqual (RealRuntimeResult.NormalExit 0, expected, "")
+
+    [<Test>]
+    let ``the guest reads each environment variable it was given`` () : unit =
+        laidOut
+            "PrintsEnvironment"
+            printsEnvironmentImage.Value
+            None
+            (fun dllPath ->
+                // Each case starts a process.
+                Check.One (
+                    Config.QuickThrowOnFailure.WithMaxTest 15,
+                    Prop.forAll (Arb.fromGen genVariables) (readsEnvironment dllPath)
+                )
+            )
+
+    /// The two variables are the test's own, set in the test host for its duration under names no
+    /// other test uses, so the test does not depend on what the test host was started with.
+    [<Test>]
+    let ``an environment entry replaces the test host's value of that variable, and leaves the others`` () : unit =
+        let suffix = Guid.NewGuid().ToString "N"
+        let replaced = "WOOFWARE_TEST_REPLACED_" + suffix
+        let inherited = "WOOFWARE_TEST_INHERITED_" + suffix
+
+        try
+            Environment.SetEnvironmentVariable (replaced, "the test host's value")
+            Environment.SetEnvironmentVariable (inherited, "inherited from the test host")
+
+            laidOut
+                "PrintsEnvironment"
+                printsEnvironmentImage.Value
+                None
+                (fun dllPath ->
+                    let run =
+                        RealRuntime.captureAssemblyInPlace
+                            AppContextProperties.empty
+                            [ EnvironmentPal.nameValueEntry replaced "the entry's value" ]
+                            [| replaced ; inherited |]
+                            dllPath
+
+                    (run.Result, run.Stdout, run.Stderr)
+                    |> shouldEqual (
+                        RealRuntimeResult.NormalExit 0,
+                        printedLine replaced (Some "the entry's value")
+                        + printedLine inherited (Some "inherited from the test host"),
+                        ""
+                    )
+                )
+
+            // The overlay is on the child's environment alone.
+            Environment.GetEnvironmentVariable replaced
+            |> shouldEqual "the test host's value"
+        finally
+            Environment.SetEnvironmentVariable (replaced, null)
+            Environment.SetEnvironmentVariable (inherited, null)
+
+    /// Prints the name of the culture `fr-FR` constructs, or the name of the exception
+    /// constructing it throws.
+    let private constructsCultureImage : Lazy<byte[]> =
+        lazy
+            Roslyn.compileAssembly
+                "ConstructsCulture"
+                OutputKind.ConsoleApplication
+                []
+                [
+                    """
+using System;
+using System.Globalization;
+
+public static class Program
+{
+    public static int Main(string[] args)
+    {
+        try
+        {
+            Console.WriteLine("constructed " + new CultureInfo("fr-FR").Name);
+        }
+        catch (CultureNotFoundException)
+        {
+            Console.WriteLine("CultureNotFoundException");
+        }
+        return 0;
+    }
+}
+"""
+                ]
+
+    /// CoreLib reads `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` first and the AppContext property
+    /// only when the variable is unset or unparseable, so a caller comparing with PawPrint, whose
+    /// kernel sets the variable, must hand the oracle the variable and not only the property.
+    ///
+    /// Invariant mode constructs `fr-FR` anyway when predefined cultures are not required, which
+    /// a test host may have set by the same means, so the test requires them.
+    [<Test>]
+    let ``DOTNET_SYSTEM_GLOBALIZATION_INVARIANT in the environment decides over the AppContext property`` () : unit =
+        laidOut
+            "ConstructsCulture"
+            constructsCultureImage.Value
+            None
+            (fun dllPath ->
+                let run =
+                    RealRuntime.captureAssemblyInPlace
+                        (AppContextProperties.ofMap (Map.ofList [ "System.Globalization.Invariant", "false" ]))
+                        [
+                            EnvironmentPal.nameValueEntry "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" "1"
+                            EnvironmentPal.nameValueEntry "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY" "1"
+                        ]
+                        [||]
+                        dllPath
+
+                (run.Result, run.Stdout, run.Stderr)
+                |> shouldEqual (RealRuntimeResult.NormalExit 0, "CultureNotFoundException" + Environment.NewLine, "")
+            )
+
+    /// Writes an empty file `ran` into its working directory.
+    let private marksImage : Lazy<byte[]> =
+        lazy
+            Roslyn.compileAssembly
+                "Marks"
+                OutputKind.ConsoleApplication
+                []
+                [
+                    """
+using System.IO;
+
+public static class Program
+{
+    public static int Main(string[] args)
+    {
+        File.WriteAllText("ran", "");
+        return 0;
+    }
+}
+"""
+                ]
+
+    /// Run `marksImage` with `entries`, and return the message of the exception the oracle
+    /// raises, failing if it raises none or if the guest ran.
+    let private environmentRefusal (entries : string list) : string =
+        laidOut
+            "Marks"
+            marksImage.Value
+            None
+            (fun dllPath ->
+                let outcome =
+                    try
+                        Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty entries [||] dllPath)
+                    with e ->
+                        Error e.Message
+
+                File.Exists (Path.Combine (Path.GetDirectoryName dllPath, "ran"))
+                |> shouldEqual false
+
+                match outcome with
+                | Error message -> message
+                | Ok run -> failwith $"expected the oracle to refuse the environment %A{entries}, but it ran: %A{run}"
+            )
+
+    /// A child process's environment overlay maps names to values, so it cannot hold an entry with
+    /// no name, nor two values for one name, both of which PawPrint's kernel can hold.
+    [<TestCase("WOOFWARE_TEST_NO_EQUALS", "", "WOOFWARE_TEST_NO_EQUALS")>]
+    [<TestCase("=WOOFWARE_TEST_LEADING_EQUALS", "", "=WOOFWARE_TEST_LEADING_EQUALS")>]
+    [<TestCase("WOOFWARE_TEST_TWICE=1", "WOOFWARE_TEST_TWICE=2", "WOOFWARE_TEST_TWICE")>]
+    let ``an environment entry the overlay cannot express is refused, not run``
+        (first : string)
+        (second : string)
+        (named : string)
+        : unit
+        =
+        [ first ; second ]
+        |> List.filter (fun entry -> entry <> "")
+        |> environmentRefusal
+        |> shouldContainText named
+
+    /// A NUL would end the entry early, and an unpaired surrogate has no UTF-8 encoding, so the
+    /// guest would see another value; PawPrint's kernel refuses both.
+    [<Test>]
+    let ``an environment entry no process could hold intact is refused, not run`` () : unit =
+        environmentRefusal [ "WOOFWARE_TEST_NUL=before" + string (char 0) + "after" ]
+        |> shouldContainText "WOOFWARE_TEST_NUL"
+
+        environmentRefusal [ "WOOFWARE_TEST_SURROGATE=a" + string (char 0xD800) ]
+        |> shouldContainText "WOOFWARE_TEST_SURROGATE"
 
     /// Writes two lines to stdout, the second with no newline and the first ended by "\r\n", one
     /// line to stderr, and exits 3; or, given the argument `throw`, writes one line to stdout and
@@ -418,7 +702,7 @@ public static class Program
             writesImage.Value
             None
             (fun dllPath ->
-                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [||] dllPath
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [||] dllPath
                 |> shouldEqual
                     {
                         Result = RealRuntimeResult.NormalExit 3
@@ -427,7 +711,7 @@ public static class Program
                     }
 
                 let thrown =
-                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "throw" |] dllPath
+                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "throw" |] dllPath
 
                 thrown.Stdout |> shouldEqual ("before the throw" + Environment.NewLine)
 
@@ -523,7 +807,7 @@ public static class Program
         try
             let outcome =
                 try
-                    Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "0" |] dllPath)
+                    Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "exit" ; "0" |] dllPath)
                 with e ->
                     Error e.Message
 
@@ -554,6 +838,7 @@ public static class Program
                     Ok (
                         RealRuntime.captureAssemblyInPlace
                             AppContextProperties.empty
+                            []
                             [| "exit" ; "0" |]
                             (Path.Combine (link, name + ".dll"))
                     )
@@ -589,7 +874,13 @@ public static class Program
 
                     let outcome =
                         try
-                            Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "0" |] link)
+                            Ok (
+                                RealRuntime.captureAssemblyInPlace
+                                    AppContextProperties.empty
+                                    []
+                                    [| "exit" ; "0" |]
+                                    link
+                            )
                         with e ->
                             Error e.Message
 
@@ -634,6 +925,7 @@ public static class Program
                     Ok (
                         RealRuntime.captureAssemblyInPlace
                             AppContextProperties.empty
+                            []
                             [| "exit" ; "0" |]
                             (Path.Combine (flipped, name))
                     )
@@ -665,7 +957,7 @@ public static class Program
                 File.Exists (Path.Combine (Path.GetDirectoryName dllPath, relative))
                 |> shouldEqual false
 
-                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] relative
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "exit" ; "5" |] relative
                 |> _.Result
                 |> shouldEqual (RealRuntimeResult.NormalExit 5)
             )
@@ -681,7 +973,7 @@ public static class Program
                 let dotted =
                     Path.Combine (Path.GetDirectoryName dllPath, ".", Path.GetFileName dllPath)
 
-                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] dotted
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "exit" ; "5" |] dotted
                 |> _.Result
                 |> shouldEqual (RealRuntimeResult.NormalExit 5)
             )
@@ -700,7 +992,7 @@ public static class Program
             (fun dllPath ->
                 Path.GetFileName dllPath |> shouldEqual "Ends\\AsTold.dll"
 
-                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] dllPath
+                RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "exit" ; "5" |] dllPath
                 |> _.Result
                 |> shouldEqual (RealRuntimeResult.NormalExit 5)
             )
@@ -718,7 +1010,7 @@ public static class Program
 
                 let outcome =
                     try
-                        Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] dotted)
+                        Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "exit" ; "5" |] dotted)
                     with e ->
                         Error e.Message
 
@@ -762,7 +1054,13 @@ public static class Program
 
                 let outcome =
                     try
-                        Ok (RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "exit" ; "5" |] climbing)
+                        Ok (
+                            RealRuntime.captureAssemblyInPlace
+                                AppContextProperties.empty
+                                []
+                                [| "exit" ; "5" |]
+                                climbing
+                        )
                     with e ->
                         Error e.Message
 
@@ -779,7 +1077,7 @@ public static class Program
             None
             (fun dllPath ->
                 let run =
-                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [| "cwd" |] dllPath
+                    RealRuntime.captureAssemblyInPlace AppContextProperties.empty [] [| "cwd" |] dllPath
 
                 (run.Result, run.Stdout)
                 |> shouldEqual (
@@ -806,6 +1104,7 @@ public static class Program
                 let run =
                     RealRuntime.captureAssemblyInPlace
                         AppContextProperties.empty
+                        []
                         [| "args" ; "two words" ; "" |]
                         dllPath
 
@@ -849,4 +1148,42 @@ public static class Program
                     |]
 
                 directoryContents dllPath |> shouldEqual before
+            )
+
+    /// The host would otherwise read `DOTNET_ROLL_FORWARD` over the runtimeconfig's roll-forward
+    /// policy and could run the guest on a later runtime than the framework under test.
+    [<Test>]
+    let ``environment entries asking to roll forward leave the guest on the framework under test`` () : unit =
+        laidOut
+            "EndsAsTold"
+            endsAsToldImage.Value
+            None
+            (fun dllPath ->
+                let run =
+                    RealRuntime.captureAssemblyInPlace
+                        AppContextProperties.empty
+                        [
+                            EnvironmentPal.nameValueEntry "DOTNET_ROLL_FORWARD" "LatestMajor"
+                            EnvironmentPal.nameValueEntry "DOTNET_ROLL_FORWARD_TO_PRERELEASE" "1"
+                        ]
+                        [| "framework" |]
+                        dllPath
+
+                let printed =
+                    run.Stdout.Split Environment.NewLine
+                    |> Array.choose (fun line ->
+                        if line.StartsWith ("framework: ", StringComparison.Ordinal) then
+                            Some (FrameworkUnderTest.resolveLinks (line.Substring "framework: ".Length))
+                        else
+                            None
+                    )
+
+                (run.Result, run.Stderr, printed)
+                |> shouldEqual (
+                    RealRuntimeResult.NormalExit 0,
+                    "",
+                    [|
+                        FrameworkUnderTest.resolveLinks (FrameworkUnderTest.sharedFrameworkDirectory ())
+                    |]
+                )
             )
