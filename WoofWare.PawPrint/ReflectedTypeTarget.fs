@@ -423,6 +423,13 @@ module ReflectedTypeTarget =
             // canonical if that ever changes.
             state, RuntimeTypeHandleTarget.composite shape elementTarget
         | TypeDefn.FunctionPointer signature ->
+            // A `void` return under custom modifiers returns nothing, as concretising the closed
+            // pointer reads it; read otherwise, the two would be two `Type`s for one type.
+            let signature =
+                { signature with
+                    ReturnType = TypeConcretization.runtimeReturnColumn signature.ReturnType
+                }
+
             let state, signature =
                 TypeMethodSignature.map
                     state
