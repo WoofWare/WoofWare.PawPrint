@@ -366,6 +366,10 @@ module TestFrameworkUnderTest =
         | SimulatedUnixFlavour.Linux -> "linux-x64"
         | SimulatedUnixFlavour.Darwin -> "osx-arm64"
 
+    /// A `deps.json`'s bytes as a JSON document.
+    let private parseDepsJson (bytes : byte[]) : JsonDocument =
+        JsonDocument.Parse (ReadOnlyMemory bytes)
+
     /// The name of a `deps.json`'s runtime target.
     let private runtimeTargetName (root : JsonElement) : string =
         let runtimeTarget = root.GetProperty "runtimeTarget"
@@ -379,6 +383,15 @@ module TestFrameworkUnderTest =
     [<TestCase("""{ "runtimeTarget": { "name": "T/rid", "signature": "" } }""")>]
     let ``A deps.json's runtime target is read in either of its forms`` (json : string) : unit =
         use document = JsonDocument.Parse json
+        runtimeTargetName document.RootElement |> shouldEqual "T/rid"
+
+    /// The host's JSON parser skips a UTF-8 byte order mark (`json_parser_t`).
+    [<Test>]
+    let ``A deps.json may start with a UTF-8 byte order mark`` () : unit =
+        let bytes =
+            Array.append [| 0xEFuy ; 0xBBuy ; 0xBFuy |] (Text.Encoding.UTF8.GetBytes """{ "runtimeTarget": "T/rid" }""")
+
+        use document = parseDepsJson bytes
         runtimeTargetName document.RootElement |> shouldEqual "T/rid"
 
     let pinnedPacks : TestCaseData list =
@@ -462,7 +475,8 @@ module TestFrameworkUnderTest =
         runtimeAssets document.RootElement "T/rid" |> shouldEqual [ "A.dll", "A.dll" ]
 
     /// `deps_entry_t::to_dir_path`: a runtime asset is at its `localPath` when it has one; else, in
-    /// a `runtimepack` library, at its listed path; else at its listed path's file name.
+    /// a `runtimepack` library, at its listed path; else at its listed path's file name. The host
+    /// reads `\` in either path as `/`, and a leading `./` names the directory itself.
     [<Test>]
     let ``A pack's runtime asset is where the host looks for it`` () : unit =
         let json =
@@ -474,7 +488,10 @@ module TestFrameworkUnderTest =
         "runtime": {
           "A.dll": { "localPath": "sub/A.dll" },
           "lib/net10.0/B.dll": {},
-          "D.dll": { "localPath": "" }
+          "D.dll": { "localPath": "" },
+          "lib\\net10.0\\E.dll": {},
+          "F.dll": { "localPath": "./F.dll" },
+          "lib\\net10.0\\_._": {}
         }
       },
       "Pack/1.0.0": { "runtime": { "lib/net10.0/C.dll": {} } }
@@ -494,6 +511,8 @@ module TestFrameworkUnderTest =
                 "A.dll", "sub/A.dll"
                 "B.dll", "B.dll"
                 "D.dll", "D.dll"
+                "E.dll", "E.dll"
+                "F.dll", "F.dll"
                 "C.dll", "lib/net10.0/C.dll"
             ]
 
@@ -513,7 +532,7 @@ module TestFrameworkUnderTest =
             failwith
                 $"%s{pack} holds no Microsoft.NETCore.App.deps.json: flake.nix's frameworkPack must copy it out of the runtime pack"
 
-        use document = JsonDocument.Parse (File.ReadAllBytes depsPath)
+        use document = parseDepsJson (File.ReadAllBytes depsPath)
         let root = document.RootElement
         let targetName = runtimeTargetName root
 
