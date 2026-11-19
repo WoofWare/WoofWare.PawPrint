@@ -1155,10 +1155,6 @@ module TypeConcretization =
             concretizeNamedDefinition loadAssembly ctx currentAssemblyFullName identity spelled
         )
 
-    /// Does this signature type carry an ECMA-335 custom modifier (`modreq`/`modopt`) anywhere
-    /// inside it? Concretisation refuses a generic instantiation with a type argument that does,
-    /// the one position where dropping a modifier is unrecoverable (see
-    /// `concretizeGenericInstantiation`), so a caller that must not fail can ask this first.
     /// A decoded return column as it is at run time: a `void` under custom modifiers returns
     /// nothing, so `Returns (modified void)` is <c>MethodReturnType.Void</c>, and every other column is
     /// unchanged. Concretisation applies it (`concretizeReturnColumn`), and so must any translation that
@@ -1171,6 +1167,10 @@ module TypeConcretization =
             | _ -> returnType
         | MethodReturnType.Void -> returnType
 
+    /// Does this signature type carry an ECMA-335 custom modifier (`modreq`/`modopt`) anywhere
+    /// inside it? Concretisation refuses a generic instantiation with a type argument that does,
+    /// the one position where dropping a modifier is unrecoverable (see
+    /// `concretizeGenericInstantiation`), so a caller that must not fail can ask this first.
     let rec carriesCustomModifier (typeDefn : TypeDefn) : bool =
         match typeDefn with
         | TypeDefn.Modified _ -> true
