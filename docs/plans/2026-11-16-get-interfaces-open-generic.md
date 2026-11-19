@@ -1031,6 +1031,10 @@ change here.
 26. *Tests: an interface walked once per map; an extends clause naming no class*, from Codex's sixth review; the sketch
     oracle now compares PawPrint's entries, as host types, with the host's answer in order. Two cases were red.
 27. *Interface map: walk a head once per question; an extends clause naming no class*: the fix.
+28. and 29. *Plan for #2309*: this section after the sixth review, and what the seventh left open.
+30. *Tests: the sketch oracle builds each host type once; many instantiations*: the decisions after the seventh review,
+    tests only.
+31. *Plan for #2309*: those decisions, and the list of what this pull request leaves.
 
 **Codex's sixth review, under the decisions' reopening rule.** It found:
 
@@ -1145,21 +1149,28 @@ they hold is linear in the depth. The review found:
   `MethodTableLayout.baseOfDefinition`'s arity `failwith` is reachable through a row head's base, not only through
   `interfaceMapOfDefinition`, and should become `Refused (WrongArity ...)`.
 
-**Open after Codex's seventh review (on commit 28); stopped under the decisions' rule.** The seventh round is the
-last, and it has a finding on valid metadata, so the work stops here and is reported rather than fixed:
+**Codex's seventh review (on commit 28), and what was decided.** The seventh round was the last. Its finding on valid
+metadata, a class implementing many instantiations of one interface, stopped the work as the rule said, and the
+decisions at the end of this section accepted it as a cost: CoreCLR's `ExpandApproxInterface` makes the same
+`n(n-1)/2` comparisons, so only the price of one differs (#2335). A growth test pins the count: 128 instantiations
+allocate 17,084,720 bytes against 4,683,656 for 64, a ratio of 3.6 where quadratic work gives 4. The bare-TypeSpec
+extends clause was filed with `extends valuetype V<int>` (#2336). The sketch oracle now builds each host type once and
+compares `Type` values, and its own allocation is bounded beside the code's (commit 30). There was no eighth round.
 
-- [P2, valid metadata] A class implementing many instantiations of one interface (`I<A0>` to `I<A511>`, distinct
-  TypeDefs of one image) now compares every pair with `substitutionsEquivalent`, 130,816 comparisons: Codex measured
-  253 MB for one map against 10.7 MB on the base. The definition walk's duplicate filter is the interface's identity
-  alone, where the old walk's was the closed handle, and nothing cheap rules out arguments that are provably distinct
-  before the full comparison.
-- [P2] An extends clause spelled as the bare TypeSpec `CLASS B` passes `baseOfDefinition`'s shape check, because the
-  outer spelling is discarded before the head is examined, so `interfaceMapOfDefinition` answers where .NET 10 refuses.
-  Malformed metadata, answered rather than refused; of the same kind as `extends valuetype V<int>` above.
-- [P3] The sketch oracle names each of PawPrint's entries by rebuilding its host type and formatting it, which expands
-  a shared type such as `Pair<A, A>` into a tree: 229 MB allocated by one outcome for the depth-16 chain and 191 MB for
-  the diamond, outside the PawPrint call the tests measure. Memoising host types by handle and comparing `Type`
-  values, formatting only on a mismatch, would remove it.
+**Left by this pull request, each with its issue.**
+
+- **#2329, the failure named for a malformed row.** A row naming a class at an instantiation CoreCLR's approximate
+  load refuses (`G<int, int>` for one-parameter `G`, `G<valuetype Missing>`) is refused as not an interface, where
+  the host names the earlier failure; and a TypeSpec head spelled `VALUETYPE Missing` reports `TypeAbsent` where the
+  host refuses the shape. Both sides refuse; which refusal is named differs. Two tests pin the refusals.
+- **#2336, the extends-clause shapes.** An extends clause spelled as a bare TypeSpec (`CLASS B`) or naming a value
+  type (`valuetype V<int>`) is answered by `MethodTableLayout.baseOfDefinition` where CoreCLR refuses; that arm is on
+  `main`. Only `interfaceMapOfDefinition`, which has no caller before PR 3, reaches it from this pull request.
+- **#2335, the comparison's constant.** About 1.9 kB allocated per duplicate comparison of two instantiations of one
+  interface: 253 MB for one map of a class implementing `I<A0>` to `I<A511>`, against 10.7 MB on `main`, which did not
+  compare distinct closed instantiations.
+- **#2330, the cyclic base chain.** The Loader's base-chain loading follows a cyclic chain without end, both through a
+  row naming such a class and through `resolveTypeFromRef`'s priming of a TypeRef base; `main` reaches it the same way.
 
 **The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
 walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
@@ -1644,3 +1655,80 @@ row's spelling once, in a context closed once. Its only exponential term was the
   on, so its Roslyn image stays linear and it is unaffected.)
 - A bound is stated in what the image holds, **spelled nodes included**, never in depth alone. For W1 and W2 the
   spelled nodes are linear in depth, which is why a ratio between two depths is a fair assertion there.
+
+##### After Codex's seventh review
+
+Decided 2026-11-19, after reading the branch at `441c45466`, Codex's seventh review and the plan's account of it.
+Nothing was built or run for these decisions.
+
+**In brief.** The pull request opens now. Two test-only changes go in first; no code under `WoofWare.PawPrint.*`
+other than tests changes; there is no eighth Codex round. Findings 1 and 2 are filed.
+
+**The stop was right, and the choice it anticipated does not arise.** The rule said a seventh-round finding on valid
+metadata would mean the approximate load's checks are in the wrong place. Finding 1 is on valid metadata but is not
+of that kind: it is about what one duplicate comparison costs, and no rearrangement of the walk changes it. The
+approximate load stays where it is.
+
+**1. Many instantiations of one interface: accepted in this pull request, the constant filed.**
+
+- *What CoreCLR does* (read). `ExpandApproxInterface` (methodtablebuilder.cpp:341-375) scans **every** entry of the
+  map for each interface it is about to add and calls `CompareTypeDefsUnderSubstitutions` on each. For an entry of
+  another interface that returns at the TypeDef check; for an entry of the same interface it compares the
+  arguments. So `n` instantiations of one interface cost `n(n-1)/2` argument comparisons there too: 130,816 for
+  `I<A0>` to `I<A511>`. **The quadratic count is faithful.** PawPrint makes exactly the comparisons CoreCLR makes,
+  and skips the others on identity as CoreCLR skips them on TypeDef.
+- *What differs* is the price of one: about 1.9 kB allocated here to tell two TypeDefs of one image apart, a few
+  instructions there. The old walk hid that price behind the closed-handle filter, which a definition cannot have.
+- *Options.* (a) A check in the walk for "provably distinct" arguments ahead of the comparison, as Codex suggests.
+  It is option C of decision 1 again, narrower: a second statement of part of the comparison rule (which spellings
+  cannot be the same type: two TypeDefs of one image yes, two TypeRefs no, a variable never), to be kept in step
+  with the first, and it leaves the same price under `ownDispatchMapOf` and method-table layout. Rejected.
+  (b) Make the comparison itself cheap: a change to published code that every signature comparison runs through,
+  to be led by a profile, and so a pull request of its own. Chosen, as an issue. (c) Index the entries by interface
+  so that other interfaces are not scanned: irrelevant to this shape, where every entry is the same interface.
+- *Why it does not hold this pull request.* The work is CoreCLR's own in shape; the regression is a constant on a
+  type with hundreds of instantiations of one interface (about 1 MB at 32, where `main` is already 10.7 MB at 512
+  for other reasons); the guest suites' times did not move; and the remedy is not in this pull request's files.
+- *In this pull request:* one test, with the sketch fixture, that pins the growth: one map for a class implementing
+  128 distinct instantiations of `I<T>` allocates at most 8 times one for 64. Quadratic work gives 4. Record the
+  253 MB and 10.7 MB in the body under "accepted costs", with the issue's number.
+- Filed as #2335.
+
+**2. An extends clause spelled `CLASS B` as a bare TypeSpec: filed, with `extends valuetype V<int>`.**
+
+Under round six's rule this is malformed metadata answered rather than refused, which is a finding of the first
+kind only if this pull request made it so. It did not: the `| nominal -> nominal, ImmutableArray.Empty` arm of
+`MethodTableLayout.baseOfDefinition` is on `main`, and it serves method-table layout, method reference resolution
+and constrained calls as well. The fix is to the shape of an extends clause wherever one is read, and is one change
+of its own.
+
+*Does it matter before PR 3?* No. `interfaceMapOfDefinition` has no caller until then, and the closed path reaches a
+base by `resolveBaseConcreteType`, unchanged from `main`. *Does it matter in PR 3?* Only as far as PawPrint already
+hands a guest the `Type` of such a definition, where real .NET fails at the `ldtoken`; the missing refusal is the
+same one seen from another side. So it does not block PR 3 either, but PR 3 must not claim that
+`interfaceMapOfDefinition` refuses every extends clause CoreCLR refuses, and its docstring should name the issue.
+Fixing it before PR 3 is welcome and not required.
+
+Filed as #2336. The parse it asks for is the one #2329 asks for on a row, and each names the other.
+
+**3. The sketch oracle: fix here.** It is this pull request's own test code, the change is small (host types kept
+per handle, `Type` values compared, names formatted only to report a mismatch), and an oracle that does exponential
+work beside a test asserting that the code under test does not is a trap for whoever next deepens the chain. Check
+it by the same means as the code: `sketchOutcome`'s allocation outside the measured call at depth 16 is within a
+small multiple of depth 8's.
+
+**No eighth round.** The seventh was the last and stays the last. What follows it is two test-only changes, which
+the rule after the comparison pull request's review already said need no round. If, against this decision, any
+non-test file is edited before the pull request opens, that edit does get a review, and its findings are sorted by
+round six's rule with no further round after it.
+
+**Order.**
+
+1. Finding 3's oracle change and finding 1's growth test, one commit, tests only.
+2. File the three issues (the two above and the row issue from the fifth review, if it is not yet filed); put their
+   numbers into the plan, the not-an-interface diagnostic's text if it still lacks one, and the tests' docstrings.
+   A diagnostic's wording is not a reason for a review.
+3. Bring "As built (PR 2)" up to date: replace "Open after Codex's seventh review" with what was decided, and list
+   under one heading everything this pull request knowingly leaves, each with its issue: the failure named for a
+   malformed row, the extends-clause shapes, the comparison's constant, and the cyclic base chain (#2330).
+4. Default suite once more (the changes are tests), then open the pull request and enqueue it.
