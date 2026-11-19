@@ -1,5 +1,6 @@
 namespace WoofWare.PawPrint
 
+open System.Collections.Generic
 open System.Collections.Immutable
 open Microsoft.Extensions.Logging
 
@@ -24,125 +25,21 @@ module RuntimeTypeInterfaces =
 
         state, map |> List.map (fun entry -> RuntimeTypeHandleTarget.Closed entry.Interface)
 
-    /// Whether any class on the base chain of `target` declares an InterfaceImpl row, which is when
-    /// its interface map is non-empty.
-    let rec private baseChainDeclaresInterfaces
-        (loggerFactory : ILoggerFactory)
-        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (operation : string)
-        (state : IlMachineState)
-        (target : RuntimeTypeHandleTarget)
-        : IlMachineState * bool
-        =
-        match IlMachineState.resolveBaseRuntimeTypeHandleTarget loggerFactory baseClassTypes state target with
-        | state, None -> state, false
-        | state, Some parent ->
-            let rows =
-                match parent with
-                | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle) ->
-                    match IlMachineState.tryGetConcreteTypeInfo state handle with
-                    | Some (_, typeInfo) -> typeInfo.ImplementedInterfaces
-                    | None -> failwith $"%s{operation}: base class handle %O{handle} of %O{target} was not registered"
-                | RuntimeTypeHandleTarget.OpenConstructed (identity, _)
-                | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity ->
-                    match state.LoadedAssembly identity.AssemblyFullName with
-                    | Some assembly -> assembly.TypeDefs.[identity.TypeDefinition.Get].ImplementedInterfaces
-                    | None ->
-                        failwith
-                            $"%s{operation}: assembly %s{identity.AssemblyFullName} of the base class of %O{target} is not loaded"
-                | other ->
-                    failwith $"%s{operation}: the base class of %O{target} resolved to %O{other}, which is not a class"
-
-            if rows.IsEmpty then
-                baseChainDeclaresInterfaces loggerFactory baseClassTypes operation state parent
-            else
-                state, true
-
-    /// A generic definition's interface map, where every InterfaceImpl row is closed and no base class
-    /// has interfaces: each row followed by its own interfaces, each closed instantiation once.
-    let private ofDefinition
-        (loggerFactory : ILoggerFactory)
-        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
-        (operation : string)
-        (state : IlMachineState)
-        (identity : ResolvedTypeIdentity)
-        : IlMachineState * RuntimeTypeHandleTarget list
-        =
-        let receiver = RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity
-
-        // The base's entries come first in the map, which this arm cannot yet build for a definition.
-        match baseChainDeclaresInterfaces loggerFactory baseClassTypes operation state receiver with
-        | _, true ->
-            failwith
-                $"TODO: %s{operation} for the generic definition %O{identity.TypeDefinition.Get} in %s{identity.AssemblyFullName}: a base class has interfaces, whose entries come first in the map; a definition's interface map is #2309"
-        | state, false ->
-
-        let assembly =
-            state.LoadedAssembly identity.AssemblyFullName
-            |> Option.defaultWith (fun () ->
-                failwith
-                    $"%s{operation}: assembly %s{identity.AssemblyFullName} not loaded for the generic definition %O{identity.TypeDefinition.Get}"
-            )
-
-        let typeInfo = assembly.TypeDefs.[identity.TypeDefinition.Get]
-
-        let state, entries =
-            ((state, []), typeInfo.ImplementedInterfaces)
-            ||> Seq.fold (fun (state, entries) row ->
-                let rowAssembly =
-                    state.LoadedAssembly row.RelativeToAssembly.FullName
-                    |> Option.defaultValue assembly
-
-                let state, rowTypeDefnResult =
-                    IlMachineState.resolveTypeMetadataToken
-                        loggerFactory
-                        baseClassTypes
-                        state
-                        rowAssembly
-                        row.InterfaceHandle
-
-                let rowTypeDefn, rowResolvedAssembly =
-                    TokenBindingStop.typeToken rowAssembly row.InterfaceHandle rowTypeDefnResult
-
-                if IlMachineState.containsAnyGenericParameter rowTypeDefn then
-                    failwith
-                        $"TODO: %s{operation} for the generic definition %O{identity.TypeDefinition.Get} in %s{identity.AssemblyFullName}: the interface row %O{rowTypeDefn} names the definition's variables; a definition's interface map is #2309"
-
-                let state, rowHandle =
-                    IlMachineState.concretizeType
-                        loggerFactory
-                        baseClassTypes
-                        state
-                        rowResolvedAssembly.DefinitionFullName
-                        ImmutableArray.Empty
-                        ImmutableArray.Empty
-                        rowTypeDefn
-
-                let rowTarget = RuntimeTypeHandleTarget.Closed rowHandle
-
-                // A row already in the map adds nothing, nor do its parents, which came with it.
-                if List.contains rowTarget entries then
-                    state, entries
-                else
-
-                let state, parents = ofClosed loggerFactory baseClassTypes operation state rowHandle
-
-                let entries =
-                    (entries @ [ rowTarget ], parents)
-                    ||> List.fold (fun entries parent ->
-                        if List.contains parent entries then
-                            entries
-                        else
-                            entries @ [ parent ]
-                    )
-
-                state, entries
-            )
-
-        state, entries
-
     /// The interfaces of the generic definition `definition` applied to `arguments`, one target per
-    /// variable the definition declares, in the order the QCall returns them. Not yet implemented.
+    /// variable the definition declares (none for a type that is its own definition), in the order the
+    /// QCall returns them: the definition's interface map (`interfaceMapOfDefinition`), each entry
+    /// read over `arguments`, in the same order and with the same duplicates. This is CoreCLR's rule
+    /// that an instantiation's map is its definition's, entry for entry
+    /// (`MethodTableBuilder::LoadExactInterfaceMap`).
+    ///
+    /// An entry's argument that is one of the definition's variables is the matching argument; a
+    /// closed one is that type; one the definition spells is read in the assembly that spells it,
+    /// over its own context converted the same way. An entry whose arguments are all closed, as is an
+    /// interface with none, is the closed instantiation, and the definition applied to its own
+    /// variables is the definition (`ReflectedTypeTarget.instantiateTargets`).
+    ///
+    /// The failure is the definition map's. That map refuses some malformed InterfaceImpl rows and
+    /// extends clauses, but not every extends clause CoreCLR refuses (#2336).
     let internal ofInstantiation
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -152,16 +49,162 @@ module RuntimeTypeInterfaces =
         (arguments : ImmutableArray<RuntimeTypeHandleTarget>)
         : IlMachineState * Result<RuntimeTypeHandleTarget list, TypeBindingFailure>
         =
-        ignore<ILoggerFactory> loggerFactory
-        ignore<BaseClassTypes<DumpedAssembly>> baseClassTypes
-        ignore<IlMachineState> state
-        ignore<ImmutableArray<RuntimeTypeHandleTarget>> arguments
+        let typeInfo =
+            match state.LoadedAssembly definition.AssemblyFullName with
+            | Some assembly -> assembly.TypeDefs.[definition.TypeDefinition.Get]
+            | None ->
+                failwith
+                    $"%s{operation}: assembly %s{definition.AssemblyFullName} of %O{definition.TypeDefinition.Get} is not loaded"
 
-        failwith
-            $"TODO: %s{operation}: RuntimeTypeInterfaces.ofInstantiation of %O{definition.TypeDefinition.Get} in %s{definition.AssemblyFullName} is not yet implemented (#2309)"
+        if typeInfo.Generics.Length <> arguments.Length then
+            failwith
+                $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} declares %d{typeInfo.Generics.Length} generic parameter(s), but %d{arguments.Length} argument(s) were supplied"
+
+        let typeSystem, map =
+            ConcreteInterfaceDispatch.interfaceMapOfDefinition
+                loggerFactory
+                state.DotnetRuntimeDirs
+                baseClassTypes
+                operation
+                state.TypeSystem
+                definition
+
+        let state = state.WithTypeSystem typeSystem
+
+        match map with
+        | Error failure -> state, Error failure
+        | Ok map ->
+
+        let ownerDescription =
+            $"an interface-map entry of %s{typeInfo.Namespace}.%s{typeInfo.Name}"
+
+        // Each context the map shares is converted once: a chain of interfaces nests one context
+        // inside the next, and converting each occurrence afresh would take time exponential in its
+        // length. Keyed on the array itself, which `ImmutableArray` compares by reference.
+        let converted =
+            Dictionary<ImmutableArray<TypeConcretization.SubstitutionArgument>, ImmutableArray<RuntimeTypeHandleTarget>> ()
+
+        let rec convertArgument
+            (state : IlMachineState)
+            (argument : TypeConcretization.SubstitutionArgument)
+            : IlMachineState * RuntimeTypeHandleTarget
+            =
+            match argument with
+            | TypeConcretization.SubstitutionArgument.Closed handle -> state, RuntimeTypeHandleTarget.Closed handle
+            | TypeConcretization.SubstitutionArgument.Formal (owner, index) ->
+                // A definition's map mentions only that definition's own variables.
+                if owner <> definition || index < 0 || index >= arguments.Length then
+                    failwith
+                        $"%s{operation}: %s{ownerDescription} mentions variable !%d{index} of %s{owner.AssemblyFullName}/%O{owner.TypeDefinition.Get}, which is not one of the definition's"
+
+                state, arguments.[index]
+            | TypeConcretization.SubstitutionArgument.Spelled (assemblyName, spelling, inner) ->
+                let state, innerTargets = convertContext state inner
+
+                let assembly =
+                    state.LoadedAssembly assemblyName
+                    |> Option.defaultWith (fun () ->
+                        failwith
+                            $"%s{operation}: %s{ownerDescription} is spelled in %s{assemblyName}, which is not loaded"
+                    )
+
+                let closedInner =
+                    innerTargets
+                    |> Seq.choose (fun target ->
+                        match target with
+                        | RuntimeTypeHandleTarget.Closed handle -> Some handle
+                        | _ -> None
+                    )
+                    |> ImmutableArray.CreateRange
+
+                let typeVariables =
+                    if closedInner.Length = innerTargets.Length then
+                        ReflectedTypeTarget.ReflectionVariableBinding.Bound closedInner
+                    else
+                        ReflectedTypeTarget.ReflectionVariableBinding.Open innerTargets
+
+                ReflectedTypeTarget.reflectedTypeTarget
+                    loggerFactory
+                    baseClassTypes
+                    operation
+                    ownerDescription
+                    assembly
+                    {
+                        TypeVariables = typeVariables
+                        MethodVariables = ReflectedTypeTarget.ReflectionVariableBinding.Open ImmutableArray.Empty
+                    }
+                    state
+                    spelling
+
+        and convertContext
+            (state : IlMachineState)
+            (context : ImmutableArray<TypeConcretization.SubstitutionArgument>)
+            : IlMachineState * ImmutableArray<RuntimeTypeHandleTarget>
+            =
+            match converted.TryGetValue context with
+            | true, targets -> state, targets
+            | false, _ ->
+                let state, targets =
+                    ((state, []), context)
+                    ||> Seq.fold (fun (state, acc) argument ->
+                        let state, target = convertArgument state argument
+                        state, target :: acc
+                    )
+
+                let targets = targets |> List.rev |> ImmutableArray.CreateRange
+                converted.[context] <- targets
+                state, targets
+
+        let state, targets =
+            ((state, []), map.Entries)
+            ||> List.fold (fun (state, acc) entry ->
+                let state, entryArguments = convertContext state entry.Substitution.Arguments
+
+                let state, target =
+                    ReflectedTypeTarget.instantiateTargets
+                        loggerFactory
+                        baseClassTypes
+                        operation
+                        state
+                        entry.Interface
+                        (List.ofSeq entryArguments)
+
+                state, target :: acc
+            )
+
+        state, Ok (List.rev targets)
+
+    /// `System.Array`'s interface map, which is every array's: `CreateArrayMethodTable` (array.cpp)
+    /// copies it row for row into each array MethodTable ("Because of array method table
+    /// persisting, we need to copy the map"), whatever the element, so `int[]` and `T[]` alike answer
+    /// `System.Array`'s six.
+    ///
+    /// An SZ array's five generic interfaces (`IList<T>` and its parents) are not in the map:
+    /// `RuntimeTypeCache.PopulateInterfaces` (RuntimeType.CoreCLR.cs) appends them in managed code,
+    /// which PawPrint runs from the guest's own CoreLib, unconditionally and without removing
+    /// duplicates, so answering them here would list them twice.
+    let private ofArray
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        : IlMachineState * RuntimeTypeHandleTarget list
+        =
+        let state, arrayHandle =
+            LoadedTypeInfo.typeInfoToTypeDefn' baseClassTypes state.TypeSystem._LoadedAssemblies baseClassTypes.Array
+            |> IlMachineState.concretizeType
+                loggerFactory
+                baseClassTypes
+                state
+                baseClassTypes.Corelib.DefinitionFullName
+                ImmutableArray.Empty
+                ImmutableArray.Empty
+
+        ofClosed loggerFactory baseClassTypes operation state arrayHandle
 
     /// The interfaces of `receiver`, in the order the QCall returns them. A receiver the managed
-    /// wrapper never passes to the QCall (a TypeDesc) fails loudly.
+    /// wrapper never passes to the QCall (a TypeDesc) fails loudly, as does one whose definition's
+    /// map is refused.
     let ofReceiver
         (loggerFactory : ILoggerFactory)
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
@@ -170,12 +213,15 @@ module RuntimeTypeInterfaces =
         (receiver : RuntimeTypeHandleTarget)
         : IlMachineState * RuntimeTypeHandleTarget list
         =
+        let ofOpen (definition : ResolvedTypeIdentity) (arguments : ImmutableArray<RuntimeTypeHandleTarget>) =
+            let state, result =
+                ofInstantiation loggerFactory baseClassTypes operation state definition arguments
+
+            state, BindingStop.bound result
+
         match receiver with
         | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
             RuntimeTypeHandleTarget.refuseMetadataQuery operation scopeAssembly
-        | RuntimeTypeHandleTarget.OpenConstructed _ as openConstructed ->
-            failwith
-                $"TODO: open constructed types are not handled at RuntimeTypeInterfaces.fs:%s{__LINE__}; got %O{openConstructed}"
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Byref _ as handle)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Pointer _ as handle)
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.FunctionPointer _ as handle) ->
@@ -193,33 +239,24 @@ module RuntimeTypeInterfaces =
         | RuntimeTypeHandleTarget.FunctionPointer _ ->
             failwith
                 $"%s{operation}: TypeDesc target %O{receiver} reached the QCall; the managed wrapper short-circuits IsTypeDesc to `[]` before this point"
-        | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) ->
-            RuntimeTypeHandleTarget.refuseComposite operation receiver
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as handle) ->
             ofClosed loggerFactory baseClassTypes operation state handle
-        // An array's interface map is `System.Array`'s, copied row for row into every array
-        // MethodTable (`CreateArrayMethodTable`, array.cpp: "Because of array method table persisting,
-        // we need to copy the map"), so `int[]` answers `System.Array`'s six.
-        //
-        // An SZ array's five generic interfaces (`IList<T>` and its parents) are not in the map:
-        // `RuntimeTypeCache.PopulateInterfaces` (RuntimeType.CoreCLR.cs) appends them in managed code,
-        // which PawPrint runs from the guest's own CoreLib, unconditionally and without removing
-        // duplicates, so answering them here would list them twice.
+        // An array over a variable (`T[]`, `List<K>[]`, `T[,]`) answers as a closed array does.
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _)
-        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _) ->
-            let state, arrayHandle =
-                LoadedTypeInfo.typeInfoToTypeDefn'
-                    baseClassTypes
-                    state.TypeSystem._LoadedAssemblies
-                    baseClassTypes.Array
-                |> IlMachineState.concretizeType
-                    loggerFactory
-                    baseClassTypes
-                    state
-                    baseClassTypes.Corelib.DefinitionFullName
-                    ImmutableArray.Empty
-                    ImmutableArray.Empty
+        | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Array _)
+        | RuntimeTypeHandleTarget.Composite ((CompositeShape.OneDimArrayZero | CompositeShape.Array _), _) ->
+            ofArray loggerFactory baseClassTypes operation state
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition definition ->
+            // CoreCLR's typical instantiation: the definition over its own variables.
+            let arity =
+                match state.LoadedAssembly definition.AssemblyFullName with
+                | Some assembly -> assembly.TypeDefs.[definition.TypeDefinition.Get].Generics.Length
+                | None ->
+                    failwith
+                        $"%s{operation}: assembly %s{definition.AssemblyFullName} of the generic definition %O{definition.TypeDefinition.Get} is not loaded"
 
-            ofClosed loggerFactory baseClassTypes operation state arrayHandle
-        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity ->
-            ofDefinition loggerFactory baseClassTypes operation state identity
+            Seq.init arity (fun i -> RuntimeTypeHandleTarget.GenericParameter (definition, i))
+            |> ImmutableArray.CreateRange
+            |> ofOpen definition
+        | RuntimeTypeHandleTarget.OpenConstructed (definition, arguments) ->
+            ofOpen definition (ImmutableArray.CreateRange arguments)

@@ -57,6 +57,70 @@ module ReflectedTypeTarget =
 
         instantiatedHandle, state
 
+    /// `definition` applied to `arguments`, one per variable it declares, in canonical form. Every
+    /// argument closed (true of no arguments, for a definition that declares none) is a closed type,
+    /// concretised into `AllConcreteTypes`; otherwise `RuntimeTypeHandleTarget.openConstructed`,
+    /// which collapses the definition applied to its own variables to the definition.
+    let instantiateTargets
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (definition : ResolvedTypeIdentity)
+        (arguments : RuntimeTypeHandleTarget list)
+        : IlMachineState * RuntimeTypeHandleTarget
+        =
+        let closedArguments =
+            arguments
+            |> List.choose (fun target ->
+                match target with
+                | RuntimeTypeHandleTarget.Closed handle -> Some handle
+                | _ -> None
+            )
+
+        if closedArguments.Length <> arguments.Length then
+            state, RuntimeTypeHandleTarget.openConstructed definition arguments
+        elif not arguments.IsEmpty then
+            let handle, state =
+                instantiateOpenGenericTypeDefinition
+                    loggerFactory
+                    baseClassTypes
+                    operation
+                    state
+                    definition
+                    closedArguments
+
+            state, RuntimeTypeHandleTarget.Closed handle
+        else
+
+        // A definition with no variables is not instantiated: it is the type its TypeDef names.
+        let assembly =
+            state.LoadedAssembly definition.AssemblyFullName
+            |> Option.defaultWith (fun () ->
+                failwith $"%s{operation}: assembly %s{definition.AssemblyFullName} is not loaded"
+            )
+
+        let typeInfo = assembly.TypeDefs.[definition.TypeDefinition.Get]
+
+        if not typeInfo.Generics.IsEmpty then
+            failwith
+                $"%s{operation}: %s{typeInfo.Namespace}.%s{typeInfo.Name} declares %i{typeInfo.Generics.Length} generic parameters, but no arguments were supplied"
+
+        let state, handle =
+            IlMachineTypeResolution.concretizeType
+                loggerFactory
+                baseClassTypes
+                state
+                definition.AssemblyFullName
+                ImmutableArray.Empty
+                ImmutableArray.Empty
+                (TypeDefn.FromDefinition (
+                    definition,
+                    LoadedTypeInfo.signatureTypeKind baseClassTypes state.TypeSystem._LoadedAssemblies typeInfo
+                ))
+
+        state, RuntimeTypeHandleTarget.Closed handle
+
     /// What one axis of a reflected type's generic environment -- the type variables, or the
     /// method variables -- denotes.
     ///
@@ -302,36 +366,12 @@ module ReflectedTypeTarget =
                     state, target :: acc
                 )
 
-            let argumentTargets = List.rev argumentTargets
-
-            let closedArguments =
-                argumentTargets
-                |> List.choose (fun target ->
-                    match target with
-                    | RuntimeTypeHandleTarget.Closed handle -> Some handle
-                    | _ -> None
-                )
-
-            if closedArguments.Length = argumentTargets.Length then
-                // Every variable mentioned here named a closed argument of an `Open` axis --
-                // `Base<!0>` read under `Derived<int, T>` -- so this is a closed type, which
-                // `openConstructed` refuses to spell and `AllConcreteTypes` must hold instead.
-                let handle, state =
-                    instantiateOpenGenericTypeDefinition
-                        loggerFactory
-                        baseClassTypes
-                        operation
-                        state
-                        definition
-                        closedArguments
-
-                state, RuntimeTypeHandleTarget.Closed handle
-            else
-                // `openConstructed` is what keeps this canonical: it collapses the typical
-                // instantiation -- the CRTP `where T : ISelf<T>`, and a definition naming itself in
-                // its own method signatures -- back to the bare definition, exactly as CoreCLR's
-                // class loader does, so the guest sees one `Type` object rather than two.
-                state, RuntimeTypeHandleTarget.openConstructed definition argumentTargets
+            // Every variable mentioned here may have named a closed argument of an `Open` axis --
+            // `Base<!0>` read under `Derived<int, T>` -- which makes this a closed type. Otherwise the
+            // typical instantiation -- the CRTP `where T : ISelf<T>`, and a definition naming itself
+            // in its own method signatures -- collapses to the bare definition, exactly as CoreCLR's
+            // class loader does, so the guest sees one `Type` object rather than two.
+            instantiateTargets loggerFactory baseClassTypes operation state definition (List.rev argumentTargets)
         | TypeDefn.Byref element
         | TypeDefn.Pointer element
         | TypeDefn.OneDimensionalArrayLowerBoundZero element
