@@ -388,7 +388,8 @@ module TestGetInterfacesOrder =
         Assert.That (withOpenInterface, Is.GreaterThanOrEqualTo 100)
 
     /// The instantiations of `definition` the substitution law is checked at: all `object`, all
-    /// `int`, alternating `string` and `long`, and, for a definition with no constraints, all
+    /// `int`, alternating `string` and `long`, and, for a definition with no constraints (variance is
+    /// not one), all
     /// `Dictionary<,>`'s `K`, alternating its `V` and `K`, and the definition's own variables reversed.
     /// An instantiation the host refuses (a constraint it violates) is left out.
     let private lawInstantiations (definition : Type) : Type list =
@@ -398,7 +399,8 @@ module TestGetInterfacesOrder =
         let unconstrained =
             variables
             |> Array.forall (fun v ->
-                v.GenericParameterAttributes = Reflection.GenericParameterAttributes.None
+                v.GenericParameterAttributes
+                &&& Reflection.GenericParameterAttributes.SpecialConstraintMask = Reflection.GenericParameterAttributes.None
                 && v.GetGenericParameterConstraints().Length = 0
             )
 
@@ -3226,14 +3228,14 @@ public struct S2<T> : IC<T[]> { }
     /// `ofInstantiation` of `receiver` in `pairChain depth`, at its own variables if it is generic:
     /// the host's count of its interfaces, how many PawPrint answered, and the bytes the call allocated
     /// on this thread, measured after a first call has registered every type it closes.
-    let private pairChainConversion (depth : int) (receiver : string) : int * int * int64 =
-        let image = sketchImage (pairChain depth)
+    let private conversionCost (sketches : Sketch list) (receiver : string) : int * int * int64 =
+        let image = sketchImage sketches
 
         let dumped =
             use stream = new MemoryStream (image)
             AssemblyApi.read loggerFactory None stream
 
-        let context = AssemblyLoadContext ("pairChainConversion", isCollectible = true)
+        let context = AssemblyLoadContext ("conversionCost", isCollectible = true)
 
         try
             let host =
@@ -3283,14 +3285,88 @@ public struct S2<T> : IC<T[]> { }
         let name (depth : int) =
             if receiver = "C" then "C" else $"N%d{depth}`2"
 
-        let host8, pawPrint8, allocated8 = pairChainConversion 8 (name 8)
+        let host8, pawPrint8, allocated8 = conversionCost (pairChain 8) (name 8)
         pawPrint8 |> shouldEqual host8
-        let host16, pawPrint16, allocated16 = pairChainConversion 16 (name 16)
+        let host16, pawPrint16, allocated16 = conversionCost (pairChain 16) (name 16)
         pawPrint16 |> shouldEqual host16
 
         TestContext.Progress.WriteLine $"%s{receiver}: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
 
         Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
+    /// `K0<T> : IOne`, and `Kk<T> : K(k-1)<Pair<T, T>>` up to `depth`: a base chain whose every level
+    /// passes its argument on twice, so the bases' targets share their halves.
+    let private pairBaseChain (depth : int) : Sketch list =
+        [
+            yield sketch "IOne" SketchKind.Interface 0 []
+            yield sketch "Pair`2" SketchKind.Class 2 []
+            yield sketch "K0`1" SketchKind.Class 1 [ Spelling.Named ("IOne", []) ]
+            for k in 1..depth do
+                yield
+                    { sketch $"K%d{k}`1" SketchKind.Class 1 [] with
+                        Base =
+                            Some (
+                                Spelling.Named (
+                                    $"K%d{k - 1}`1",
+                                    [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ; Spelling.Var 0 ]) ]
+                                )
+                            )
+                    }
+        ]
+
+    /// Loading an open receiver's base chain costs work linear in what the image holds: one row and
+    /// one extends clause per class, each of constant size. Sixteen levels cost at most 32 times what
+    /// eight do, where describing each base by its whole target gives about 256. The answer is the one
+    /// interface `IOne`.
+    [<Test>]
+    let ``Loading an open base chain passing Pair<T, T> on costs work linear in its depth`` () : unit =
+        let host8, pawPrint8, allocated8 = conversionCost (pairBaseChain 8) "K8`1"
+        pawPrint8 |> shouldEqual host8
+        let host16, pawPrint16, allocated16 = conversionCost (pairBaseChain 16) "K16`1"
+        pawPrint16 |> shouldEqual host16
+        host16 |> shouldEqual 1
+
+        TestContext.Progress.WriteLine $"base chain: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+
+    /// `C<int, U>`'s entry `I<D<int>, U>` closes `D<int>`, whose base `LBase` is in an assembly nothing
+    /// has loaded yet: closing it loads that assembly, as concretisation does, and the host answers.
+    [<Test>]
+    let ``An open receiver's closed argument whose base is in an assembly not yet loaded is answered`` () : unit =
+        {
+            Assemblies =
+                [
+                    CrossAssemblySpec.library "OpenReceiverBaseLib" [] [ "public class LBase { }" ]
+                    CrossAssemblySpec.entryPoint
+                        "OpenReceiverBaseEntry"
+                        [ "OpenReceiverBaseLib" ]
+                        [
+                            """
+using System;
+
+public interface I<A, B> { }
+public class D<T> : LBase { }
+public class C<T, U> : I<D<T>, U> { }
+
+public static class Program
+{
+    public static int Main()
+    {
+        Type u = typeof(C<,>).GetGenericArguments()[1];
+        Type[] interfaces = typeof(C<,>).MakeGenericType(typeof(int), u).GetInterfaces();
+        if (interfaces.Length != 1) return 1;
+        if (!ReferenceEquals(interfaces[0], typeof(I<,>).MakeGenericType(typeof(D<int>), u))) return 2;
+        return 0;
+    }
+}
+"""
+                        ]
+                ]
+            EntryAssemblyName = "OpenReceiverBaseEntry"
+            ExpectedReturnCode = 0
+        }
+        |> CrossAssemblyHarness.runTest
 
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
     /// expects; PawPrint must stop where managed code asks `GetUtf8NameInternal` for the name of an
