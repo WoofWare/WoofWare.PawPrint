@@ -318,6 +318,13 @@ module FrameworkUnderTest =
     let requireFrameworkPackDirectory (flavour : SimulatedUnixFlavour) : string =
         requireDevshellDirectory (frameworkPackVariable flavour (runtime ())) $"run a guest on the %A{flavour} CoreLib"
 
+    /// `runtime`'s pinned runtime pack of `flavour`'s CoreLib, whichever runtime is under test;
+    /// outside the Nix devshell, the calling test is ignored.
+    let requireFrameworkPackDirectoryOf (flavour : SimulatedUnixFlavour) (runtime : EmulatedRuntime) : string =
+        requireDevshellDirectory
+            (frameworkPackVariable flavour runtime)
+            $"read %s{name runtime}'s pinned %A{flavour} runtime pack"
+
     /// `runtime`'s pinned linux-x64 framework, whichever runtime is under test; outside the Nix
     /// devshell, the calling test is ignored.
     let requireLinuxFrameworkDirectoryOf (runtime : EmulatedRuntime) : string =

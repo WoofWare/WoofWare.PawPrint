@@ -184,10 +184,15 @@
       # Pointing the interpreter's runtime-dir list at the pack of the kernel's flavour closes
       # that gap.
       #
-      # Only the managed assemblies are kept: PawPrint never loads native code (that is the
-      # point of the project), so the pack's `native/` tree is closure for nothing. The install
-      # phase fails loudly if the pack's layout ever stops matching `frameworkPackTfm`, rather
-      # than silently producing an empty dir.
+      # Only the managed assemblies and the pack's `Microsoft.NETCore.App.deps.json` are kept:
+      # PawPrint never loads native code (that is the point of the project), so the pack's
+      # `native/` tree is closure for nothing. The `deps.json` makes the directory a
+      # `Microsoft.NETCore.App` for the pack's RID, as the host reads one: it lists each
+      # assembly with its assembly and file version, which is what the host's TPA computation
+      # reads (docs/plans/2026-11-19-host-style-assembly-binding.md). `TestFrameworkUnderTest`
+      # checks that its runtime assets are exactly the copied assemblies. The install phase
+      # fails loudly if the pack's layout ever stops matching `frameworkPackTfm`, rather than
+      # silently producing an empty dir.
       frameworkPack = rid: hash: name: pin:
         pkgs.stdenvNoCC.mkDerivation {
           pname = "dotnet-${rid}-framework";
@@ -213,7 +218,7 @@
               exit 1
             fi
             mkdir -p "$out"
-            cp "$libDir"/*.dll "$out/"
+            cp "$libDir"/*.dll "$libDir/Microsoft.NETCore.App.deps.json" "$out/"
             runHook postInstall
           '';
           # Managed assemblies: nothing to strip, patchelf, or rewrite. Fixup on 170-odd DLLs is

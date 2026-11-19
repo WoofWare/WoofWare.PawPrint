@@ -3,6 +3,7 @@ namespace WoofWare.PawPrint.Test
 open System
 open System.Collections.Immutable
 open System.IO
+open System.Text.Json
 open FsCheck
 open FsCheck.FSharp
 open FsUnitTyped
@@ -358,3 +359,237 @@ module TestFrameworkUnderTest =
             Assembly.readFile NullLoggerFactory.Instance (FrameworkUnderTest.selected ()).CoreLibPath
 
         FrameworkUnderTest.assertServes (stateHaving (Some corelib))
+
+    /// The runtime identifier of the runtime pack which `flake.nix` pins for `flavour`.
+    let private packRid (flavour : SimulatedUnixFlavour) : string =
+        match flavour with
+        | SimulatedUnixFlavour.Linux -> "linux-x64"
+        | SimulatedUnixFlavour.Darwin -> "osx-arm64"
+
+    /// A `deps.json`'s bytes as a JSON document.
+    let private parseDepsJson (bytes : byte[]) : JsonDocument =
+        // The host's JSON parser skips a UTF-8 byte order mark; `JsonDocument` does not.
+        let start =
+            if
+                bytes.Length >= 3
+                && bytes.[0] = 0xEFuy
+                && bytes.[1] = 0xBBuy
+                && bytes.[2] = 0xBFuy
+            then
+                3
+            else
+                0
+
+        JsonDocument.Parse (ReadOnlyMemory (bytes, start, bytes.Length - start))
+
+    /// The name of a `deps.json`'s runtime target.
+    let private runtimeTargetName (root : JsonElement) : string =
+        let runtimeTarget = root.GetProperty "runtimeTarget"
+
+        match runtimeTarget.ValueKind with
+        | JsonValueKind.String -> runtimeTarget.GetString ()
+        | _ -> runtimeTarget.GetProperty("name").GetString ()
+
+    /// `deps_json_t::load` takes `runtimeTarget` either as a string or as an object with a `name`.
+    [<TestCase("""{ "runtimeTarget": "T/rid" }""")>]
+    [<TestCase("""{ "runtimeTarget": { "name": "T/rid", "signature": "" } }""")>]
+    let ``A deps.json's runtime target is read in either of its forms`` (json : string) : unit =
+        use document = JsonDocument.Parse json
+        runtimeTargetName document.RootElement |> shouldEqual "T/rid"
+
+    /// The host's JSON parser skips a UTF-8 byte order mark (`json_parser_t`).
+    [<Test>]
+    let ``A deps.json may start with a UTF-8 byte order mark`` () : unit =
+        let bytes =
+            Array.append [| 0xEFuy ; 0xBBuy ; 0xBFuy |] (Text.Encoding.UTF8.GetBytes """{ "runtimeTarget": "T/rid" }""")
+
+        use document = parseDepsJson bytes
+        runtimeTargetName document.RootElement |> shouldEqual "T/rid"
+
+    let pinnedPacks : TestCaseData list =
+        [
+            for runtime in EmulatedRuntime.supported do
+                for flavour in [ SimulatedUnixFlavour.Linux ; SimulatedUnixFlavour.Darwin ] do
+                    TestCaseData(runtime, flavour).SetArgDisplayNames (FrameworkUnderTest.name runtime, $"%A{flavour}")
+        ]
+
+    /// Every runtime asset which the host reads from `Microsoft.NETCore.App`'s `deps.json`, whose
+    /// target is `targetName`, as the file name the asset is listed under and the path, relative to
+    /// the framework directory, at which the host looks for it. The host parses the lowest
+    /// framework in self-contained mode (`deps_resolver.h`, `deps_json_t::load_self_contained`):
+    /// for each package that `libraries` declares, the `runtime` assets that the target lists for
+    /// it. `runtimeTargets` is not read in that mode.
+    let private runtimeAssets (root : JsonElement) (targetName : string) : (string * string) list =
+        let target = root.GetProperty("targets").GetProperty targetName
+
+        [
+            for library in root.GetProperty("libraries").EnumerateObject () do
+                let libraryType = library.Value.GetProperty("type").GetString ()
+
+                match target.TryGetProperty library.Name with
+                | true, package ->
+                    match package.TryGetProperty "runtime" with
+                    | true, runtime ->
+                        for asset in runtime.EnumerateObject () do
+                            // `deps_asset_t` reads `\` as `/` in both paths.
+                            let relativePath = asset.Name.Replace ('\\', '/')
+
+                            // `resolve_tpa_list` skips a placeholder.
+                            if not (relativePath.EndsWith ("/_._", StringComparison.OrdinalIgnoreCase)) then
+                                let localPath =
+                                    match asset.Value.TryGetProperty "localPath" with
+                                    | true, localPath ->
+                                        match localPath.GetString () with
+                                        | null -> null
+                                        | localPath -> localPath.Replace ('\\', '/')
+                                    | false, _ -> null
+
+                                // `deps_entry_t::to_dir_path`, for a runtime asset.
+                                let probed =
+                                    match localPath with
+                                    | null
+                                    | "" ->
+                                        if
+                                            String.Equals (
+                                                libraryType,
+                                                "runtimepack",
+                                                StringComparison.OrdinalIgnoreCase
+                                            )
+                                        then
+                                            relativePath
+                                        else
+                                            Path.GetFileName relativePath
+                                    | localPath -> localPath
+
+                                // A leading `./` names the framework directory itself.
+                                let rec withoutDotSlash (path : string) : string =
+                                    if path.StartsWith ("./", StringComparison.Ordinal) then
+                                        withoutDotSlash (path.Substring 2)
+                                    else
+                                        path
+
+                                yield Path.GetFileName relativePath, withoutDotSlash probed
+                    | false, _ -> ()
+                | false, _ -> ()
+        ]
+
+    /// The host reads `Microsoft.NETCore.App`'s `deps.json` as it reads a self-contained
+    /// application's: a target package's assets count only if `libraries` declares the package, and
+    /// a RID-specific (`runtimeTargets`) asset never counts. `resolve_tpa_list` skips a placeholder,
+    /// an asset whose path ends `/_._`.
+    [<Test>]
+    let ``A pack's runtime assets are those the host reads from the lowest framework`` () : unit =
+        let json =
+            """{
+  "runtimeTarget": { "name": "T/rid" },
+  "targets": {
+    "T/rid": {
+      "Declared/1.0.0": {
+        "runtime": { "A.dll": {}, "lib/net10.0/_._": {} },
+        "runtimeTargets": { "runtimes/rid/lib/net10.0/B.dll": { "rid": "rid", "assetType": "runtime" } }
+      },
+      "Undeclared/1.0.0": { "runtime": { "C.dll": {} } }
+    }
+  },
+  "libraries": {
+    "Declared/1.0.0": { "type": "package", "serviceable": true, "sha512": "" }
+  }
+}"""
+
+        use document = JsonDocument.Parse json
+        runtimeAssets document.RootElement "T/rid" |> shouldEqual [ "A.dll", "A.dll" ]
+
+    /// `deps_entry_t::to_dir_path`: a runtime asset is at its `localPath` when it has one; else, in
+    /// a `runtimepack` library, at its listed path; else at its listed path's file name. The host
+    /// reads `\` in either path as `/`, and a leading `./` names the directory itself.
+    [<Test>]
+    let ``A pack's runtime asset is where the host looks for it`` () : unit =
+        let json =
+            """{
+  "runtimeTarget": { "name": "T/rid" },
+  "targets": {
+    "T/rid": {
+      "Package/1.0.0": {
+        "runtime": {
+          "A.dll": { "localPath": "sub/A.dll" },
+          "lib/net10.0/B.dll": {},
+          "D.dll": { "localPath": "" },
+          "lib\\net10.0\\E.dll": {},
+          "F.dll": { "localPath": "./F.dll" },
+          "G.dll": { "localPath": ".\\G.dll" },
+          "lib\\net10.0\\_._": {}
+        }
+      },
+      "Pack/1.0.0": { "runtime": { "lib/net10.0/C.dll": {} } }
+    }
+  },
+  "libraries": {
+    "Package/1.0.0": { "type": "package", "serviceable": true, "sha512": "" },
+    "Pack/1.0.0": { "type": "runtimepack", "serviceable": false, "sha512": "" }
+  }
+}"""
+
+        use document = JsonDocument.Parse json
+
+        runtimeAssets document.RootElement "T/rid"
+        |> shouldEqual
+            [
+                "A.dll", "sub/A.dll"
+                "B.dll", "B.dll"
+                "D.dll", "D.dll"
+                "E.dll", "E.dll"
+                "F.dll", "F.dll"
+                "G.dll", "G.dll"
+                "C.dll", "lib/net10.0/C.dll"
+            ]
+
+    /// Each pinned pack is a `Microsoft.NETCore.App` for its RID, with the `deps.json` its nupkg
+    /// ships. Every assembly in the directory is a runtime asset of that `deps.json`, and every
+    /// runtime asset is an assembly in the directory.
+    [<TestCaseSource(nameof pinnedPacks)>]
+    let ``A pinned runtime pack's deps.json lists exactly the pack's assemblies``
+        (runtime : EmulatedRuntime)
+        (flavour : SimulatedUnixFlavour)
+        : unit
+        =
+        let pack = FrameworkUnderTest.requireFrameworkPackDirectoryOf flavour runtime
+        let depsPath = Path.Combine (pack, "Microsoft.NETCore.App.deps.json")
+
+        if not (File.Exists depsPath) then
+            failwith
+                $"%s{pack} holds no Microsoft.NETCore.App.deps.json: flake.nix's frameworkPack must copy it out of the runtime pack"
+
+        use document = parseDepsJson (File.ReadAllBytes depsPath)
+        let root = document.RootElement
+        let targetName = runtimeTargetName root
+
+        targetName
+        |> shouldEqual $".NETCoreApp,Version=v%i{EmulatedRuntime.major runtime}.0/%s{packRid flavour}"
+
+        // Filtered here rather than by a search pattern, whose casing follows the platform:
+        // `AssemblyProbe` binds `X.DLL` as readily as `X.dll`.
+        let assemblies =
+            Directory.GetFiles pack
+            |> Seq.map Path.GetFileName
+            |> Seq.filter (fun name -> name.EndsWith (".dll", StringComparison.OrdinalIgnoreCase))
+            |> List.ofSeq
+
+        assemblies |> shouldContain "System.Private.CoreLib.dll"
+
+        let assets = runtimeAssets root targetName
+
+        // Each asset is a file of its own name directly in the pack, so its TPA name is that
+        // file's stem.
+        assets |> List.filter (fun (name, path) -> name <> path) |> shouldEqual []
+
+        let listed = assets |> List.map snd
+
+        // Each difference is compared with the empty list, so a failure names exactly the
+        // offending files rather than printing both lists in full.
+        Set.difference (Set.ofList listed) (Set.ofList assemblies)
+        |> Set.toList
+        |> shouldEqual []
+
+        Set.difference (Set.ofList assemblies) (Set.ofList listed)
+        |> Set.toList
+        |> shouldEqual []
