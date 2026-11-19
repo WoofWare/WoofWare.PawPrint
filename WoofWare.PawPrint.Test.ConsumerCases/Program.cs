@@ -55,7 +55,10 @@ public class CountingInterceptor : Castle.DynamicProxy.IInterceptor
     public void Intercept(Castle.DynamicProxy.IInvocation invocation)
     {
         Count++;
-        Console.WriteLine("intercept " + invocation.Method.Name);
+        // The method a proxy with a target forwards to is the target's implementation, which Castle
+        // finds through the target type's interface map.
+        var forwardedTo = invocation.InvocationTarget == null ? "" : " on " + invocation.MethodInvocationTarget.DeclaringType.Name;
+        Console.WriteLine("intercept " + invocation.Method.Name + forwardedTo);
         if (invocation.InvocationTarget != null || !invocation.Method.IsAbstract)
         {
             try { invocation.Proceed(); return; } catch (NotImplementedException) { }
@@ -278,8 +281,10 @@ public static class Program
     static int FieMhhFail()
     {
         var fake = A.Fake<IThing>();
-        fake.Act(3);
-        try { A.CallTo(() => fake.Act(4)).MustHaveHappened(); }
+        // Ten distinct calls, so that the message pads each call's number to the width of the last
+        // one's, which FakeItEasy computes with Math.Log10.
+        for (var i = 1; i <= 10; i++) fake.Act(i);
+        try { A.CallTo(() => fake.Act(11)).MustHaveHappened(); }
         catch (ExpectationException e)
         {
             Console.WriteLine(e.GetType().FullName);
