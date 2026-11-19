@@ -1750,6 +1750,11 @@ the interpreter's package.
 4. *Test: converting a definition's map to targets is linear in a shared chain*, added for a mutant; red on commit 3.
 5. *instantiateTargets closes an instantiation under its arguments' handles*: the fix for what commit 4 found.
 6. *Tests: an open construction over an interface's own variable*, added when a mutant survived.
+7. *Plan for #2309: record the third pull request as built*: this section, before Codex's review.
+8. *Tests: an open receiver loads its base chain and every row*, from Codex's first review; both new tests failed
+   before the next commit.
+9. *ofInstantiation loads the receiver's base chain and every row*: the fix.
+10. This section, after Codex's first review.
 
 **The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
 variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
@@ -1782,14 +1787,19 @@ type. Otherwise it is `openConstructed`, which collapses a typical instantiation
   for `C`. Commit 4 found it. `instantiateTargets` now concretises the definition over its own variables, with the
   handles as the type variables, which gives the same handle: 445 kB at depth 16. `instantiateOpenGenericTypeDefinition`
   itself is unchanged and still re-spells. `MakeGenericType` reaches it, among others.
-- **Rows that add no entry are not loaded for an open receiver.** Decision 4 converts entries. So a row naming an
-  entry that an earlier row added is not converted, whereas `interfaceMapOf` concretises every row in the order read.
-  Where the receiver is closed, the two agree on every corpus (the cross-check below). A malformed image whose later
-  duplicate row fails to load would be answered for an open receiver and refused for a closed one. That has not been
-  observed; it is recorded so that it is not mistaken for a decision.
+- **What is loaded before the entries are converted.** Decision 4 converts entries. Codex's first review showed two
+  malformed images the host refuses which entries alone answer. In one, `C<T> : B<IAbsent>`, the base `B<U>` adds no
+  entry. In the other, `C<T>` re-declares its base's `I<valuetype Int32>` as `I<class Int32>`, a row that adds no
+  entry. So once the definition's map is built (commit 9), `ofInstantiation` loads the receiver's base chain through
+  `resolveBaseRuntimeTypeHandleTarget`, as `interfaceMapOf` loads a closed type's chain. It then converts every row
+  the map read, in the order read, as `interfaceMapOf` concretises them, and only then converts the entries. The map
+  comes first because it refuses an extends clause naming a variable the type lacks, which loading the chain would
+  instead stop on with a `failwith`.
 - **A refused definition map stops the run.** It does not raise a guest exception, just as `interfaceMapOf` does not
   on the closed path. `interfaceMapOfDefinition` refuses some malformed InterfaceImpl rows and extends clauses, but not
-  every extends clause CoreCLR refuses (#2336). Its docstring now says so.
+  every extends clause CoreCLR refuses (#2336). Its docstring now says so. A type that the base chain, a row or an
+  entry names and that does not load stops the run inside the conversion, as `reflectedTypeTarget` stops it. It is not
+  `ofInstantiation`'s `Error`, which is the map's refusal alone; the docstring says which is which.
 
 **Tests** (default suite), each against the host's `GetInterfaces()` over the same image, order, duplicates and
 canonical form included:
@@ -1867,6 +1877,36 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
 | walk: the parent's map not rebased onto the extends clause | ten default tests; `TypeGetInterfaceMapTargets` and both order guests |
 | conversion: an environment never `Bound`, always `Open` | none: equivalent on metadata that loads. With every target closed, the walk gives each variable its closed target, each instantiation the same closed handle through `instantiateTargets`, and each array or pointer the closed shape through `composite`. The two differ only where a function pointer is a generic argument, which CoreCLR refuses to load. `Bound` is kept because it concretises a spelling in one step |
 | walk: the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
+| (after commit 9) the receiver's base chain not loaded | the absent-base-argument test |
+| (after commit 9) rows that add no entry not converted | the re-declared-row test |
+
+**Codex's first review (on commit 7).** It ran the focused tests and both guests, and found:
+
+- [P2] Two malformed images that the host refuses and an open receiver answered: an absent argument of a base that
+  adds no entry, and a re-declared row of the wrong kind. Both are fixed in commits 8 and 9 (above).
+- [P3] The two refusal tests for #2315 matched fragments that other open-construction stops share. They now also
+  name `GetUtf8NameInternal` (commit 8).
+- [P3] A type that does not load during the conversion stops the run rather than returning `Error`. The docstring
+  now says so (commit 9). Returning it would mean a `Result` from `reflectedTypeTarget`, whose other callers all stop.
+- **Left for a decision, not fixed here.** Each needs a structural choice the decisions do not make:
+  - [P2] *Exponential registration of a deeply shared open target.* The QCall turns each target into a guest `Type`
+    through `TypeHandleRegistry.getOrAllocate`. That runs `assertWellFormed`, which revisits every occurrence of a
+    shared argument, and looks the target up in a `Map` keyed on it, which compares two equal trees structurally.
+    Measured over the definition `N<depth>` of W1's chain: assertion alone took 292 kB at depth 8, 4.7 MB at 12 and
+    75 MB at 16; registering again once the targets are present took 0.54 MB, 8.4 MB and 134 MB. Each two levels
+    multiply the cost by four. A closed receiver is unaffected, its entries being interned handles. Bounding this
+    means interning open targets, or memoising both the assertion and the comparison by reference, in the registry
+    every open reflected type goes through. That is the representation of `RuntimeTypeHandleTarget`, beyond this
+    feature.
+  - [P2] *Open constructions are not checked as CoreCLR's loader checks them.* `reflectedTypeTarget`'s structural
+    walk, and `instantiateTargets`'s open branch, build an `OpenConstructed` without checking the arity, the
+    arguments `Generics::CheckInstantiation` refuses (a pointer, a byref, a function pointer), or the spelled
+    `CLASS`/`VALUETYPE` kind of a nested instantiation. A closed instantiation is checked by concretisation. Codex
+    showed three malformed definitions that the host refuses and an open receiver answers: `C<T> : I<T*>`,
+    `C<T> : I<Pair<T>>` for a two-parameter `Pair`, and `I<valuetype G<T>>` for a class `G`. The walk serves every
+    open reflected type: constraints, signatures and extends clauses. Checking there changes what all of them answer.
+    `NativeRuntimeTypeHelpers.malformedInstantiationArgument`, the target-level form of the argument check, is
+    compiled after `ReflectedTypeTarget`.
 
 **Neighbours, now that this has landed.** #2303 and #2295 can read a definition's interface map from
 `ConcreteInterfaceDispatch.interfaceMapOfDefinition`: each entry's interface, its definition-rooted substitution,
