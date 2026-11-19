@@ -958,3 +958,45 @@ After stage 5, PR 4 of the consumer-guest plan can start.
 
 **Not in this work**, as the plan lists, less self-contained publishes: seeding the property (Q9 B); existence
 checks (Q10 B); deleting the framework-overlap refusal once the locator's order is in use.
+
+## As built (stage 1)
+
+Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after the plan and decisions commits.
+
+* **The flake.** `frameworkPack` copies `runtimes/<rid>/lib/<tfm>/Microsoft.NETCore.App.deps.json` beside the
+  DLLs it already copied. The comment above it says why. The fixed-output hashes are of the nupkgs, so none
+  changed. Nothing in PawPrint reads the file yet.
+* **The test.** `TestFrameworkUnderTest`, "A pinned runtime pack's deps.json lists exactly the pack's
+  assemblies", in the default suite. It has one case per runtime and flavour: four packs, read whichever runtime
+  is under test. Each case:
+  * fails when the pack directory holds no `Microsoft.NETCore.App.deps.json`;
+  * checks that `runtimeTarget` is `.NETCoreApp,Version=v<major>.0/<rid>`, for the pack's RID;
+  * collects the runtime assets of that target (each library's `runtime` assets, and its `runtimeTargets` assets
+    of type `runtime`), and requires them to equal the set of `*.dll` files in the directory. Each set difference
+    is compared with the empty list, so a failure names the files.
+
+  Outside the Nix devshell the cases are ignored, as the other pack tests are: only the devshell names the packs.
+  `FrameworkUnderTest.requireFrameworkPackDirectoryOf flavour runtime` is new, so that a test can name any
+  runtime's pack and not only the runtime under test's.
+* **Measured** (the pinned nupkgs, read with the test's rule). Each pack's `deps.json` has one library,
+  `Microsoft.NETCore.App.Runtime.<rid>/<version>`, no `runtimeTargets`, and its runtime asset paths are bare file
+  names. Runtime assets: 172 on 10.0.14 and 181 on 11.0.0-rc.3, for both RIDs, as the plan measured.
+* **Decision 5's RID list is not implemented here.** Nothing reads the file yet. When the harness builds the
+  function's input (stage 5), it passes the list for the pack's RID, not the host's: `linux-x64, linux, unix-x64,
+  unix, any` for the Linux pack, and `osx-arm64, osx, unix-arm64, unix, any` for the Darwin pack. The test's
+  private `packRid` holds the RID of each flavour's pack; stage 5 can move it into `FrameworkUnderTest`.
+
+The red run, before the flake change: all four cases failed with "`<pack>` holds no Microsoft.NETCore.App.deps.json".
+
+Mutants, each run against the four cases and each killing all four:
+
+| Mutant | How it failed |
+|---|---|
+| The flake does not copy the `deps.json` | "holds no Microsoft.NETCore.App.deps.json" |
+| The flake drops `Microsoft.VisualBasic.dll` after the copy | listed but absent: `Microsoft.VisualBasic.dll` |
+| The flake copies an extra DLL, `NotListed.dll` | present but unlisted: `NotListed.dll` |
+| The test's expectation gains `NotInThePack.dll` | present but unlisted: `NotInThePack.dll` |
+| The test swaps the two flavours' RIDs | the `runtimeTarget` check |
+
+Suites on the .NET 10 host, each its own invocation: default 5990 (5951 passed, 39 skipped), `Guest` 250,
+`GuestSolo` 2, `GuestPure` 1210, `GuestImpure` 305, all passed.
