@@ -70,6 +70,21 @@ type internal DepsEntry =
         IsRidSpecific : bool
     }
 
+/// What the host reads from one `deps.json`.
+[<NoComparison>]
+type internal DepsManifest =
+    {
+        /// The entries, in the host's order: each `libraries` member in order, and within one
+        /// library its runtime, then resources, then native assets, each in the order of the
+        /// runtime target. Placeholders are kept.
+        Entries : DepsEntry list
+        /// The packages for which the host's `deps_json_t::has_package` holds: those of the
+        /// runtime target with an asset-type member (even an empty one), and, when reading
+        /// `runtimeTargets`, those with RID-specific assets for a listed RID. Whether or not
+        /// `libraries` names them. Test one with `DepsManifest.hasPackage`.
+        Packages : Set<string>
+    }
+
 /// One step into a JSON value, for naming where a `deps.json` was refused.
 [<RequireQualifiedAccess>]
 type internal DepsJsonPathSegment =
@@ -91,8 +106,9 @@ type internal DepsJsonError =
     | InvalidUtf8
     /// System.Text.Json does not read the document as one strict JSON value: for instance it
     /// is empty, malformed, holds a comment or a trailing comma, has content after its root
-    /// value, or nests deeper than 64.
-    | NotStrictJson of message : string
+    /// value, or nests deeper than 64. With the line, and the byte within that line, at which
+    /// it stopped, each counted from zero, where the reader reports them.
+    | NotStrictJson of line : int64 option * bytePositionInLine : int64 option
     /// A `\u` escape names half of a surrogate pair without the other half, in the string at
     /// `path` or in a member name of the object at `path`.
     | UnpairedSurrogate of path : DepsJsonPathSegment list
@@ -268,6 +284,15 @@ module internal DepsEntry =
                 HostStrings.appendPath culture fileName
             | DepsAssetType.Runtime
             | DepsAssetType.Native -> fileName
+
+[<RequireQualifiedAccess>]
+module internal DepsManifest =
+
+    /// `deps_json_t::has_package`: whether the manifest has the package `name/version`. A
+    /// framework's entry is found in that framework's directory only if the framework's own
+    /// manifest has its `LibraryName/LibraryVersion`.
+    let hasPackage (manifest : DepsManifest) (name : string) (version : string) : bool =
+        manifest.Packages.Contains (name + "/" + version)
 
 [<RequireQualifiedAccess>]
 module internal DepsJson =
@@ -587,6 +612,7 @@ module internal DepsJson =
     /// `reconcile_libraries_with_targets`: each library in order which has assets, and its
     /// assets of each type.
     let private reconcile
+        (runtime : EmulatedRuntime)
         (root : JsonElement)
         (hasAssets : string -> bool)
         (assetsOf : string -> DepsAssetType -> Asset list * bool)
@@ -603,10 +629,17 @@ module internal DepsJson =
 
                 requireObject libraryPath library
                 |> Result.bind (fun library ->
-                    // The host reads `sha512` (.NET 10 only) and `serviceable` without checking
-                    // them, though nothing PawPrint models depends on their values.
-                    requireStringMember libraryPath library "sha512"
-                    |> Result.bind (fun _ -> requireMember libraryPath library "serviceable")
+                    // The host reads `sha512` and `serviceable` without checking them, though
+                    // nothing PawPrint models depends on their values. .NET 11's hostpolicy no
+                    // longer reads `sha512`.
+                    let sha512 =
+                        match runtime with
+                        | EmulatedRuntime.Net10 ->
+                            requireStringMember libraryPath library "sha512" |> Result.map ignore
+                        | EmulatedRuntime.Net11 -> Ok ()
+
+                    sha512
+                    |> Result.bind (fun () -> requireMember libraryPath library "serviceable")
                     |> Result.bind (requireBool (ofMember libraryPath "serviceable"))
                     |> Result.bind (fun _ -> requireStringMember libraryPath library "type")
                     |> Result.map (fun libraryType ->
@@ -658,7 +691,12 @@ module internal DepsJson =
         |> Option.defaultValue []
 
     /// `load_framework_dependent` and `load_self_contained`.
-    let private load (mode : DepsJsonMode) (root : JsonElement) : Result<DepsEntry list, DepsJsonError> =
+    let private load
+        (runtime : EmulatedRuntime)
+        (mode : DepsJsonMode)
+        (root : JsonElement)
+        : Result<DepsManifest, DepsJsonError>
+        =
         runtimeTargetName root
         |> Result.bind (fun target ->
             let targetsPath = [ DepsJsonPathSegment.Member "targets" ]
@@ -674,9 +712,16 @@ module internal DepsJson =
                     processTargets targetPath packages
                     |> Result.bind (fun assets ->
                         reconcile
+                            runtime
                             root
                             assets.ContainsKey
                             (fun package assetType -> assetsOfType assets package assetType, false)
+                        |> Result.map (fun entries ->
+                            {
+                                Entries = entries
+                                Packages = assets.Keys |> Set.ofSeq
+                            }
+                        )
                     )
                 | DepsJsonMode.FrameworkDependent rids ->
                     processRuntimeTargets rids targetPath packages
@@ -693,20 +738,37 @@ module internal DepsJson =
                                 | [] -> assetsOfType assets package assetType, false
                                 | ridSpecific -> ridSpecific, true
 
-                            reconcile root hasAssets assetsOf
+                            // `has_package` asks for RID-specific assets which survived RID
+                            // selection, unlike `hasAssets`.
+                            let packages =
+                                Seq.append
+                                    assets.Keys
+                                    (ridAssets |> Map.filter (fun _ byType -> not byType.IsEmpty) |> Map.keys)
+                                |> Set.ofSeq
+
+                            reconcile runtime root hasAssets assetsOf
+                            |> Result.map (fun entries ->
+                                {
+                                    Entries = entries
+                                    Packages = packages
+                                }
+                            )
                         )
                     )
             )
         )
 
-    /// Read a `deps.json`'s entries as the host does (`deps_json_t::load`), in the host's order:
-    /// each `libraries` member in order, and within one library its runtime, then resources,
-    /// then native assets, each in the order of the runtime target. Placeholders are kept.
+    /// Read a `deps.json` as `runtime`'s hostpolicy does (`deps_json_t::load`).
     ///
     /// Refuses a document which the host would refuse, or on which its behaviour is undefined
     /// (a member it reads without checking is absent or of another kind), or which rapidjson
     /// and System.Text.Json might read differently.
-    let parse (mode : DepsJsonMode) (contents : byte[]) : Result<DepsEntry list, DepsJsonError> =
+    let parse
+        (runtime : EmulatedRuntime)
+        (mode : DepsJsonMode)
+        (contents : byte[])
+        : Result<DepsManifest, DepsJsonError>
+        =
         // `json_parser_t::parse_file` skips one UTF-8 byte order mark.
         let body =
             if contents.Length >= 3 && contents.[0..2] = utf8Bom then
@@ -733,7 +795,9 @@ module internal DepsJson =
                 // nesting deeper than 64.
                 Ok (JsonDocument.Parse body)
             with :? JsonException as e ->
-                Error (DepsJsonError.NotStrictJson e.Message)
+                Error (
+                    DepsJsonError.NotStrictJson (Option.ofNullable e.LineNumber, Option.ofNullable e.BytePositionInLine)
+                )
 
         match document with
         | Error e -> Error e
@@ -744,4 +808,4 @@ module internal DepsJson =
 
         checkReadersAgree [] root
         |> Result.bind (fun () -> requireObject [] root)
-        |> Result.bind (load mode)
+        |> Result.bind (load runtime mode)
