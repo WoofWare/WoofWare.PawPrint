@@ -293,10 +293,11 @@ module TestGuestParking =
     let ``Every consumer library has a running scenario that shows it generated a type`` () : unit =
         let libraries = Set.ofList TestConsumerCases.libraries
 
+        // Every scenario names a known library, and every library has a scenario.
         TestConsumerCases.scenarios
         |> List.map TestConsumerCases.libraryOf
-        |> List.filter (fun library -> not (libraries.Contains library))
-        |> shouldEqual []
+        |> Set.ofList
+        |> shouldEqual libraries
 
         for runtime in everyRuntime do
             let parked = (TestConsumerCases.onRuntime runtime).Parked
