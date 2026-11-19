@@ -1,9 +1,7 @@
 namespace WoofWare.Pawprint.Test
 
 open System
-open System.Collections.Generic
 open System.Collections.Immutable
-open System.Diagnostics
 open System.IO
 open FsUnitTyped
 open NUnit.Framework
@@ -19,128 +17,21 @@ open WoofWare.PawPrint.Test
 [<Explicit>]
 module TestFSharpPureCases =
 
-    type private TestAssemblyMarker = class end
-
-    // We cannot use __SOURCE_DIRECTORY__: when ContinuousIntegrationBuild is set
-    // (Directory.Build.props turns it on whenever GITHUB_ACTION is non-empty), the
-    // F# compiler remaps source paths to a deterministic `/_/` prefix that has no
-    // relationship to the runtime filesystem. Instead, walk up from the test
-    // assembly's on-disk location until we find WoofWare.PawPrint.slnx, then
-    // resolve the sibling FSharpPureCases project from there.
-    let private repoRoot : string =
-        let testAssemblyDir =
-            Path.GetDirectoryName typeof<TestAssemblyMarker>.Assembly.Location
-
-        let rec walk (dir : string) : string =
-            if String.IsNullOrEmpty dir then
-                failwith
-                    $"Could not locate WoofWare.PawPrint.slnx by walking up from %s{testAssemblyDir}; cannot determine F# test project directory."
-            elif File.Exists (Path.Combine (dir, "WoofWare.PawPrint.slnx")) then
-                dir
-            else
-                walk (Path.GetDirectoryName dir)
-
-        walk testAssemblyDir
-
-    let private projectDir =
-        Path.Combine (repoRoot, "WoofWare.PawPrint.Test.FSharpPureCases")
-
-    let private projectFile =
-        Path.Combine (projectDir, "WoofWare.PawPrint.Test.FSharpPureCases.fsproj")
-
-    // Output goes to a path we control so the test isn't coupled to the project's TargetFramework.
-    let private publishDir =
-        Path.Combine (projectDir, "bin", "Release", "pawprint-test-publish")
-
-    let private dllPath =
-        Path.Combine (publishDir, "WoofWare.PawPrint.Test.FSharpPureCases.dll")
-
-    /// The files in `publishDir` whose names are also those of files in `frameworkDir`, compared
-    /// ignoring case as `AssemblyProbe` binds. PawPrint searches `publishDir` ahead of the
-    /// framework, so each such file is one it would bind in place of the framework's own.
-    let private frameworkFilesIn (publishDir : string) (frameworkDir : string) : string list =
-        let frameworkFiles =
-            HashSet<string> (
-                Directory.EnumerateFiles frameworkDir |> Seq.map Path.GetFileName,
-                StringComparer.OrdinalIgnoreCase
-            )
-
-        // Guards against the comparison passing vacuously on a listing that found nothing.
-        if not (frameworkFiles.Contains "System.Private.CoreLib.dll") then
-            failwith $"logic error: the framework directory %s{frameworkDir} holds no System.Private.CoreLib.dll"
-
-        Directory.EnumerateFiles publishDir
-        |> Seq.map Path.GetFileName
-        |> Seq.filter frameworkFiles.Contains
-        |> Seq.sort
-        |> List.ofSeq
-
-    /// Publishes the cases framework-dependent, so that both PawPrint and the real-runtime oracle run
-    /// them on the framework under test. A self-contained publish would carry a framework of its
-    /// own, which is the host SDK's runtime pack whatever framework is under test, and PawPrint
-    /// would bind it ahead of `FrameworkUnderTest.runtimeDirs ()`.
-    let private publishOnce : Lazy<unit> =
+    /// The cases' publish. Checked against the shared framework only, not the whole of
+    /// `FrameworkUnderTest.runtimeDirs ()`: that list also holds the test assembly's own directory,
+    /// whose FSharp.Core the publish's is meant to shadow.
+    let private published : Lazy<PublishedGuest> =
         lazy
-            if not (File.Exists projectFile) then
-                failwith $"Cannot publish F# test cases: project file %s{projectFile} does not exist."
+            GuestPublish.publish
+                "WoofWare.PawPrint.Test.FSharpPureCases"
+                "WoofWare.PawPrint.Test.FSharpPureCases.fsproj"
+                "WoofWare.PawPrint.Test.FSharpPureCases"
+                [ FrameworkUnderTest.sharedFrameworkDirectory () ]
 
-            // `dotnet publish` adds to an existing output directory rather than replacing it, so a
-            // file left by an earlier publish of another shape would survive this one.
-            if Directory.Exists publishDir then
-                Directory.Delete (publishDir, true)
-
-            let psi = ProcessStartInfo "dotnet"
-            psi.ArgumentList.Add "publish"
-            psi.ArgumentList.Add "--configuration"
-            psi.ArgumentList.Add "Release"
-            psi.ArgumentList.Add "--no-self-contained"
-            // The oracle runs the dll through the muxer of the framework under test; an apphost
-            // would find a framework by its own lookup instead.
-            psi.ArgumentList.Add "-p:UseAppHost=false"
-            psi.ArgumentList.Add "--output"
-            psi.ArgumentList.Add publishDir
-            psi.ArgumentList.Add projectFile
-            psi.RedirectStandardOutput <- true
-            psi.RedirectStandardError <- true
-            psi.UseShellExecute <- false
-
-            use proc =
-                Process.Start psi
-                |> Option.ofObj
-                |> Option.defaultWith (fun () -> failwith "Process.Start returned null for dotnet publish")
-
-            // Read both pipes concurrently so a chatty child can't deadlock by filling
-            // the stderr buffer while we're blocked draining stdout (or vice versa).
-            let stdoutTask = proc.StandardOutput.ReadToEndAsync ()
-            let stderrTask = proc.StandardError.ReadToEndAsync ()
-            proc.WaitForExit ()
-            let stdout = stdoutTask.GetAwaiter().GetResult ()
-            let stderr = stderrTask.GetAwaiter().GetResult ()
-
-            if proc.ExitCode <> 0 then
-                failwith
-                    $"dotnet publish failed with exit code %d{proc.ExitCode} for %s{projectFile}.\nSTDOUT:\n%s{stdout}\nSTDERR:\n%s{stderr}"
-
-            if not (File.Exists dllPath) then
-                failwith
-                    $"dotnet publish completed but %s{dllPath} does not exist.\nSTDOUT:\n%s{stdout}\nSTDERR:\n%s{stderr}"
-
-            // Only the shared framework, not the whole of `FrameworkUnderTest.runtimeDirs ()`: that
-            // list also holds the test assembly's own directory, whose FSharp.Core the publish's is
-            // meant to shadow.
-            let frameworkDir = FrameworkUnderTest.sharedFrameworkDirectory ()
-
-            match frameworkFilesIn publishDir frameworkDir with
-            | [] -> ()
-            | files ->
-                let files = String.concat ", " files
-
-                failwith
-                    $"The F# cases' publish in %s{publishDir} holds files named as in the framework under test's %s{frameworkDir}, which PawPrint would bind ahead of that framework's own: %s{files}. Publish framework-dependent."
-
-    let private loadImage () : byte array =
-        publishOnce.Force ()
-        File.ReadAllBytes dllPath
+    /// The cases' assembly, read from the publish.
+    let private loadImage () : PublishedGuest * byte array =
+        let guest = published.Force ()
+        guest, File.ReadAllBytes guest.Dll
 
     let testCases : string list =
         [
@@ -203,14 +94,14 @@ module TestFSharpPureCases =
         (onRuntime (FrameworkUnderTest.runtime ())).Parked |> Map.keys |> List.ofSeq
 
     let private runTest (testCaseName : string) : unit =
-        let image = loadImage ()
+        let guest, image = loadImage ()
         let messages, loggerFactory = LoggerFactory.makeTest ()
 
         let ending = (onRuntime (FrameworkUnderTest.runtime ())).Ending testCaseName
 
         let dotnetRuntimes =
             seq {
-                yield publishDir
+                yield guest.Directory
                 yield! FrameworkUnderTest.runtimeDirs ()
             }
             |> ImmutableArray.CreateRange
@@ -223,11 +114,11 @@ module TestFSharpPureCases =
             // `DifferentialOracle.alongsideInterpreted`.
             let realResult, pawPrintResult =
                 DifferentialOracle.alongsideInterpreted
-                    (fun () -> RealRuntime.executeAssemblyInPlace [| testCaseName |] dllPath)
+                    (fun () -> RealRuntime.executeAssemblyInPlace [| testCaseName |] guest.Dll)
                     (fun () ->
                         Program.run
                             loggerFactory
-                            (Some dllPath)
+                            (Some guest.Dll)
                             peImage
                             { HostConfig.Default dotnetRuntimes with
                                 Guest =
@@ -288,12 +179,12 @@ module TestFSharpPureCases =
     /// <published dll> TailCall`) and reshape TailCall.fs until the prefix comes back.
     [<Test>]
     let ``TailCall case really does contain tail. prefixes`` () : unit =
-        let image = loadImage ()
+        let guest, image = loadImage ()
         let _, loggerFactory = LoggerFactory.makeTest ()
         use _loggerFactoryResource = loggerFactory
         use peImage = new MemoryStream (image)
 
-        let assy = Assembly.read loggerFactory (Some dllPath) peImage
+        let assy = Assembly.read loggerFactory (Some guest.Dll) peImage
 
         let tailPrefixed =
             assy.TypeDefs.Values
@@ -328,12 +219,12 @@ module TestFSharpPureCases =
     /// comes back.
     [<Test>]
     let ``AbstractDispatch's abstract Combine really does have zero Param rows`` () : unit =
-        let image = loadImage ()
+        let guest, image = loadImage ()
         let _, loggerFactory = LoggerFactory.makeTest ()
         use _loggerFactoryResource = loggerFactory
         use peImage = new MemoryStream (image)
 
-        let assy = Assembly.read loggerFactory (Some dllPath) peImage
+        let assy = Assembly.read loggerFactory (Some guest.Dll) peImage
 
         let combine =
             assy.TypeDefs.Values
@@ -367,12 +258,12 @@ module TestFSharpPureCases =
     /// would leave `F# pure tests(ByrefDispatch)` silently passing while covering nothing.
     [<Test>]
     let ``ByrefDispatch's abstract Bump really does have zero Param rows and a byref parameter`` () : unit =
-        let image = loadImage ()
+        let guest, image = loadImage ()
         let _, loggerFactory = LoggerFactory.makeTest ()
         use _loggerFactoryResource = loggerFactory
         use peImage = new MemoryStream (image)
 
-        let assy = Assembly.read loggerFactory (Some dllPath) peImage
+        let assy = Assembly.read loggerFactory (Some guest.Dll) peImage
 
         let bump =
             assy.TypeDefs.Values
@@ -399,9 +290,9 @@ module TestFSharpPureCases =
     [<TestCaseSource(nameof unimplemented)>]
     let ``Unimplemented F# tests have correct real-runtime behaviour`` (testCaseName : string) =
         // This case never runs PawPrint, so it needs the publish rather than the image.
-        publishOnce.Force ()
+        let guest = published.Force ()
 
         let ending = (onRuntime (FrameworkUnderTest.runtime ())).Ending testCaseName
 
-        RealRuntime.executeAssemblyInPlace [| testCaseName |] dllPath
+        RealRuntime.executeAssemblyInPlace [| testCaseName |] guest.Dll
         |> GuestEnding.assertReal testCaseName ending

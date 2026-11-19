@@ -140,12 +140,6 @@ module TestFrameworkLocatorRatchet =
                     "reads the framework assembly host reflection loaded, after checking it is the framework under test's, since host reflection is the oracle"
             }
             {
-                File = "TestFSharpPureCases.fs"
-                Locator = "Location"
-                Count = 1
-                Reason = "locates the test assembly's directory, which holds the F# guests"
-            }
-            {
                 File = "TestGenericParamOwnerOracle.fs"
                 Locator = "Location"
                 Count = 1
