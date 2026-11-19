@@ -970,11 +970,15 @@ Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after t
   assemblies", in the default suite. It has one case per runtime and flavour: four packs, read whichever runtime
   is under test. Each case:
   * fails when the pack directory holds no `Microsoft.NETCore.App.deps.json`;
-  * checks that `runtimeTarget` is `.NETCoreApp,Version=v<major>.0/<rid>`, for the pack's RID;
+  * checks that `runtimeTarget` is `.NETCoreApp,Version=v<major>.0/<rid>`, for the pack's RID (read as a string or
+    as an object with a `name`, as `deps_json_t::load` reads it);
   * collects the runtime assets which the host reads, each with the path at which the host looks for it;
   * requires each asset to be a file of its own name directly in the pack, so that its TPA name is the file's stem;
-  * requires those paths to equal the set of `*.dll` files in the directory. Each set difference is compared with
-    the empty list, so a failure names the files.
+  * requires those paths to equal the set of files in the directory whose names end `.dll` in any case, as
+    `AssemblyProbe` binds them. Each set difference is compared with the empty list, so a failure names the files.
+
+  An asset whose path ends `/_._` is a placeholder, which `resolve_tpa_list` skips (read:
+  `hostpolicy/deps_resolver.cpp:430-434`); the test skips it too.
 
   The host reads `Microsoft.NETCore.App`, the lowest framework, in self-contained mode (read:
   `hostpolicy/deps_resolver.h:68-87`, `deps_format.cpp:541-555`). That mode takes, for each package which
@@ -1018,8 +1022,14 @@ Mutants, each run against the four pack cases and the unit case:
 | The test ignores `localPath` | the second unit case |
 | The test treats a `runtimepack` library as a package | the second unit case |
 
-The flake mutants kill the four pack cases; the test mutants kill the unit case they name. The surviving double
-mutant shows that the name check is the only thing that catches a swap.
+| The flake copies an extra `NotListed.DLL` | present but unlisted: `NotListed.DLL` |
+| The same, with the test's extension filter made case-sensitive | survives on macOS too: the filter is what sees it |
+| The test does not skip placeholders | the first unit case: `_._` counted |
+| The test reads `runtimeTarget` only as an object | the `runtimeTarget` unit case, string form |
+
+The flake mutants kill the four pack cases; the test mutants kill the unit case they name. The two surviving
+double mutants show that the name check is the only thing that catches a swap, and that the case-insensitive
+filter is what catches an upper-case extension.
 
 Suites on the .NET 10 host, each its own invocation, at `dca73fe83`: default 5990 (5951 passed, 39 skipped),
 `Guest` 250, `GuestSolo` 2, `GuestPure` 1210, `GuestImpure` 305, all passed.
@@ -1088,3 +1098,23 @@ The other six are about later stages, recorded as in round 1, unverified here:
 * Q6's "directory with no `deps.json`" input: Codex says .NET 10 admitted a directory named `X.dll` into the TPA
   and omitted a dangling link named `Y.dll`. The input should be the entries the host's `pal::readdir` admits,
   or the gatherer should refuse other entry kinds.
+
+**Round 3.** Six findings. Three were about stage 1's test, and were fixed:
+
+* *A placeholder asset (`/_._`) was counted as a missing assembly.* Fixed tests first.
+* *A string `runtimeTarget` made the test throw.* Fixed tests first.
+* *On Linux, `GetFiles (pack, "*.dll")` misses `X.DLL`*, which `AssemblyProbe` binds. The test now filters the
+  extension ignoring case. On this macOS host the search pattern already matched `X.DLL`, so the mutant was red
+  here before the change; Codex's Linux claim is not measured here.
+
+The other three are about later stages, recorded as before, unverified here:
+
+* Stage 5, the binder: a name outside the TPA is a miss for the disk probe, not for the bind. Codex says .NET 10
+  returned an already-loaded assembly from `Assembly.Load` though the TPA did not list it.
+  `AssemblyBinding.tryBind`'s lookup in the loaded context must stay ahead of the TPA.
+* Decision 1, the entry-assembly rule: `Program.prepare` takes the image apart from `HostConfig`, so a TPA built
+  for one image can be reused with another. The refusal belongs where the image and the TPA meet, at startup, as
+  well as in the function.
+* Stage 3, the real-host test: the guest that prints the TPA must not itself load a name whose winner is a missing
+  or dummy file. Codex says a missing app-local `System.Console.dll` at a higher version made the guest throw
+  before it printed anything. Keep those names out of the generator, or read the host's trace instead.
