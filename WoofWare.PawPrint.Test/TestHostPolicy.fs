@@ -665,7 +665,6 @@ module TestHostPolicy =
             | HostPolicyUnreproducible.UsesRidGraph -> "UsesRidGraph"
             | HostPolicyUnreproducible.SetsAppPaths -> "SetsAppPaths"
             | HostPolicyUnreproducible.CoreClrFromApplication _ -> "CoreClrFromApplication"
-            | HostPolicyUnreproducible.CoreClrNameCaseOnly _ -> "CoreClrNameCaseOnly"
             | HostPolicyUnreproducible.ProbeDirectoryHoldsPathListSeparator _ -> "ProbeDirectoryHoldsPathListSeparator"
             | HostPolicyUnreproducible.UnmodelledSettings _ -> "UnmodelledSettings"
             | HostPolicyUnreproducible.DepsJsonUnreadable _ -> "DepsJsonUnreadable"

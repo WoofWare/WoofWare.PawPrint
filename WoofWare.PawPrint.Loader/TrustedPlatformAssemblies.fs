@@ -44,14 +44,23 @@ type internal TrustedPlatformAssemblies =
 [<RequireQualifiedAccess>]
 module internal TrustedPlatformAssemblies =
 
-    /// `name` upper-cased as CoreCLR's Unix fold would at least: invariant upper casing, which
-    /// leaves dotless `ı` as it is, with `ı` read as `I`.
+    /// `name` upper-cased as CoreCLR's map compares it, where the other name is ASCII: ASCII letters
+    /// upper-cased, and dotless `ı` and the long s read as `I` and `S`, the only characters outside
+    /// ASCII which CoreCLR's Unix fold (`minipal`'s `unicodedata.c`) takes to an ASCII letter.
+    /// Every other character stays as it is, so that the answer does not depend on the process's
+    /// globalization mode.
     let private upperFold (name : string) : string =
-        name.Replace(char 0x131, 'I').ToUpperInvariant ()
+        name.ToCharArray ()
+        |> Array.map (fun c ->
+            if c >= 'a' && c <= 'z' then char (int c - 32)
+            elif c = '\u0131' then 'I'
+            elif c = '\u017F' then 'S'
+            else c
+        )
+        |> String
 
     /// Whether CoreCLR's case-insensitive map, which hashes and compares names upper-cased, takes
-    /// `a` and `b` for one name. Exact when one of them is ASCII: the only characters outside ASCII
-    /// which either fold upper-cases to an ASCII letter are dotless `ı` and the long s.
+    /// `a` and `b` for one name. Exact when one of them is ASCII, as every TPA name is.
     let private equalIgnoringCase (a : string) (b : string) : bool =
         String.Equals (upperFold a, upperFold b, StringComparison.Ordinal)
 

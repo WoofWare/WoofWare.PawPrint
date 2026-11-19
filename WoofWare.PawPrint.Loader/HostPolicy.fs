@@ -173,10 +173,6 @@ type internal HostPolicyUnreproducible =
     /// A framework-dependent application supplies the CoreCLR library, at `path`. The host loads
     /// it, and CoreLib, from wherever its links lead, which PawPrint cannot see.
     | CoreClrFromApplication of path : string
-    /// The application's directory, which has no `deps.json`, lists `listed`, which equals the
-    /// CoreCLR library's name only ignoring case; whether the host finds it depends on whether the
-    /// filesystem folds case.
-    | CoreClrNameCaseOnly of listed : string
     /// The host's TPA is one PawPrint cannot bind from as CoreCLR does.
     | Tpa of TpaRefusal
     /// A native or resource probe directory holds `:`, which separates the entries of the host's
@@ -611,7 +607,7 @@ module internal HostPolicy =
         (manifests : Manifest[])
         (coreClr : string)
         (sources : NativeSource list)
-        (listing : string list)
+        (coreClrInApplicationDirectory : bool)
         : Result<NativeProbe, HostPolicyRefusal>
         =
         let found =
@@ -645,22 +641,10 @@ module internal HostPolicy =
                         let directories = appDirectory :: directories
 
                         match found with
-                        | Some _ -> Ok (found, directories)
-                        | None ->
-                            // `file_exists_in_dir`.
-                            if List.contains coreClr listing then
-                                Ok (Some (join appDirectory coreClr, 0), directories)
-                            else
-                                match listing |> List.tryFind (equalsIgnoringAsciiCase coreClr) with
-                                // Found only if the filesystem folds case, which PawPrint does not
-                                // know.
-                                | Some listed ->
-                                    Error (
-                                        HostPolicyRefusal.NotReproducible (
-                                            HostPolicyUnreproducible.CoreClrNameCaseOnly listed
-                                        )
-                                    )
-                                | None -> Ok (None, directories)
+                        // `file_exists_in_dir`, whose answer the input carries.
+                        | None when coreClrInApplicationDirectory ->
+                            Ok (Some (join appDirectory coreClr, 0), directories)
+                        | _ -> Ok (found, directories)
                 )
                 (Ok (None, []))
 
@@ -776,7 +760,14 @@ module internal HostPolicy =
                 (fun state source -> state |> Result.bind (fun tpa -> step manifests tpa source))
                 (Ok Map.empty)
             |> Result.bind (fun tpa ->
-                probeNatives manifests coreClr (probeSources DepsAssetType.Native) (Option.defaultValue [] listing)
+                let coreClrInApplicationDirectory =
+                    match application with
+                    | Some {
+                               Manifest = HostPolicyAppManifest.Listing (_, exists)
+                           } -> exists
+                    | _ -> false
+
+                probeNatives manifests coreClr (probeSources DepsAssetType.Native) coreClrInApplicationDirectory
                 |> Result.map (fun natives -> tpa, natives)
             )
             |> Result.bind (fun (tpa, natives) ->
@@ -816,7 +807,10 @@ module internal HostPolicy =
                 // CoreCLR loads the CoreLib beside the CoreCLR library, whatever the TPA says.
                 match TrustedPlatformAssemblies.tryFindIgnoringCase coreLibName tpa with
                 | None -> Error (HostPolicyRefusal.NotReproducible HostPolicyUnreproducible.CoreLibAbsent)
-                | Some (_, path) when path <> join (directoryOf coreClrPath) (coreLibName + ".dll") ->
+                | Some (_, path) when
+                    withoutDotComponents path
+                    <> withoutDotComponents (join (directoryOf coreClrPath) (coreLibName + ".dll"))
+                    ->
                     Error (
                         HostPolicyRefusal.NotReproducible (
                             HostPolicyUnreproducible.CoreLibNotBesideCoreClr (path, coreClrPath)
