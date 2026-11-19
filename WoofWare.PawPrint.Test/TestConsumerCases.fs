@@ -169,13 +169,13 @@ module TestConsumerCases =
 
     /// Each package assembly's file version, which, unlike its assembly version, names the
     /// package's release.
-    let private expectedFileVersions : Map<string, string> =
+    let private expectedFileVersions : Map<string, Version> =
         [
-            "Castle.Core.dll", "5.1.1.0"
-            "FakeItEasy.dll", "8.0.0.0"
-            "Moq.dll", "4.20.72.0"
-            "NSubstitute.dll", "5.1.0.0"
-            "System.Diagnostics.EventLog.dll", "6.0.21.52210"
+            "Castle.Core.dll", Version (5, 1, 1, 0)
+            "FakeItEasy.dll", Version (8, 0, 0, 0)
+            "Moq.dll", Version (4, 20, 72, 0)
+            "NSubstitute.dll", Version (5, 1, 0, 0)
+            "System.Diagnostics.EventLog.dll", Version (6, 0, 21, 52210)
         ]
         |> Map.ofList
 
@@ -199,11 +199,14 @@ module TestConsumerCases =
         |> shouldEqual expectedPackages
 
         for KeyValue (file, version) in expectedFileVersions do
+            // By its parts: the version string is the attribute's text, which need not have four.
+            let info = FileVersionInfo.GetVersionInfo (Path.Combine (guest.Directory, file))
+
             let actual =
-                FileVersionInfo.GetVersionInfo(Path.Combine (guest.Directory, file)).FileVersion
+                Version (info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart)
 
             if actual <> version then
-                failwith $"%s{file} in the publish has file version %s{actual}, but %s{version} is pinned"
+                failwith $"%s{file} in the publish has file version %O{actual}, but %O{version} is pinned"
 
         let runtimeConfigPath =
             Path.Combine (guest.Directory, $"%s{projectName}.runtimeconfig.json")

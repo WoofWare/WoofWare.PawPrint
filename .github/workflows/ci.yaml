@@ -176,6 +176,10 @@ jobs:
         for project in $projects; do
           nix develop "$GITHUB_WORKSPACE" --command dotnet build "$project" --configuration Release
         done
+        # TestConsumerCases publishes this project, whose packages come from nuget.org. Restoring
+        # it here makes the fixture's own publish find its packages already restored, so that a
+        # nuget.org outage fails this step rather than the tests.
+        nix develop "$GITHUB_WORKSPACE" --command dotnet restore WoofWare.PawPrint.Test.ConsumerCases/WoofWare.PawPrint.Test.ConsumerCases.csproj
     - name: Test (guest-running fixtures)
       if: ${{ steps.affected.outputs.tests == 'true' }}
       working-directory: ${{ runner.temp }}/footprint

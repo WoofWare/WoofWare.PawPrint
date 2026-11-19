@@ -1,0 +1,45 @@
+<!--
+  Scenarios from libraries that consumers run under PawPrint, which TestConsumerCases runs under
+  PawPrint and under real .NET and compares.
+
+  The packages referenced here are test dependencies, and the owner's rule is that test dependencies
+  must never become dependencies of a published package. So no project may reference this one:
+  referencing it would hand its packages on. scripts/check-package-dependencies.py fails on a
+  published package that gains a dependency, and scripts/footprint.py fails if this project becomes
+  packable.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <!-- A publish with a RuntimeIdentifier otherwise stamps the image with that RID's machine, and
+         PawPrint refuses a machine-specific image. -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- TestConsumerCases states both of these for PawPrint and the oracle, and checks that the
+         publish's runtimeconfig.json agrees. They are here so that a hand run of the publish, under
+         `dotnet` or WoofWare.PawPrint.App (which reads the runtimeconfig.json), behaves as the
+         fixture's runs do. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- NuGet's audit reads an advisory feed at restore time, so with TreatWarningsAsErrors an
+         advisory published later against a package pinned here would fail every build with no change
+         in the repository. This project is never shipped, and it pins these versions on purpose. -->
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported" Value="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Exact versions only: TestConsumerCases checks each assembly's version in the publish. -->
+    <PackageReference Include="Castle.Core" Version="5.1.1" />
+    <PackageReference Include="Moq" Version="4.20.72" />
+    <PackageReference Include="NSubstitute" Version="5.1.0" />
+    <PackageReference Include="FakeItEasy" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

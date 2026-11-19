@@ -300,6 +300,8 @@
               for rid in ${pkgs.lib.escapeShellArgs publishRids}; do
                 dotnet publish CSharpExample/CSharpExample.csproj --self-contained --configuration Release --runtime "$rid"
               done
+              # TestConsumerCases's publish, which must work with no network.
+              dotnet publish WoofWare.PawPrint.Test.ConsumerCases/WoofWare.PawPrint.Test.ConsumerCases.csproj --configuration Release --no-self-contained -p:UseAppHost=false --output "$TMPDIR/consumer-cases-publish"
               dotnet tool restore --configfile "$PAWPRINT_TOOL_NUGET_CONFIG" --no-http-cache
               dotnet fantomas --version
               dotnet fsharp-analyzers --help

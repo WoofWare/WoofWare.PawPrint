@@ -21,6 +21,7 @@
     "WoofWare.PawPrint.Performance/WoofWare.PawPrint.Performance.fsproj",
     "WoofWare.PawPrint.Semantics",
     "WoofWare.PawPrint.Test",
+    "WoofWare.PawPrint.Test.ConsumerCases",
     "WoofWare.PawPrint.Test.FSharpPureCases",
     "WoofWare.PawPrint.TypeSystem",
     "WoofWare.PawPrint.slnx",

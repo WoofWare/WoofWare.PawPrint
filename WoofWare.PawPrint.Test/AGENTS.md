@@ -6,6 +6,7 @@ The repository root's `AGENTS.md` says how to run the suite and which filters to
 
 * C# files in `sourcesPure/` become test cases automatically (`TestPureCases.fs` has the mechanism); those in `sourcesImpure/` must be registered in `TestImpureCases.fs`. Each is compiled and run under the interpreter.
 * `TestHarness.fs` runs test assemblies through the interpreter.
+* A guest that needs third-party packages is a scenario in the guest project `WoofWare.PawPrint.Test.ConsumerCases`, which `TestConsumerCases.fs` publishes (through `GuestPublish.fs`) and runs under PawPrint and real .NET, comparing endings and stdout. Test dependencies must never become dependencies of a published package, so no project may reference that guest project, and `scripts/check-package-dependencies.py` fails on a published nupkg that gains one. A new package there also needs `nix/deps.json` refreshed (`nix build .#default.fetch-deps && ./result nix/deps.json`).
 * A known-unimplemented guest is *parked* rather than deleted, so we won't forget it. Parking is per runtime: each guest fixture's parked cases, with the reason for each and the ending expected on that runtime, come from an exhaustive `onRuntime : EmulatedRuntime -> ...` match, into every arm of which the cases parked everywhere (`parkedEverywhere`) are folded. A run evaluates it at `FrameworkUnderTest.runtime ()`, and `TestGuestParking` checks the tables on every runtime without running a guest. A test outside the guest fixtures parks with `ParkedOn.check runtimes reason`.
 
 ## Why guest fixtures are `Explicit`
