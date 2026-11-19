@@ -3409,6 +3409,48 @@ public static unsafe class Program
         }
         |> CrossAssemblyHarness.runTest
 
+    /// The same function pointer in a row `G<int, U>` inherits from its interface `J<X>`, which is read
+    /// in `J<int>`'s context, every argument of which is closed. Real .NET 10 and 11 answer `J<int>` and
+    /// the `I<...>` whose argument is the `typeof` of the closed array; reading the row must not
+    /// concretise its whole spelling, which PawPrint refuses for an instantiation whose argument carries
+    /// a custom modifier.
+    [<Test>]
+    let ``An open receiver's inherited entry over a function pointer returning modified void is answered`` () : unit =
+        {
+            Assemblies =
+                [
+                    CrossAssemblySpec.entryPoint
+                        "OpenReceiverInheritedModifiedVoid"
+                        []
+                        [
+                            """
+using System;
+
+public interface I<A> { }
+public unsafe interface J<X> : I<delegate* unmanaged[SuppressGCTransition]<X, void>[]> { }
+public class G<T, U> : J<T> { }
+
+public static unsafe class Program
+{
+    public static int Main()
+    {
+        Type u = typeof(G<,>).GetGenericArguments()[1];
+        Type[] interfaces = typeof(G<,>).MakeGenericType(typeof(int), u).GetInterfaces();
+        if (interfaces.Length != 2) return 1;
+        if (!ReferenceEquals(interfaces[0], typeof(J<int>))) return 2;
+        if (!interfaces[1].IsGenericType || interfaces[1].GetGenericTypeDefinition() != typeof(I<>)) return 3;
+        if (!ReferenceEquals(interfaces[1].GetGenericArguments()[0], typeof(delegate* unmanaged[SuppressGCTransition]<int, void>[]))) return 4;
+        return 0;
+    }
+}
+"""
+                        ]
+                ]
+            EntryAssemblyName = "OpenReceiverInheritedModifiedVoid"
+            ExpectedReturnCode = 0
+        }
+        |> CrossAssemblyHarness.runTest
+
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it
     /// expects; PawPrint must stop where managed code asks `GetUtf8NameInternal` for the name of an
     /// open construction (#2315).
