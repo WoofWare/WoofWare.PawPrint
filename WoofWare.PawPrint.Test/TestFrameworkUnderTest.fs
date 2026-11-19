@@ -366,6 +366,17 @@ module TestFrameworkUnderTest =
         | SimulatedUnixFlavour.Linux -> "linux-x64"
         | SimulatedUnixFlavour.Darwin -> "osx-arm64"
 
+    /// The name of a `deps.json`'s runtime target.
+    let private runtimeTargetName (root : JsonElement) : string =
+        root.GetProperty("runtimeTarget").GetProperty("name").GetString ()
+
+    /// `deps_json_t::load` takes `runtimeTarget` either as a string or as an object with a `name`.
+    [<TestCase("""{ "runtimeTarget": "T/rid" }""")>]
+    [<TestCase("""{ "runtimeTarget": { "name": "T/rid", "signature": "" } }""")>]
+    let ``A deps.json's runtime target is read in either of its forms`` (json : string) : unit =
+        use document = JsonDocument.Parse json
+        runtimeTargetName document.RootElement |> shouldEqual "T/rid"
+
     let pinnedPacks : TestCaseData list =
         [
             for runtime in EmulatedRuntime.supported do
@@ -416,7 +427,8 @@ module TestFrameworkUnderTest =
 
     /// The host reads `Microsoft.NETCore.App`'s `deps.json` as it reads a self-contained
     /// application's: a target package's assets count only if `libraries` declares the package, and
-    /// a RID-specific (`runtimeTargets`) asset never counts.
+    /// a RID-specific (`runtimeTargets`) asset never counts. `resolve_tpa_list` skips a placeholder,
+    /// an asset whose path ends `/_._`.
     [<Test>]
     let ``A pack's runtime assets are those the host reads from the lowest framework`` () : unit =
         let json =
@@ -425,7 +437,7 @@ module TestFrameworkUnderTest =
   "targets": {
     "T/rid": {
       "Declared/1.0.0": {
-        "runtime": { "A.dll": {} },
+        "runtime": { "A.dll": {}, "lib/net10.0/_._": {} },
         "runtimeTargets": { "runtimes/rid/lib/net10.0/B.dll": { "rid": "rid", "assetType": "runtime" } }
       },
       "Undeclared/1.0.0": { "runtime": { "C.dll": {} } }
@@ -493,7 +505,7 @@ module TestFrameworkUnderTest =
 
         use document = JsonDocument.Parse (File.ReadAllBytes depsPath)
         let root = document.RootElement
-        let targetName = root.GetProperty("runtimeTarget").GetProperty("name").GetString ()
+        let targetName = runtimeTargetName root
 
         targetName
         |> shouldEqual $".NETCoreApp,Version=v%i{EmulatedRuntime.major runtime}.0/%s{packRid flavour}"
