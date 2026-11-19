@@ -156,7 +156,8 @@ module AppContextProperties =
     [<Literal>]
     let internal AppPathsName = "APP_PATHS"
 
-    /// Why PawPrint cannot seed a guest with `properties`, or `None` if it can.
+    /// Why PawPrint refuses to seed a guest with `properties` because they set `APP_PATHS`,
+    /// or `None` if they do not set it.
     ///
     /// `properties` must not contain `APP_PATHS`, whatever its value. CoreCLR reads the
     /// property of exactly that name into its binder, which then probes the directories it
@@ -171,7 +172,10 @@ module AppContextProperties =
     ///
     /// `RuntimeConfig.combine` refuses a config for which this is `Some`, and so does the
     /// start of every run, for properties a host built by hand.
-    let unreproducibleReason (properties : AppContextProperties) : string option =
+    ///
+    /// This checks `APP_PATHS` and nothing else. `None` does not mean every other property
+    /// is one PawPrint can seed faithfully.
+    let internal appPathsRefusal (properties : AppContextProperties) : string option =
         // `Map` compares strings ordinally, as CoreCLR's `u16_strcmp` does.
         if properties.Values.ContainsKey AppPathsName then
             Some
@@ -187,8 +191,8 @@ type RuntimeConfigError =
     | HostWouldReject of message : string
     /// The file is one a real host reads and acts on, but whose properties PawPrint cannot
     /// reproduce exactly — a value rapidjson's `Writer` would format in a way we do not
-    /// implement, bytes that are not valid UTF-8, or a property PawPrint's runtime does not
-    /// model (`AppContextProperties.unreproducibleReason`). A real launch proceeds (or fails
+    /// implement, bytes that are not valid UTF-8, or `APP_PATHS`, which PawPrint's binder does
+    /// not model (`AppContextProperties.appPathsRefusal`). A real launch proceeds (or fails
     /// later, on a name the hosting layer owns); either way, ignoring this file is not what it
     /// does.
     | NotReproducible of message : string
@@ -250,7 +254,7 @@ module RuntimeConfig =
     /// The opt-in switch that makes `hostpolicy` set `APP_PATHS` itself, at which point a
     /// config-supplied `APP_PATHS` becomes a duplicate and the launch fails. Without it, a
     /// config-supplied `APP_PATHS` reaches CoreCLR's binder, which `combine` refuses for
-    /// PawPrint's own reason (`AppContextProperties.unreproducibleReason`). Compared
+    /// PawPrint's own reason (`AppContextProperties.appPathsRefusal`). Compared
     /// case-insensitively in both name and value, as `pal::strcasecmp` does.
     ///
     /// hostpolicy's loop *assigns* rather than accumulates — `set_app_paths = (value ==
@@ -648,14 +652,14 @@ module RuntimeConfig =
     /// `SetAppPaths` in the other is exactly that — and a host-owned name in the *dev* file is
     /// as fatal as in the main one, even though a dev file's own parse failures are ignored.
     ///
-    /// The merged set is then refused as `NotReproducible` if PawPrint cannot seed it
-    /// (`AppContextProperties.unreproducibleReason`). That check comes second, because a
+    /// The merged set is then refused as `NotReproducible` if it sets `APP_PATHS`
+    /// (`AppContextProperties.appPathsRefusal`). That check comes second, because a
     /// real host refuses a duplicate before CoreCLR sees any property.
     ///
     /// Any caller assembling properties from files should come through here rather than
     /// calling `AppContextProperties.overlay` directly, which does the merge but not the
     /// checks. A host supplying its own property bag via `ofMap` skips the hosting layer's
-    /// checks, but not PawPrint's own: a run refuses what `unreproducibleReason` refuses.
+    /// checks, but a run still refuses what `appPathsRefusal` refuses.
     let combine
         (devConfig : AppContextProperties)
         (mainConfig : AppContextProperties)
@@ -666,7 +670,7 @@ module RuntimeConfig =
         |> rejectHostOwnedNames
         |> Result.map AppContextProperties.ofMap
         |> Result.bind (fun properties ->
-            match AppContextProperties.unreproducibleReason properties with
+            match AppContextProperties.appPathsRefusal properties with
             | None -> Ok properties
             | Some reason ->
                 RuntimeConfigError.NotReproducible

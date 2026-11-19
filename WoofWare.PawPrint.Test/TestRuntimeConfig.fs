@@ -357,7 +357,9 @@ module TestRuntimeConfig =
         let image =
             Roslyn.compile [ "class AppPathsHandBuilt { static int Main() { return 0; } }" ]
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        // The default kernel's flavour, so that `APP_PATHS` is the only thing wrong with this run.
+        let dotnetRuntimes =
+            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
 
         let _, loggerFactory = LoggerFactory.makeTest ()
         use loggerFactory = loggerFactory

@@ -107,8 +107,8 @@ module internal ProgramStartup =
     /// reads from that CoreLib.
     ///
     /// Fails loudly, before any guest code runs, if `launch.Argv` or `launch.AssemblyPath`
-    /// contains a NUL (`CommandLineArgsInit.validate`), or if `launch.AppContext` holds a
-    /// property PawPrint cannot seed (`AppContextProperties.unreproducibleReason`).
+    /// contains a NUL (`CommandLineArgsInit.validate`), or if `launch.AppContext` sets
+    /// `APP_PATHS` (`AppContextProperties.appPathsRefusal`).
     ///
     /// `launch.PctSeed = Some s` selects the PCT scheduling policy seeded with `s`; `None` keeps
     /// the default round-robin policy. Applied before any cctor frame is pushed so the very first
@@ -142,7 +142,7 @@ module internal ProgramStartup =
 
         // Every seed of AppContext passes here, whether its properties came through
         // `RuntimeConfig.combine` or were built by hand, so this is where the refusal holds.
-        match AppContextProperties.unreproducibleReason launch.AppContext with
+        match AppContextProperties.appPathsRefusal launch.AppContext with
         | None -> ()
         | Some reason ->
             failwith
