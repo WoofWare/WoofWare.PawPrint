@@ -20,36 +20,25 @@ module NativeRuntimeTypeFCall =
         match target with
         | RuntimeTypeHandleTarget.DynamicMethodsClass scopeAssembly ->
             RuntimeTypeHandleTarget.refuseMetadataQuery operation scopeAssembly
-        | RuntimeTypeHandleTarget.OpenConstructed _ as openConstructed ->
-            failwith
-                $"TODO: open constructed types are not handled at Native/NativeRuntimeTypeFCall.fs:%s{__LINE__}; got %O{openConstructed}"
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Concrete _ as typeHandle) ->
             match IlMachineState.tryGetConcreteTypeInfo state typeHandle with
             | Some (_, typeInfo) -> typeInfo.Name
             | None -> failwith $"%s{operation}: concrete type handle was not registered: %O{typeHandle}"
-        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition identity ->
-            // CoreCLR's canonical MethodTable for an open definition (`G<__Canon>`)
-            // carries the definition's own TypeDef token, and the managed wrapper
-            // lets it through: it is neither a TypeDesc nor an array. So
-            // `typeof(G<>)` legitimately names itself, and our identity already
-            // holds exactly the token `GetCl()` would return.
-            //
-            // Not covered by a test: every route that would deliver an open
-            // definition here is blocked further upstream today —
-            // `PopulateNestedClasses`' name filter (`RuntimeType.CoreCLR.cs:1130`)
-            // needs nested-type enumeration, which fails in
-            // `NativeMetadataImport.tryExecuteQCall`, and `PopulateInterfaces` on an
-            // open definition needs bound-shared interface MTs, which
-            // `RuntimeTypeHandle_GetInterfaces` refuses. Handling it is still right:
-            // the alternative is failing loudly on input CoreCLR accepts.
+        | RuntimeTypeHandleTarget.OpenGenericTypeDefinition definition
+        | RuntimeTypeHandleTarget.OpenConstructed (definition, _) ->
+            // A MethodTable's `GetCl()` is its generic definition's TypeDef token for every
+            // instantiation, open or closed: CoreCLR's MethodTable for `typeof(G<>)` (`G` over its own
+            // variables) and for an open construction such as `IList<T>` over `List<>`'s `T` both
+            // carry it, and the managed wrapper lets both through, being neither a TypeDesc nor an
+            // array. So each answers the definition's name, as a closed instantiation does.
             let assembly =
-                state.LoadedAssembly identity.AssemblyFullName
+                state.LoadedAssembly definition.AssemblyFullName
                 |> Option.defaultWith (fun () ->
                     failwith
-                        $"%s{operation}: assembly for open generic type definition is not loaded: %s{identity.AssemblyFullName}"
+                        $"%s{operation}: assembly for generic type definition is not loaded: %s{definition.AssemblyFullName}"
                 )
 
-            assembly.TypeDefs.[identity.TypeDefinition.Get].Name
+            assembly.TypeDefs.[definition.TypeDefinition.Get].Name
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.Continuation layout) ->
             ContinuationType.unasked operation layout
         | RuntimeTypeHandleTarget.Closed (ConcreteTypeHandle.OneDimArrayZero _ as typeHandle)
