@@ -902,7 +902,9 @@ The plan's stage numbers are kept. Every stage commits its tests first, with the
   application`, where `application` is one of decision 6's cases. In this stage it returns exactly the directory
   list which each call site builds today. Call sites move to it. Test code only. Oracle: the default suite and
   every guest category pass unchanged on both runtimes.
-* **The `APP_PATHS` fix** (#2353). Its own small PR, measured first.
+* **The `APP_PATHS` fix** (#2353). Its own small PR, measured first. Done in #2354: `RuntimeConfig.combine` and
+  program start refuse a config-supplied `APP_PATHS`. `SetAppPaths=true` alone is still accepted; decision 10 covers
+  it.
 
 **Can start now, as `internal` code in Loader.** Nothing public changes. If the owner chooses a new package for
 Q2, the files move unchanged. Only the locator option of Q2 would discard work: the function would be rewritten
@@ -1145,3 +1147,23 @@ Four rounds were run, as the brief allows; round 4 still had findings in the tes
 without a fifth review. Each round's test fixes made the test agree with the host on a manifest shape that the
 pinned packs do not use. They are a small transcription of `hostpolicy`'s reading of a framework's runtime
 assets, which stage 2's parser will own; once it lands, this test can read the pack through it.
+
+**Round 5**, run after the rebase onto #2354. Seven findings. None was acted on in this PR:
+
+* *A pack variable missing inside the devshell makes the case skip, and the run still succeeds.* True, and it holds
+  for every test that reads a pack through `requireDevshellDirectory`, guests included. It predates this PR, so it
+  is filed as #2356 rather than fixed here for one test.
+* *A pack holding `X.dll` and `X.ni.dll` passes, where the host refuses the pair.* No pinned pack holds a `.ni.dll`.
+  Stage 3's function owns that refusal (decision 10).
+* *A non-string `localPath`, and a `libraries` entry with no target, make the test throw on manifests the host
+  accepts.* Neither shape is in a pinned pack. Stage 2's parser owns them, and its tests should cover both.
+* Stage 5: the gatherer must read the host-policy switches from the frameworks' runtimeconfigs as well as the
+  application's. Codex says `SetAppPaths=true` set only in `Microsoft.NETCore.App.runtimeconfig.json` made .NET 10
+  set `APP_PATHS` to the application directory. Merge the properties with the precedence of `corehost_init_t`,
+  then apply decision 10 to the result.
+* Stage 3 and decision 10: a configured `additionalProbingPaths` entry that does not exist does not turn on the
+  existence checks. Codex says .NET 10 logged "Ignoring additional probing path" and launched normally. The
+  gatherer should pass only the paths which `append_probe_fullpath` admits, after its `|arch|/|tfm|` expansion.
+* The staging listed #2353 as work still to start. It is marked done above.
+
+The findings about later stages are unverified here, as in the earlier rounds.
