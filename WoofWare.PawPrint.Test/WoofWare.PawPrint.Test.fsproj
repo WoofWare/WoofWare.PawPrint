@@ -86,6 +86,8 @@
     <Compile Include="AssemblyShape.fs" />
     <Compile Include="AssemblyGraphShape.fs" />
     <Compile Include="TestAssemblyProbe.fs" />
+    <Compile Include="TestDepsVersion.fs" />
+    <Compile Include="TestDepsJson.fs" />
     <Compile Include="ParamTableReplay.fs" />
     <Compile Include="EmitScopeGen.fs" />
     <Compile Include="TestAssemblyBinding.fs" />
