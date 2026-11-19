@@ -144,7 +144,9 @@ module internal ProgramStartup =
         // `RuntimeConfig.combine` or were built by hand, so this is where the refusal holds.
         match AppContextProperties.unreproducibleReason launch.AppContext with
         | None -> ()
-        | Some reason -> failwith $"GuestConfig.AppContext cannot be seeded: %s{reason}"
+        | Some reason ->
+            failwith
+                $"the launch's AppContext properties (GuestConfig.AppContext, or ProgramLaunch.AppContext under MultiProgram) cannot be seeded: %s{reason}"
 
         let state =
             IlMachineState.initial loggerFactory dotnetRuntimeDirs dumped

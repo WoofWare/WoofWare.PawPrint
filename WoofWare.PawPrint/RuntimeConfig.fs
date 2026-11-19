@@ -165,6 +165,10 @@ module AppContextProperties =
     /// assembly on CoreCLR which it cannot bind under PawPrint. Any other spelling, such as
     /// `app_paths`, is an ordinary property, as it is to CoreCLR.
     ///
+    /// A value that lists no directory, such as the empty string, is refused too. It binds
+    /// nothing extra, but from .NET 11 `AppContext.GetData` reads `APP_PATHS` back from the
+    /// binder, and so returns null for it, which PawPrint does not model either.
+    ///
     /// `RuntimeConfig.combine` refuses a config for which this is `Some`, and so does the
     /// start of every run, for properties a host built by hand.
     let unreproducibleReason (properties : AppContextProperties) : string option =

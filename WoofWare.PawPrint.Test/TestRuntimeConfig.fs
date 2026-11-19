@@ -303,7 +303,9 @@ module TestRuntimeConfig =
         combineResult (Map.ofList [ "APP_PATHS", "/somewhere" ]) Map.empty
         |> shouldRefuseAppPaths
 
-        // Whatever the value: no value is one the binder ignores and PawPrint can match.
+        // Even a value that lists no directory. It binds nothing extra, but .NET 11 reads it
+        // back from the binder, so `AppContext.GetData("APP_PATHS")` is null there (measured
+        // 2026-11-19, where .NET 10 returns the empty string), and PawPrint does not model that.
         combineResult Map.empty (Map.ofList [ "APP_PATHS", "" ]) |> shouldRefuseAppPaths
 
     [<Test>]
