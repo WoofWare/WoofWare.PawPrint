@@ -971,8 +971,10 @@ Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after t
   is under test. Each case:
   * fails when the pack directory holds no `Microsoft.NETCore.App.deps.json`;
   * checks that `runtimeTarget` is `.NETCoreApp,Version=v<major>.0/<rid>`, for the pack's RID;
-  * collects the runtime assets which the host reads, and requires them to equal the set of `*.dll` files in the
-    directory. Each set difference is compared with the empty list, so a failure names the files.
+  * collects the runtime assets which the host reads, each with the path at which the host looks for it;
+  * requires each asset to be a file of its own name directly in the pack, so that its TPA name is the file's stem;
+  * requires those paths to equal the set of `*.dll` files in the directory. Each set difference is compared with
+    the empty list, so a failure names the files.
 
   The host reads `Microsoft.NETCore.App`, the lowest framework, in self-contained mode (read:
   `hostpolicy/deps_resolver.h:68-87`, `deps_format.cpp:541-555`). That mode takes, for each package which
@@ -980,6 +982,11 @@ Branch `host-binding-1-pack-deps-json`, on `origin/main` at `2b38151e8`, after t
   the same. A unit case on a synthetic manifest pins this: an undeclared package's asset and a `runtimeTargets`
   asset are not counted. Fact 3 above covers only the application's file; stages 2 and 3 need this rule for the
   frameworks too.
+
+  The path at which the host looks for a runtime asset is `deps_entry_t::to_dir_path` (read:
+  `hostpolicy/deps_entry.cpp:141-184`): the asset's `localPath` when it is set and non-empty; else, in a library of
+  type `runtimepack`, the listed path; else the listed path's file name. A second unit case covers the three
+  rules.
 
   Outside the Nix devshell the cases are ignored, as the other pack tests are: only the devshell names the packs.
   `FrameworkUnderTest.requireFrameworkPackDirectoryOf flavour runtime` is new, so that a test can name any
@@ -1005,8 +1012,14 @@ Mutants, each run against the four pack cases and the unit case:
 | The test swaps the two flavours' RIDs | the `runtimeTarget` check |
 | The test counts packages which `libraries` does not declare | the unit case: `C.dll` counted |
 | The test counts `runtimeTargets` assets | the unit case: `runtimes/rid/lib/net10.0/B.dll` counted |
+| The flake gives `Microsoft.VisualBasic.dll` a `localPath` of `missing/Microsoft.VisualBasic.dll` | the asset is not a file of its own name |
+| The flake swaps the `localPath`s of `Microsoft.VisualBasic.dll` and `Microsoft.CSharp.dll` | the asset is not a file of its own name |
+| The same swap, with that check removed from the test | survives: the sets are equal, so only that check sees a swap |
+| The test ignores `localPath` | the second unit case |
+| The test treats a `runtimepack` library as a package | the second unit case |
 
-The first five kill the four pack cases; the last two kill the unit case.
+The flake mutants kill the four pack cases; the test mutants kill the unit case they name. The surviving double
+mutant shows that the name check is the only thing that catches a swap.
 
 Suites on the .NET 10 host, each its own invocation, at `dca73fe83`: default 5990 (5951 passed, 39 skipped),
 `Guest` 250, `GuestSolo` 2, `GuestPure` 1210, `GuestImpure` 305, all passed.
@@ -1048,3 +1061,30 @@ re-measured here, so each is a claim for that stage to check before relying on i
 * The stage 3 mutants "frameworks processed before the application" and "no `deps.json`: listed files given the
   framework's version" need witnesses whose winner changes: the equal-version tie row, and a strictly higher
   local version.
+
+**Round 2.** Seven findings. One was about stage 1's code, and was fixed:
+
+* *The test read an asset's JSON key as its file*, where the host looks at its `localPath` first. Codex gave
+  `Microsoft.VisualBasic.dll` a `localPath` naming a missing file, and the test stayed green. Fixed tests first,
+  as above.
+
+The other six are about later stages, recorded as in round 1, unverified here:
+
+* Decision 1, the CoreLib rule: an application's `deps.json` can name a native `libcoreclr`, which hostpolicy
+  resolves before the framework's (`resolve_probe_dirs`). Codex says an absent one made .NET 10 exit 135. The rule
+  should refuse an application-selected CoreCLR, or take its location as input.
+* Stage 3, the real-host comparison: it must use the RID list and framework directories of the real child
+  process, not the pack's. The pack's RID list is for the interpreted guest (decision 5). Foreign-pack selection
+  needs its own test.
+* Decision 11, `di-version`: `TestGuestParking`'s check that every consumer library has a scenario showing a
+  generated type would fail for a `di` scenario, which prints a version. Stage 5 must register binding-only
+  scenarios apart from that check.
+* Decision 1's alternative "keep the directory list beside the TPA, no break": adding a field to the public
+  `GuestConfig` record changes its constructor, so it is a break for code that constructs one. The owner's
+  question should not call it "no break".
+* Stage 4a: `TestFSharpPureCases` runs its publishes without a pack, and `TestConsumerCases` with one. One helper
+  keyed on the platform and the application case cannot return both lists. Leave the F# caller out of 4a, or
+  pass the pack choice explicitly.
+* Q6's "directory with no `deps.json`" input: Codex says .NET 10 admitted a directory named `X.dll` into the TPA
+  and omitted a dangling link named `Y.dll`. The input should be the entries the host's `pal::readdir` admits,
+  or the gatherer should refuse other entry kinds.
