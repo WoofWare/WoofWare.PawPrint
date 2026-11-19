@@ -1754,7 +1754,12 @@ the interpreter's package.
 8. *Tests: an open receiver loads its base chain and every row*, from Codex's first review; both new tests failed
    before the next commit.
 9. *ofInstantiation loads the receiver's base chain and every row*: the fix.
-10. This section, after Codex's first review.
+10. This section, after Codex's first review, and 11, its suites.
+12. *Plan for #2309: decisions after the third pull request's first review*: the subsection at the end of the plan.
+13. *Tests: a nested instantiation of the wrong arity in an open construction*: that subsection's step 1, tests alone;
+    both failed before the next commit.
+14. *instantiateTargets checks its arity before the open branch*: its steps 2 and 5.
+15. This section, after those decisions.
 
 **The function.** `RuntimeTypeInterfaces.ofInstantiation` (internal) takes a generic definition and one target per
 variable it declares (none for a type that is its own definition), and answers `interfaceMapOfDefinition`'s entries
@@ -1879,6 +1884,7 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
 | walk: the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
 | (after commit 9) the receiver's base chain not loaded | the absent-base-argument test |
 | (after commit 9) rows that add no entry not converted | the re-declared-row test |
+| (after commit 14) the arity check moved back below the open branch | both wrong-arity tests |
 
 **Codex's first review (on commit 7).** It ran the focused tests and both guests, and found:
 
@@ -1897,8 +1903,9 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
     multiply the cost by four. A closed receiver is unaffected, its entries being interned handles. Bounding this
     means interning open targets, or memoising both the assertion and the comparison by reference, in the registry
     every open reflected type goes through. That is the representation of `RuntimeTypeHandleTarget`, beyond this
-    feature.
-  - [P2] *Open constructions are not checked as CoreCLR's loader checks them.* `reflectedTypeTarget`'s structural
+    feature. (Decided after this review: shipped, and filed as #2339; see below.)
+  - [P2] *Open constructions are not checked as CoreCLR's loader checks them.* (Decided after this review: the arity is
+    checked here, commit 14, and the rest is #2340; see below.) `reflectedTypeTarget`'s structural
     walk, and `instantiateTargets`'s open branch, build an `OpenConstructed` without checking the arity, the
     arguments `Generics::CheckInstantiation` refuses (a pointer, a byref, a function pointer), or the spelled
     `CLASS`/`VALUETYPE` kind of a nested instantiation. A closed instantiation is checked by concretisation. Codex
@@ -1912,6 +1919,24 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
 the solution built again, each suite its own invocation on a .NET 10 host: default 5,968 (5,929 passed, 39 skipped);
 `Guest` 234 passed (717 s); `GuestSolo` 2 passed (324 s); `GuestPure` 1,209 passed (580 s); `GuestImpure` 305 passed
 (274 s).
+
+**After the decisions on Codex's first review.**
+
+- *Registration* (#2339): shipped. The conversion cost test's docstring now says that it measures the conversion
+  alone, and that registering the targets as guest `Type`s is not linear in a shared chain.
+- *Arity* (commits 13 and 14): `instantiateTargets` looks up the definition and compares its generic parameters with
+  the arguments before it tests for an open argument, so the wrong number stops the run whichever the result. Two
+  tests are red before the change and green after: `C<T> : I<Pair<T>>` through `ofInstantiation`, and
+  `C<T> : B<Pair<T>>` through `resolveBaseRuntimeTypeHandleTarget`, each for a two-parameter `Pair`, where the
+  host refuses to load `C<>`. Each asserts that the stop names the declared and supplied counts. The mutant that
+  moves the check back below the branch is killed by both, and by nothing else in the selection.
+- *The other load checks* (#2340): not made. `instantiateTargets`' docstring says an open result has its arity
+  checked and nothing else, and `ofInstantiation`'s says that a definition whose row has a pointer, byref or
+  function-pointer argument, or nests an instantiation spelled with the wrong kind, is answered where CoreCLR refuses
+  it, while a closed receiver of the same definition is refused. No test pins those shapes as answered.
+- *Suites* at commit 14, on `a32418d9a`, after the same whole-solution build, reference assemblies deleted and second
+  build: default 5,970 (5,931 passed, 39 skipped); `Guest` 234 passed (817 s); `GuestSolo` 2 passed (285 s);
+  `GuestPure` 1,209 passed (391 s); `GuestImpure` 305 passed (233 s). No existing test went red.
 
 **A flaky assertion found on the way, not this pull request's.** One run of the selection failed `A diamond of two
 chains passing Pair<A, A> on agrees with the host, in work linear in its depth` (PR 2's W2). It failed on the sketch
