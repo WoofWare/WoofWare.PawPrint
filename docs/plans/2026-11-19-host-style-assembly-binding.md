@@ -673,3 +673,288 @@ Host traces came from the same runs with `COREHOST_TRACE=1` and `COREHOST_TRACEF
 edited the copied publish's `deps.json` (the Abs asset's `assemblyVersion` and `fileVersion`) or deleted files. The
 pack comparisons read `runtimes/<rid>/lib/<tfm>/Microsoft.NETCore.App.deps.json` out of the pinned nupkgs in the Nix
 store and compared each runtime asset's name, assembly version and file version with the shared framework's.
+
+## Decisions
+
+Decided 2026-11-19 by the delegated decider, against this plan at `7510a8e8f`. The numbers match the questions
+above. Four decisions change published public API or another repository. Each of those is a recommendation marked
+**Owner to confirm**, with the question to put to the owner.
+
+Three things were found while deciding. They change the plan.
+
+* **A self-contained publish is the documented way to run a program** (read). `AGENTS.md` ("Running the
+  application"), `docs/user/run-a-program.md`, the debugger-server skill, `HelloWorld.fsproj` and the flake's
+  publish check all use `--self-contained`. So Q7's premise, "no consumer needs it", is wrong. See decision 7.
+* **A runtimeconfig can set `APP_PATHS` without the `SetAppPaths` switch** (read, not measured).
+  `RuntimeConfig.fs` admits a `configProperties` entry named `APP_PATHS` as an ordinary property when the switch is
+  off. CoreCLR reads any property of that exact name into its binder (`src/coreclr/vm/corhost.cpp:606`). So fact 18
+  is incomplete: `APP_PATHS` can be set by the application's own config. PawPrint seeds the value and its binder
+  ignores it, today and after the switch. Filed as #2353. See decision 10.
+* **An abbreviation makes the refactor of Q3 free of any break** (measured for the language rule only). An F# type
+  abbreviation is erased, so a signature that says `AssemblySource` where it said `string seq` is the same
+  signature. See decision 3.
+
+### 1. `GuestConfig` holds the TPA: option A — **Owner to confirm**
+
+`GuestConfig.Assemblies : TrustedPlatformAssemblies` replaces `GuestConfig.DotnetRuntimeDirs`. The type is a
+validated map from simple name to one absolute `.dll` path. It is built only through a function that returns a
+`Result`. It has structural equality, because it is part of the replay contract. It has no `AppPaths` field.
+`GuestConfig.Default` takes the TPA.
+
+`UnsupportedRuntimeException` in `WoofWare.PawPrint.Domain` loses its `DotnetRuntimeDirs` member and that
+constructor argument. Domain cannot see the TPA type, and `UnsupportedRuntime.CoreLibPath` already names the file.
+The message names that path.
+
+Why A:
+
+* It is CoreCLR's own boundary. The host decides the TPA, and the runtime binds from it.
+* A stored config keeps its binding when the function is later fixed. The run records the answer.
+* B keeps the first-file rule alive as a fallback. A name outside the TPA would bind under PawPrint and fail on
+  real .NET. That is the divergence which #2351 is about.
+* C puts a case with no host counterpart (the in-memory guest) into `GuestConfig`, and ties replay to the version
+  of the function. C can be added later as a helper that builds the TPA.
+
+Two rules which the plan does not state are added to the function, so that a TPA from the function is one which
+the binder can honour:
+
+* **CoreLib.** CoreCLR binds CoreLib from the directory of `libcoreclr` before it reads the TPA (fact 19). So the
+  function refuses, as "not reproducible", when `System.Private.CoreLib` is absent from the result, or resolves
+  outside the directory that holds the runtime. That directory is the `Microsoft.NETCore.App` framework's, or the
+  application's when the application is self-contained.
+* **The entry assembly.** The input names the entry assembly's file in every application case. The function
+  refuses when the result maps the entry's simple name to any other file. With an image held in memory, that
+  means any file at all (Q6). This is the general form of Q6's refusal, and it puts the refusal in the pure
+  function, where the transcription test reaches it. Fact 20 is read and not measured, so stage 3 measures it
+  first: a directory with no `deps.json` whose entry assembly is named as a framework assembly, run on real .NET.
+  If the host launches it, the refusal is "not reproducible" and stays. If the host fails, the refusal is "the
+  host would fail this launch".
+
+**Question for the owner.** `GuestConfig.DotnetRuntimeDirs` is public in `WoofWare.PawPrint` and part of the
+replay contract. May it be replaced by `GuestConfig.Assemblies : TrustedPlatformAssemblies`, a validated map from
+simple name to one absolute `.dll` path with no `AppPaths` field, and may `UnsupportedRuntimeException` in
+`WoofWare.PawPrint.Domain` lose its `DotnetRuntimeDirs` member? The alternatives are: keep the directory list
+beside the TPA as a fallback (no break, but a name outside the TPA binds under PawPrint and not on real .NET); or
+store the host's inputs (the `deps.json` bytes and directories) and compute the TPA at launch.
+
+### 2. The function lives in `WoofWare.PawPrint.Loader`: option A — **Owner to confirm**
+
+Loader gains three public modules with their types: `TrustedPlatformAssemblies` (the validated map), `DepsJson`
+(the parser) and `HostPolicy` (the function, its input and its refusals).
+
+Why A: Loader already answers "which file does a name bind to", and Analysis sees Loader, so the escape analysis
+binds as the interpreter does. A new project costs a new published package and enforces nothing new. The locator
+is the wrong home: the TPA is `hostpolicy`'s job, and the refusals say what PawPrint can reproduce.
+
+One change to Q10 belongs here, because it widens the input. The input also carries the host settings that turn
+on existence checks, as values. See decision 10.
+
+Until the owner answers, stages 2 and 3 land these modules as `internal`. Loader's internals are already visible
+to the test project, so the tests are the same. Nothing public changes until stage 5.
+
+**Question for the owner.** The function that computes the TPA, the `deps.json` parser and the TPA type would be
+new public API in `WoofWare.PawPrint.Loader` (modules `HostPolicy`, `DepsJson` and `TrustedPlatformAssemblies`).
+Is Loader the right home? The alternatives are a new published package `WoofWare.PawPrint.HostPolicy`, or
+`WoofWare.DotnetRuntimeLocator`.
+
+### 3. One break, after a refactor that breaks nothing: a new option D — **Owner to confirm**
+
+The plan's options were A (one large break), and B or C (two breaks, with a public `AssemblySource` type in
+between, kept afterwards as a wrapper round the TPA). Decision: neither.
+
+* **Stage 4b, no break.** Loader gains a public type abbreviation, `type AssemblySource = string seq`. Every
+  `dotnetRuntimeDirs : string seq` parameter in Loader, TypeSystem, Analysis and the interpreter becomes
+  `assemblies : AssemblySource`. An abbreviation is erased, so every signature is unchanged, for binary and for
+  source consumers. Public record fields keep their names and types. The only public change is the new name
+  `AssemblySource`.
+* **Stage 5, one break.** The semantic commit points the abbreviation at `TrustedPlatformAssemblies` and fixes the
+  places that build or read the value. The roughly 500 annotated parameters do not change in that commit. The last
+  commit of the PR replaces the token `AssemblySource` with `TrustedPlatformAssemblies` everywhere, deletes the
+  abbreviation, and renames the public fields `IlMachineState.DotnetRuntimeDirs` and
+  `ProgramLaunch.DotnetRuntimeDirs` to `Assemblies`. That commit is a token rename, and a word diff shows it.
+
+Why D:
+
+* The libraries' signatures break once, and `GuestConfig` breaks once. Under C the libraries break twice.
+* The end state has one type. Under B and C a single-case wrapper outlives the migration and holds nothing but
+  the TPA.
+* The mechanical step still gets its own PR and its own full run of every guest category, as C wanted.
+* The cost is a public name that lives for a few days and names a directory list.
+
+If the owner wants no temporary public name, choose A, and structure the switch PR as the same three commits
+(abbreviation, semantic change, token rename) so that the abbreviation never reaches `main`.
+
+The language rule was checked in F# interactive only. Stage 4b confirms it in the build: the package's public
+signatures before and after must be equal. If they are not, stop and report; do not fall back to C unasked.
+
+**Question for the owner.** The binder's input is threaded as `dotnetRuntimeDirs : string seq` through about 500
+places in the signatures of Loader, TypeSystem, Analysis and `WoofWare.PawPrint`. May a first PR add a public type
+abbreviation `AssemblySource = string seq` to Loader and use it in those signatures (no binary or source break,
+but a public name that lives until the switch), so that the switch PR then breaks those signatures exactly once
+and deletes the abbreviation? The alternatives are: one PR that does everything, with no temporary name; or the
+planner's two breaks, with a real `AssemblySource` type that stays as a wrapper round the TPA.
+
+### 4. The locator returns each framework's name and directory, in `hostfxr`'s order: option B — **Owner to confirm**
+
+`WoofWare.DotnetRuntimeLocator` gains a function beside `SelectForDll`. It returns, for a DLL, the frameworks as
+`hostfxr` resolves them: name, version and directory, highest level first, following each framework's own
+runtimeconfig to its base framework as `read_framework` does. It does not include the application's directory.
+`SelectForDll` is unchanged. `hostfxr` is its oracle, as for the rest of the locator. Filed as
+the locator issue (filed once the owner confirms decision 4), for the locator's repository.
+
+Why B: resolving frameworks is `hostfxr`'s job, and the locator already transcribes it. Option A reads the
+framework's name off a directory layout which is a convention, and C writes a second transcription of `hostfxr`.
+
+The refusal for two frameworks that list one name stays in PawPrint's function, not in the locator. It is deleted
+when the order is a tested input.
+
+The App needs the locator only for a framework-dependent application. A self-contained application has no
+frameworks (decision 7). The test harness needs no locator change: the devshell names each framework. So only
+stage 5 waits for the locator's release.
+
+**Question for the owner.** The App must tell the function each framework's name and directory in `hostfxr`'s
+order. May `WoofWare.DotnetRuntimeLocator` gain a function that returns them (name, version, directory; highest
+level first; base frameworks followed), leaving `SelectForDll` as it is? The alternatives are: the App derives
+each name from the `shared/<name>/<version>` layout and takes the locator's present order; or PawPrint walks the
+framework runtimeconfigs itself.
+
+### 5. The pinned packs carry their `deps.json`: option A
+
+`frameworkPack` copies `Microsoft.NETCore.App.deps.json` into the pack directory. The harness passes the pack as
+`Microsoft.NETCore.App`, with its own `deps.json`. No input pairs one RID's `deps.json` with another RID's files,
+and no input has a pack ahead of a framework.
+
+The RID list which the harness passes is the list for the pack's RID, not the host's. The App passes the list for
+its host. The RID list is a value in the input; the function never asks the host.
+
+### 6. Three application cases: option A, with the entry assembly named in each
+
+A directory with a `deps.json`; a directory with no `deps.json` and the names of its files; an image held in
+memory. Each case also names the entry assembly's file (decision 1), which is where the Q6 refusal comes from.
+
+One gap to close in stage 5, not to assume. The real-runtime oracle runs a Roslyn guest from a scratch directory
+with no `deps.json`, and a filesystem seed's files land in that directory. A seeded `.dll` is therefore in the
+host's TPA and not in PawPrint's. The harness must use the second case, with the seed's file names, for a guest
+whose seed holds a `.dll` beside it, or refuse such a seed. The implementer picks one and tests it.
+
+### 7. Self-contained publishes are supported from the first version: option B
+
+This reverses the plan's recommendation. A self-contained publish is how the repository tells people to run a
+program, and how its own playground and `HelloWorld` are built. Today such a publish binds every name from the
+application's directory, because that directory is first on the list; that is also what the host does. Refusing
+it would break the documented path, and the App would be left with only the path that waits for the locator.
+
+What it costs:
+
+* The parser already has the mode (stage 2: the self-contained parse reads `targets` only).
+* The function takes an empty framework list with the self-contained mode. A non-empty framework list with that
+  mode, or an empty one without it, is unrepresentable in the input type.
+* The App decides the mode from the runtimeconfig as `hostfxr` does: an application whose runtimeconfig names no
+  framework is self-contained. The App then needs no locator call at all.
+* The CoreLib rule of decision 1 uses the application's directory.
+
+The CoreLib of such a publish is the publish's RID's, which may differ from the emulated kernel's flavour. That
+is so today and is not part of this work.
+
+### 8. No refusal lands first: option B
+
+As the plan argues: a name-collision refusal in the App would mostly refuse runs that bind correctly today, and
+it would miss the missing-file and RID-specific cases. The exact refusal (option C) stays the fallback if stage 5
+stalls after stage 3.
+
+### 9. The guest does not read the TPA back: option A
+
+`TRUSTED_PLATFORM_ASSEMBLIES` stays absent. No bind depends on it, and neither runtime's order can be reproduced.
+Stage 5 rewrites the entry in `docs/divergences.md`: PawPrint now has a TPA and does not seed the property.
+
+### 10. Unmodelled host settings are refused, by the function: option A, moved
+
+The function models the host with existence checks off. The settings that turn them on are refused, as the plan
+says. The change: the refusal is the function's, not the App's alone.
+
+* The input carries the settings as values: additional probing paths, additional `deps.json` files, a shared
+  store, a servicing directory. A non-empty list is a "not reproducible" refusal.
+* The App and the test harness each gather the facts (their host reads) and pass them. Neither decides.
+* Why: the harness's real-host test (stage 3) runs on CI hosts whose settings were not measured. If one has a
+  store directory, the test must refuse and say so, not report a mismatch. One rule in one place does that.
+* `DOTNET_RUNTIME_ID` joins the list of what the App and the harness refuse when set. Honouring it is an
+  addition for later.
+* `UseRidGraph=true` and `SetAppPaths=true` are refused as the plan says.
+
+A config-supplied `APP_PATHS` is a separate matter, with its own issue (#2353). It is
+wrong today, it does not depend on this work, and it can be fixed now.
+
+### 11. The witness: option A, a `di-version` scenario, plus a package-free witness
+
+`di-version` joins `WoofWare.PawPrint.Test.ConsumerCases` in the switch PR, as its first commit, with the
+`PackageReference` at 9.0.2. The Roslyn-built directory with no `deps.json` is the second witness. A third is
+added for decision 7: a self-contained publish run through the App's path.
+
+### Staging
+
+The plan's stage numbers are kept. Every stage commits its tests first, with the failing output in the PR body.
+
+**Can start now. No owner answer can change them.**
+
+* **Stage 1: the packs carry their `deps.json`** (decision 5). Contents and oracle as the plan says: for each
+  pinned pack of each runtime, the `deps.json`'s runtime assets are exactly the pack's DLLs. The test fails when
+  the file is absent.
+* **Stage 4a: one helper for the harness's binding input.** `FrameworkUnderTest.assembliesFor platform
+  application`, where `application` is one of decision 6's cases. In this stage it returns exactly the directory
+  list which each call site builds today. Call sites move to it. Test code only. Oracle: the default suite and
+  every guest category pass unchanged on both runtimes.
+* **The `APP_PATHS` fix** (#2353). Its own small PR, measured first.
+
+**Can start now, as `internal` code in Loader.** Nothing public changes. If the owner chooses a new package for
+Q2, the files move unchanged. Only the locator option of Q2 would discard work: the function would be rewritten
+in C#, and its generators, its transcription and its real-host test would carry over.
+
+* **Stage 2: `DepsJson.parse`.** As the plan says, both parse modes included. Oracle as the plan says: the
+  model-based property test, the version parser against a transcription of `version_t::parse`, a unit case for
+  each refusal, and the real `deps.json` files of both pins, packs included once stage 1 is in.
+* **Stage 3: the TPA type and `HostPolicy.resolveTpa`.** After stage 2. As the plan says, plus: the self-contained
+  mode (decision 7); the CoreLib rule and the entry-assembly rule (decision 1); the existence-check settings
+  (decision 10). Oracle as the plan says: the transcription at 10 000 cases or more, the metamorphic properties,
+  the real-host test at about 25 cases, and the measured table as unit examples. Added:
+  * the measurement of fact 20, then a unit example for whichever way it falls;
+  * one real-host case on a self-contained publish, compared name by name as the others are;
+  * the transcription covers the self-contained mode (it is the same loop with no frameworks);
+  * mutants, beside the plan's: the CoreLib rule removed; the entry-assembly rule removed; a non-empty
+    existence-check list accepted; the self-contained parse reading `runtimeTargets`.
+
+**Wait for the owner.**
+
+* **The locator PR** waits for Q4. It is in the locator's repository, with `hostfxr` as its oracle, and ends in a
+  release. It can run beside every stage here.
+* **Stage 4b: thread `AssemblySource`** waits for Q3. It needs no other stage. Contents as decision 3 says. Oracle:
+  the public signatures of each package are equal before and after; `fantomas` is clean; the default suite and
+  every guest category pass unchanged on both runtimes. If the owner chooses "one PR", this stage becomes the
+  first commit of stage 5.
+* **Stage 5: the switch** waits for Q1, Q2, Q3 and Q4, for stages 1, 3, 4a and 4b, and for the locator's
+  release. Commits, in order:
+  1. Red: `di-version` and its `PackageReference`; the no-`deps.json` witness; the missing-file guest; the
+     self-contained witness if it is red (it may be green already, since today's binding agrees with the host
+     there; say which in the PR body).
+  2. Delete `GuestPublish`'s refusal. Record the wrong binding of `di-version` on Net11.
+  3. The switch. The stage 3 modules become public. `AssemblySource` abbreviates `TrustedPlatformAssemblies`. The
+     binder and `AssemblyBinding` read the TPA: a name in it binds to that file; a missing file is a miss; a name
+     outside it is a miss; no directory is listed at bind time. `GuestConfig.Assemblies` replaces
+     `DotnetRuntimeDirs`, and `UnsupportedRuntimeException` changes with it. `assembliesFor` builds the input and
+     calls the function. The App reads the runtimeconfig, takes the self-contained path or asks the locator for
+     the frameworks, reads the `deps.json` files, gathers the settings of decision 10, and calls the function.
+     `WoofWare.PawPrint.Performance` moves the same way. `PatchedCoreLib`'s tests build a TPA that names the
+     patched CoreLib.
+  4. Docs, as the plan lists, and the divergence entry of decision 9.
+  5. The token rename of decision 3, and nothing else.
+
+  Oracle: the witnesses go green on both runtimes; the default suite and every guest category pass on Net10 and
+  Net11; the plan's binder mutants die. Each guest whose binding changes is recorded in the PR body, with the
+  reason.
+
+  Stage 5 is the only large PR. Do not grow it. If the App's part proves large, the App's gathering of inputs
+  (reading the runtimeconfig, the `deps.json` files and the settings into the function's input, and printing the
+  refusal) may land before the switch as code which computes the TPA and does not yet use it.
+
+After stage 5, PR 4 of the consumer-guest plan can start.
+
+**Not in this work**, as the plan lists, less self-contained publishes: seeding the property (Q9 B); existence
+checks (Q10 B); deleting the framework-overlap refusal once the locator's order is in use.
