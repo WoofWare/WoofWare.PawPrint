@@ -8,8 +8,10 @@ open NativeRuntimeTypeHelpers
 [<RequireQualifiedAccess>]
 module NativeRuntimeTypeFCall =
     /// The name `RuntimeTypeHandle.GetUtf8NameInternal` answers for `target`: the Name column of the
-    /// TypeDef row that its MethodTable's `GetCl()` names. Fails for a target with no such row, which
-    /// the managed wrapper `RuntimeTypeHandle.GetUtf8Name` refuses before calling the FCall.
+    /// TypeDef row that its MethodTable's `GetCl()` names. Fails for a target with no such row: an
+    /// array, a TypeDesc or a type variable, which the managed wrapper `RuntimeTypeHandle.GetUtf8Name`
+    /// refuses before calling the FCall, and the class that owns a module's `Reflection.Emit` dynamic
+    /// methods, which the wrapper lets through and which has no metadata to read.
     let internal utf8Name (operation : string) (state : IlMachineState) (target : RuntimeTypeHandleTarget) : string =
         // Only a type with a TypeDef row has a name to read. CoreCLR asserts exactly
         // this (`_ASSERTE(!IsNilToken(tkTypeDef))`) and relies on the managed wrapper

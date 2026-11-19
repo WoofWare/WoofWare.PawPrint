@@ -2234,8 +2234,9 @@ it is gone: `List<>` over `IList<>`'s own `T` reaches it through `GetInterface`,
 `GetInterfaces`.
 
 **Where the routes go next.** Nowhere: both of #2315's routes now reach real .NET's answer, with no further stop.
-After the name, `AddSpecialInterface` asks `IsAssignableFrom` and `GetInterfaces` of the open `IList<T>`, and
-`GetInterface(name)` compares the namespace; each already answered.
+`AddSpecialInterface` asks `IsAssignableFrom` of the open `IList<T>` before it names it, so that call already
+answered on `main` (the stop came after it). After the name it asks `GetInterfaces` of `IList<T>`, and
+`GetInterface(name)` compares the namespace; each answers.
 
 **Tests** (default suite):
 
@@ -2279,3 +2280,10 @@ at the same `TODO`, in `RuntimeTypeHandle.GetUtf8NameInternal`.
 the solution built again, each suite its own invocation on a .NET 10 host: default 5,982 (5,943 passed, 39 skipped);
 `Guest` 234 passed (733 s); `GuestSolo` 2 passed (444 s); `GuestPure` 1,210 passed (565 s); `GuestImpure` 305 passed
 (307 s).
+
+**Codex's first review (on commit 5).** It ran the selection and the new guest, and found only documentation:
+
+- [P3] `utf8Name`'s docstring said the wrapper refuses every target without a TypeDef row; it lets through the class
+  that owns a module's dynamic methods, which the `refuseMetadataQuery` arm refuses. The docstring now names both.
+- [P3] This section said `AddSpecialInterface` asks `IsAssignableFrom` after the name; it asks it before, so that
+  call already answered on `main`. Corrected.
