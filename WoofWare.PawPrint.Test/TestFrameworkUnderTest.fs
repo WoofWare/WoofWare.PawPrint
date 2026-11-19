@@ -368,7 +368,11 @@ module TestFrameworkUnderTest =
 
     /// The name of a `deps.json`'s runtime target.
     let private runtimeTargetName (root : JsonElement) : string =
-        root.GetProperty("runtimeTarget").GetProperty("name").GetString ()
+        let runtimeTarget = root.GetProperty "runtimeTarget"
+
+        match runtimeTarget.ValueKind with
+        | JsonValueKind.String -> runtimeTarget.GetString ()
+        | _ -> runtimeTarget.GetProperty("name").GetString ()
 
     /// `deps_json_t::load` takes `runtimeTarget` either as a string or as an object with a `name`.
     [<TestCase("""{ "runtimeTarget": "T/rid" }""")>]
@@ -402,25 +406,31 @@ module TestFrameworkUnderTest =
                     match package.TryGetProperty "runtime" with
                     | true, runtime ->
                         for asset in runtime.EnumerateObject () do
-                            let localPath =
-                                match asset.Value.TryGetProperty "localPath" with
-                                | true, localPath -> localPath.GetString ()
-                                | false, _ -> null
+                            // `resolve_tpa_list` skips a placeholder.
+                            if not (asset.Name.EndsWith ("/_._", StringComparison.OrdinalIgnoreCase)) then
+                                let localPath =
+                                    match asset.Value.TryGetProperty "localPath" with
+                                    | true, localPath -> localPath.GetString ()
+                                    | false, _ -> null
 
-                            // `deps_entry_t::to_dir_path`, for a runtime asset.
-                            let probed =
-                                match localPath with
-                                | null
-                                | "" ->
-                                    if
-                                        String.Equals (libraryType, "runtimepack", StringComparison.OrdinalIgnoreCase)
-                                    then
-                                        asset.Name
-                                    else
-                                        Path.GetFileName asset.Name
-                                | localPath -> localPath
+                                // `deps_entry_t::to_dir_path`, for a runtime asset.
+                                let probed =
+                                    match localPath with
+                                    | null
+                                    | "" ->
+                                        if
+                                            String.Equals (
+                                                libraryType,
+                                                "runtimepack",
+                                                StringComparison.OrdinalIgnoreCase
+                                            )
+                                        then
+                                            asset.Name
+                                        else
+                                            Path.GetFileName asset.Name
+                                    | localPath -> localPath
 
-                            yield Path.GetFileName asset.Name, probed
+                                yield Path.GetFileName asset.Name, probed
                     | false, _ -> ()
                 | false, _ -> ()
         ]
@@ -510,8 +520,13 @@ module TestFrameworkUnderTest =
         targetName
         |> shouldEqual $".NETCoreApp,Version=v%i{EmulatedRuntime.major runtime}.0/%s{packRid flavour}"
 
+        // Filtered here rather than by a search pattern, whose casing follows the platform:
+        // `AssemblyProbe` binds `X.DLL` as readily as `X.dll`.
         let assemblies =
-            Directory.GetFiles (pack, "*.dll") |> Seq.map Path.GetFileName |> List.ofSeq
+            Directory.GetFiles pack
+            |> Seq.map Path.GetFileName
+            |> Seq.filter (fun name -> name.EndsWith (".dll", StringComparison.OrdinalIgnoreCase))
+            |> List.ofSeq
 
         assemblies |> shouldContain "System.Private.CoreLib.dll"
 
