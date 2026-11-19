@@ -373,24 +373,23 @@ module TestFrameworkUnderTest =
                     TestCaseData(runtime, flavour).SetArgDisplayNames (FrameworkUnderTest.name runtime, $"%A{flavour}")
         ]
 
-    /// The path of every runtime asset which a `deps.json` lists under the target `targetName`:
-    /// each library's `runtime` assets, and its `runtimeTargets` assets of type `runtime`.
+    /// The path of every runtime asset which the host reads from `Microsoft.NETCore.App`'s
+    /// `deps.json`, whose target is `targetName`. The host parses the lowest framework in
+    /// self-contained mode (`deps_resolver.h`, `deps_json_t::load_self_contained`): for each
+    /// package that `libraries` declares, the `runtime` assets that the target lists for it.
+    /// `runtimeTargets` is not read in that mode.
     let private runtimeAssets (root : JsonElement) (targetName : string) : string list =
         let target = root.GetProperty("targets").GetProperty targetName
 
         [
-            for library in target.EnumerateObject () do
-                match library.Value.TryGetProperty "runtime" with
-                | true, runtime ->
-                    for asset in runtime.EnumerateObject () do
-                        yield asset.Name
-                | false, _ -> ()
-
-                match library.Value.TryGetProperty "runtimeTargets" with
-                | true, runtimeTargets ->
-                    for asset in runtimeTargets.EnumerateObject () do
-                        if asset.Value.GetProperty("assetType").GetString () = "runtime" then
+            for library in root.GetProperty("libraries").EnumerateObject () do
+                match target.TryGetProperty library.Name with
+                | true, package ->
+                    match package.TryGetProperty "runtime" with
+                    | true, runtime ->
+                        for asset in runtime.EnumerateObject () do
                             yield asset.Name
+                    | false, _ -> ()
                 | false, _ -> ()
         ]
 
