@@ -1,7 +1,7 @@
 # Regression guests for the libraries that run under PawPrint (issues #2092 and #2314)
 
-Status: decided 2026-11-16 (see "Decisions"). PR 1 is built (see "As built (PR 1)" at the end); PR 2 and PR 3 are not
-started.
+Status: decided 2026-11-16 (see "Decisions"). PR 1 and PR 2 are built (see "As built (PR 1)" and "As built (PR 2)" at
+the end); PR 3 is not started.
 
 Measured 2026-11-16 on `origin/main` at `418a1b8df`. Real .NET means 10.0.14 on the macOS host. PawPrint runs used
 the test project's own harness (`BoundedRun.runWith`, Release build) through a throwaway NUnit fixture that was never
@@ -889,3 +889,176 @@ line altogether is killed by `test_a_missing_package`.
 Not verifiable before it runs on GitHub: that the job's checkout, download and `$RUNNER_TEMP` path behave as read
 above, and that `nix flake check` on the Linux runner runs the new check (it ran on macOS through
 `nix build .#checks.aarch64-darwin.package-dependencies`).
+
+### As built (PR 2)
+
+Branch `test-capturing-oracle`. Everything is in `WoofWare.PawPrint.Test`.
+
+**The oracle.** `RealRuntime.captureAssemblyInPlace : AppContextProperties -> string[] -> string -> CapturedRun`
+writes `runtimeConfigFor OracleFrameworks.NetCoreApp configProperties` as `guest.runtimeconfig.json` into a
+scratch directory of its own (a fixed name, since hostfxr, deriving the dev runtimeconfig's name from it, takes a
+backslash in a Unix file name for a separator), and runs `dotnet exec --runtimeconfig <that file> <dll> <args>` through `runCapturing`
+and the muxer of the framework under test, with the assembly's directory as the working directory. Nothing in the
+assembly's directory is read or written. The host looks for the dev runtimeconfig beside the runtimeconfig it is
+given (`get_runtime_config_paths_from_arg` in hostfxr's `fx_muxer.cpp`), so a `<name>.runtimeconfig.dev.json`
+beside the assembly is not read either. `executeAssemblyInPlace` is `captureAssemblyInPlace
+AppContextProperties.empty` followed by the existing `echo`; its signature and its fourteen call sites are unchanged,
+and the overwrite of the runtimeconfig beside the assembly, with its staging file and rename, is deleted.
+
+Codex found, over twelve rounds, the ways in which the first version could report an ending for something other than
+the guest it was asked to run, or let the guest see the oracle's files. The function now refuses, with an exception
+rather than a `CapturedRun`:
+
+* properties no runtimeconfig can deliver as given. This is in `runtimeConfigFor`, so `executeConcurrently` refuses
+  them too: a name the hosting layer populates (checked with `RuntimeConfig.combine`, as for a runtimeconfig PawPrint
+  reads), which the host refuses before the guest starts, with exit code 161 that would read as the guest's; and a
+  name or value that is not well-formed UTF-16, which the runtimeconfig would carry as U+FFFD;
+* an assembly path or temp directory with `..` in it. `Path.GetFullPath`, and so `File.Exists`, collapse `..` by its
+  spelling, while after a symbolic link the operating system climbs from the link's target. An attempt to walk paths
+  as the operating system does needed, round after round, more of `realpath`'s behaviour (search permission, Windows
+  roots, drive-relative paths), so the oracle refuses the ambiguity instead. Without `..`, `Path.GetFullPath` only
+  joins a relative path to the test host's working directory and drops `.`. The assembly path may not end in `.`
+  either, since `Guest.dll/.` names a directory to the operating system and `Path.GetFullPath` would drop the `.`;
+* an assembly file that is a symbolic link, which the host would run from its target's directory;
+* a temp directory that does not exist, which `Directory.CreateTempSubdirectory` creates on some platforms;
+* an assembly whose directory is the temp directory or above it, where the guest would see the scratch directory in
+  its tree. Comparing spellings proved unsound (symbolic links, a linked assembly file, case folding, Unicode
+  normalisation), so the check asks the filesystem: after creating the scratch directory, whose name is random, it
+  tries the path down to it from each directory above it, starting from the assembly's directory, with the temp
+  directory both as spelled and with its links resolved. That path exists only if the guest could reach the scratch
+  directory.
+
+The scratch directory comes from `Directory.CreateTempSubdirectory`, so its name is no other directory's and cleanup
+removes only what this call made; its path is absolute, since `TMPDIR` may be relative.
+
+**The tests**, in `TestRealRuntimeInPlace.fs`, in the default suite:
+
+* decision 6's three: (a) an FsCheck property, 15 cases, over maps of up to four generated properties whose values mix
+  JSON escapes, control characters, non-ASCII text and a character outside the BMP, the guest printing each value as
+  UTF-16 hex and null for one it was not given; (b) a runtimeconfig beside the assembly, naming another value and
+  framework version `0.0.1` with roll-forward disabled, is not read, and every file in the directory is unchanged
+  afterwards; (c) eight runs of one assembly, three rounds, started on a barrier, each with its own value, all awaited
+  before any failure is reported;
+* stdout, stderr and the ending captured as lines (a `\r\n` and a missing final newline both come back as
+  `Environment.NewLine`);
+* what the existing callers rely on, through `executeAssemblyInPlace`: the endings (exit code, unhandled exception,
+  FailFast), the command line (`Environment.GetCommandLineArgs` is the DLL's path and then the arguments), the
+  working directory, the echo (read from NUnit's `TestExecutionContext.CurrentContext.CurrentResult.Output`), and
+  that the guest runs the framework under test (CoreLib's whole directory, links resolved on both sides) whatever
+  runtimeconfig the directory holds, which is what the overwrite gave the F# pure cases, published for `net10.0` and
+  run on .NET 11;
+* each refusal above: three host-owned property shapes, and one through `executeConcurrently` in
+  `TestRealRuntimeConcurrent.fs`; a lone surrogate in a value and in a name; a path with `..` that would otherwise
+  have run a decoy; `EndsAsTold.dll/.` (and a `.` inside a path, which is accepted); an assembly whose file name
+  holds a backslash, which runs (ignored on Windows); an assembly file that is a symbolic link; an assembly directly in the temp
+  directory, through a symbolic link to it, and through another case of its name (ignored on a case-sensitive
+  filesystem);
+* a relative path, with a directory in it, names the same assembly. Its assembly is laid out under the test host's
+  working directory, which must therefore be writable, since a relative path climbing out of it would be refused.
+
+`TestFrameworkLocatorRatchet` gains one allowance: the guest source in the new file names `Assembly.Location` to
+report where real .NET loaded the guest's CoreLib from.
+
+**Choices the decisions left open.** The function takes no `OracleFrameworks`, environment or standard streams: no
+caller, and none of PR 3's guests, needs more than `Microsoft.NETCore.App` with the defaults, and adding a parameter
+later is mechanical. Test (c) starts eight runs three times rather than two once, since a shared runtimeconfig shows
+only when the starts overlap, which no test can force. The guest prints paths that the host resolves (`/tmp` on
+macOS, the Nix store's links) so that the test compares them with links resolved on both sides.
+
+**Decision 6's premise about invariant globalisation is wrong, and PR 3 needs a decision.** Decision 6 says the
+`System.Globalization.Invariant` property takes precedence over the environment variable in CoreLib. It is the other
+way round: `GlobalizationMode.Settings.Invariant` is
+`AppContextConfigHelper.GetBooleanConfig("System.Globalization.Invariant", "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT")`,
+which returns the environment variable's value whenever it is `0`, `1`, `true` or `false`, and reads the property
+only otherwise (read in the pinned .NET 10 source). Codex measured it on .NET 10.0.14: with
+`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=0` inherited, a guest given the property `true` constructed
+`CultureInfo("fr-FR")`, while `AppContext.GetData` still reported `true`. Every oracle entry overlays the test host's
+environment on its children, so stating the property on both sides does not make them agree on a machine whose
+environment sets the variable. Options for PR 3: give `captureAssemblyInPlace` an environment overlay, as
+`executeConcurrently` has, and have the fixture pass the variable PawPrint's kernel seeds; clear `DOTNET_*` variables
+from every oracle child; or accept the exposure and say so in the fixture. PR 2 builds the function as decision 6
+specifies and leaves the choice to the decider.
+
+**Codex findings not addressed here.**
+
+* The oracle cannot tell, in general, a host that refused to start from a guest that exited. `RuntimeConfig.combine`
+  refuses the shapes PawPrint models, so the two sides agree on what a launchable runtimeconfig is, but Codex
+  measured one it does not model: `APP_PATHS` naming a relative path, without `SetAppPaths`, makes CoreCLR fail to
+  start with exit code 137. Teaching `RuntimeConfig.combine` that rule would fix both sides at once.
+* `RuntimeConfig.combine` refuses `APP_PATHS` when any spelling of `SetAppPaths` says `true`, although hostpolicy acts
+  on whichever spelling it visits last. That conservative reading is `RuntimeConfig`'s documented choice, and the
+  oracle refuses exactly what PawPrint refuses.
+* Every entry overlays the test host's environment, so a `DOTNET_*` variable there reaches the real runtime: Codex
+  measured `DOTNET_STARTUP_HOOKS` being prepended to a supplied `STARTUP_HOOKS`. The globalisation paragraph above is
+  the same exposure; clearing such variables would change every entry. A relative `TMPDIR` is another: the child
+  reads it against the assembly's directory, and Codex saw the guest's own runtime create its `clr-debug-pipe-*` files
+  there while it ran.
+* For an assembly lying directly in the temp directory, the scratch directory exists beside it for a moment before
+  the refusal removes it. The refusal needs it to exist, since its random name is what makes the check sound, and no
+  guest runs in that window.
+* The relative-path test needs a writable working directory; see above.
+* The temp directory's links are resolved with `FrameworkUnderTest.resolveLinks`, which reads a `..` inside a link's
+  target by its spelling. A `TMPDIR` reached through such a link, inside the assembly's tree, would escape the check.
+
+**Measured.**
+
+* Red, against the old `executeAssemblyInPlace` and a stub `captureAssemblyInPlace` that failed: six of seven tests
+  failed. The capturing tests failed at the stub. The `executeAssemblyInPlace` tests of the endings, the command line,
+  the echo and the framework passed against the old code, which is the behaviour the wrapper keeps; only the directory
+  comparison failed, because the old mechanism replaced the runtimeconfig beside the assembly. Each later test was
+  committed red before its fix, with the output in its commit message.
+* `TestRealRuntimeInPlace` in the devshell with `TMPDIR=.`: every test passes, and before the scratch path was made
+  absolute nine of thirteen failed. With `TMPDIR=<dir>/a/current/..`, where `current` links to `<dir>/b/sub`, every
+  oracle call is refused, as intended, and no scratch directory is left in `a` or `b`.
+* Which suites: the callers of `executeAssemblyInPlace` (directly, or through `CrossAssemblyHarness` and
+  `FabricatedGuest`) are in the default suite and in `Guest` (`TestFSharpPureCases`, `TestDelegateBindFormalSignature`,
+  `TestOpcodeFaultsOnPawPrint`); `executeConcurrently`, which the property refusal reaches, has its caller with
+  properties in `GuestSolo` (`TestAspNetTwoProcess`). `GuestPure` and `GuestImpure` reach the oracle only through
+  `executeWithRealRuntime` and its siblings, which this change leaves alone. All five ran on .NET 10, and the default
+  suite and `Guest` on .NET 11, after the last change to `FrameworkUnderTest`; the default suite on both runtimes and
+  `Guest` on .NET 10 ran again at the final commit, whose later changes are inside `captureAssemblyInPlace`.
+
+| suite | .NET 10.0.14 (host) | .NET 11 (`PAWPRINT_TEST_RUNTIME=Net11`) |
+|---|---|---|
+| default | 5915 total: 5876 passed, 39 skipped | 5915 total: 5887 passed, 28 skipped |
+| `Guest` | 234 passed | 234 passed |
+| `GuestSolo` | 2 passed | not run |
+| `GuestPure` | 1208 passed | not run |
+| `GuestImpure` | 304 passed | not run |
+
+Unrelated failures seen on the way, each in code this change does not reach and each passing when run again or at
+the next round: `a guest that never reads and never exits is timed out` (a sixty-second wall-clock bound, which took
+109 seconds on a loaded machine), an `OutOfMemoryException` in `each runtime's CoreLib declares that runtime's
+StartCallback` on .NET 11, and an HTTP timeout in `TestDebuggerServerTrace`'s `pages concatenate to the same run
+whatever their sizes` on .NET 11. The first default runs failed 24 tests on each runtime, all in
+`TestFrameworkLocatorRatchet`, which flagged the new guest source's `Assembly.Location`; the allowance fixed them.
+
+**Mutation testing.** Each mutant was applied to the committed `RealRuntime.fs` and the file's tests run against it;
+where a row says "the code before", the mutant is the code the red commit ran against.
+
+| mutant | tests that failed |
+|---|---|
+| properties not passed (an empty map written instead) | (a), (b), (c) |
+| the runtimeconfig beside the assembly written as well | (b), the framework test |
+| stdout not captured (emptied in the result) | six of seven, including (a), (b), (c) and the capture test |
+| one shared scratch directory, deleted after each run | five of seven, including (c) |
+| one shared scratch file, never deleted | (c), in each of four runs; once also (b) |
+| `exec --runtimeconfig` dropped (the scratch file written, not passed) | all seven: the host finds no runtimeconfig |
+| working directory moved to the scratch directory | the working-directory test (added for this mutant, which first survived) |
+| `executeAssemblyInPlace` does not echo | the command-line test and the framework test |
+| scratch directory not removed | none: survives |
+| host-owned names not refused (the code before) | the three host-owned cases, and `executeConcurrently`'s |
+| ill-formed UTF-16 not refused (the code before) | the lone-surrogate test |
+| relative path not made absolute (the code before) | the relative-path test (`NormalExit 129`, the host's) |
+| `..` not refused | the `..` test (the decoy ran) |
+| final `.` not refused | the final-`.` test |
+| every `.` refused | the interior-`.` test |
+| runtimeconfig named after the assembly | the backslash test |
+| linked assembly file not refused | the linked-file test (its target, in the temp directory, ran) |
+| temp-directory refusal removed | the temp-directory tests (then four, the linked-file test among them) |
+| temp-directory refusal comparing spellings (the code before) | the symbolic-link, linked-file and other-case tests (each `NormalExit 0`) |
+| scratch directory not made absolute, with `TMPDIR=.` (the code before) | nine of thirteen |
+
+The surviving mutant survives because no test can see the scratch directory: other tests create and remove their own
+beside it at the same moment, so a listing of the temp directory before and after a run cannot tell whose is whose.
+The scratch directories of `executeWithTimeoutAndSeed` and `executeConcurrently` are untested in the same way.

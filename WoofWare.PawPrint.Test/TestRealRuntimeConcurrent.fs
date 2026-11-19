@@ -162,6 +162,23 @@ public static class Program
         |> shouldEqual [ RealRuntimeResult.NormalExit 0, "a \"quoted\" value\n" ]
 
     [<Test>]
+    let ``a property the hosting layer populates is refused, not run`` () : unit =
+        let outcome =
+            try
+                RealRuntime.executeConcurrently
+                    OracleFrameworks.NetCoreApp
+                    (AppContextProperties.ofMap (Map.ofList [ "TRUSTED_PLATFORM_ASSEMBLIES", "value" ]))
+                    []
+                    [ guest "Refused" (exitsWithSource 0) [] ]
+                |> Ok
+            with e ->
+                Error e.Message
+
+        match outcome with
+        | Error message -> message |> shouldContainText "TRUSTED_PLATFORM_ASSEMBLIES"
+        | Ok runs -> failwith $"expected the oracle to refuse the property, but it ran: %A{runs}"
+
+    [<Test>]
     let ``the ASP.NET Core directory is a Microsoft.AspNetCore.App framework on the runtime-dir list`` () : unit =
         let dir = FrameworkUnderTest.aspNetCoreFrameworkDirectory ()
 

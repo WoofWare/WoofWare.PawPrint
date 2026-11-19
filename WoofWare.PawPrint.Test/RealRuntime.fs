@@ -163,7 +163,27 @@ module RealRuntime =
     /// framework reference), which a real guest process would not have. Roll-forward is disabled
     /// because each version is by construction the framework under test's, the one PawPrint runs
     /// the guest on, so any roll-forward would silently be a mismatch rather than a convenience.
+    ///
+    /// Fails on properties that no runtimeconfig can deliver to the guest as given: a name the
+    /// hosting layer populates for itself, which the host refuses before the guest starts (with
+    /// an exit code that would read as the guest's), and a name or value that is not well-formed
+    /// UTF-16, which has no UTF-8 encoding.
     let private runtimeConfigFor (frameworks : OracleFrameworks) (configProperties : AppContextProperties) : string =
+        match RuntimeConfig.combine AppContextProperties.empty configProperties with
+        | Ok _ -> ()
+        | Error error ->
+            failwith $"RealRuntime: the oracle cannot run a guest with these AppContext properties: %s{error.Message}"
+
+        let strictUtf8 = UTF8Encoding (false, true)
+
+        for KeyValue (key, value) in AppContextProperties.toMap configProperties do
+            for text in [ key ; value ] do
+                try
+                    strictUtf8.GetByteCount text |> ignore<int>
+                with :? EncoderFallbackException ->
+                    failwith
+                        $"RealRuntime: the AppContext property %A{key} has a name or value that is not well-formed UTF-16 (%A{text}), which a runtimeconfig, being UTF-8, cannot carry; the guest would see U+FFFD in its place."
+
         // Derived rather than hardcoded so this does not quietly start lying when the projects move
         // to a later target framework.
         let tfm =
@@ -977,7 +997,9 @@ module RealRuntime =
     let executeWithRealRuntime (args : string[]) (assemblyBytes : byte array) : RealRuntimeResult =
         executeWithTimeout guestTimeout args assemblyBytes
 
-    /// Run a managed assembly that already sits on disk beside the assemblies it depends on.
+    /// Run a managed assembly that already sits on disk beside the assemblies it depends on, with
+    /// the AppContext properties `configProperties`, and report how it terminated and what it
+    /// wrote.
     ///
     /// `executeWithTimeout` owns a scratch directory holding exactly one image, so it cannot run a
     /// guest that references anything but the shared framework. This instead runs the assembly
@@ -986,34 +1008,143 @@ module RealRuntime =
     /// directory of co-compiled assemblies binds by simple name with no probing logic of ours. A
     /// framework-dependent publish's `deps.json` names its dependencies in that same directory.
     ///
-    /// This replaces any `<name>.runtimeconfig.json` beside the assembly with one naming the
-    /// framework under test, so a published app runs on that framework rather than on the one it
-    /// was published for. Callers may run the same assembly concurrently.
-    let executeAssemblyInPlace (args : string[]) (dllPath : string) : RealRuntimeResult =
+    /// The guest runs on the framework under test, with `configProperties` and no others, whatever
+    /// `<name>.runtimeconfig.json` sits beside the assembly: the oracle hands the host a
+    /// runtimeconfig of its own, from a scratch directory of the call's own, and reads and writes
+    /// nothing in the assembly's directory. So callers may run one assembly concurrently, each
+    /// with different properties. The guest's working directory is the assembly's directory. A
+    /// relative `dllPath` is relative to the test host's working directory; a `dllPath` or temp
+    /// directory with `..` in it is refused. An assembly in the temp directory, or in a
+    /// directory above it, is refused, since the scratch directories go there.
+    ///
+    /// `Stdout` and `Stderr` are what the guest wrote, rebuilt as lines (see `CapturedRun`), so a
+    /// caller comparing them claims the same lines, not the same bytes.
+    let captureAssemblyInPlace
+        (configProperties : AppContextProperties)
+        (args : string[])
+        (dllPath : string)
+        : CapturedRun
+        =
+        // `Path.GetFullPath`, and so `File.Exists`, collapse `..` by its spelling, while the
+        // operating system, after a symbolic link, climbs from the link's target; so a path with
+        // `..` in it is refused rather than read two ways. Without it, `Path.GetFullPath` only
+        // joins the path to the working directory and drops any `.`, which both readings agree on.
+        let absoluteWithoutParent (what : string) (path : string) : string =
+            let components =
+                path.Split (
+                    [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |],
+                    StringSplitOptions.RemoveEmptyEntries
+                )
+
+            if Array.contains ".." components then
+                failwith
+                    $"Cannot run an assembly under the real runtime in place with %s{what} %s{path}, which has '..' in it: the operating system and System.IO read it differently after a symbolic link. Pass the path without it."
+
+            Path.GetFullPath path
+
+        // Both readings agree on a `.` inside a path, but a final one, as in `Guest.dll/.`, names a
+        // directory to the operating system, and `Path.GetFullPath` would drop it.
+        if
+            dllPath.Split (
+                [| Path.DirectorySeparatorChar ; Path.AltDirectorySeparatorChar |],
+                StringSplitOptions.RemoveEmptyEntries
+            )
+            |> Array.tryLast = Some "."
+        then
+            failwith
+                $"Cannot run an assembly under the real runtime in place with the assembly path %s{dllPath}, which ends in '.', so names a directory. Pass the path to the file."
+
+        // Absolute, because the host would resolve a relative path against the guest's working
+        // directory, which is the assembly's directory.
+        let dllPath = absoluteWithoutParent "the assembly path" dllPath
+
         if not (File.Exists dllPath) then
             failwith $"Cannot run %s{dllPath} under the real runtime: the assembly does not exist."
 
+        // The host runs a link's target, from the target's directory, which the checks below,
+        // asking only about the assembly's own directory, would not see.
+        if not (isNull (FileInfo(dllPath).LinkTarget)) then
+            failwith
+                $"Cannot run %s{dllPath} under the real runtime in place: it is a symbolic link, and the host would run its target from the target's directory. Pass the target itself."
+
         let directory = Path.GetDirectoryName dllPath
-        // The host derives the config's name from the assembly's *file* name, not from its
-        // assembly name, and the file is already on disk under a name the caller chose.
         let name = Path.GetFileNameWithoutExtension dllPath
-        let configPath = Path.Combine (directory, name + ".runtimeconfig.json")
 
-        // Written aside and renamed into place, so that a concurrent run of the same assembly reads
-        // either the old file or this one whole, never one this call has truncated. Every file
-        // renamed into place has the same contents.
-        let staging = configPath + "." + Path.GetRandomFileName () + ".tmp"
-        File.WriteAllText (staging, runtimeConfig)
-        File.Move (staging, configPath, true)
+        // Absolute, for the reason the assembly path is: `TMPDIR` may be relative.
+        let temp = absoluteWithoutParent "the temp directory" (Path.GetTempPath ())
 
-        runToCompletion
-            guestTimeout
-            muxerPath
-            (dllPath :: List.ofArray args)
-            directory
-            Map.empty
-            StandardStreamsConfig.piped
-            name
+        // Some platforms' `CreateTempSubdirectory` creates a missing temp directory, which could
+        // lie in the assembly's tree.
+        if not (Directory.Exists temp) then
+            failwith
+                $"Cannot run %s{dllPath} under the real runtime in place: the temp directory %s{temp} does not exist."
+
+        // Under a name no other directory has, so that cleaning up removes only what this call made.
+        let scratch =
+            Path.Combine (
+                temp,
+                Path.GetFileName (
+                    Path.TrimEndingDirectorySeparator (Directory.CreateTempSubdirectory "pawprint-oracle-").FullName
+                )
+            )
+
+        try
+            // Whether the guest could reach `scratch` by walking down from `candidate`, decided by
+            // asking the filesystem rather than by comparing spellings, which links, case folding
+            // and Unicode normalisation can each defeat: for each directory above `scratch`, the
+            // path down from it to `scratch` is tried from `candidate`. The scratch directory's
+            // name is random, so that path exists from `candidate` only if it reaches `scratch`.
+            // The paths down are taken from `scratch` as spelled and with its links resolved,
+            // whose directories above it can differ.
+            let reachesScratch (candidate : string) : bool =
+                let rec downFrom (above : string) (suffix : string) : bool =
+                    match Path.GetDirectoryName above with
+                    | null -> false
+                    | parent ->
+                        let suffix = Path.Combine (Path.GetFileName above, suffix)
+                        Directory.Exists (Path.Combine (candidate, suffix)) || downFrom parent suffix
+
+                [ scratch ; FrameworkUnderTest.resolveLinks scratch ]
+                |> List.exists (fun target ->
+                    Directory.Exists (Path.Combine (candidate, Path.GetFileName target))
+                    || downFrom (Path.GetDirectoryName target) (Path.GetFileName target)
+                )
+
+            // The guest's working directory, which is also the directory of the file the host runs,
+            // since a linked assembly file is refused above.
+            if reachesScratch directory then
+                failwith
+                    $"Cannot run %s{dllPath} under the real runtime in place: its directory is the temp directory (%s{Path.GetDirectoryName scratch}) or above it, and the oracle makes its scratch directories there, so the guest would see them in its own directory tree. Move the assembly into a directory of its own."
+
+            // The host looks for the dev runtimeconfig beside the runtimeconfig it is given, under a
+            // name derived from it (`get_runtime_config_paths_from_arg` in hostfxr's fx_muxer.cpp),
+            // so a `<name>.runtimeconfig.dev.json` beside the assembly is not read either. The name
+            // is fixed rather than the assembly's because that derivation takes a backslash, which
+            // a Unix file name may hold, for a separator.
+            let configPath = Path.Combine (scratch, "guest.runtimeconfig.json")
+            File.WriteAllText (configPath, runtimeConfigFor OracleFrameworks.NetCoreApp configProperties)
+
+            runCapturing
+                guestTimeout
+                muxerPath
+                ("exec" :: "--runtimeconfig" :: configPath :: dllPath :: List.ofArray args)
+                directory
+                Map.empty
+                StandardStreamsConfig.piped
+                name
+        finally
+            try
+                deleteScratchTree scratch
+            with
+            | :? IOException
+            | :? UnauthorizedAccessException -> ()
+
+    /// `captureAssemblyInPlace` with no AppContext properties, echoing what the guest wrote on
+    /// the calling thread.
+    let executeAssemblyInPlace (args : string[]) (dllPath : string) : RealRuntimeResult =
+        let run = captureAssemblyInPlace AppContextProperties.empty args dllPath
+        echo run
+        run.Result
 
     /// Run `guests` on the real runtime at the same time, each as its own process, and report how
     /// each terminated and what it wrote, in the order of `guests`. This is the oracle for
