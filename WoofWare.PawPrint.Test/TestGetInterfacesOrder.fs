@@ -1067,6 +1067,1557 @@ public struct S2<T> : IC<T[]> { }
         finally
             context.Unload ()
 
+    // ----- A deep chain of generic interfaces -----
+
+    /// `I16<A, B, C> : I15<A, B, C>`, and so on down to `I0`, each passing its three arguments on; a
+    /// class implementing the top, and a chain of generic classes over it. Each interface's arguments
+    /// are read in the context of the one above, so the contexts nest sixteen deep, and closing or
+    /// re-reading each occurrence of a context afresh would take time exponential in the depth.
+    [<Test>]
+    let ``A deep chain of generic interfaces agrees with the host`` () : unit =
+        let depth = 16
+
+        let source =
+            let interfaces =
+                [
+                    yield "public interface I0<A, B, C> { }"
+                    for i in 1..depth do
+                        yield $"public interface I%d{i}<A, B, C> : I%d{i - 1}<A, B, C> {{ }}"
+                ]
+
+            String.concat
+                "\n"
+                (interfaces
+                 @ [
+                     $"public class Top : I%d{depth}<int, string, long> {{ }}"
+                     $"public class B0<A, B, C> : I%d{depth}<A, B, C> {{ }}"
+                     "public class B1<A, B, C> : B0<A, B, C> { }"
+                     "public class B2<A, B, C> : B1<A, B, C> { }"
+                 ])
+
+        let image =
+            Roslyn.compileAssembly "DeepChain" OutputKind.DynamicallyLinkedLibrary [] [ source ]
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("deepChain", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let images = [ hostCoreLib, corelib ; host, dumped ]
+            let mutable state = coreState.WithLoadedAssembly dumped
+            let mutable failures = []
+            let stopwatch = Stopwatch.StartNew ()
+
+            for receiver in
+                [
+                    host.GetType "Top"
+                    host.GetType("B2`3").MakeGenericType (typeof<int>, typeof<string>, typeof<int64>)
+                ] do
+                let after, failure = compareReceiver images state receiver
+                state <- after
+
+                match failure with
+                | Some failure -> failures <- failure :: failures
+                | None -> ()
+
+            report "deep chain" (List.rev failures)
+            (host.GetType "Top").GetInterfaces().Length |> shouldEqual (depth + 1)
+            // Linear work finishes in well under a second; the exponential would not finish at all.
+            Assert.That (stopwatch.Elapsed, Is.LessThan (TimeSpan.FromSeconds 60.0))
+        finally
+            context.Unload ()
+
+    // ----- InterfaceImpl rows C# never writes -----
+
+    /// An argument of a hand-spelled `I<_>` row.
+    [<RequireQualifiedAccess>]
+    type private RowArgument =
+        /// `int32`.
+        | Int32
+        /// `valuetype [CoreLib]System.Int32`.
+        | Int32AsValueType
+        /// `class [CoreLib]System.Int32`, the wrong kind.
+        | Int32AsClass
+        /// `!0`, in a type with no variables.
+        | Var0
+        /// `class [CoreLib]System.Missing`, which CoreLib does not declare.
+        | Missing
+
+    /// One InterfaceImpl row of a hand-built image.
+    [<RequireQualifiedAccess>]
+    type private Row =
+        /// `GENERICINST <CLASS or VALUETYPE> I 1 <argument>`.
+        | Instantiation of asValueType : bool * argument : RowArgument
+        /// `CLASS I`: the generic `I<T>` with no instantiation.
+        | BareGeneric
+        /// `[CoreLib]System.IAbsent`, which CoreLib does not declare.
+        | Absent
+        /// `!!0`, the whole spelling, in a row where no method variable is in scope.
+        | MethodVariable
+        /// `CLASS Fake`, a class of the image whose base type CoreLib does not declare.
+        | ClassOverAbsentBase
+        /// `GENERICINST CLASS I 2 <first> <second>`: two arguments to the one-parameter `I`.
+        | TwoArguments of first : RowArgument * second : RowArgument
+        /// `[CoreLib]System.Object`, a class, by its TypeRef.
+        | Object
+        /// `I<T>` by its TypeDef token, which carries no instantiation.
+        | GenericByTypeDef
+        /// `GENERICINST CLASS J 1 !0`, where `J<T>` extends the absent `IAbsent`, in a type with no
+        /// variables.
+        | OverAbsentParentWithVar0
+        /// `CLASS K`, the non-generic interface `K` as a TypeSpec.
+        | NonGenericAsTypeSpec
+        /// `K` by its TypeDef token.
+        | NonGenericByTypeDef
+        /// The class `F2`, which implements the absent `IAbsent`, by its TypeDef token.
+        | ClassOverAbsentInterface
+        /// `L` by its TypeDef token, where `L : M<int, int>` gives the one-parameter `M<T> : L` two
+        /// arguments: a cycle through a row whose arguments cannot be read.
+        | CycleThroughWrongArity
+
+    /// An image with `I<T>`, `B : <baseRows>` and `C : B, <receiverRows>`.
+    let private rowsImage (baseRows : Row list) (receiverRows : Row list) : byte[] =
+        let metadata = Reflection.Metadata.Ecma335.MetadataBuilder ()
+        let nil = Unchecked.defaultof<Reflection.Metadata.EntityHandle>
+
+        let definition (handle : Reflection.Metadata.TypeDefinitionHandle) : Reflection.Metadata.EntityHandle =
+            Reflection.Metadata.TypeDefinitionHandle.op_Implicit handle
+
+        metadata.AddModule (
+            0,
+            metadata.GetOrAddString "InterfaceRows.dll",
+            metadata.GetOrAddGuid (Guid ("0f5b8c2a-3d61-4e7b-9a40-5c7e2d18b963")),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>
+        )
+        |> ignore<Reflection.Metadata.ModuleDefinitionHandle>
+
+        metadata.AddAssembly (
+            metadata.GetOrAddString "InterfaceRows",
+            Version (1, 0, 0, 0),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>,
+            enum<Reflection.AssemblyFlags> 0,
+            Reflection.AssemblyHashAlgorithm.None
+        )
+        |> ignore<Reflection.Metadata.AssemblyDefinitionHandle>
+
+        let coreLibName = hostCoreLib.GetName ()
+
+        let coreLibRef =
+            metadata.AddAssemblyReference (
+                metadata.GetOrAddString coreLibName.Name,
+                coreLibName.Version,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddBlob (coreLibName.GetPublicKeyToken ()),
+                enum<Reflection.AssemblyFlags> 0,
+                Unchecked.defaultof<_>
+            )
+
+        let coreLibType (name : string) : Reflection.Metadata.EntityHandle =
+            metadata.AddTypeReference (
+                Reflection.Metadata.AssemblyReferenceHandle.op_Implicit coreLibRef,
+                metadata.GetOrAddString "System",
+                metadata.GetOrAddString name
+            )
+            |> Reflection.Metadata.TypeReferenceHandle.op_Implicit
+
+        let objectRef = coreLibType "Object"
+        let int32Ref = coreLibType "Int32"
+        let missingRef = coreLibType "Missing"
+        let absentRef = coreLibType "IAbsent"
+        let absentBaseRef = coreLibType "AbsentBase"
+
+        let addType
+            (name : string)
+            (attributes : Reflection.TypeAttributes)
+            (baseType : Reflection.Metadata.EntityHandle)
+            =
+            metadata.AddTypeDefinition (
+                attributes,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddString name,
+                baseType,
+                Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle 1,
+                Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle 1
+            )
+
+        addType "<Module>" Reflection.TypeAttributes.NotPublic nil
+        |> ignore<Reflection.Metadata.TypeDefinitionHandle>
+
+        let iface =
+            addType
+                "I`1"
+                (Reflection.TypeAttributes.Public
+                 ||| Reflection.TypeAttributes.Interface
+                 ||| Reflection.TypeAttributes.Abstract)
+                nil
+
+        let baseClass = addType "B" Reflection.TypeAttributes.Public objectRef
+        let receiver = addType "C" Reflection.TypeAttributes.Public (definition baseClass)
+        let fake = addType "Fake" Reflection.TypeAttributes.Public absentBaseRef
+
+        let interfaceAttributes =
+            Reflection.TypeAttributes.Public
+            ||| Reflection.TypeAttributes.Interface
+            ||| Reflection.TypeAttributes.Abstract
+
+        let overAbsent = addType "J`1" interfaceAttributes nil
+        let nonGeneric = addType "K" interfaceAttributes nil
+        let classOverAbsent = addType "F2" Reflection.TypeAttributes.Public objectRef
+        let cycleL = addType "L" interfaceAttributes nil
+        let cycleM = addType "M`1" interfaceAttributes nil
+
+        let typeSpec (write : Reflection.Metadata.BlobBuilder -> unit) : Reflection.Metadata.EntityHandle =
+            let blob = Reflection.Metadata.BlobBuilder ()
+            write blob
+
+            metadata.AddTypeSpecification (metadata.GetOrAddBlob blob)
+            |> Reflection.Metadata.TypeSpecificationHandle.op_Implicit
+
+        let codedIndex (handle : Reflection.Metadata.EntityHandle) : int =
+            Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef handle
+
+        let writeArgument (blob : Reflection.Metadata.BlobBuilder) (argument : RowArgument) : unit =
+            match argument with
+            | RowArgument.Int32 -> blob.WriteByte 0x08uy
+            | RowArgument.Int32AsValueType ->
+                blob.WriteByte 0x11uy
+                blob.WriteCompressedInteger (codedIndex int32Ref)
+            | RowArgument.Int32AsClass ->
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex int32Ref)
+            | RowArgument.Var0 ->
+                blob.WriteByte 0x13uy
+                blob.WriteCompressedInteger 0
+            | RowArgument.Missing ->
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex missingRef)
+
+        let token (row : Row) : Reflection.Metadata.EntityHandle =
+            match row with
+            | Row.Absent -> absentRef
+            | Row.Object -> objectRef
+            | Row.NonGenericAsTypeSpec ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition nonGeneric))
+                )
+            | Row.NonGenericByTypeDef -> definition nonGeneric
+            | Row.ClassOverAbsentInterface -> definition classOverAbsent
+            | Row.CycleThroughWrongArity -> definition cycleL
+            | Row.GenericByTypeDef -> definition iface
+            | Row.OverAbsentParentWithVar0 ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x15uy
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition overAbsent))
+                    blob.WriteCompressedInteger 1
+                    writeArgument blob RowArgument.Var0
+                )
+            | Row.MethodVariable ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x1Euy
+                    blob.WriteCompressedInteger 0
+                )
+            | Row.ClassOverAbsentBase ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition fake))
+                )
+            | Row.TwoArguments (first, second) ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x15uy
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition iface))
+                    blob.WriteCompressedInteger 2
+                    writeArgument blob first
+                    writeArgument blob second
+                )
+            | Row.BareGeneric ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x12uy
+                    blob.WriteCompressedInteger (codedIndex (definition iface))
+                )
+            | Row.Instantiation (asValueType, argument) ->
+                typeSpec (fun blob ->
+                    blob.WriteByte 0x15uy
+                    blob.WriteByte (if asValueType then 0x11uy else 0x12uy)
+                    blob.WriteCompressedInteger (codedIndex (definition iface))
+                    blob.WriteCompressedInteger 1
+                    writeArgument blob argument
+                )
+
+        for row in baseRows do
+            metadata.AddInterfaceImplementation (baseClass, token row)
+            |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        for row in receiverRows do
+            metadata.AddInterfaceImplementation (receiver, token row)
+            |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddInterfaceImplementation (overAbsent, absentRef)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddInterfaceImplementation (classOverAbsent, absentRef)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        let mOfIntInt =
+            typeSpec (fun blob ->
+                blob.WriteByte 0x15uy
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex (definition cycleM))
+                blob.WriteCompressedInteger 2
+                blob.WriteByte 0x08uy
+                blob.WriteByte 0x08uy
+            )
+
+        metadata.AddInterfaceImplementation (cycleL, mOfIntInt)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddInterfaceImplementation (cycleM, definition cycleL)
+        |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        metadata.AddGenericParameter (
+            definition iface,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        metadata.AddGenericParameter (
+            definition overAbsent,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        metadata.AddGenericParameter (
+            definition cycleM,
+            Reflection.GenericParameterAttributes.None,
+            metadata.GetOrAddString "T",
+            0
+        )
+        |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        let builder =
+            Reflection.PortableExecutable.ManagedPEBuilder (
+                Reflection.PortableExecutable.PEHeaderBuilder (
+                    imageCharacteristics =
+                        (Reflection.PortableExecutable.Characteristics.ExecutableImage
+                         ||| Reflection.PortableExecutable.Characteristics.Dll)
+                ),
+                Reflection.Metadata.Ecma335.MetadataRootBuilder metadata,
+                Reflection.Metadata.BlobBuilder ()
+            )
+
+        let output = Reflection.Metadata.BlobBuilder ()
+        builder.Serialize output |> ignore<Reflection.Metadata.BlobContentId>
+        output.ToArray ()
+
+    /// The host's `C.GetInterfaces()`, or the exception that loading `C` raised; and PawPrint's
+    /// interface map of `C`.
+    let private rowsOutcome
+        (baseRows : Row list)
+        (receiverRows : Row list)
+        : Result<string[], exn> * Result<ConcreteInterfaceDispatch.InterfaceMapEntry list, TypeBindingFailure>
+        =
+        let image = rowsImage baseRows receiverRows
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("interfaceRows", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let hostAnswer =
+                try
+                    host.GetType("C", true).GetInterfaces () |> Array.map _.ToString() |> Ok
+                with e ->
+                    Error e
+
+            let state = coreState.WithLoadedAssembly dumped
+
+            let state, receiver =
+                LoadedTypeInfo.typeInfoToTypeDefn'
+                    bct
+                    state.TypeSystem._LoadedAssemblies
+                    (dumped.TypeDefs.Values |> Seq.find (fun typeInfo -> typeInfo.Name = "C"))
+                |> IlMachineState.concretizeType
+                    loggerFactory
+                    bct
+                    state
+                    dumped.DefinitionFullName
+                    Collections.Immutable.ImmutableArray.Empty
+                    Collections.Immutable.ImmutableArray.Empty
+
+            let _, pawPrintAnswer =
+                ConcreteInterfaceDispatch.interfaceMapOf
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    bct
+                    "test"
+                    state.TypeSystem
+                    receiver
+
+            hostAnswer, pawPrintAnswer
+        finally
+            context.Unload ()
+
+    /// `C`'s row names the instantiation `B` already put in the map, so it adds no entry; but the
+    /// runtime loads every row's interface as the row spells it, so a row that does not load fails
+    /// the type all the same.
+    [<TestCase true>]
+    [<TestCase false>]
+    let ``A re-declared interface's own row is loaded`` (asValueType : bool) : unit =
+        let host, pawPrint =
+            rowsOutcome
+                [ Row.Instantiation (false, RowArgument.Int32) ]
+                [ Row.Instantiation (asValueType, RowArgument.Int32) ]
+
+        if asValueType then
+            match host with
+            | Error (:? TypeLoadException) -> ()
+            | other -> failwith $"the host answered %A{other}"
+
+            match pawPrint with
+            | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+        else
+            host |> Result.toOption |> shouldEqual (Some [| "I`1[System.Int32]" |])
+
+            match pawPrint with
+            | Ok [ entry ] -> entry.Definition.DeclaredOnType |> shouldEqual true
+            | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `C`'s `I<class Int32>` names `B`'s `I<valuetype Int32>` again and adds no entry, and nothing but
+    /// loading its argument finds the wrong kind there.
+    [<Test>]
+    let ``A row that adds no entry is still loaded`` () : unit =
+        let host, pawPrint =
+            rowsOutcome
+                [ Row.Instantiation (false, RowArgument.Int32AsValueType) ]
+                [ Row.Instantiation (false, RowArgument.Int32AsClass) ]
+
+        match host with
+        | Error (:? TypeLoadException) -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// Rows are loaded in the order read, the parent's first, whether or not they add an entry:
+    /// `C`'s `I<Missing>` comes before its `I<class Int32>`, which names `B`'s `I<valuetype Int32>`
+    /// again with the wrong kind.
+    [<Test>]
+    let ``Rows that do not load fail in the order they are read`` () : unit =
+        let host, pawPrint =
+            rowsOutcome
+                [ Row.Instantiation (false, RowArgument.Int32AsValueType) ]
+                [
+                    Row.Instantiation (false, RowArgument.Missing)
+                    Row.Instantiation (false, RowArgument.Int32AsClass)
+                ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "Missing" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row's interface is resolved, and its spelling's kind checked, before any later row is read:
+    /// `GENERICINST VALUETYPE I<int>` fails before the absent interface after it.
+    [<Test>]
+    let ``A row's interface is spelled with the wrong kind before a later row is absent`` () : unit =
+        let host, pawPrint =
+            rowsOutcome [] [ Row.Instantiation (true, RowArgument.Int32) ; Row.Absent ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when not (e.Message.Contains "IAbsent") -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.KindMismatch _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A TypeSpec naming the generic `I<T>` with no instantiation, which the host does not load.
+    [<Test>]
+    let ``A row naming a generic interface without an instantiation is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.BareGeneric ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `C`, which has no type variables, names `I<!0>`, as `B` names `I<int>`, so the duplicate check
+    /// would compare a variable its context does not supply. The host does not load `C`.
+    [<Test>]
+    let ``A row naming a variable its type does not have is refused`` () : unit =
+        let host, pawPrint =
+            rowsOutcome [ Row.Instantiation (false, RowArgument.Int32) ] [ Row.Instantiation (false, RowArgument.Var0) ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.TypeParameterOutOfScope (0, 0))) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row whose arguments the definition walk cannot read is loaded in its turn, so an earlier
+    /// row's absent argument is reported first: `I<Missing>` before `I<!0>` in a type with no variables,
+    /// and before `I<Missing, int>` given to a one-parameter `I`, as on the host.
+    [<TestCase false>]
+    [<TestCase true>]
+    let ``An earlier row's absent argument comes before a later row's unreadable arguments`` (arity : bool) : unit =
+        let later =
+            if arity then
+                Row.TwoArguments (RowArgument.Int32, RowArgument.Int32)
+            else
+                Row.Instantiation (false, RowArgument.Var0)
+
+        let host, pawPrint =
+            rowsOutcome [] [ Row.Instantiation (false, RowArgument.Missing) ; later ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "Missing" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// The same arity row alone: its own absent argument is reported before its arity, as the host
+    /// reports it.
+    [<Test>]
+    let ``A row's absent argument comes before its wrong number of arguments`` () : unit =
+        let host, pawPrint =
+            rowsOutcome [] [ Row.TwoArguments (RowArgument.Missing, RowArgument.Int32) ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "Missing" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row spelled `!!0`, a TypeSpec that is not a generic instantiation.
+    [<Test>]
+    let ``A row spelled as a method variable is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.MethodVariable ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row spelled `CLASS Fake`, a class of the image whose base type does not exist. The host
+    /// refuses the row's shape (a TypeSpec here must be a generic instantiation) before reading
+    /// `Fake`, and so does PawPrint.
+    [<Test>]
+    let ``A TypeSpec row naming a class is refused for its shape`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.ClassOverAbsentBase ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row spelled `!!0` fails before a later absent interface is read, as the host fails on it.
+    [<Test>]
+    let ``A row spelled as a method variable fails before a later absent row`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.MethodVariable ; Row.Absent ]
+
+        match host with
+        | Error e when not (e.Message.Contains "IAbsent") -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A TypeDef row naming the generic `I<T>` itself, with no instantiation.
+    [<Test>]
+    let ``A TypeDef row naming a generic interface is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.GenericByTypeDef ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.UninstantiatedDefinition _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row naming `System.Object`, which is not an interface.
+    [<Test>]
+    let ``A row naming a class is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.Object ]
+
+        match host with
+        | Error (:? TypeLoadException) -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `J<!0>` in a type with no variables cannot be read, but `J`'s own parent `IAbsent` is absent,
+    /// and the host reports that first.
+    [<Test>]
+    let ``An unreadable row's interface's absent parent is reported first`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.OverAbsentParentWithVar0 ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "IAbsent" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `CLASS K`, a non-generic interface spelled as a TypeSpec, is refused for its shape; `K` by its
+    /// TypeDef token is the control, answered on both.
+    [<TestCase true>]
+    [<TestCase false>]
+    let ``A non-generic interface is named by a token, not a TypeSpec`` (asTypeSpec : bool) : unit =
+        let row =
+            if asTypeSpec then
+                Row.NonGenericAsTypeSpec
+            else
+                Row.NonGenericByTypeDef
+
+        let host, pawPrint = rowsOutcome [] [ row ]
+
+        if asTypeSpec then
+            match host with
+            | Error (:? TypeLoadException) -> ()
+            | other -> failwith $"the host answered %A{other}"
+
+            match pawPrint with
+            | Error (TypeBindingFailure.Unmodelled _) -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+        else
+            host |> Result.toOption |> shouldEqual (Some [| "K" |])
+
+            match pawPrint with
+            | Ok [ _ ] -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row naming the class `F2`, which implements the absent `IAbsent`: the host loads `F2`,
+    /// and fails on its interface, before it finds that `F2` is not an interface.
+    [<Test>]
+    let ``A row naming a class fails first on that class's own interfaces`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.ClassOverAbsentInterface ]
+
+        match host with
+        | Error (:? TypeLoadException as e) when e.Message.Contains "IAbsent" -> ()
+        | other -> failwith $"the host answered %A{other}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.TypeAbsent _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `L : M<int, int>` and `M<T> : L`: a cycle through a row with the wrong number of arguments.
+    /// CoreCLR finds the cycle, a recursive load, before it reads any arity.
+    [<Test>]
+    let ``A cycle through an unreadable row is refused`` () : unit =
+        let host, pawPrint = rowsOutcome [] [ Row.CycleThroughWrongArity ]
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled unmodelled) when unmodelled.Diagnostic.Contains "IDS_CLASSLOAD_GENERAL" ->
+            ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    // ----- Hand-built type graphs -----
+
+    /// A type as a hand-built image spells it, in a row, an extends clause or an argument.
+    [<RequireQualifiedAccess>]
+    type private Spelling =
+        /// A type of the image, by name (with its arity suffix), with arguments if it is generic: by its
+        /// TypeDef token as a row or base when it has none, by `GENERICINST` otherwise.
+        | Named of name : string * arguments : Spelling list
+        /// `!i`.
+        | Var of index : int
+        /// `<element>*`.
+        | Pointer of element : Spelling
+        /// `<element>[]`.
+        | SzArray of element : Spelling
+        | Int32
+        | String
+        /// `[CoreLib]System.Collections.Generic.List<_>`.
+        | CoreLibList of element : Spelling
+        /// `VALUETYPE [CoreLib]System.Missing`, which CoreLib does not declare.
+        | MissingValueType
+        /// `[CoreLib]System.IAbsent`, which CoreLib does not declare, by its TypeRef.
+        | AbsentInterface
+        /// `GENERICINST int32 1 int32`: an instantiation whose head is not a type token.
+        | Int32HeadedInstantiation
+
+    [<RequireQualifiedAccess>]
+    type private SketchKind =
+        | Interface
+        | Class
+        | Struct
+
+    /// One type of a hand-built image. A class or struct with no `Base` extends `object` or
+    /// `ValueType`.
+    type private Sketch =
+        {
+            Name : string
+            Kind : SketchKind
+            Arity : int
+            Base : Spelling option
+            Rows : Spelling list
+        }
+
+    let private sketch (name : string) (kind : SketchKind) (arity : int) (rows : Spelling list) : Sketch =
+        {
+            Name = name
+            Kind = kind
+            Arity = arity
+            Base = None
+            Rows = rows
+        }
+
+    /// An image holding `sketches`, in that order.
+    let private sketchImage (sketches : Sketch list) : byte[] =
+        let metadata = Reflection.Metadata.Ecma335.MetadataBuilder ()
+        let nil = Unchecked.defaultof<Reflection.Metadata.EntityHandle>
+
+        metadata.AddModule (
+            0,
+            metadata.GetOrAddString "Sketch.dll",
+            metadata.GetOrAddGuid (Guid ("6d0e2b7a-91c4-4f3e-8a55-0d2c7b1e4f86")),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>
+        )
+        |> ignore<Reflection.Metadata.ModuleDefinitionHandle>
+
+        metadata.AddAssembly (
+            metadata.GetOrAddString "Sketch",
+            Version (1, 0, 0, 0),
+            Unchecked.defaultof<_>,
+            Unchecked.defaultof<_>,
+            enum<Reflection.AssemblyFlags> 0,
+            Reflection.AssemblyHashAlgorithm.None
+        )
+        |> ignore<Reflection.Metadata.AssemblyDefinitionHandle>
+
+        let coreLibName = hostCoreLib.GetName ()
+
+        let coreLibRef =
+            metadata.AddAssemblyReference (
+                metadata.GetOrAddString coreLibName.Name,
+                coreLibName.Version,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddBlob (coreLibName.GetPublicKeyToken ()),
+                enum<Reflection.AssemblyFlags> 0,
+                Unchecked.defaultof<_>
+            )
+
+        let coreLibType (ns : string) (name : string) : Reflection.Metadata.EntityHandle =
+            metadata.AddTypeReference (
+                Reflection.Metadata.AssemblyReferenceHandle.op_Implicit coreLibRef,
+                metadata.GetOrAddString ns,
+                metadata.GetOrAddString name
+            )
+            |> Reflection.Metadata.TypeReferenceHandle.op_Implicit
+
+        let objectRef = coreLibType "System" "Object"
+        let valueTypeRef = coreLibType "System" "ValueType"
+        let listRef = coreLibType "System.Collections.Generic" "List`1"
+        let missingRef = coreLibType "System" "Missing"
+        let absentRef = coreLibType "System" "IAbsent"
+
+        // `<Module>` is row 1, so the sketches are rows 2 onwards, in order.
+        let handles =
+            sketches
+            |> List.mapi (fun i s ->
+                s.Name, (Reflection.Metadata.Ecma335.MetadataTokens.TypeDefinitionHandle (i + 2), s)
+            )
+            |> Map.ofList
+
+        let token (name : string) : Reflection.Metadata.EntityHandle * Sketch =
+            match Map.tryFind name handles with
+            | Some (handle, s) -> Reflection.Metadata.TypeDefinitionHandle.op_Implicit handle, s
+            | None -> failwith $"the sketch has no type %s{name}"
+
+        let codedIndex (handle : Reflection.Metadata.EntityHandle) : int =
+            Reflection.Metadata.Ecma335.CodedIndex.TypeDefOrRef handle
+
+        let kindByte (s : Sketch) : byte =
+            match s.Kind with
+            | SketchKind.Struct -> 0x11uy
+            | SketchKind.Interface
+            | SketchKind.Class -> 0x12uy
+
+        let rec write (blob : Reflection.Metadata.BlobBuilder) (spelling : Spelling) : unit =
+            match spelling with
+            | Spelling.Named (name, []) ->
+                let handle, s = token name
+                blob.WriteByte (kindByte s)
+                blob.WriteCompressedInteger (codedIndex handle)
+            | Spelling.Named (name, arguments) ->
+                let handle, s = token name
+                blob.WriteByte 0x15uy
+                blob.WriteByte (kindByte s)
+                blob.WriteCompressedInteger (codedIndex handle)
+                blob.WriteCompressedInteger arguments.Length
+
+                for argument in arguments do
+                    write blob argument
+            | Spelling.Var index ->
+                blob.WriteByte 0x13uy
+                blob.WriteCompressedInteger index
+            | Spelling.Pointer element ->
+                blob.WriteByte 0x0Fuy
+                write blob element
+            | Spelling.SzArray element ->
+                blob.WriteByte 0x1Duy
+                write blob element
+            | Spelling.Int32 -> blob.WriteByte 0x08uy
+            | Spelling.String -> blob.WriteByte 0x0Euy
+            | Spelling.CoreLibList element ->
+                blob.WriteByte 0x15uy
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex listRef)
+                blob.WriteCompressedInteger 1
+                write blob element
+            | Spelling.MissingValueType ->
+                blob.WriteByte 0x11uy
+                blob.WriteCompressedInteger (codedIndex missingRef)
+            | Spelling.AbsentInterface ->
+                blob.WriteByte 0x12uy
+                blob.WriteCompressedInteger (codedIndex absentRef)
+            | Spelling.Int32HeadedInstantiation ->
+                blob.WriteByte 0x15uy
+                blob.WriteByte 0x08uy
+                blob.WriteCompressedInteger 1
+                blob.WriteByte 0x08uy
+
+        // A row or base: a TypeDef or TypeRef token when the spelling has one, a TypeSpec otherwise.
+        let typeDefOrRefOrSpec (spelling : Spelling) : Reflection.Metadata.EntityHandle =
+            match spelling with
+            | Spelling.Named (name, []) -> fst (token name)
+            | Spelling.AbsentInterface -> absentRef
+            | other ->
+                let blob = Reflection.Metadata.BlobBuilder ()
+                write blob other
+
+                metadata.AddTypeSpecification (metadata.GetOrAddBlob blob)
+                |> Reflection.Metadata.TypeSpecificationHandle.op_Implicit
+
+        metadata.AddTypeDefinition (
+            Reflection.TypeAttributes.NotPublic,
+            Unchecked.defaultof<_>,
+            metadata.GetOrAddString "<Module>",
+            nil,
+            Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle 1,
+            Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle 1
+        )
+        |> ignore<Reflection.Metadata.TypeDefinitionHandle>
+
+        for s in sketches do
+            let attributes, baseType =
+                match s.Kind with
+                | SketchKind.Interface ->
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Interface
+                    ||| Reflection.TypeAttributes.Abstract,
+                    nil
+                | SketchKind.Class ->
+                    Reflection.TypeAttributes.Public,
+                    s.Base |> Option.map typeDefOrRefOrSpec |> Option.defaultValue objectRef
+                | SketchKind.Struct ->
+                    Reflection.TypeAttributes.Public
+                    ||| Reflection.TypeAttributes.Sealed
+                    ||| Reflection.TypeAttributes.SequentialLayout,
+                    s.Base |> Option.map typeDefOrRefOrSpec |> Option.defaultValue valueTypeRef
+
+            metadata.AddTypeDefinition (
+                attributes,
+                Unchecked.defaultof<_>,
+                metadata.GetOrAddString s.Name,
+                baseType,
+                Reflection.Metadata.Ecma335.MetadataTokens.FieldDefinitionHandle 1,
+                Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle 1
+            )
+            |> ignore<Reflection.Metadata.TypeDefinitionHandle>
+
+        for s in sketches do
+            let owner = fst (token s.Name)
+
+            for row in s.Rows do
+                metadata.AddInterfaceImplementation (
+                    Reflection.Metadata.TypeDefinitionHandle.op_Explicit owner,
+                    typeDefOrRefOrSpec row
+                )
+                |> ignore<Reflection.Metadata.InterfaceImplementationHandle>
+
+        for s in sketches do
+            for i in 0 .. s.Arity - 1 do
+                metadata.AddGenericParameter (
+                    fst (token s.Name),
+                    Reflection.GenericParameterAttributes.None,
+                    metadata.GetOrAddString $"T%d{i}",
+                    i
+                )
+                |> ignore<Reflection.Metadata.GenericParameterHandle>
+
+        let builder =
+            Reflection.PortableExecutable.ManagedPEBuilder (
+                Reflection.PortableExecutable.PEHeaderBuilder (
+                    imageCharacteristics =
+                        (Reflection.PortableExecutable.Characteristics.ExecutableImage
+                         ||| Reflection.PortableExecutable.Characteristics.Dll)
+                ),
+                Reflection.Metadata.Ecma335.MetadataRootBuilder metadata,
+                Reflection.Metadata.BlobBuilder ()
+            )
+
+        let output = Reflection.Metadata.BlobBuilder ()
+        builder.Serialize output |> ignore<Reflection.Metadata.BlobContentId>
+        output.ToArray ()
+
+    /// What the host and PawPrint answer for the non-generic type `receiver` of `sketches`: the host's
+    /// `GetInterfaces()`, or what loading the type raised; PawPrint's interface map, each entry as the
+    /// host type it names over the same image; the bytes PawPrint's call allocated on this thread; and
+    /// the bytes naming its entries allocated, each host type built once per handle.
+    let private sketchOutcome
+        (sketches : Sketch list)
+        (receiver : string)
+        : Result<Type[], exn> * Result<Type list, TypeBindingFailure> * int64 * int64
+        =
+        let image = sketchImage sketches
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let context = AssemblyLoadContext ("sketch", isCollectible = true)
+
+        try
+            let host =
+                use stream = new MemoryStream (image)
+                context.LoadFromStream stream
+
+            let hostAnswer =
+                try
+                    host.GetType(receiver, true).GetInterfaces () |> Ok
+                with e ->
+                    Error e
+
+            let state = coreState.WithLoadedAssembly dumped
+
+            let state, handle =
+                LoadedTypeInfo.typeInfoToTypeDefn'
+                    bct
+                    state.TypeSystem._LoadedAssemblies
+                    (dumped.TypeDefs.Values |> Seq.find (fun typeInfo -> typeInfo.Name = receiver))
+                |> IlMachineState.concretizeType
+                    loggerFactory
+                    bct
+                    state
+                    dumped.DefinitionFullName
+                    Collections.Immutable.ImmutableArray.Empty
+                    Collections.Immutable.ImmutableArray.Empty
+
+            let before = GC.GetAllocatedBytesForCurrentThread ()
+
+            let typeSystem, pawPrintAnswer =
+                ConcreteInterfaceDispatch.interfaceMapOf
+                    loggerFactory
+                    state.DotnetRuntimeDirs
+                    bct
+                    "test"
+                    state.TypeSystem
+                    handle
+
+            let allocated = GC.GetAllocatedBytesForCurrentThread () - before
+            let namingBefore = GC.GetAllocatedBytesForCurrentThread ()
+
+            // A shared type such as `Pair<A, A>` names one handle many times; each is built once.
+            let built = Collections.Generic.Dictionary<ConcreteTypeHandle, Type> ()
+
+            let rec hostTypeOf (handle : ConcreteTypeHandle) : Type =
+                match built.TryGetValue handle with
+                | true, ty -> ty
+                | false, _ ->
+                    let ty = buildHostType handle
+                    built.[handle] <- ty
+                    ty
+
+            and buildHostType (handle : ConcreteTypeHandle) : Type =
+                match handle with
+                | ConcreteTypeHandle.Concrete _ ->
+                    let ty =
+                        AllConcreteTypes.lookup handle typeSystem.ConcreteTypes
+                        |> Option.defaultWith (fun () -> failwith $"%O{handle} is not registered")
+
+                    let assembly =
+                        if ty.Identity.AssemblyFullName = dumped.DefinitionFullName then
+                            host
+                        else
+                            hostCoreLib
+
+                    let definition =
+                        assembly.ManifestModule.ResolveType (
+                            Reflection.Metadata.Ecma335.MetadataTokens.GetToken (
+                                Reflection.Metadata.TypeDefinitionHandle.op_Implicit ty.Identity.TypeDefinition.Get
+                                : Reflection.Metadata.EntityHandle
+                            )
+                        )
+
+                    if ty.Generics.IsEmpty then
+                        definition
+                    else
+                        definition.MakeGenericType (ty.Generics |> Seq.map hostTypeOf |> Array.ofSeq)
+                | ConcreteTypeHandle.OneDimArrayZero element -> (hostTypeOf element).MakeArrayType ()
+                | ConcreteTypeHandle.Pointer element -> (hostTypeOf element).MakePointerType ()
+                | other -> failwith $"no host type is built for %O{other}"
+
+            let named =
+                pawPrintAnswer
+                |> Result.map (List.map (fun entry -> hostTypeOf entry.Interface))
+
+            let namingAllocated = GC.GetAllocatedBytesForCurrentThread () - namingBefore
+            hostAnswer, named, allocated, namingAllocated
+        finally
+            context.Unload ()
+
+    /// The host's and PawPrint's answers agree, interface for interface, in order. Types are compared
+    /// as values, and named only to report a disagreement.
+    let private agreeWithHost (host : Result<Type[], exn>) (pawPrint : Result<Type list, TypeBindingFailure>) : unit =
+        match host, pawPrint with
+        | Ok hostInterfaces, Ok interfaces when interfaces = List.ofArray hostInterfaces -> ()
+        | Ok hostInterfaces, Ok interfaces ->
+            let render (types : Type seq) =
+                types |> Seq.map string |> String.concat ", "
+
+            failwith $"the host answered [%s{render hostInterfaces}] and PawPrint [%s{render interfaces}]"
+        | other -> failwith $"the host and PawPrint answered %A{other}"
+
+    /// The refusal of an interface hierarchy that reaches a definition whose load is already in
+    /// progress.
+    let private isCycleRefusal (failure : TypeBindingFailure) : bool =
+        match failure with
+        | TypeBindingFailure.Unmodelled unmodelled -> unmodelled.Diagnostic.Contains "IDS_CLASSLOAD_GENERAL"
+        | _ -> false
+
+    /// `N0<A, B> : I<A>, I<B>`, and `Nk<A, B> : N(k-1)<Pair<A, A>, Pair<A, B>>` up to `depth`, under
+    /// `C : N<depth><int, string>`. Every `I<_>` the bottom compares is an instantiation over contexts
+    /// shared `depth` deep.
+    let private pairChain (depth : int) : Sketch list =
+        [
+            yield sketch "I`1" SketchKind.Interface 1 []
+            yield sketch "Pair`2" SketchKind.Class 2 []
+            yield
+                sketch
+                    "N0`2"
+                    SketchKind.Interface
+                    2
+                    [
+                        Spelling.Named ("I`1", [ Spelling.Var 0 ])
+                        Spelling.Named ("I`1", [ Spelling.Var 1 ])
+                    ]
+            for k in 1..depth do
+                yield
+                    sketch
+                        $"N%d{k}`2"
+                        SketchKind.Interface
+                        2
+                        [
+                            Spelling.Named (
+                                $"N%d{k - 1}`2",
+                                [
+                                    Spelling.Named ("Pair`2", [ Spelling.Var 0 ; Spelling.Var 0 ])
+                                    Spelling.Named ("Pair`2", [ Spelling.Var 0 ; Spelling.Var 1 ])
+                                ]
+                            )
+                        ]
+            yield
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ($"N%d{depth}`2", [ Spelling.Int32 ; Spelling.String ]) ]
+        ]
+
+    /// The interface map of a sixteen-deep chain of shared contexts agrees with the host, and costs
+    /// at most 32 times what an eight-deep one does: linear work gives about 2, exponential about 256.
+    [<Test>]
+    let ``A chain passing Pair<A, A> and Pair<A, B> on agrees with the host, in work linear in its depth`` () : unit =
+        let warm, _, _, _ = sketchOutcome (pairChain 2) "C"
+        warm |> Result.isOk |> shouldEqual true
+
+        let host8, pawPrint8, allocated8, naming8 = sketchOutcome (pairChain 8) "C"
+        agreeWithHost host8 pawPrint8
+
+        let host16, pawPrint16, allocated16, naming16 = sketchOutcome (pairChain 16) "C"
+        agreeWithHost host16 pawPrint16
+        host16 |> Result.map Array.length |> shouldEqual (Ok 19)
+
+        TestContext.Progress.WriteLine $"pair chain: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+        // The oracle naming the entries must not do the exponential work the test rules out.
+        TestContext.Progress.WriteLine $"pair chain naming: %d{naming8} bytes at depth 8, %d{naming16} at depth 16"
+        Assert.That (naming16, Is.LessThanOrEqualTo (8L * naming8))
+
+    /// `L0<A> : I<A>`, `Lk<A> : L(k-1)<Pair<A, A>>` up to `depth`, the same for `R`, under
+    /// `C : L<depth><int>, R<depth><int>`. Each interface's row names its one direct parent, so the
+    /// image holds spellings of constant size, linear in the depth; the two chains' `I<_>` rows close
+    /// to one handle, and their substitutions, equal and shared `depth` deep, are compared.
+    let private pairDiamond (depth : int) : Sketch list =
+        let chain (side : string) =
+            [
+                yield sketch $"%s{side}0`1" SketchKind.Interface 1 [ Spelling.Named ("I`1", [ Spelling.Var 0 ]) ]
+                for k in 1..depth do
+                    yield
+                        sketch
+                            $"%s{side}%d{k}`1"
+                            SketchKind.Interface
+                            1
+                            [
+                                Spelling.Named (
+                                    $"%s{side}%d{k - 1}`1",
+                                    [ Spelling.Named ("Pair`2", [ Spelling.Var 0 ; Spelling.Var 0 ]) ]
+                                )
+                            ]
+            ]
+
+        [
+            yield sketch "I`1" SketchKind.Interface 1 []
+            yield sketch "Pair`2" SketchKind.Class 2 []
+            yield! chain "L"
+            yield! chain "R"
+            yield
+                sketch
+                    "C"
+                    SketchKind.Class
+                    0
+                    [
+                        Spelling.Named ($"L%d{depth}`1", [ Spelling.Int32 ])
+                        Spelling.Named ($"R%d{depth}`1", [ Spelling.Int32 ])
+                    ]
+        ]
+
+    /// The diamond of two chains of shared contexts agrees with the host, and costs at most 32 times
+    /// at sixteen levels what it does at eight: the image is linear in its depth, so linear work gives
+    /// about 2, and comparing the two equal substitutions unshared about 256.
+    [<Test>]
+    let ``A diamond of two chains passing Pair<A, A> on agrees with the host, in work linear in its depth`` () : unit =
+        let warm, _, _, _ = sketchOutcome (pairDiamond 2) "C"
+        warm |> Result.isOk |> shouldEqual true
+
+        let host8, pawPrint8, allocated8, naming8 = sketchOutcome (pairDiamond 8) "C"
+        agreeWithHost host8 pawPrint8
+
+        let host16, pawPrint16, allocated16, naming16 = sketchOutcome (pairDiamond 16) "C"
+        agreeWithHost host16 pawPrint16
+        host16 |> Result.map Array.length |> shouldEqual (Ok 35)
+
+        TestContext.Progress.WriteLine $"pair diamond: %d{allocated8} bytes at depth 8, %d{allocated16} at depth 16"
+        Assert.That (allocated16, Is.LessThanOrEqualTo (32L * allocated8))
+        TestContext.Progress.WriteLine $"pair diamond naming: %d{naming8} bytes at depth 8, %d{naming16} at depth 16"
+        Assert.That (naming16, Is.LessThanOrEqualTo (8L * naming8))
+
+    /// `C : I<A0>, ..., I<A(count - 1)>`, each `Ai` a class of the image.
+    let private manyInstantiations (count : int) : Sketch list =
+        [
+            yield sketch "I`1" SketchKind.Interface 1 []
+            for i in 0 .. count - 1 do
+                yield sketch $"A%d{i}" SketchKind.Class 0 []
+            yield
+                sketch
+                    "C"
+                    SketchKind.Class
+                    0
+                    [
+                        for i in 0 .. count - 1 do
+                            Spelling.Named ("I`1", [ Spelling.Named ($"A%d{i}", []) ])
+                    ]
+        ]
+
+    /// `n` instantiations of one interface make `n(n-1)/2` duplicate comparisons, as CoreCLR's
+    /// `ExpandApproxInterface` makes them, so the work is quadratic: 128 cost at most 8 times what 64
+    /// do, where quadratic work gives 4. What one comparison costs is #2335.
+    [<Test>]
+    let ``Many instantiations of one interface cost work quadratic in their number`` () : unit =
+        let warm, _, _, _ = sketchOutcome (manyInstantiations 8) "C"
+        warm |> Result.isOk |> shouldEqual true
+
+        let host64, pawPrint64, allocated64, _ = sketchOutcome (manyInstantiations 64) "C"
+        agreeWithHost host64 pawPrint64
+
+        let host128, pawPrint128, allocated128, _ =
+            sketchOutcome (manyInstantiations 128) "C"
+
+        agreeWithHost host128 pawPrint128
+        host128 |> Result.map Array.length |> shouldEqual (Ok 128)
+
+        TestContext.Progress.WriteLine $"many instantiations: %d{allocated64} bytes at 64, %d{allocated128} at 128"
+
+        Assert.That (allocated128, Is.LessThanOrEqualTo (8L * allocated64))
+
+    /// `J0<T>`, and `Jk<T>` with two rows each giving its predecessor `J(k-1)` two arguments, under
+    /// `C : J<depth><int>`. The image holds two rows a level; each row's arguments cannot be read, and
+    /// its interface's own map is walked before it is deferred. Walking the same interface's map again
+    /// for the second row of each level would double the work at every level.
+    let private wrongArityLadder (depth : int) : Sketch list =
+        [
+            yield sketch "J0`1" SketchKind.Interface 1 []
+            for k in 1..depth do
+                let previous = Spelling.Named ($"J%d{k - 1}`1", [ Spelling.Var 0 ; Spelling.Var 0 ])
+                yield sketch $"J%d{k}`1" SketchKind.Interface 1 [ previous ; previous ]
+            yield sketch "C" SketchKind.Class 0 [ Spelling.Named ($"J%d{depth}`1", [ Spelling.Int32 ]) ]
+        ]
+
+    /// Both refuse the ladder; PawPrint's work at twelve levels is at most 8 times its work at six,
+    /// where walking each interface once gives about 2 and walking it once a row about 64.
+    [<Test>]
+    let ``Rows that cannot be read walk each interface once`` () : unit =
+        let _, _, _, _ = sketchOutcome (wrongArityLadder 2) "C"
+        let host6, pawPrint6, allocated6, _ = sketchOutcome (wrongArityLadder 6) "C"
+        let host12, pawPrint12, allocated12, _ = sketchOutcome (wrongArityLadder 12) "C"
+
+        for host, pawPrint in [ host6, pawPrint6 ; host12, pawPrint12 ] do
+            match host with
+            | Error _ -> ()
+            | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+            match pawPrint with
+            | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)) -> ()
+            | other -> failwith $"PawPrint answered %A{other}"
+
+        TestContext.Progress.WriteLine
+            $"wrong-arity ladder: %d{allocated6} bytes at depth 6, %d{allocated12} at depth 12"
+
+        Assert.That (allocated12, Is.LessThanOrEqualTo (8L * allocated6))
+
+    /// A class `D : int32[]`, an extends clause naming no class.
+    let private overArray : Sketch list =
+        [
+            { sketch "D" SketchKind.Class 0 [] with
+                Base = Some (Spelling.SzArray Spelling.Int32)
+            }
+        ]
+
+    /// A row naming `D`, whose extends clause is `int32[]`: loading the row's head refuses the clause,
+    /// as the host refuses `C`.
+    [<Test>]
+    let ``A row naming a class whose extends clause names no class is refused`` () : unit =
+        let host, pawPrint, _, _ =
+            sketchOutcome (overArray @ [ sketch "C" SketchKind.Class 0 [ Spelling.Named ("D", []) ] ]) "C"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// The same clause through `interfaceMapOfDefinition` on `D`. Other extends shapes CoreCLR refuses, a
+    /// non-generic class spelled as a bare TypeSpec or a value type as a base, are #2336.
+    [<Test>]
+    let ``A definition's map refuses an extends clause naming no class`` () : unit =
+        let image = sketchImage overArray
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let state = coreState.WithLoadedAssembly dumped
+
+        let identity =
+            let handle, _ =
+                dumped.TypeDefs
+                |> Seq.map (fun (KeyValue (handle, typeInfo)) -> handle, typeInfo)
+                |> Seq.find (fun (_, typeInfo) -> typeInfo.Name = "D")
+
+            ResolvedTypeIdentity.ofDefinitionInAssembly dumped.DefinitionFullName handle
+
+        let _, result =
+            ConcreteInterfaceDispatch.interfaceMapOfDefinition
+                loggerFactory
+                state.DotnetRuntimeDirs
+                bct
+                "test"
+                state.TypeSystem
+                identity
+
+        match result with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// Shapes whose interface hierarchy reaches a definition already being loaded, which CoreCLR
+    /// refuses as a recursive load (`IDS_CLASSLOAD_GENERAL`). A row naming a class whose base chain
+    /// is a cycle (`K : K2`, `K2 : K`) is not here: the Loader's base-chain loading, which reading the
+    /// row's token runs before the walk sees the row, follows that chain without end (#2330).
+    let private cycles : (string * Sketch list) list =
+        [
+            "I<T> : I<T*>",
+            [
+                sketch "I`1" SketchKind.Interface 1 [ Spelling.Named ("I`1", [ Spelling.Pointer (Spelling.Var 0) ]) ]
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.Int32 ]) ]
+            ]
+            "I<T> : I<List<T>>",
+            [
+                sketch
+                    "I`1"
+                    SketchKind.Interface
+                    1
+                    [ Spelling.Named ("I`1", [ Spelling.CoreLibList (Spelling.Var 0) ]) ]
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.Int32 ]) ]
+            ]
+            "I<T> : J<T[]>, J<T> : I<T>",
+            [
+                sketch "I`1" SketchKind.Interface 1 [ Spelling.Named ("J`1", [ Spelling.SzArray (Spelling.Var 0) ]) ]
+                sketch "J`1" SketchKind.Interface 1 [ Spelling.Named ("I`1", [ Spelling.Var 0 ]) ]
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.Int32 ]) ]
+            ]
+            "I<T> : J<T>, J<T> : I<T>",
+            [
+                sketch "I`1" SketchKind.Interface 1 [ Spelling.Named ("J`1", [ Spelling.Var 0 ]) ]
+                sketch "J`1" SketchKind.Interface 1 [ Spelling.Named ("I`1", [ Spelling.Var 0 ]) ]
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.Int32 ]) ]
+            ]
+        ]
+
+    /// Each must end, and in a refusal, where the host refuses too. Run with a time limit outside the
+    /// test host when the walk is suspect: NUnit cannot stop a loop, and a recursion overflows the host's
+    /// stack.
+    let private cycleNames : string list = cycles |> List.map fst
+
+    [<TestCaseSource(nameof cycleNames)>]
+    let ``An interface hierarchy that reaches itself is refused`` (name : string) : unit =
+        let sketches = cycles |> List.find (fun (n, _) -> n = name) |> snd
+        let host, pawPrint, _, _ = sketchOutcome sketches "C"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error failure when isCycleRefusal failure -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// Shapes that reach a definition more than once without reaching it from itself, each answered
+    /// as the host answers it.
+    let private notCycles : (string * Sketch list * string) list =
+        [
+            "a diamond, C : L, R over I",
+            [
+                sketch "I" SketchKind.Interface 0 []
+                sketch "L" SketchKind.Interface 0 [ Spelling.Named ("I", []) ]
+                sketch "R" SketchKind.Interface 0 [ Spelling.Named ("I", []) ]
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("L", []) ; Spelling.Named ("R", []) ]
+            ],
+            "C"
+            "struct V : I<V>",
+            [
+                sketch "I`1" SketchKind.Interface 1 []
+                sketch "V" SketchKind.Struct 0 [ Spelling.Named ("I`1", [ Spelling.Named ("V", []) ]) ]
+            ],
+            "V"
+            "class C : I<C>",
+            [
+                sketch "I`1" SketchKind.Interface 1 []
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.Named ("C", []) ]) ]
+            ],
+            "C"
+            "I<T> : J<I<T>>",
+            [
+                sketch "J`1" SketchKind.Interface 1 []
+                sketch
+                    "I`1"
+                    SketchKind.Interface
+                    1
+                    [ Spelling.Named ("J`1", [ Spelling.Named ("I`1", [ Spelling.Var 0 ]) ]) ]
+                sketch "C" SketchKind.Class 0 [ Spelling.Named ("I`1", [ Spelling.Int32 ]) ]
+            ],
+            "C"
+        ]
+
+    let private notCycleNames : string list = notCycles |> List.map (fun (n, _, _) -> n)
+
+    [<TestCaseSource(nameof notCycleNames)>]
+    let ``A hierarchy that reaches a definition twice without a cycle is answered`` (name : string) : unit =
+        let _, sketches, receiver = notCycles |> List.find (fun (n, _, _) -> n = name)
+        let host, pawPrint, _, _ = sketchOutcome sketches receiver
+        agreeWithHost host pawPrint
+
+    /// `GENERICINST int32 1 int32`, a TypeSpec whose head is not a type token, alone and before a
+    /// later absent row: refused for its shape, before any later row is read.
+    [<TestCase false>]
+    [<TestCase true>]
+    let ``A TypeSpec row whose head is not a type token is refused`` (laterAbsent : bool) : unit =
+        let rows =
+            [
+                yield Spelling.Int32HeadedInstantiation
+                if laterAbsent then
+                    yield Spelling.AbsentInterface
+            ]
+
+        let host, pawPrint, _, _ = sketchOutcome [ sketch "C" SketchKind.Class 0 rows ] "C"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Unmodelled _) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A one-parameter class `G`, and `BadHead : G<int, int>`.
+    let private badHead : Sketch list =
+        [
+            sketch "G`1" SketchKind.Class 1 []
+            { sketch "BadHead" SketchKind.Class 0 [] with
+                Base = Some (Spelling.Named ("G`1", [ Spelling.Int32 ; Spelling.Int32 ]))
+            }
+        ]
+
+    /// A row naming `BadHead`, whose extends clause gives `G` two arguments: loading the row's head
+    /// fails on that clause, as the host fails.
+    [<Test>]
+    let ``A row naming a class whose extends clause has the wrong arity is refused`` () : unit =
+        let host, pawPrint, _, _ =
+            sketchOutcome (badHead @ [ sketch "C" SketchKind.Class 0 [ Spelling.Named ("BadHead", []) ] ]) "C"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// The same extends clause through `interfaceMapOfDefinition` on `BadHead` itself.
+    [<Test>]
+    let ``A definition's map refuses an extends clause with the wrong arity`` () : unit =
+        let image = sketchImage badHead
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let state = coreState.WithLoadedAssembly dumped
+
+        let identity =
+            let handle, _ =
+                dumped.TypeDefs
+                |> Seq.map (fun (KeyValue (handle, typeInfo)) -> handle, typeInfo)
+                |> Seq.find (fun (_, typeInfo) -> typeInfo.Name = "BadHead")
+
+            ResolvedTypeIdentity.ofDefinitionInAssembly dumped.DefinitionFullName handle
+
+        let _, result =
+            ConcreteInterfaceDispatch.interfaceMapOfDefinition
+                loggerFactory
+                state.DotnetRuntimeDirs
+                bct
+                "test"
+                state.TypeSystem
+                identity
+
+        match result with
+        | Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity _)) -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// `K : K2` and `K2 : K`, through `interfaceMapOfDefinition` on `K`, which reads each extends
+    /// clause without loading the chain it names: the walk reaches `K` again while loading it.
+    [<Test>]
+    let ``A definition's map refuses a base chain that reaches itself`` () : unit =
+        let image =
+            sketchImage
+                [
+                    { sketch "K" SketchKind.Class 0 [] with
+                        Base = Some (Spelling.Named ("K2", []))
+                    }
+                    { sketch "K2" SketchKind.Class 0 [] with
+                        Base = Some (Spelling.Named ("K", []))
+                    }
+                ]
+
+        let dumped =
+            use stream = new MemoryStream (image)
+            AssemblyApi.read loggerFactory None stream
+
+        let state = coreState.WithLoadedAssembly dumped
+
+        let identity =
+            let handle, _ =
+                dumped.TypeDefs
+                |> Seq.map (fun (KeyValue (handle, typeInfo)) -> handle, typeInfo)
+                |> Seq.find (fun (_, typeInfo) -> typeInfo.Name = "K")
+
+            ResolvedTypeIdentity.ofDefinitionInAssembly dumped.DefinitionFullName handle
+
+        let _, result =
+            ConcreteInterfaceDispatch.interfaceMapOfDefinition
+                loggerFactory
+                state.DotnetRuntimeDirs
+                bct
+                "test"
+                state.TypeSystem
+                identity
+
+        match result with
+        | Error failure when isCycleRefusal failure -> ()
+        | other -> failwith $"PawPrint answered %A{other}"
+
+    /// A row naming a class `G` at an instantiation CoreCLR's approximate load refuses before it
+    /// finds `G` is not an interface: the host names that earlier failure, PawPrint refuses the row as
+    /// not an interface. Which refusal is named is #2329; these pin that both refuse.
+    [<TestCase false>]
+    [<TestCase true>]
+    let ``A row naming a class at a bad instantiation is refused`` (missingArgument : bool) : unit =
+        let row =
+            if missingArgument then
+                Spelling.Named ("G`1", [ Spelling.MissingValueType ])
+            else
+                Spelling.Named ("G`1", [ Spelling.Int32 ; Spelling.Int32 ])
+
+        let host, pawPrint, _, _ =
+            sketchOutcome [ sketch "G`1" SketchKind.Class 1 [] ; sketch "C" SketchKind.Class 0 [ row ] ] "C"
+
+        match host with
+        | Error _ -> ()
+        | Ok interfaces -> failwith $"the host answered %A{interfaces}"
+
+        match pawPrint with
+        | Error _ -> ()
+        | Ok entries -> failwith $"PawPrint answered %A{entries}"
+
     // ----- A generic definition -----
 
     /// A guest whose one assembly is `program`, which returns 0 where the real runtime answers as it

@@ -15,7 +15,7 @@ module ConcreteMethodTable =
 
     /// Run one of `MethodTableLayout`'s walks against a type system's load context, keeping the
     /// assemblies it bound and the concrete types it registered.
-    let private inContext
+    let internal inContext
         (baseClassTypes : BaseClassTypes<DumpedAssembly>)
         (state : TypeSystemState)
         (walk :

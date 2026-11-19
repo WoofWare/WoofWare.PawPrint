@@ -1,7 +1,8 @@
 # `Type.GetInterfaces` on a generic definition or an open construction (issue #2309)
 
-Status: decided (see "Decisions"); the first of five pull requests, the closed order (#1318), is built (see "As built
-(PR 1)"); the other four are not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
+Status: decided (see "Decisions"); the first two of five pull requests are built: the closed order (#1318, "As built
+(PR 1)", merged as #2322) and the definition-level interface map ("As built (PR 2)", on top of #2331, which shares
+the substitution comparison's work); the other three are not started. The study below was measured 2026-11-16 on `main` at `c50428b33` (#2307),
 with a throwaway handler described under "PawPrint with a throwaway", since reverted.
 
 Scope is the one QCall `RuntimeTypeHandle_GetInterfaces`, for every receiver it can be given. The issue asks only about
@@ -975,3 +976,760 @@ against the library version it runs with, only reached by swapping a dependency.
 **Suites**, after a whole-solution build with the reference assemblies deleted, each its own invocation on a .NET 10
 host, at the branch's tip rebased onto `77507f161`: default 5,882 (5,843 passed, 39 skipped); `Guest` 234 passed;
 `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 303 passed.
+
+### As built (PR 2)
+
+The definition-level interface map, with `interfaceMapOf` re-expressed through it and its own walk deleted. TypeSystem
+and tests only; every name added or changed is `internal`, so nothing public is added to or removed from a published
+package.
+
+**Commits.**
+
+1. *The definition-level interface map, beside interfaceMapOf's walk*: `interfaceMapOfDefinition` and a temporary
+   closing function, the old walk untouched, and a property that the two agree entry for entry (below).
+2. *interfaceMapOf is the definition's interface map, closed*: the closing function becomes `interfaceMapOf`, the old
+   walk and the property are deleted, and a closed `InterfaceMapEntry` becomes `{ Definition; Interface; Type }`, so
+   that the substitution and both flags live only on the definition entry. `ownDispatchMapOf` and
+   `DefaultInterfaceImplementation` read them through `Definition`.
+3. *Test: a re-declared interface's own row is loaded*, added when mutation testing found no test for it (below).
+4. *Plan for #2309: record the second pull request as built*: this section, before Codex's review.
+5. *Tests: interface rows C# never writes, and a deep interface chain*, from Codex's review; four failed before the
+   next commit, each for the reason the review gave.
+6. *Interface map: rows load in the order read; shared contexts close once*: the fix.
+7. *Test: a row that adds no entry is still loaded*, added when mutation testing of commit 6 found that the
+   re-declared-row test no longer reaches closing (below).
+8. *Plan for #2309: the second pull request after Codex's review*: this section, before Codex's second review.
+9. *Tests: rows the definition walk cannot read, and a head's base chain*, from Codex's second review; all five cases
+   failed before the next commit, each for the reason the review gave.
+10. *Interface map: arguments are an exact-load fact*: the fix.
+11. *Plan for #2309: the second pull request after Codex's second review*: this section, before the third review.
+12. *Tests: rows CoreCLR's approximate load refuses*, from Codex's third review; all four failed before the next commit.
+13. *Interface map: what the approximate load refuses*: the fix.
+14. *Plan for #2309: the second pull request after Codex's third review*: this section, before the fourth review.
+15. *Tests: a TypeSpec row is a generic instantiation; heads load first; cycles*, from Codex's fourth review; six
+    cases failed before the next commit, and the cycle test would have recursed without end.
+16. *Interface map: TypeSpec shape, heads loaded first, no cycle re-walked*: the fix.
+17. and 18. *Plan for #2309*: this section after the fourth review, and what the fifth left open.
+19. *Plan for #2309: decisions after Codex's fifth review*: the subsection at the end of this section.
+20. *Tests: shared-context chains, cycles, a non-token head, a base's arity*: the decisions' step 2, tests alone,
+    with their red run in the message (W1 at a ratio of 178; a plain interface cycle answered; `I<T> : I<T*>`
+    overflowing the test host's stack; the `int32`-headed row and `BadHead` throwing).
+21. *Tests: a row naming a class over a cyclic base chain is not a cycle case*: the `K : K2`, `K2 : K` row case is
+    removed. It hangs in the Loader's base-chain loading, which reading the row's TypeDef token runs before the walk
+    sees the row, and which `main` reaches the same way and every concretisation that loads a base chain reaches
+    too; that is #2330.
+22. *Interface map: recursive loads, a row's shape, a base's arity*: the decisions' step 4.
+23. *Test: a definition's map refuses a base chain that reaches itself*, added when the mutant removing the walk's
+    entry check survived.
+24. *Test: W2, a diamond of two chains of shared contexts*, written with `MetadataBuilder` as the decisions' second
+    subsection requires, red before the rebase (ratio 168).
+
+The branch was then rebased onto `002ac9d86` (#2331, the comparison pull request), and W1 and W2 went green with no
+change here.
+
+25. *Plan for #2309: the second pull request after the comparison pull request*: this section, before the sixth review.
+26. *Tests: an interface walked once per map; an extends clause naming no class*, from Codex's sixth review; the sketch
+    oracle now compares PawPrint's entries, as host types, with the host's answer in order. Two cases were red.
+27. *Interface map: walk a head once per question; an extends clause naming no class*: the fix.
+28. and 29. *Plan for #2309*: this section after the sixth review, and what the seventh left open.
+30. *Tests: the sketch oracle builds each host type once; many instantiations*: the decisions after the seventh review,
+    tests only.
+31. *Plan for #2309*: those decisions, and the list of what this pull request leaves.
+
+**Codex's sixth review, under the decisions' reopening rule.** It found:
+
+- [P1] Two unreadable rows naming the same interface walked that interface's map twice, so a ladder of interfaces
+  with two such rows a level doubled the work at every level (Codex: 2.7 MB at depth 8, 45.4 MB at depth 12; the
+  test: 679,280 bytes at depth 6 against 45,896,672 at depth 12). Unbounded work on metadata, so fixed here: within
+  one question (one call of `interfaceMapOf` or `interfaceMapOfDefinition`) the walk keeps the definitions whose walk
+  has succeeded, and a row whose head is one of them does not walk it again. A succeeded walk cannot fail on another
+  path: its other failures do not depend on the path, and a recursive load reaching it from a path here would have met
+  itself in its own walk. After: 76,064 bytes at depth 6 against 122,616 at depth 12.
+- [P2] An extends TypeSpec naming no class (`int32[]`) threw from `nominalIdentityOfSpelling` through
+  `interfaceMapOfDefinition`. A host exception, so fixed here: `MethodTableLayout.baseOfDefinition` refuses such a
+  clause as `Unmodelled`. A row naming such a class is refused already on the closed path, by the Loader's base-chain
+  loading, and a test pins that. The same finding's `C extends valuetype V<int>`, answered by
+  `interfaceMapOfDefinition` where .NET refuses, is neither a hang, a host exception nor valid metadata, and is not
+  fixed here; `main`'s closed path answers it too.
+- [P2] A cyclic base chain with a TypeRef edge does not end in `interfaceMapOfDefinition`, because
+  `baseOfDefinition` resolves a TypeRef through `TypeResolution.resolveTypeFromRef`, which primes the whole base chain
+  with no guard against a cycle. That is #2330's mechanism, in the Loader, and is left to it.
+- [P2] The sketch oracle compared only how many interfaces each side answered. It now compares them, in order, as host
+  types over the same image, outside the allocation measured; the chain, the diamond and the four non-cycle shapes
+  pass it unchanged.
+
+**The function.** `ConcreteInterfaceDispatch.interfaceMapOfDefinition` takes a definition's identity and returns a
+`DefinitionInterfaceMap`: its entries (`DefinitionInterfaceMapEntry`, the decision's five fields, in the definition's
+own vocabulary) and every InterfaceImpl row it read (`DefinitionInterfaceMapRow`: the row's spelling, in the same
+vocabulary, and the entry it names), closing nothing. The parent definition's map comes first (through
+`ConcreteMethodTable.baseOfDefinition`), re-read onto the extends clause's arguments, then each row and its parents,
+depth-first, an entry being "the same interface identity, and `substitutionsEquivalent`". The CoreLib rule covers value
+types and interfaces, keyed on the type being built, with the comment decision 7 asks for. `interfaceMapOf` loads the
+closed type's base chain, takes its definition's map, concretises every row's spelling in the order read, and gives
+each entry the handle its first row closed to, asserting that every later row naming the entry closes to the same
+handle and that each handle is an instantiation of the interface the entry names. Not memoised.
+
+**Where the decisions were silent.**
+
+- **What is closed.** A closed entry is the concretisation of the row that added it, as the row spells it (a
+  `SubstitutionArgument.Spelled` made by `SubstitutionContext.forBase` with one argument), not of the entry's identity
+  and `Substitution`. So each row is loaded exactly as the old walk loaded it, with every check concretisation makes of
+  a spelling, such as a type argument with a custom modifier, which closing from the substitution would have silently
+  looked through.
+- **Rows that add no entry.** CoreCLR's exact load reads every row's interface as written, and the old walk
+  concretised every row before asking whether it was a duplicate. So the definition map keeps every row, in the order
+  read, and closing loads them all in that order. Measured on a .NET 10 host: `C : B, I<int>` over `B : I<int>`, with
+  `C`'s row spelled `GENERICINST VALUETYPE I 1 int32`, does not load ("Could not load TypeSpec"); PawPrint refuses with
+  `KindMismatch`. An earlier version kept such rows on their entry and closed them beside it, which Codex showed reports
+  the wrong one of two failing rows; the rows list replaced it.
+- **What the definition walk checks, and what it leaves to closing.** CoreCLR's approximate load of a row
+  (`LoadApproxInterfaceMap`) resolves the interface, loads its base chain and checks the spelling's kind; only the
+  exact load (`LoadExactInterfaceMap`) reads the arguments, row by row. The definition walk does the same. Before
+  reading any later row it refuses a TypeSpec row that is not a generic instantiation (`CLASS I`, `!!0`, `CLASS K`
+  for a non-generic `K`: `Unmodelled`, as `ClassLoader::LoadApproxTypeThrowing` refuses them before resolving what
+  they name), loads a TypeSpec row's interface's base chain (`BaseTypeAbsent` and the like), and refuses a spelling
+  with the wrong kind (`KindMismatch`), a generic interface named by a TypeDef or TypeRef token, which carries no
+  instantiation (`UninstantiatedDefinition`), and a type that is not an interface (`Unmodelled`, for
+  `IDS_CLASSLOAD_NOTINTERFACE`); before the last two it walks the named type's own map, as the approximate load loads
+  that type, so a failure there comes first. The walk carries the definitions whose load is in progress on the path
+  to a row, and entering one of them again, at a walk's entry or as soon as a row's head resolves, is refused as
+  CoreCLR refuses a recursive load (`IDS_CLASSLOAD_GENERAL`); a diamond is not a cycle. It also refuses an extends clause naming a variable the type does not have, before
+  re-reading the parent's map through it. A row whose arguments it cannot read in the definition's vocabulary (a
+  variable its context does not supply, or the wrong number of arguments) cannot be compared with the entries; the
+  walk still walks that interface's own map, as the approximate load expands its parents, then records the row as
+  unreadable, adds no entry, and reads on.
+  `interfaceMapOfDefinition` refuses a map holding such a row with the first one's failure; `interfaceMapOf` loads
+  every row in order, unreadable ones included, so an earlier row's absent argument is reported first and an unreadable
+  row's own arguments are loaded before its arity is refused, as the old walk and the host report them. The first
+  version of this pull request refused all of these in the walk, or none, which threw on five malformed images,
+  recursed without end on one, answered two that .NET refuses, and reported the wrong failure on eight; Codex's four
+  reviews found them, and each is now a test against the host, except the extends clause, which the closed path
+  refuses first (in its base chain) and which only `interfaceMapOfDefinition`, not yet called, can reach.
+- **Shared contexts.** A chain of generic interfaces nests each interface's arguments in the context of the one above,
+  so the same context appears many times in a deep entry. Closing keeps one closed context per shared context, and
+  re-reading a parent's map onto the extends clause keeps one re-read context per shared one, so the work is linear in
+  the chain's depth. Codex measured the version without this at 165.75 MB for one map of a ten-deep chain of
+  three-parameter interfaces, against 0.60 MB on the base. The walk's rows are accumulated last first and reversed
+  once; appending them made a deep chain's rows (quadratic in number, since Roslyn lists every interface's parents)
+  quartic to build. A row naming an existing entry copies the entries only when it re-declares one; Codex measured a
+  128-deep chain at 64.2 MiB allocated with the copy against 23.2 MiB on the base.
+- **The base chain.** The closed function walks the closed base chain with `resolveBaseConcreteType` before anything
+  else. The definition map needs no closed parent, but the old walk concretised every ancestor first (its recursion
+  did), so a type whose ancestor's arguments do not bind failed, and the ancestors were registered before any
+  interface. The walk keeps both.
+- **The concretisation context** is applied to the state through `ConcreteMethodTable.inContext`, made internal for it.
+- **`interfaceMapOfDefinition` has no caller yet.** `interfaceMapOf` reads the walk directly, since it must load the
+  rows `interfaceMapOfDefinition` refuses. The function is the third pull request's starting point, as the decisions
+  intend; until then its refusal of an unreadable row, and of an extends clause naming a variable the type lacks, is
+  exercised by no test, and that pull request's tests should cover both. One gap remains there, found by Codex's
+  fourth review and left for that pull request: an extends clause giving its base the wrong number of arguments
+  reaches `MethodTableLayout.baseOfDefinition`'s arity `failwith` rather than a refusal. The closed path never gets
+  there, since its base-chain load refuses such a clause first.
+
+**Found by Codex's fifth review (on commit 17), and settled by the decisions at the end of this section.** The
+comparison is shared within one call by #2331; the cycle, the TypeSpec head and the base's arity are fixed here
+(commit 22); a class head's approximate instantiation is #2329, with its diagnostic corrected and two shapes pinned as
+refusals. After the rebase onto #2331, W1 allocated 350,056 bytes at depth 8 and 676,912 at depth 16 (ratio 1.9), and
+W2 378,416 and 1,126,640 (ratio 3.0); both images are written with `MetadataBuilder`, one row per interface, so what
+they hold is linear in the depth. The review found:
+
+- **[P1] Exponential comparison on valid metadata.** The definition walk filters duplicate candidates by interface
+  identity, where the old walk filtered by closed handle, so distinct instantiations of one interface now reach
+  `substitutionsEquivalent`, which re-walks shared argument contexts without memoising them. Codex measured a 16-level
+  chain of interfaces passing `Pair<A, A>` and `Pair<A, B>` on, with `I<A>` and `I<B>` at the bottom: 173 MB allocated
+  for one map, against 0.36 MB on the base. The fix is a structural choice the decisions do not make: memoise pairs of
+  shared contexts inside `TypeConcretization.substitutionsEquivalent` (published code that every signature comparison
+  uses), or compare a canonical, shared form of definition-level types in the walk.
+- **[P1] A malformed `I<T> : I<T*>`** expands without end: each level adds a pointer, so no entry is ever a duplicate.
+  The expansion path needs to carry the interface definitions on it and refuse re-entry (CoreCLR refuses cyclic
+  interface inheritance); the old walk refused the pointer argument when closing.
+- **[P2]** A TypeSpec row whose head is not `CLASS <token>` (an `int32` head reaches a `failwith`; `VALUETYPE Missing`
+  reports `TypeAbsent` where the host refuses the shape). A TypeSpec naming a class (`G<int, int>` for a one-parameter
+  `G`) should load that instantiation approximately, and report its failure, before refusing it as not an interface.
+  `MethodTableLayout.baseOfDefinition`'s arity `failwith` is reachable through a row head's base, not only through
+  `interfaceMapOfDefinition`, and should become `Refused (WrongArity ...)`.
+
+**Codex's seventh review (on commit 28), and what was decided.** The seventh round was the last. Its finding on valid
+metadata, a class implementing many instantiations of one interface, stopped the work as the rule said, and the
+decisions at the end of this section accepted it as a cost: CoreCLR's `ExpandApproxInterface` makes the same
+`n(n-1)/2` comparisons, so only the price of one differs (#2335). A growth test pins the count: 128 instantiations
+allocate 17,084,720 bytes against 4,683,656 for 64, a ratio of 3.6 where quadratic work gives 4. The bare-TypeSpec
+extends clause was filed with `extends valuetype V<int>` (#2336). The sketch oracle now builds each host type once and
+compares `Type` values, and its own allocation is bounded beside the code's (commit 30). There was no eighth round.
+
+**Left by this pull request, each with its issue.**
+
+- **#2329, the failure named for a malformed row.** A row naming a class at an instantiation CoreCLR's approximate
+  load refuses (`G<int, int>` for one-parameter `G`, `G<valuetype Missing>`) is refused as not an interface, where
+  the host names the earlier failure; and a TypeSpec head spelled `VALUETYPE Missing` reports `TypeAbsent` where the
+  host refuses the shape. Both sides refuse; which refusal is named differs. Two tests pin the refusals.
+- **#2336, the extends-clause shapes.** An extends clause spelled as a bare TypeSpec (`CLASS B`) or naming a value
+  type (`valuetype V<int>`) is answered by `MethodTableLayout.baseOfDefinition` where CoreCLR refuses; that arm is on
+  `main`. Only `interfaceMapOfDefinition`, which has no caller before PR 3, reaches it from this pull request.
+- **#2335, the comparison's constant.** About 1.9 kB allocated per duplicate comparison of two instantiations of one
+  interface: 253 MB for one map of a class implementing `I<A0>` to `I<A511>`, against 10.7 MB on `main`, which did not
+  compare distinct closed instantiations.
+- **#2330, the cyclic base chain.** The Loader's base-chain loading follows a cyclic chain without end, both through a
+  row naming such a class and through `resolveTypeFromRef`'s priming of a TypeRef base; `main` reaches it the same way.
+
+**The equivalence property** (commit 1, `DefinitionInterfaceMapEquivalence.fs`): for each closed receiver, the old
+walk's map and the closed definition map agree entry for entry in closed handle, `ConcreteType`, `TypeInfo`,
+substitution (by `substitutionsEquivalent`) and both flags. It ran over every receiver of `TestInterfaceDispatchMap`'s
+two corpora (969 CoreLib receivers with 3,513 entries; 7,621 generated receivers with 27,121 entries) and over
+`TestGetInterfacesOrder`'s closed receivers (CoreLib, the generated hierarchies, the shapes C# refuses): 11 tests, all
+passed, on a .NET 10 host. It was checked not vacuous on commit 1 by mutating the new walk alone: a duplicate check on
+identity alone failed four of the tests, and a re-declared entry left undeclared failed five.
+
+**The before-and-after dump.** A throwaway patch to the two test files, not committed, wrote one record per receiver of
+`TestInterfaceDispatchMap`'s two corpora (every entry's handle, both flags and substitution) and of
+`TestGetInterfacesOrder`'s three (every answered target, with the expected targets built after the call rather than
+before, so that what the call registers shows), then each receiver's newly registered handles in order, with their
+definitions and arguments, and the assemblies loaded: 179,251 lines. On the base (#2322's tip) it was identical over
+two runs; on commit 1, identical to the base, byte for byte. On commit 2 four files are identical and one differs: the
+substitutions, and nothing else, of five CoreLib interface receivers (`IList<int>`, `IDictionary<string, object>`,
+`IReadOnlyList<Exception>`, `ISet<int>`, `INumber<int>`). That is decision 7: a CoreLib interface no longer expands its
+rows' parents, so an entry such as `IList<T>`'s `IEnumerable<T>` now comes from the interface's own row (spelled
+`!0`) rather than from expanding `ICollection<T>` (spelled `!0` in `ICollection`'s context, over `IList`'s `!0`); the
+two denote the same types, and the handles, order, flags, registrations and loads are unchanged. With only that rule
+put back to value types, commit 2's dump is identical to the base in all five files. After the fixes of commits 6, 10, 13, 16, 22 and 27, and the rebase onto #2331,
+the dump (with the deep chain's two receivers added in a sixth file) is identical to commit 2's in all five files it
+shares with it, and so is the probe below; the sixth is identical across all of them.
+
+**What moved, measured.** In those corpora every assembly is loaded before the walk, so the dump cannot see load
+order. A throwaway probe (not committed) compiled classes against one version of a library and ran them against a
+second that drops some of its types, and asked the host's `GetInterfaces()` and PawPrint's `interfaceMapOf`:
+
+| type (rows) | host | old walk | new walk |
+|---|---|---|---|
+| `TwoArgFirst : IEquatable<Gone>, IGone` | `IGone` absent | `Gone` absent | `IGone` absent |
+| `TwoHeadFirst : IGone, IEquatable<Gone>` | `IGone` | `IGone` | `IGone` |
+| `TwoArgs : IEquatable<Gone>, IGen<Gone2>` | `Gone` | `Gone` | `Gone` |
+| `TwoHeads : IGone, IGone2` | `IGone` | `IGone` | `IGone` |
+| `DerHead : BaseArg, IGone`, `BaseArg : IEquatable<Gone>` | `IGone` | `Gone` | `IGone` |
+| `ArgThenGenHead : IGen<Gone>, IGoneGen<int>` | ``IGoneGen`1`` | `Gone` | ``IGoneGen`1`` |
+
+So a doubly broken type now reports the failure the host reports in all six shapes, where the old walk did in three:
+the definition walk resolves every row's interface before any argument, as `LoadApproxInterfaceMap` does before
+`LoadExactInterfaceMap`. For `LoadOrder : IEquatable<BitVector32>, IChangeTracking, IKeep` the old walk loaded
+`System.Collections.Specialized`, `System.Runtime`, `System.ComponentModel`, and the new one loads
+`System.ComponentModel`, `System.Collections.Specialized`, `System.Runtime`. A console program on real .NET 10, which
+subscribes to `AssemblyLoad` and then asks `GetType("LoadOrder").GetInterfaces()`, loads `System.ComponentModel` then
+`System.Collections.Specialized` (`System.Runtime` is already loaded at startup there), the new order. With two rows
+of one interface (`IGen<BitVector32>, IGen<IChangeTracking>`) nothing moves. `TestDispatchBindingFailure` and every
+guest stayed green without edits.
+
+Codex's reviews found more malformed images on which an earlier version answered differently from the old walk and the
+host. The tests named under commits 5, 7, 9, 12 and 15 now pin each against the host.
+
+**Mutants**, each applied to commit 2 (those marked later to that commit, against the tests that name the shapes) by
+an exact replacement, the test project built, and two selections run: the
+tests (`TestInterfaceDispatchMap`, `TestGetInterfacesOrder`, `TestDispatchBindingFailure`, `TestArrayInterfaceMap`,
+`TestGetInterfaceMethodImplementation`, `TestInterfaceMethodImplementation`) and the pure guests whose names contain
+`Interface` or `TypeGetInterfacesOrder` (64). The file was restored and checked against `HEAD` after each.
+
+| mutant | killed by |
+|---|---|
+| base-class entries after the type's own | both CoreLib and both generated host comparisons, shapes, the `GetInterfaceMap` corpora; guests `TypeGetInterfacesOrder`, `VariantInterfaceMapOrder` |
+| entries deduplicated by closed handle after closing | generated `GetInterfaces` and dispatch comparisons; guests `InterfaceDispatchMapShapes`, `TypeGetInterfacesOrder` |
+| own rows deduplicated against the parent's entries by closed handle | the same four |
+| a declared row's parents not expanded | shapes |
+| parents appended after all declared rows (breadth-first) | shapes |
+| parents expanded before the row | both CoreLib and both generated comparisons, shapes; guest `TypeGetInterfacesOrder` |
+| duplicate check on interface identity alone | CoreLib dispatch, both generated comparisons, shapes; seven guests (`InterfaceDispatchMapShapes`, `InterfaceSlotHiddenByDerivedMethod`, `TypeGetInterfaceMapTargets`, `TypeGetInterfacesOrder`, `VariantInterfaceDefaultBodyPrecedence`, `VariantInterfaceMapOrder`, `VariantInterfaceSlotOwnership`) |
+| the parent's substitution not rebased onto the extends clause | CoreLib dispatch, both generated comparisons, shapes; guest `TypeGetInterfacesOrder` |
+| the parent's spelling not rebased onto the extends clause | eleven tests, among them the modified-TypeSpec base case; four guests |
+| a re-declared row not closed | the re-declared row test (commit 3); it survived the first battery, before that test existed |
+| (after commit 6) the head's kind not checked by the definition walk | the wrong-kind-before-absent test |
+| (after commit 6) a bare generic spelling not refused | the bare generic test |
+| (after commit 6) a variable out of scope not refused | the out-of-scope variable test |
+| (after commit 6) rows closed in entry order rather than the order read | the row-order test |
+| (after commit 6) closed contexts not shared | the deep chain (ten minutes, then failed) |
+| (after commit 6) re-read contexts not shared | the deep chain (73 s, then failed) |
+| (after commit 6) rows that add no entry not closed | the no-entry row test (commit 7); it survived before that test existed, since commit 6's head check refuses the re-declared-row test's row before closing |
+| (after commit 10) a variable out of scope refused by the walk | the earlier-absent-argument test (`!0` case) |
+| (after commit 10) the wrong arity refused by the walk | the earlier-absent-argument test (arity case), the absent-argument-before-arity test |
+| (after commit 10) the head's base chain not loaded before its kind | the absent-head-base test |
+| (after commit 10) an unreadable row reported without loading it | the absent-argument-before-arity test |
+| (after commit 13) a non-nominal head left to closing | the `!!0`-before-absent test |
+| (after commit 13) only a TypeSpec checked for a missing instantiation | the TypeDef-row test |
+| (after commit 13) a head that is not an interface accepted | the `System.Object` row test |
+| (after commit 13) an unreadable row's interface not walked | the absent-parent test |
+| (after commit 16) a TypeSpec row's shape not checked | five tests: the four moved to the shape refusal, and `CLASS K` |
+| (after commit 16) a refused head's own map not walked first | the class-with-absent-interface test |
+| (after commit 16) an unreadable row's interface walked again within a cycle | the cycle test (the test host overflowed its stack) |
+| (after commit 22) the in-progress check removed from the expansion path | the cycle tests (the test host overflowed its stack) |
+| (after commit 22) the in-progress check removed from the walk's entry | the base-chain cycle test (commit 23; stack overflow); it survived before that test existed, since every other path into the walk meets the head check first |
+| (after commit 22) the in-progress set global rather than local to the path | the diamond, and both cases of the earlier-absent-argument test |
+| (after commit 22) the row classification accepting a non-nominal head | both `int32`-head tests |
+| (after commit 27) a head walked again for every row naming it | the wrong-arity ladder |
+| (after commit 27) an extends clause's shape not checked | the definition-level `D : int32[]` test |
+| the CoreLib no-expansion rule removed | none: equivalent over CoreLib as compiled, as decision 7's check states |
+| the rule widened to every CoreLib type | none: equivalent, the same reason |
+| the rule keyed on the interface being expanded, not the type being built | none: equivalent, as the decisions record |
+
+**Suites**, after a whole-solution build with the reference assemblies deleted, each its own invocation on a .NET 10
+host. At commit 3, on `24c6fdb3c`: default 5,886 (5,847 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed;
+`GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 6, on `3a6d1c53c` (whose two commits beyond `24c6fdb3c`
+change only package descriptions, READMEs, CI and a page under `docs/developer`): default 5,891 (5,852 passed, 39
+skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 10,
+on `3a6d1c53c`: default 5,897 (5,858 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208
+passed; `GuestImpure` 304 passed. At commit 13, on `3a6d1c53c`: default 5,901 (5,862 passed, 39 skipped); `Guest` 234
+passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 16, on `3a6d1c53c`:
+default 5,905 (5,866 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed;
+`GuestImpure` 304 passed. At commit 24, rebased onto `002ac9d86` (#2331): default 5,931 (5,892 passed, 39 skipped);
+`Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208 passed; `GuestImpure` 304 passed. At commit 27, on
+`002ac9d86`: default 5,934 (5,895 passed, 39 skipped); `Guest` 234 passed; `GuestSolo` 2 passed; `GuestPure` 1,208
+passed; `GuestImpure` 304 passed. Commits 28 to 31 change only tests and this plan; at commit 31 the default suite
+ran once more: 5,935 (5,896 passed, 39 skipped).
+
+**Time of the guest categories**, on the same machine, one category at a time, in seconds: on the base (#2322's tip),
+and at commits 3, 6, 10, 13, 16, 24 and 27.
+
+| category | base | commit 3 | commit 6 | commit 10 | commit 13 | commit 16 | commit 24 | commit 27 |
+|---|---|---|---|---|---|---|---|---|
+| `Guest` | 1,092 | 1,179 | 1,698 | 1,395 | 1,175 | 1,515 | 1,131 | 956 |
+| `GuestSolo` | 545 | 747 | 1,193 | 637 | 648 | 665 | 586 | 499 |
+| `GuestPure` | 910 | 717 | 796 | 842 | 715 | 776 | 864 | 532 |
+| `GuestImpure` | 883 | 289 | 408 | 396 | 687 | 693 | 687 | 416 |
+
+The machine was shared with other runs, and the differences go both ways by more than any change in this branch could
+explain (`GuestImpure` took 505 to 560 s in PR 1's runs; `GuestSolo`, two tests, ranged from 545 to 1,193 s here), so
+these runs show no slowdown that stands out from that noise, and nothing asks for memoising the definition map. A
+quieter machine would be needed to see a difference of a few per cent.
+
+#### Decisions after Codex's fifth review
+
+Decided 2026-11-18 by the delegated decider, after reading the branch at `2c9dc9c13`, `origin/main` at `3a6d1c53c`,
+and the pinned .NET 10 source. "Read" below means read in the code; nothing was built or run for these decisions, so
+each claim marked *read, not measured* is for the implementer to confirm with the test named beside it.
+
+**In brief.**
+
+| finding | decision |
+|---|---|
+| 1. exponential comparison | Share work inside the comparison itself (option A below). It lands **first, as its own pull request against `main`**; this pull request is rebased onto it. |
+| 2. `I<T> : I<T*>` never ends | Fix here: one "load in progress" set, checked wherever a definition's walk is entered. |
+| 3. a TypeSpec head that is not nominal | Fix the `failwith` here. The `VALUETYPE Missing` half is filed. |
+| 4. a class head's approximate instantiation | Filed, not fixed here. The diagnostic is corrected and the shapes are pinned as refusals. |
+| 5. `baseOfDefinition`'s arity `failwith` | Fix here: it becomes `Refused (WrongArity ...)`. |
+| sixth Codex round | Yes, one, with a stated rule for what it may reopen; a seventh at most. |
+
+##### 1. The comparison
+
+**The claim, checked.** It is right, and the comparison is the whole of it.
+
+- `compareElements` (TypeConcretisation.fs) resolves a spelled `!i` through `readTypeVariable` to the context's
+  `i`th argument, itself a `Spelled` carrying its own context, and recurses. Nothing remembers a pair it has already
+  compared. A spelling that mentions a variable twice (`Pair<!0, !0>`) therefore walks the context below it twice, and
+  a chain of `n` such levels is walked as a tree of `2^n` leaves although it is held as `n` shared arrays.
+- Codex's chain compares `I<X16>` with `I<Y16>`, where `X(n) = Pair<X(n-1), X(n-1)>` and
+  `Y(n) = Pair<X(n-1), Y(n-1)>`. The first arguments are equal, which costs the full `2^(n-1)`, and the second differ
+  only at the bottom, so the total is about `2^n` element comparisons. 173 MB over `2^16` is roughly 2.6 kB a step,
+  which is what `allEqual`, `List.zip` and the token comparison allocate.
+- The walk itself is not at fault: `rebaseMap` and the closing in `interfaceMapOf` each keep one result per shared
+  context already.
+- **Why the old walk avoided this input.** Its filter was the closed handle. Handles are interned, so `I<X16>` and
+  `I<Y16>` have different handles and were never compared. It called `substitutionsEquivalent` only for two rows that
+  close to one handle.
+- **The old walk is exponential on a different valid input** (*read, not measured*): two rows that do close to one
+  handle through two deep paths, such as `C : L16<int>, R16<int>` where both chains pass `Pair<A, A>` down to `I<A>`.
+  There the handles agree, `substitutionsEquivalent` runs on two equal substitutions, and equality is the expensive
+  answer. So the defect is in the comparison and predates this branch; the branch widened the set of inputs that
+  reach it. Test W2 below measures this on `main`.
+- **CoreCLR compares the same way, and is exponential too** (*read, not measured*). `ExpandApproxInterface`
+  (methodtablebuilder.cpp:347) calls `MetaSig::CompareTypeDefsUnderSubstitutions` in the *approximate* pass: same
+  TypeDef, then `CompareElementType` on each argument blob under the substitution chain (siginfo.cpp:4391).
+  `CompareElementType` follows the chain afresh at every `ELEMENT_TYPE_VAR` (siginfo.cpp:3815-3862) and keeps no
+  record of pairs. It does not compare approximate types by identity and leave exactness to a later pass:
+  `ExpandExactInterface` (:10252) makes the same comparison again. The exact pass does have a handle filter
+  (`InsertMethodTable`, "technique 1", :9618-9666), which is what the old walk's filter resembled, but it decides only
+  whether the substitution comparison is needed for a closed type, never the definition's map. So the duplicate rule
+  is settled, PawPrint's statement of it is already CoreCLR's, and only its cost is open. A chain deep enough hangs
+  real .NET as well; PawPrint's step is about a thousand times dearer, which is why sixteen levels already hurts.
+
+**Options.**
+
+- **A. Share work inside the comparison.** `compareElements` keeps, for the length of one public comparison, the set
+  of pairs it has already proved equal, and answers `true` for a pair in it. Every recursive step of the comparison is
+  a conjunction (`allEqual`), so a `false` or an `Error` ends the whole comparison, and the only result that can ever
+  be reused is `true`: the "memo" is a set, not a table.
+  - *Correctness:* unchanged by construction. A pair enters the set only after the unshared comparison answered
+    `true` for it without throwing, and the values are immutable, so a hit returns what recomputing would. Assembly
+    loads made while proving a pair are made the first time and are idempotent after. No `failwith` or refusal is
+    skipped, since a pair that throws or refuses never enters the set.
+  - *Blast radius:* a private function of a published package changes; no signature, no public type, no answer.
+    The risk is a wrong key. It is bounded by keeping the set out of closed comparisons altogether (below) and by the
+    oracle property T2.
+  - *Reversibility:* one private function and a local set; reverting it restores today's code exactly.
+  - *For PR 3:* nothing changes. A definition entry's `Substitution` stays what it is, CoreCLR's own
+    `Substitution` chain, which is what decision 4's conversion to targets reads.
+- **B. A canonical, interned form of definition-level types in the walk,** compared by identity. To agree with
+  CoreCLR it would have to restate everything `compareElements` decides: that `object` and `class System.Object` are
+  different spellings, modifier order, the refusal of two GENERIC function pointers, the mixed-world `failwith`s, and
+  the order in which TypeRefs are resolved (canonicalising resolves every TypeRef up front, where the comparison
+  resolves them as it meets them and stops at the first difference, so assembly load order and the failure reported
+  can both move). That is a second statement of the duplicate rule, held to the first by a property test, which is
+  the arrangement "Staging" rejected for the walk itself. It adds a representation PR 3 would have to convert from or
+  ignore, and it leaves `substitutionsEquivalent` exponential for `ownDispatchMapOf` and for every signature
+  comparison through a deep base chain. Rejected.
+- **C. A cheaper necessary condition before the comparison** (a fingerprint of the substituted type computed once per
+  shared context, or the closed handle put back as a filter where a closed receiver exists). It removes Codex's
+  example and nothing else: two equal instantiations pass any sound filter and then cost `2^n`, which is the input the
+  old walk already mishandles. It bounds nothing. Rejected. A closed-handle filter would also give the closed path a
+  rule the definition path lacks, against decision 3.
+- **D. Leave it, since CoreCLR is exponential too.** Rejected: this branch takes a valid input from 0.36 MB to
+  173 MB, and "no slower than the host asymptotically" is not a guarantee anyone can use at 2.6 kB a step.
+
+**Chosen: A, as its own pull request against `main`, landing before this one.** It is a change to published code
+that every signature comparison runs through, it is independent of the interface map, it fixes an input `main`
+already mishandles, and its tests need no metadata image. Reviewed alone it is a few dozen lines; inside this pull
+request it would be the one hunk a reviewer most needs to see and is least likely to find. Branch it from
+`origin/main`, do not stack it. This pull request is rebased onto `main` once it merges, and changes nothing in
+`TypeConcretisation.fs`.
+
+Constraints on the implementation:
+
+- The set lives for one call of a public comparison (`substitutionsEquivalent`, `signaturesEquivalent` and their
+  siblings), as a local in that call. Nothing outlives the call and no signature changes. One mode for every entry
+  point: a second, unshared mode would be a second comparison to keep in step.
+- A pair is recorded only where sharing can arise: when at least one side was reached by reading a variable whose
+  argument is `Spelled`. A closed comparison (every argument `Closed`) and an unsubstituted one must never allocate
+  or consult the set, so that what the interpreter does for live objects runs exactly the code it runs today. Create
+  the set lazily.
+- The key is identity, never structure: on each side the assembly name, the context array (an `ImmutableArray`
+  compares and hashes by the array it wraps, as `rebaseMap` already relies on) and the spelling node by reference
+  (`HashIdentity.Reference`). The assembly is part of the key because one `TypeDefn` object is not guaranteed to
+  belong to one image. Do not key on a `SubstitutionArgument` or `TypeDefn` by `=`.
+- Do not add "the same object on both sides is equal" as a shortcut. `compareElements x x` is not always `true`: it
+  can refuse (two GENERIC function pointers) or fail to resolve a TypeRef, and a shortcut would turn those into an
+  answer.
+- Record a pair after it is proved, not before.
+
+**Tests for that pull request, written first and run on `main`.**
+
+- **T1, red on `main`.** No image: build contexts with `SubstitutionContext.forDefinition` and repeated `forBase`
+  over a two-parameter CoreLib generic (`KeyValuePair<!0, !0>` and `KeyValuePair<!0, !1>` at each level), in the two
+  shapes above: Codex's (differing at the bottom of the last argument) and two equal substitutions built separately,
+  so that no array is shared between the sides. Assert the answer, and that the bytes allocated by one comparison
+  (`GC.GetAllocatedBytesForCurrentThread`, after one untimed warm-up call) at depth 16 are at most 8 times those at
+  depth 8. Exponential work gives a ratio near 256 and linear work near 2, so the assertion has a factor of thirty on
+  either side and no clock in it. Record the two ratios measured on `main` in the commit message.
+- **T2, the oracle; green before and after.** For generated pairs of small substitutions (depth at most 6, contexts
+  of one to three arguments, spellings drawn from `!i`, `KeyValuePair<!i, !j>`, `!i[]`, `!i*` and one level of nesting,
+  all in one assembly with no TypeRefs and no modifiers), `substitutionsEquivalent` agrees with a reference written in
+  the test: expand each side to a tree by substituting every variable, and compare the trees structurally. Within that
+  fragment structural equality of the expansions *is* the rule. Generate both sides from a small alphabet so that
+  equal pairs are common, and assert with `Prop.cover` (or a counted classification) that each answer occurs in at
+  least a fifth of cases, so the property cannot pass on `false` alone.
+- **T3, the bound.** Over generated chains of depth 1 to 20 (same spelling alphabet, the two sides either built
+  separately from one recipe or differing in one leaf of the last argument at the bottom), the bytes allocated by one
+  comparison are at most `K * depth * (1 + s)^2`, where `s` is the largest number of nodes in one level's spellings
+  and `K` is twenty times the largest constant measured after the fix. That is quadratic in what the metadata holds
+  and independent of how often it is shared. At depth 20 unshared work allocates gigabytes, so a regression fails by
+  three orders of magnitude and still finishes in seconds; the depth is capped at 20 so that a red run ends. A step
+  counter would be exact, but it would put a parameter into published code for the tests' sake alone, so allocation
+  is the measure.
+- **Mutants T2 must kill:** the key without the right-hand side; the key without the context (spelling node alone);
+  a `false` or unproved pair recorded. T1 or T3 must kill "the set never consulted".
+
+**Tests added to this pull request after the rebase.**
+
+- **W1.** Codex's sixteen-level chain as an image, through `interfaceMapOf`, against the host's `GetInterfaces()`
+  (19 entries), with the allocation of one map at sixteen levels at most 32 times that at eight. Run it on this
+  branch *before* the rebase and record the failure: that is the red run.
+- **W2.** The diamond `C : L16<int>, R16<int>` described above, same two assertions. Run it on `origin/main` before
+  the comparison pull request and record what it does. If it is not exponential there, say so in the body of the
+  comparison pull request and strike the "predates this branch" sentence above; the decision does not change.
+- The map's *size* can be exponential in depth legitimately (each level passing two distinct instantiations on), and
+  CoreCLR builds that map too. So any bound over generated hierarchies is stated in rows read and entries produced,
+  not in depth alone.
+
+##### 2. An interface that reaches itself: fix here
+
+`origin/main` ends on `I<T> : I<T*>`, by accident: closing refuses a pointer argument. This branch never ends, so it
+is this pull request's to fix. The accident does not cover `I<T> : I<List<T>>`, on which the old walk also expands
+without end (*read, not measured*), and both walks *answer* the plain cycle `I<T> : J<T>`, `J<T> : I<T>` (the second
+visit is a duplicate, so the expansion stops and a map comes back).
+
+CoreCLR has one rule for all of them (*read, not measured*). The approximate load of a row loads the interface's
+generic *definition* to `CLASS_LOAD_APPROXPARENTS` (`LoadApproxTypeThrowing`, clsload.cpp:2398), which loads that
+definition's own rows. A definition whose load is already in progress on the thread is a recursive load, refused with
+`IDS_CLASSLOAD_GENERAL` (clsload.cpp:3222-3226). Arguments are not loaded in that pass, which is why
+`struct V : I<V>` and `class C<T> : I<C<T>>` are legal and `I<T> : I<anything>` is not.
+
+So: **one set of definitions whose load is in progress, and entering the walk of a member of it is the refusal.**
+It replaces today's `walking` set and its two special cases (`walkHead` returning the other refusal on re-entry,
+`unreadableRow` silently not walking). It is checked in one place that both `walkDefinition` and the recursion of
+`expand` into an interface's rows pass through, immediately after the row's head resolves and before its kind, arity
+or arguments are looked at. It is local to the path, so a diamond is unaffected. The refusal is
+`TypeBindingFailure.Unmodelled` with a diagnostic naming the definition and `IDS_CLASSLOAD_GENERAL`, like this
+branch's other approximate-load refusals; a new `TypeLoadRefusal` case would be a public addition to a published
+package, and making the refusal catchable by a guest is a feature of its own.
+
+Checking at entry to `walkDefinition` also closes a hole nobody has reported: a base-class cycle reached through a
+TypeDef or TypeRef row head (`K : K2`, `K2 : K`, no base chain loaded first) recurses through `baseOfDefinition`
+with nothing to stop it (*read, not measured*).
+
+Red first, each against the host, each run under an external time limit (NUnit's `Timeout` cannot stop a loop, and
+the last cycle test overflowed the host's stack):
+
+- `I<T> : I<T*>`: does not end on this branch.
+- `I<T> : I<List<T>>`, and the indirect `I<T> : J<T[]>`, `J<T> : I<T>`: expected not to end on `main` either.
+- `I<T> : J<T>`, `J<T> : I<T>` under `C : I<int>`: expected to be answered today where the host refuses.
+- A row naming class `K` by TypeDef, with `K : K2`, `K2 : K`.
+- Green throughout: a diamond (`C : L, R`, both over `I`), `struct V : I<V>`, `class C<T> : I<C<T>>`,
+  `I<T> : J<I<T>>`.
+
+`A cycle through an unreadable row is refused` expects `WrongArity` today. Under this rule the cycle is found first,
+as CoreCLR finds it before any arity, so its expectation becomes the cycle refusal. That edit to an existing test is
+intended; say so in the commit.
+
+If the host answers any of the shapes above, stop and report: the rule as read is then wrong.
+
+##### 3. A TypeSpec head that is not nominal: fix the `failwith` here
+
+`main` returns `Error (Unmodelled ...)` for a row such as `GENERICINST int32 1 int32`; this branch throws. Fix it by
+parsing rather than checking: classify the row once into "a TypeDef or TypeRef token" or "`GENERICINST` over a nominal
+head, with arguments", or refuse its shape (`Unmodelled`, `IDS_CLASSLOAD_GENERAL`) before anything it names is
+resolved, and have the rest of `expand` take the classified value. The `BUG:` `failwith` then has no arm to live in.
+Red first: the `int32`-headed row, alone and before a later absent row.
+
+The other half is filed, not fixed: CoreCLR also refuses a head spelled `VALUETYPE` before binding its token, so
+`GENERICINST VALUETYPE Missing ...` is a shape refusal on the host and `TypeAbsent` here. `main` says `TypeAbsent`
+too, both refuse, and the head that exists keeps its `KindMismatch`. It goes in #2329.
+
+##### 4. A class head's approximate instantiation: filed
+
+Not fixed here, and the caller's rule ("what this pull request introduces is fixed in it") deserves a direct answer.
+On a row naming a class this branch differs from `main` in three ways:
+
+| row | host | `main` | this branch |
+|---|---|---|---|
+| `G<int>`, well formed, `G` a class | refuses | **answers, with a class in the map** | refuses (`Unmodelled`) |
+| `G<class Missing>` | not an interface | `TypeAbsent` | refuses as not an interface |
+| `G<int, int>` for one-parameter `G` | wrong arity | `WrongArity` | refuses as not an interface |
+| `G<valuetype Missing>` | missing type | `TypeAbsent` | refuses as not an interface |
+
+Every row is refused on this branch, loudly, and the first is a silent wrong answer on `main`. What moved is which
+refusal is named, toward the host in one row and away from it in two. Naming it correctly needs a primitive PawPrint
+does not have: CoreCLR's approximate load of an instantiation (`SigPointer::GetTypeHandleThrowing` with
+`dropGenericArgumentLevel`, siginfo.cpp:1457-1600), which replaces each argument that is a GC reference or a
+`GENERICINST CLASS` by `__Canon` without loading it, loads every other argument recursively under the same rule,
+and only then checks arity. A partial version (arity alone, or top-level value types alone) would name the right
+refusal for Codex's two examples and the wrong one for their combinations, and would be a third thing to keep in step
+with the host. It is one feature, with its own measurements, and nothing in PRs 3 to 5 needs it.
+
+In this pull request:
+
+- The diagnostic of the not-an-interface refusal must not claim more than is modelled: it says the row names a type
+  that is not an interface, and that CoreCLR refuses the type either for that (`IDS_CLASSLOAD_NOTINTERFACE`) or for
+  an earlier failure of the class's approximate instantiation, which is not modelled, naming #2329.
+- Two tests pin the shapes as refusals without pinning the identity: for `G<int, int>` and `G<valuetype Missing>`
+  the host fails and PawPrint returns `Error`, with #2329 named in the docstring. They are green now; they exist
+  so that the fix for #2329 has a test to tighten.
+
+Filed as #2329, which the diagnostic and the two docstrings name.
+
+##### 5. `baseOfDefinition`'s arity `failwith`: fix here
+
+`walkHead` is new in this pull request and is what lets a closed receiver reach it: `C` with a row naming `BadHead`,
+where `BadHead : G<int, int>` over a one-parameter `G`. `main` never loads `BadHead`'s base and answers silently, so
+a throw is not worse, but the fix is three lines in a function that already returns a `Result`, and it also closes
+the gap "As built" leaves for PR 3. `MethodTableLayout.baseOfDefinition` returns
+`Error (TypeBindingFailure.Refused (TypeLoadRefusal.WrongArity (baseIdentity, declared, supplied)))`, and its comment
+says the clause can be malformed rather than that the image would not load. Its other callers get an `Error` where
+they would have thrown, and each already propagates one.
+
+Red first: Codex's `C`/`BadHead` image through `interfaceMapOf` (throws today; the host reports a type-load
+failure), and the same extends clause through `interfaceMapOfDefinition` on `BadHead` itself, which gives that
+function its first test.
+
+##### Order of work, and the sixth review
+
+1. The comparison pull request, from `origin/main`: T1 to T3 first, then the change, then its own Codex review. W2's
+   run on `main` goes in its body.
+2. On this branch, before rebasing: add W1, the cycle tests, the `int32`-head tests and the `BadHead` tests in one
+   commit of tests alone, with the failing output recorded.
+3. Rebase onto `main` with the comparison merged; W1 and W2 go green with no change here.
+4. Findings 2, 3 and 5, and finding 4's diagnostic and two tests. Mutants: the in-progress check removed from the
+   expansion path; removed from `walkDefinition`'s entry; made global rather than local to the path (must fail the
+   diamond); the head classification accepting a non-nominal head.
+5. Suites, the dump, and "As built" brought up to date, as for the earlier rounds.
+
+**Run a sixth Codex round on this pull request**, since steps 2 to 4 change the walk's control flow. What it may
+reopen is fixed in advance:
+
+- A finding on valid metadata, or a hang or a host exception reachable from any metadata, is fixed here, tests
+  first, and reviewed again.
+- A finding only about *which* refusal is named for an image that both PawPrint and the host refuse is added to the
+  #2329 and not fixed here. It does not call for another round.
+- A finding that needs a structural choice stops the work, as before.
+
+A seventh round is the last. If it still has a finding of the first kind, stop and report rather than fix: six rounds
+of approximate-load corrections would then be saying that interleaving the approximate load's checks with the map's
+construction is the wrong shape, and the choice to make is whether the approximate load of a row becomes a function
+of its own which the walk calls.
+
+**No further split of this pull request.** The re-expression cannot land without the row checks, because closing is
+no longer what refuses a malformed row, and the checks are what five rounds have been about.
+
+##### After the comparison pull request's first review
+
+Decided 2026-11-18, after reading `fix-substitution-comparison-sharing` at `d3000bac5`, Codex's first review of it,
+and the implementer's W2 probe and its logs. Nothing was built or run for these decisions.
+
+**The three P2s: none changes the code.**
+
+1. **Stack depth on a purely unary chain: accepted.** The walk that lost its tail call was constant in stack only
+   for chains in which no level supplies an instantiation, and only in Release: F# emits no tail calls in Debug,
+   which is how the suite runs, so the property was never one a test held. Everything else on the same path already
+   uses stack linear in the chain's depth: `allEqual` for any `G<...>` argument, `concretizeType`,
+   `SubstitutionContext.rebase`, and the interface walk's own recursion. One frame a level, on a chain as deep as an
+   inheritance hierarchy, joins those. The worklist would put a second piece of mutable machinery into published
+   code to protect a depth the callers cannot reach, and leaving unary pairs out of the record makes the rule for
+   what is recorded depend on a spelling's shape and gives back a quadratic. If a stack limit is ever met here it
+   will be met in the callers first, and the remedy belongs to all of them together.
+2. **A chain of bare variables is quadratic: accepted, with no second record.** Each read of `!0` follows the alias
+   chain to its end, as it does on `main`; this pull request neither adds nor removes that. It is polynomial, it is
+   the cost of the commonest real shape (`class A<T> : B<T>`) at depths where it is nothing (587 kB at 64 levels),
+   and a cache of resolutions per context and index is a second memo with a second key to get wrong. What must
+   change is the claim: the docstring and the pull request body say the work is polynomial in what the chains hold,
+   at most quadratic in depth, not linear. Add Codex's shape (`[!0; KeyValuePair<!0, !1>]` at every level, two equal
+   chains built separately) as a fixed case beside T1: allocation at depth 256 at most 32 times that at depth 64.
+   Quadratic work gives 16 and Codex measured 12.7, so the test pins "no worse than quadratic" with a factor of two
+   to spare, and a regression to exponential cannot hide behind T3's constant.
+3. **`provedEqualFor`'s scan: accepted, as the implementer argued.** It reads at most the declaring type's arity in
+   array elements and allocates nothing; the alternative allocates on every comparison, closed ones included, which
+   is the cost the constraint "a closed comparison runs the code it runs today" exists to avoid. Codex's 5 µs is at
+   arity 1,024.
+
+Put all three in the pull request body under "accepted costs", with the numbers. The one change is a test, so no
+second Codex round is needed for it; open the pull request and enqueue it.
+
+**W2: the probe measured the image, not the walk** (*read, not measured; the check is below*).
+
+The probe compiles C# with Roslyn. Roslyn writes into every type's InterfaceImpl rows *all* of its interfaces, each
+as a fully expanded TypeSpec, so `L16<A>` has a row for `I<Pair<Pair<...>>>` whose blob has `2^16` leaves, `L15`
+one of `2^15`, and so on. The image doubles with each level. Reading it is the cost the probe found: every row of
+every entry is resolved and concretised (about half a million spelled nodes at depth 16), the single chain with no
+duplicate comparison pays it in full, a warmed second call pays it again because the rows are read again, and
+`resolveImplementedInterface` is a third of it. That is work linear in the metadata, at roughly 8 kB a spelled node.
+The host reads the same blobs.
+
+Three things in hand agree with this:
+
+- Codex's sixteen-level chain, built with `MetadataBuilder` with one row per level, closes the same doubly shared
+  types (`Pair<X15, X15>` at the bottom) and costs 0.36 MB on `main`. So concretising a deeply shared *type* is cheap;
+  it is the *spelling* that is large in the probe.
+- The probe's diamond fell from 20.65 GB to 7.97 GB with the fix, and 7.97 GB is about twice the single chain's
+  4.23 GB. So the comparison was 12.7 GB of the diamond on `main`, which is the "predates this branch" claim of
+  decision 1 confirmed, and what remains is two chains' worth of reading.
+- The remaining cost doubles per level exactly as the blobs do.
+
+So there is no row-concretisation defect to file, and no pull request to land before PR 2. No issue is written.
+
+**The check, before relying on that.** In the probe, print `image.Length` and the summed node count of every
+InterfaceImpl row's `TypeDefn` at each depth. Both should double per level, and bytes allocated per spelled node
+should be flat across depths. If they are, put the three numbers in the comparison pull request's body in place of
+"the exact source was not found". **If the image does not grow so, or the cost per node climbs with depth, stop and
+report**: then something does repeat work, and this subsection is wrong.
+
+**W2 stays in PR 2, rebuilt.** My specification of it was at fault: it named a shape and not how to build it. W2 is
+an image written with `MetadataBuilder`, as Codex's chain was: `L(k)<A> : L(k-1)<Pair<A, A>>` and the same for `R`,
+**each interface's rows naming its one direct parent and nothing else**, `L0<A> : I<A>`, `R0<A> : I<A>`,
+`C : L16<int>, R16<int>`. Its assertions are unchanged: the host's `GetInterfaces()` entry for entry, and one map at
+sixteen levels allocating at most 32 times one at eight. On `main` before the comparison pull request it should be
+exponential (two rows close to one handle and their equal substitutions are compared in full); record that run in
+the comparison pull request's body. After the comparison merges it should be green on `main` already, and step 3's
+"W1 and W2 go green after the rebase" stands for this form. If the rebuilt W2 is still exponential with the fix,
+stop and report.
+
+**W1 is not exposed, and is still expected to go green.** It is Codex's image: one row per level, spellings of
+constant size, 19 entries. The base read and closed it for 0.36 MB, and this branch's closing path concretises each
+row's spelling once, in a context closed once. Its only exponential term was the comparison.
+
+**What this changes in the rules above.**
+
+- Every image that a cost assertion is made over is written with `MetadataBuilder`, with rows chosen by the test.
+  Roslyn's rows are fine for comparing answers with the host, and wrong for measuring, wherever an argument is
+  wrapped at each level. (`A deep chain of generic interfaces agrees with the host` passes its arguments straight
+  on, so its Roslyn image stays linear and it is unaffected.)
+- A bound is stated in what the image holds, **spelled nodes included**, never in depth alone. For W1 and W2 the
+  spelled nodes are linear in depth, which is why a ratio between two depths is a fair assertion there.
+
+##### After Codex's seventh review
+
+Decided 2026-11-19, after reading the branch at `441c45466`, Codex's seventh review and the plan's account of it.
+Nothing was built or run for these decisions.
+
+**In brief.** The pull request opens now. Two test-only changes go in first; no code under `WoofWare.PawPrint.*`
+other than tests changes; there is no eighth Codex round. Findings 1 and 2 are filed.
+
+**The stop was right, and the choice it anticipated does not arise.** The rule said a seventh-round finding on valid
+metadata would mean the approximate load's checks are in the wrong place. Finding 1 is on valid metadata but is not
+of that kind: it is about what one duplicate comparison costs, and no rearrangement of the walk changes it. The
+approximate load stays where it is.
+
+**1. Many instantiations of one interface: accepted in this pull request, the constant filed.**
+
+- *What CoreCLR does* (read). `ExpandApproxInterface` (methodtablebuilder.cpp:341-375) scans **every** entry of the
+  map for each interface it is about to add and calls `CompareTypeDefsUnderSubstitutions` on each. For an entry of
+  another interface that returns at the TypeDef check; for an entry of the same interface it compares the
+  arguments. So `n` instantiations of one interface cost `n(n-1)/2` argument comparisons there too: 130,816 for
+  `I<A0>` to `I<A511>`. **The quadratic count is faithful.** PawPrint makes exactly the comparisons CoreCLR makes,
+  and skips the others on identity as CoreCLR skips them on TypeDef.
+- *What differs* is the price of one: about 1.9 kB allocated here to tell two TypeDefs of one image apart, a few
+  instructions there. The old walk hid that price behind the closed-handle filter, which a definition cannot have.
+- *Options.* (a) A check in the walk for "provably distinct" arguments ahead of the comparison, as Codex suggests.
+  It is option C of decision 1 again, narrower: a second statement of part of the comparison rule (which spellings
+  cannot be the same type: two TypeDefs of one image yes, two TypeRefs no, a variable never), to be kept in step
+  with the first, and it leaves the same price under `ownDispatchMapOf` and method-table layout. Rejected.
+  (b) Make the comparison itself cheap: a change to published code that every signature comparison runs through,
+  to be led by a profile, and so a pull request of its own. Chosen, as an issue. (c) Index the entries by interface
+  so that other interfaces are not scanned: irrelevant to this shape, where every entry is the same interface.
+- *Why it does not hold this pull request.* The work is CoreCLR's own in shape; the regression is a constant on a
+  type with hundreds of instantiations of one interface (about 1 MB at 32, where `main` is already 10.7 MB at 512
+  for other reasons); the guest suites' times did not move; and the remedy is not in this pull request's files.
+- *In this pull request:* one test, with the sketch fixture, that pins the growth: one map for a class implementing
+  128 distinct instantiations of `I<T>` allocates at most 8 times one for 64. Quadratic work gives 4. Record the
+  253 MB and 10.7 MB in the body under "accepted costs", with the issue's number.
+- Filed as #2335.
+
+**2. An extends clause spelled `CLASS B` as a bare TypeSpec: filed, with `extends valuetype V<int>`.**
+
+Under round six's rule this is malformed metadata answered rather than refused, which is a finding of the first
+kind only if this pull request made it so. It did not: the `| nominal -> nominal, ImmutableArray.Empty` arm of
+`MethodTableLayout.baseOfDefinition` is on `main`, and it serves method-table layout, method reference resolution
+and constrained calls as well. The fix is to the shape of an extends clause wherever one is read, and is one change
+of its own.
+
+*Does it matter before PR 3?* No. `interfaceMapOfDefinition` has no caller until then, and the closed path reaches a
+base by `resolveBaseConcreteType`, unchanged from `main`. *Does it matter in PR 3?* Only as far as PawPrint already
+hands a guest the `Type` of such a definition, where real .NET fails at the `ldtoken`; the missing refusal is the
+same one seen from another side. So it does not block PR 3 either, but PR 3 must not claim that
+`interfaceMapOfDefinition` refuses every extends clause CoreCLR refuses, and its docstring should name the issue.
+Fixing it before PR 3 is welcome and not required.
+
+Filed as #2336. The parse it asks for is the one #2329 asks for on a row, and each names the other.
+
+**3. The sketch oracle: fix here.** It is this pull request's own test code, the change is small (host types kept
+per handle, `Type` values compared, names formatted only to report a mismatch), and an oracle that does exponential
+work beside a test asserting that the code under test does not is a trap for whoever next deepens the chain. Check
+it by the same means as the code: `sketchOutcome`'s allocation outside the measured call at depth 16 is within a
+small multiple of depth 8's.
+
+**No eighth round.** The seventh was the last and stays the last. What follows it is two test-only changes, which
+the rule after the comparison pull request's review already said need no round. If, against this decision, any
+non-test file is edited before the pull request opens, that edit does get a review, and its findings are sorted by
+round six's rule with no further round after it.
+
+**Order.**
+
+1. Finding 3's oracle change and finding 1's growth test, one commit, tests only.
+2. File the three issues (the two above and the row issue from the fifth review, if it is not yet filed); put their
+   numbers into the plan, the not-an-interface diagnostic's text if it still lacks one, and the tests' docstrings.
+   A diagnostic's wording is not a reason for a review.
+3. Bring "As built (PR 2)" up to date: replace "Open after Codex's seventh review" with what was decided, and list
+   under one heading everything this pull request knowingly leaves, each with its issue: the failure named for a
+   malformed row, the extends-clause shapes, the comparison's constant, and the cyclic base chain (#2330).
+4. Default suite once more (the changes are tests), then open the pull request and enqueue it.

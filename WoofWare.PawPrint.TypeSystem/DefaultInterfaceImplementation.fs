@@ -490,7 +490,7 @@ module internal DefaultInterfaceImplementation =
                 with
                 | state, Error failure -> state, Error failure
                 | state, Ok map ->
-                    (state, candidates, map |> List.filter (fun entry -> not entry.ImplementedByParent))
+                    (state, candidates, map |> List.filter (fun entry -> not entry.Definition.ImplementedByParent))
                     |||> StateResult.fold (fun state candidates entry -> consider state candidates entry.Interface)
 
             match candidates with
