@@ -263,8 +263,10 @@ module internal DepsEntry =
         // `/_._`, compared ignoring case; the suffix has no letters.
         entry.RelativePath.EndsWith ("/_._", StringComparison.Ordinal)
 
-    /// The path, relative to the directory of the entry's `deps.json`, at which the host looks
-    /// for the entry's file when it probes that directory (`deps_entry_t::to_dir_path`).
+    /// The path, relative to the directory of the entry's `deps.json`, at which
+    /// `deps_entry_t::to_dir_path` looks for the entry's file. The host probes a framework's
+    /// directory this way, and the application's too, except for a RID-specific entry with no
+    /// `LocalPath`: that one it looks for at its `RelativePath` (`to_package_path`).
     let dirRelativePath (entry : DepsEntry) : string =
         match entry.LocalPath, entry.LibraryType with
         | Some localPath, _ -> localPath
