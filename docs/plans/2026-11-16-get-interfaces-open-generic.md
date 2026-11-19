@@ -1908,6 +1908,17 @@ was restored after each. In the table, "conversion" names `ofInstantiation` and 
     `NativeRuntimeTypeHelpers.malformedInstantiationArgument`, the target-level form of the argument check, is
     compiled after `ReflectedTypeTarget`.
 
+**Suites**, run at commit 10 on `a32418d9a` (#2337) after a whole-solution build, the reference assemblies deleted and
+the solution built again, each suite its own invocation on a .NET 10 host: default 5,968 (5,929 passed, 39 skipped);
+`Guest` 234 passed (717 s); `GuestSolo` 2 passed (324 s); `GuestPure` 1,209 passed (580 s); `GuestImpure` 305 passed
+(274 s).
+
+**A flaky assertion found on the way, not this pull request's.** One run of the selection failed `A diamond of two
+chains passing Pair<A, A> on agrees with the host, in work linear in its depth` (PR 2's W2). It failed on the sketch
+oracle's own naming cost: 17,488 bytes at depth 8 and 230,904 at depth 16, against a bound of eight times. Run alone
+straight afterwards, it measured 17,488 and 34,200. Something allocated about 200 kB once on the test's thread during
+the oracle's measurement, and a bound of 140 kB cannot absorb that.
+
 **Neighbours, now that this has landed.** #2303 and #2295 can read a definition's interface map from
 `ConcreteInterfaceDispatch.interfaceMapOfDefinition`: each entry's interface, its definition-rooted substitution,
 `DeclaredOnType` and `ImplementedByParent`. They can read it as targets over any receiver's arguments from
