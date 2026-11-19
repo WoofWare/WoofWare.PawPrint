@@ -141,6 +141,25 @@ module RuntimeTypeInterfaces =
 
         state, entries
 
+    /// The interfaces of the generic definition `definition` applied to `arguments`, one target per
+    /// variable the definition declares, in the order the QCall returns them. Not yet implemented.
+    let internal ofInstantiation
+        (loggerFactory : ILoggerFactory)
+        (baseClassTypes : BaseClassTypes<DumpedAssembly>)
+        (operation : string)
+        (state : IlMachineState)
+        (definition : ResolvedTypeIdentity)
+        (arguments : ImmutableArray<RuntimeTypeHandleTarget>)
+        : IlMachineState * Result<RuntimeTypeHandleTarget list, TypeBindingFailure>
+        =
+        ignore<ILoggerFactory> loggerFactory
+        ignore<BaseClassTypes<DumpedAssembly>> baseClassTypes
+        ignore<IlMachineState> state
+        ignore<ImmutableArray<RuntimeTypeHandleTarget>> arguments
+
+        failwith
+            $"TODO: %s{operation}: RuntimeTypeInterfaces.ofInstantiation of %O{definition.TypeDefinition.Get} in %s{definition.AssemblyFullName} is not yet implemented (#2309)"
+
     /// The interfaces of `receiver`, in the order the QCall returns them. A receiver the managed
     /// wrapper never passes to the QCall (a TypeDesc) fails loudly.
     let ofReceiver
