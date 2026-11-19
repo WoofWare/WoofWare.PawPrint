@@ -418,13 +418,18 @@ module TestFrameworkUnderTest =
         |> shouldEqual $".NETCoreApp,Version=v%i{EmulatedRuntime.major runtime}.0/%s{packRid flavour}"
 
         let assemblies =
-            Directory.GetFiles (pack, "*.dll")
-            |> Seq.map Path.GetFileName
-            |> Seq.sortWith (fun a b -> String.CompareOrdinal (a, b))
-            |> List.ofSeq
+            Directory.GetFiles (pack, "*.dll") |> Seq.map Path.GetFileName |> List.ofSeq
 
         assemblies |> shouldContain "System.Private.CoreLib.dll"
 
-        runtimeAssets root targetName
-        |> List.sortWith (fun a b -> String.CompareOrdinal (a, b))
-        |> shouldEqual assemblies
+        let listed = runtimeAssets root targetName
+
+        // Each difference is compared with the empty list, so a failure names exactly the
+        // offending files rather than printing both lists in full.
+        Set.difference (Set.ofList listed) (Set.ofList assemblies)
+        |> Set.toList
+        |> shouldEqual []
+
+        Set.difference (Set.ofList assemblies) (Set.ofList listed)
+        |> Set.toList
+        |> shouldEqual []
