@@ -2560,6 +2560,8 @@ review (below). Tests and this plan only; #2309 is closed and stays closed.
 4. This section.
 5. *DynamicMemberAccess.cs: a check the binder answers from GetInterfaces*: check 5, from Codex's first review.
 6. This section again, for commit 5.
+7. *DynamicBaseInterfaceMember.cs: receivers whose classes lack the member*, from Codex's second review.
+8. This section again, for commit 7.
 
 **The guests**, both registered in `TestImpureCases` with `IsDynamicCodeSupported` true, as
 `ExpressionLambdaCompileEmitted.cs` is (`Oracle = OraclePolicy.Never`, `ExpectedReturnCode = 0`):
@@ -2568,8 +2570,10 @@ review (below). Tests and this plan only; #2309 is closed and stays closed.
   `string`, (3) a dynamic `List<int>` converted implicitly to `IEnumerable<int>`, (4) `Sum(list)` choosing
   `Sum(IEnumerable<int>)` over `Sum(object)`, (5) `CountOf(list)` choosing `CountOf<T>(IEnumerable<T>)`, with `T`
   inferred as `int`, over `CountOf(object)`.
-- `sourcesImpure/DynamicBaseInterfaceMember.cs`, parked on every runtime on #2348: (1) `IList<int>.Contains(dynamic)`,
-  (2) a user `IDerived<int>.Get(dynamic)`, each a member found only through a base interface.
+- `sourcesImpure/DynamicBaseInterfaceMember.cs`, parked on every runtime on #2348: (1) `IList<int>.Contains(dynamic)`
+  on an `int[]`, (2) a user `IDerived<int>.Get(dynamic)` on a class implementing `IBase<int>.Get` explicitly, each a
+  member found only through a base interface. Neither run-time class has the member as a public method of its own,
+  so a binder that looked on the class instead of the static interface type would fail too (since commit 7).
 
 `TestPureCases.fs` and `sourcesPure` are as `main` has them.
 
@@ -2595,7 +2599,11 @@ definition. It does not see every wrong answer; only the `[]` mutant below was r
   "TODO: open constructed types are not handled at Native/NativeRuntimeTypeQCall.fs:2614; got open constructed
   System.Private.CoreLib/...[generic parameter #0 of System.Private.CoreLib/...]". The open construction is
   CoreLib's, so the stop is check 1's binding (`ICollection<T>` over `IList<T>`'s variable, by its assembly); `Check`
-  prints only after its call returns, so neither check printed.
+  prints only after its call returns, so neither check printed. After commit 7 the stop is the same on each runtime, about 50 s in.
+- *The parked guest's class-lookup controls, real .NET.* With each receiver declared `dynamic` instead, so that the
+  binder looks on the run-time class, each check fails on .NET 10 and 11 with `RuntimeBinderException` ("'System.Array'
+  does not contain a definition for 'Contains'", "'Impl' does not contain a definition for 'Get'"); as written, and
+  with each expectation perturbed, the file behaves as above.
 - *Mutants against `DynamicMemberAccess.cs`*, each in the `OpenGenericTypeDefinition` arm of
   `RuntimeTypeInterfaces.ofReceiver`, run in the Release harness on .NET 10's CoreLib, reverted and rebuilt after:
 
@@ -2621,3 +2629,22 @@ definition. It does not see every wrong answer; only the `[]` mutant below was r
   generic overload `Sum<T>(IEnumerable<T>)` makes the binder infer `T` from `List<int>`'s interfaces, and Codex
   measured that variant under PawPrint failing with the `[]` mutant. Added as check 5 (commit 5) rather than by
   changing check 4, so that checks 1 to 4 stay as measured and decided; the mutants were rerun (table above).
+
+**Codex's second review (on commit 6).** Two findings, both addressed:
+
+- [P2] The parked guest's receivers (a `List<int>` and an `Impl` with a public `Get`) have the member as a public
+  method of their classes, so after #2348 it could pass with binding looking on the run-time class; Codex ran a copy
+  with both receivers `dynamic` and it exited 0 on real .NET 10. Fixed in commit 7 (an `int[]`, and `Get` implemented
+  explicitly), with the controls above.
+- [P3] The comment for #2309 drafted under "Decisions after PR 5 stopped" says the passing guest does not depend on
+  what `GetInterfaces` answers, which check 5 has made false. That section is the decider's record and is left as
+  written; the comment to post is this, with `#PR` replaced:
+
+  > The `dynamic` consumer from "Who reaches it" now gets past `GetInterfaces`. With `IsDynamicCodeSupported` true,
+  > property reads, conversions, overload resolution and generic type inference run to the end
+  > (`sourcesImpure/DynamicMemberAccess.cs`, #PR). The inference check depends on the answer: with a generic
+  > definition's interfaces answered empty, it fails. A member found through a base interface stops next at
+  > `RuntimeTypeHandle.GetFields` of an open construction (#2348); the guest for it is parked. With PawPrint's
+  > default, `IsDynamicCodeSupported` false, the first call site stops before the binder runs (#2349). The tests of
+  > the order, the duplicates and the identities in this issue's answers remain `TypeGetInterfacesOpenGeneric.cs`
+  > and the property tests.
