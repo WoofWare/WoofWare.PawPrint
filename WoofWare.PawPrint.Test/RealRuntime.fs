@@ -1021,6 +1021,7 @@ module RealRuntime =
     /// caller comparing them claims the same lines, not the same bytes.
     let captureAssemblyInPlace
         (configProperties : AppContextProperties)
+        (environment : string list)
         (args : string[])
         (dllPath : string)
         : CapturedRun
@@ -1142,7 +1143,7 @@ module RealRuntime =
     /// `captureAssemblyInPlace` with no AppContext properties, echoing what the guest wrote on
     /// the calling thread.
     let executeAssemblyInPlace (args : string[]) (dllPath : string) : RealRuntimeResult =
-        let run = captureAssemblyInPlace AppContextProperties.empty args dllPath
+        let run = captureAssemblyInPlace AppContextProperties.empty [] args dllPath
         echo run
         run.Result
 
