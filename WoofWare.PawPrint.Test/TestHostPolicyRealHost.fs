@@ -6,6 +6,7 @@ open System.IO
 open System.Runtime.InteropServices
 open System.Text
 open System.Text.Json.Nodes
+open FsUnitTyped
 open Microsoft.CodeAnalysis
 open NUnit.Framework
 open WoofWare.PawPrint
@@ -108,6 +109,10 @@ public static class Program
             Trace : string
             Stderr : string
         }
+
+    /// Whether `run` ended as the host does when it fails the launch as `failure` predicts.
+    let private hostFailedAs (failure : HostPolicyFailure) (run : HostRun) : bool =
+        run.Output.IsNone && run.ExitCode <> 0
 
     /// Run the guest in `appDir` on the real host with `runtimeConfig`, tracing the host.
     let private launch (scratch : string) (appDir : string) (runtimeConfig : string) (rollForward : bool) : HostRun =
@@ -272,9 +277,9 @@ public static class Program
             failwith "unreachable"
         | Error (HostPolicyRefusal.NotReproducible _) -> Compared.NotReproducible
         | Error (HostPolicyRefusal.HostWouldFail failure) ->
-            if run.Output.IsSome || run.ExitCode = 0 then
+            if not (hostFailedAs failure run) then
                 Assert.Fail
-                    $"HostPolicy.resolveTpa says the host would fail (%A{failure}), but it ran the guest.\n%s{context ()}"
+                    $"HostPolicy.resolveTpa says the host would fail (%A{failure}), but the run did not end as that failure ends.\n%s{context ()}"
 
             Compared.HostFailedAsPredicted
         | Ok resolution ->
@@ -603,6 +608,54 @@ public static class Program
         with
         | :? IOException
         | :? UnauthorizedAccessException -> ()
+
+    /// What the host wrote, measured on .NET 10.0.14 for the duplicate (exit 140) and CoreCLR's
+    /// refusal of the TPA (exit 137).
+    let private duplicateMessage : string =
+        "Error:\n  An assembly specified in the application dependencies manifest (Microsoft.NETCore.App.deps.json) has already been found but with a different file extension:\n    package: 'Microsoft.NETCore.App.Runtime.osx-arm64', version: '10.0.14'\n    path: 'System.Net.Primitives.dll'\n"
+
+    let private duplicate : HostPolicyFailure =
+        HostPolicyFailure.DuplicateWithDifferentExtension (
+            HostPolicyManifest.Framework "Microsoft.NETCore.App",
+            "System.Net.Primitives",
+            "System.Net.Primitives.dll",
+            "/app/sub/System.Net.Primitives.txt"
+        )
+
+    let private tpaRejected : HostPolicyFailure =
+        HostPolicyFailure.RuntimeRejectsTpa (TpaRefusal.NoAssemblyExtension ("Extra", "/app/sub/Extra.txt"))
+
+    let private ended (exitCode : int) (stderr : string) : HostRun =
+        {
+            ExitCode = exitCode
+            Output = None
+            Trace = ""
+            Stderr = stderr
+        }
+
+    [<Test>]
+    let ``The oracle confirms a predicted host failure by its status and message`` () =
+        hostFailedAs duplicate (ended 140 duplicateMessage) |> shouldEqual true
+
+        hostFailedAs tpaRejected (ended 137 "Failed to create CoreCLR, HRESULT: 0x80070057\n")
+        |> shouldEqual true
+
+    /// Codex, round 6: a guest which crashed before writing its report had passed as the host
+    /// failing.
+    [<Test>]
+    let ``The oracle does not take a guest crash for a predicted host failure`` () =
+        let crash =
+            ended 134 "Unhandled exception. System.BadImageFormatException: Bad IL format.\n"
+
+        hostFailedAs duplicate crash |> shouldEqual false
+        hostFailedAs tpaRejected crash |> shouldEqual false
+
+    [<Test>]
+    let ``The oracle does not take one host failure for another`` () =
+        hostFailedAs tpaRejected (ended 140 duplicateMessage) |> shouldEqual false
+
+        hostFailedAs duplicate (ended 137 "Failed to create CoreCLR, HRESULT: 0x80070057\n")
+        |> shouldEqual false
 
     [<Test>]
     let ``resolveTpa agrees with the real host on generated applications`` () =

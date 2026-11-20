@@ -2266,6 +2266,46 @@ module TestHostPolicy =
             )
         )
 
+    /// Codex, round 6: the overlap refusal does not cover an entry whose own framework lacks its
+    /// package. Framework A lists `X.dll` under the key `Q`, so the host looks for package `Q/Q`
+    /// from A down; B and the lowest framework both have it. The answer depends on the order of A
+    /// and B, which the function takes as given.
+    [<Test>]
+    let ``The order of the frameworks decides where a package probe lands`` () =
+        let a =
+            framework
+                "A"
+                "/fx/A"
+                {
+                    Libraries = [ ManifestSpec.library "Q" [ ManifestSpec.asset "X.dll" ] ]
+                }
+
+        let b =
+            framework
+                "B"
+                "/fx/B"
+                {
+                    Libraries = [ ManifestSpec.library "Q/Q" [ ManifestSpec.asset "Bq.dll" ] ]
+                }
+
+        let lowest =
+            framework
+                "Microsoft.NETCore.App"
+                "/fx/10.0.14"
+                {
+                    Libraries =
+                        (netCoreApp "10.0.14" []).Libraries
+                        @ [ ManifestSpec.library "Q/Q" [ ManifestSpec.asset "Lq.dll" ] ]
+                }
+
+        let x (higher : HostPolicyFramework list) : Result<string option, HostPolicyRefusal> =
+            frameworkDependent EmulatedRuntime.Net10 (appWith []) higher lowest
+            |> HostPolicy.resolveTpa
+            |> Result.map (fun r -> TrustedPlatformAssemblies.toMap r.Tpa |> Map.tryFind "X")
+
+        x [ a ; b ] |> shouldBe (Ok (Some "/fx/B/X.dll"))
+        x [ b ; a ] |> shouldBe (Ok (Some "/fx/10.0.14/X.dll"))
+
     [<Test>]
     let ``Refused: two frameworks naming the CoreCLR library`` () =
         let higher =
