@@ -1891,4 +1891,6 @@ Two rounds; the second found nothing.
 * **Round 2.** No findings. Codex ran the framework and ratchet tests with .NET 10 and with .NET 11 selected.
 
 The suites above ran before round 1's fixes. Those fixes rename a member and change a message and the ratchet, so
-the default suite was run again at the branch tip: RERUN-PLACEHOLDER.
+the default suite was run again, at `9f078b675`: 6060 tests, 6021 passed, 39 skipped, `Test Run Successful`. The
+one test more than before is round 1's planted case. `fantomas` is clean, `scripts/footprint.py generate` changes
+nothing, and `scripts/check-docstring-attachment-branch.sh` passes.
