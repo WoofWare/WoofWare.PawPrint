@@ -668,6 +668,31 @@ public static class Program
         hostFailedAs duplicate crash |> shouldEqual false
         hostFailedAs tpaRejected crash |> shouldEqual false
 
+    /// A process killed by SIGKILL exits 137, the host's status for CoreCLR refusing the TPA.
+    [<Test>]
+    let ``The oracle does not take a killed guest for CoreCLR refusing the TPA`` () =
+        hostFailedAs tpaRejected (ended 137 "") |> shouldEqual false
+
+    /// hostpolicy prints the missing-assembly message as a warning too, for an application entry,
+    /// and launches; the guest can then crash.
+    [<Test>]
+    let ``The oracle does not take a warning followed by a guest crash for a missing asset`` () =
+        let missing =
+            HostPolicyFailure.AssetNotFound (
+                HostPolicyManifest.Framework "Microsoft.NETCore.App",
+                DepsAssetType.Runtime,
+                "P",
+                "P",
+                "Y.dll"
+            )
+
+        let warnedThenCrashed =
+            ended
+                134
+                "Warning:\n  An assembly specified in the application dependencies manifest (TpaGuest.deps.json) was not found:\nUnhandled exception. System.IO.FileNotFoundException\n"
+
+        hostFailedAs missing warnedThenCrashed |> shouldEqual false
+
     [<Test>]
     let ``The oracle does not take one host failure for another`` () =
         hostFailedAs tpaRejected (ended 140 duplicateMessage) |> shouldEqual false
