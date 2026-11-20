@@ -1768,3 +1768,111 @@ against `main`, after the rebase.
     separator handling would need making twice. Sharing them means making `HostStrings` internal; a candidate
     follow-up. Two test docstrings named the review round that found their bug; they now describe the regression
     alone.
+
+## As built (stage 4a)
+
+Branch `host-binding-4a-assemblies-for`, cut from `origin/main` at `da87e8582`. Test code only. The test came first,
+in a commit of its own.
+
+### The helper
+
+`FrameworkUnderTest.assembliesFor framework application` returns the directory list a guest runs along.
+
+* `GuestApplication` is decision 6's three cases: `InMemory`, `DirectoryWithoutDepsJson of directory` and
+  `Publish of PublishedGuest`.
+* `GuestFramework` says which `Microsoft.NETCore.App` the guest runs on: `PinnedPackOf platform`, which is
+  `runtimeDirsFor platform`, or `Located`, which is `runtimeDirs ()`.
+* The result is the application's directory, when it has one, ahead of the framework's directories. That is what each
+  call site built before. Outside the Nix devshell `PinnedPackOf` falls back exactly as `runtimeDirsFor` does,
+  because it calls it.
+
+`GuestPublish.fs` now compiles before `FrameworkUnderTest.fs`, so that `Publish` can carry a `PublishedGuest`.
+
+### The pack choice is an argument
+
+The plan's helper took the platform and the application case. That cannot return both lists the harness uses for a
+publish: `TestConsumerCases` runs on the pack, and `TestFSharpPureCases` does not. The same holds well beyond the
+F# fixture. Of the call sites which moved, 113 had used `runtimeDirs ()`, without the pack, and 73 had used
+`runtimeDirsFor`.
+
+Two options were weighed.
+
+* **Leave out every caller without the pack**, so the helper keys on the platform alone. The diff is small. But
+  stage 5 gives every guest run a TPA, so stage 5 would then have to move those 113 sites itself, and stage 5 is the
+  PR the plan says not to grow.
+* **Make the framework an argument, and move every caller.** Chosen. The diff touches 131 files, a line or two in
+  most, done by a script that refused any line building a list. Stage 5 then changes what one function returns.
+
+The platform lives inside `PinnedPackOf`, because only the pack needs it. A `Located` run's framework is the host's
+flavour, whatever its kernel, so stage 5 should give it the host's RID list, not the kernel's.
+
+Two parts of decision 6 are not carried yet, since nothing reads them in this stage: the entry assembly's file name,
+and the names of the files in a `DirectoryWithoutDepsJson`. Stage 5 adds them when the function needs them, and the
+compiler finds every constructor.
+
+### What moved, and what did not
+
+* `InMemory` (177 sites): Roslyn-compiled guests, escape-analysis inputs, `IlMachineState.initial` states.
+* `DirectoryWithoutDepsJson` (7): fabricated guests, `CrossAssemblyHarness`, `TestFabricatedSlotAliasing`, a
+  `TestUnhandledExceptionReport` driver, the escape analysis's provider directory (twice), and the patched CoreLib
+  of `TestEmulatedRuntime`. None of these directories holds a `deps.json`.
+* `Publish` (2): `TestConsumerCases` on the pack, `TestFSharpPureCases` on `Located`.
+* `LinuxCoreLibFlavour.runtimeDirsPreferringLinux` takes the linux-x64 pack's list from `assembliesFor`, and fails
+  unless its argument is that pack. Every caller passes `requireLinuxFrameworkDirectory ()`, so the list is the same,
+  and outside the devshell the caller is ignored before the list is built, as before.
+
+`TestFrameworkLocatorRatchet` now allows `FrameworkUnderTest.runtimeDirs` and `runtimeDirsFor` only in
+`FrameworkUnderTest.fs`, and where an allowance says why. The allowances are the tests of those two functions and of
+the selection, and four uses that run no guest: the oracle's ASP.NET Core check, the consumer fixture's search for the
+pack directory (to check its publish), and two sweeps of the framework's images (`TestImageAdmission`,
+`TestGenericParamOwnerOracle`).
+
+`assertFlavourServes` names `assembliesFor` as its remedy now, and the test of its message changed with it.
+
+### For stage 5
+
+* **No guest pins a publish's place on the list.** With the publish searched after the framework, every
+  `TestFSharpPureCases` and `TestConsumerCases` case still passed on .NET 10. The F# cases bind FSharp.Core from the
+  test host's `bin` directory then, and pass anyway. So a mistake in the order of a publish is caught only by this
+  stage's unit test until stage 5's `di-version` witness lands.
+* The four uses with allowances list or sweep framework directories. Under a TPA they need the framework's
+  directories by another name, or the TPA's files.
+
+### Tests
+
+`TestFrameworkUnderTest`'s "assembliesFor is the directory list the harness runs each application along" checks
+every framework (`Located`, and the pack of each of the three platforms) against every application case. The expected
+list is spelled from `runtimeDirsFor` and `runtimeDirs ()` the way the call sites spelled it. Red first: the helper
+did not exist, so the project did not compile (FS0039).
+
+### Mutants
+
+Each was applied to `assembliesFor`, built, run, and reverted, on the .NET 10 host inside the devshell.
+
+| Mutant | Unit test | Guest |
+| --- | --- | --- |
+| the pinned pack dropped (`PinnedPackOf` gives `runtimeDirs ()`) | red | red: 11 of 13 `TestBoundedRun` tests, refused by `assertFlavourServes` |
+| a sibling directory after the framework | red | red: all 4 cases of `TestEmulatedRuntime`'s "Startup refuses a CoreLib whose major is not supported" |
+| a publish after the framework | red | survives: `TestFSharpPureCases` (14) and `TestConsumerCases` (16) pass |
+
+### Suite
+
+Each its own invocation, at `69e7011d4`, on the macOS arm64 host, all `Test Run Successful`:
+
+| Selection | Runtime under test | Total | Passed | Skipped | `main` |
+| --- | --- | --- | --- | --- | --- |
+| default | .NET 10 | 6059 | 6020 | 39 | 6055 |
+| `Guest` | .NET 10 | 250 | 250 | 0 | 250 |
+| `GuestSolo` | .NET 10 | 2 | 2 | 0 | 2 |
+| `GuestPure` | .NET 10 | 1210 | 1210 | 0 | 1210 |
+| `GuestImpure` | .NET 10 | 306 | 306 | 0 | 306 |
+| `GuestPure` | .NET 11 | 1210 | 1210 | 0 | 1210 |
+| `GuestImpure` | .NET 11 | 306 | 306 | 0 | 306 |
+
+The default suite gains four cases: the unit test, and three planted cases in the ratchet. `main`'s default total is
+#2358's 6046 plus the nine cases of #2357, which its tip did not contain. The guest totals are those reported in
+#2350, #2354 and #2357; this branch adds no guest. The .NET 11 `GuestPure` total is not reported for `main`; it is
+what case discovery gives, since the cases come from the sources, which this branch does not change.
+
+`fantomas` is clean, `scripts/footprint.py generate` changes nothing, and
+`scripts/check-docstring-attachment-branch.sh` passes.
