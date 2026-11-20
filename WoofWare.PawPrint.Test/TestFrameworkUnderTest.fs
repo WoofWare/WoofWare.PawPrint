@@ -303,7 +303,7 @@ module TestFrameworkUnderTest =
             let e =
                 Assert.Throws<Exception> (fun () -> runTrivialOn platform dirs |> ignore<RunEnd>)
 
-            e.Message |> shouldContainText "FrameworkUnderTest.runtimeDirsFor"
+            e.Message |> shouldContainText "FrameworkUnderTest.assembliesFor"
 
     /// Every `GuestFramework`: the framework as located, and the pinned pack of each platform's
     /// flavour.
