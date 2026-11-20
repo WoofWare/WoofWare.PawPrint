@@ -1766,5 +1766,5 @@ against `main`, after the rebase.
   * *Recorded, not done:* `HostPolicy.fs` has its own `join`, `fileNameOf` and `directoryOf`, beside stage 2's
     `HostStrings` in `DepsJson.fs`, which is private there; both run in one resolution, so a change to the host's
     separator handling would need making twice. Sharing them means making `HostStrings` internal; a candidate
-    follow-up. And two test docstrings name the review round that found their bug ("Codex, round 6"), which the
-    repository's `AGENTS.md` asks comments not to do; they should describe the regression alone.
+    follow-up. Two test docstrings named the review round that found their bug; they now describe the regression
+    alone.
