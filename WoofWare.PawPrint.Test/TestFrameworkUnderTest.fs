@@ -305,6 +305,62 @@ module TestFrameworkUnderTest =
 
             e.Message |> shouldContainText "FrameworkUnderTest.runtimeDirsFor"
 
+    /// Every `GuestFramework`: the framework as located, and the pinned pack of each platform's
+    /// flavour.
+    let private guestFrameworks : GuestFramework list =
+        GuestFramework.Located
+        :: ([
+                SimulatedUnixPlatform.linuxX64
+                SimulatedUnixPlatform.linuxArm64
+                SimulatedUnixPlatform.macOsArm64
+            ]
+            |> List.map GuestFramework.PinnedPackOf)
+
+    /// Every `GuestApplication`, with directories that need not exist: `assembliesFor` reads no file.
+    let private guestApplications : GuestApplication list =
+        let root = Path.Combine (Path.GetTempPath (), "assembliesFor")
+
+        [
+            GuestApplication.InMemory
+            GuestApplication.DirectoryWithoutDepsJson (Path.Combine (root, "siblings"))
+            GuestApplication.Publish
+                {
+                    Directory = Path.Combine (root, "publish")
+                    Dll = Path.Combine (root, "publish", "Guest.dll")
+                }
+        ]
+
+    /// The directory list a guest of `application` runs along on `framework`, spelled from
+    /// `runtimeDirsFor` and `runtimeDirs ()` as the harness's guest runners spell it: an image in
+    /// memory runs along the framework's directories alone; a directory of siblings, or a publish,
+    /// is searched ahead of them.
+    let private expectedAssemblies (framework : GuestFramework) (application : GuestApplication) : string list =
+        let frameworkDirs =
+            match framework with
+            | GuestFramework.PinnedPackOf platform -> FrameworkUnderTest.runtimeDirsFor platform
+            | GuestFramework.Located -> FrameworkUnderTest.runtimeDirs ()
+
+        match application with
+        | GuestApplication.InMemory -> List.ofSeq frameworkDirs
+        | GuestApplication.DirectoryWithoutDepsJson directory ->
+            seq {
+                yield directory
+                yield! frameworkDirs
+            }
+            |> List.ofSeq
+        | GuestApplication.Publish guest -> List.ofSeq (frameworkDirs.Insert (0, guest.Directory))
+
+    [<Test>]
+    let ``assembliesFor is the directory list the harness runs each application along`` () : unit =
+        for framework in guestFrameworks do
+            for application in guestApplications do
+                let actual =
+                    FrameworkUnderTest.assembliesFor framework application |> List.ofSeq
+
+                if actual <> expectedAssemblies framework application then
+                    failwith
+                        $"assembliesFor %A{framework} %A{application} is %A{actual}, expected %A{expectedAssemblies framework application}"
+
     [<TestCase 9us>]
     [<TestCase 12us>]
     let ``A CoreLib of another major does not serve the framework under test`` (major : uint16) : unit =
