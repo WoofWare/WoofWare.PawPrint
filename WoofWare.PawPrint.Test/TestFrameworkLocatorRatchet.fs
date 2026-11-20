@@ -54,6 +54,16 @@ module TestFrameworkLocatorRatchet =
             Remedy = "run guests along FrameworkUnderTest.assembliesFor"
         }
 
+    /// `SelectedFramework.FrameworkDirectories`, the list `FrameworkUnderTest.runtimeDirs ()`
+    /// returns, reached through `selected`, `locate` or `check`.
+    let private selectedFrameworkDirectories : Locator =
+        {
+            Name = "FrameworkDirectories"
+            Pattern = Regex @"\.FrameworkDirectories\b"
+            Owner = "FrameworkUnderTest.fs"
+            Remedy = "run guests along FrameworkUnderTest.assembliesFor"
+        }
+
     /// A property that reports an assembly's or a module's file. Any assembly's, since the ratchet
     /// cannot tell which assembly an expression names.
     let private fileLocator (name : string) : Locator =
@@ -88,6 +98,7 @@ module TestFrameworkLocatorRatchet =
             devshellVariable "DOTNET_FRAMEWORK_DIR"
             frameworkDirectories "runtimeDirs"
             frameworkDirectories "runtimeDirsFor"
+            selectedFrameworkDirectories
         ]
 
     type private Allowance =
@@ -249,6 +260,18 @@ module TestFrameworkLocatorRatchet =
                 Reason = "tests runtimeDirsFor itself, and states what assembliesFor returns in terms of it"
             }
             {
+                File = "TestFrameworkUnderTest.fs"
+                Locator = "FrameworkDirectories"
+                Count = 2
+                Reason = "tests the selection itself"
+            }
+            {
+                File = "TestDepsJson.fs"
+                Locator = "FrameworkDirectories"
+                Count = 1
+                Reason = "finds a runtime's ASP.NET Core directory, to read its deps.json, and runs no guest along it"
+            }
+            {
                 File = "TestRealRuntimeConcurrent.fs"
                 Locator = "runtimeDirs"
                 Count = 1
@@ -394,6 +417,7 @@ module TestFrameworkLocatorRatchet =
     [<TestCase("// read it from $DOTNET_RUNTIME_SRC", "DOTNET_RUNTIME_SRC")>]
     [<TestCase("HostConfig.Default (FrameworkUnderTest.runtimeDirs ())", "runtimeDirs")>]
     [<TestCase("yield! FrameworkUnderTest.runtimeDirsFor platform", "runtimeDirsFor")>]
+    [<TestCase("HostConfig.Default ((FrameworkUnderTest.selected ()).FrameworkDirectories)", "FrameworkDirectories")>]
     [<TestCase("// along FrameworkUnderTest.runtimeDirs () and FrameworkUnderTest.runtimeDirsFor",
                "runtimeDirs runtimeDirsFor")>]
     let ``a planted locator is caught`` (planted : string, expected : string) : unit =

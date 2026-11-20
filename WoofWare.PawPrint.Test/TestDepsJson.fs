@@ -2084,7 +2084,7 @@ module TestDepsJson =
             |> Path.GetFileName
 
         let aspNetCore =
-            selected.RuntimeDirs
+            selected.FrameworkDirectories
             |> Seq.filter (fun dir -> frameworkName dir = "Microsoft.AspNetCore.App")
             |> Seq.exactlyOne
 

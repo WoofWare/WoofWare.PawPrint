@@ -83,9 +83,9 @@ module TestFrameworkUnderTest =
     [<Test>]
     let ``The selection this run was given is valid`` () : unit =
         let selected = FrameworkUnderTest.selected ()
-        selected.RuntimeDirs |> shouldEqual (FrameworkUnderTest.runtimeDirs ())
+        selected.FrameworkDirectories |> shouldEqual (FrameworkUnderTest.runtimeDirs ())
 
-        FrameworkUnderTest.check selected.Runtime selected.RuntimeDirs
+        FrameworkUnderTest.check selected.Runtime selected.FrameworkDirectories
         |> Result.map (fun checkedAgain -> checkedAgain.CoreLibPath)
         |> shouldEqual (Ok selected.CoreLibPath)
 
