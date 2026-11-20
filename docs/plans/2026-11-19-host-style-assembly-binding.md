@@ -1876,3 +1876,19 @@ what case discovery gives, since the cases come from the sources, which this bra
 
 `fantomas` is clean, `scripts/footprint.py generate` changes nothing, and
 `scripts/check-docstring-attachment-branch.sh` passes.
+
+### Codex review
+
+Two rounds; the second found nothing.
+
+* **Round 1.** Two findings, both fixed.
+  * *The ratchet missed `(FrameworkUnderTest.selected ()).RuntimeDirs`*, which is the list `runtimeDirs ()`
+    returns. The member is renamed `FrameworkDirectories`, a name the ratchet can recognise, and the ratchet allows
+    it only in the selection's own tests and in `TestDepsJson`, which reads an ASP.NET Core `deps.json` from it. A
+    planted case checks the new spelling is caught.
+  * *`assertFlavourServes` said the pack comes first*, but `assembliesFor` puts a guest's own directory ahead of it,
+    so a CoreLib there shadows the pack. The message and the test project's `AGENTS.md` now say so.
+* **Round 2.** No findings. Codex ran the framework and ratchet tests with .NET 10 and with .NET 11 selected.
+
+The suites above ran before round 1's fixes. Those fixes rename a member and change a message and the ratchet, so
+the default suite was run again at the branch tip: RERUN-PLACEHOLDER.
