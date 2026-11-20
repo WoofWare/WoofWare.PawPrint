@@ -368,7 +368,9 @@ module TestRuntimeConfig =
 
         // The default kernel's flavour, so that `APP_PATHS` is the only thing wrong with this run.
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         let _, loggerFactory = LoggerFactory.makeTest ()
         use loggerFactory = loggerFactory

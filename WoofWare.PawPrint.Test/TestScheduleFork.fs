@@ -28,7 +28,7 @@ module TestScheduleFork =
     let private assy = typeof<RunResult>.Assembly
 
     let private dotnetRuntimes : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirs ()
+        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
     let private guestConfig : GuestConfig = GuestConfig.Default dotnetRuntimes
 

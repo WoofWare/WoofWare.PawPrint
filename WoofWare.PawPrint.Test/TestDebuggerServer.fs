@@ -241,7 +241,8 @@ class Program
     let private startServerWith (compile : string list -> byte[]) (source : string) : RunningServer =
         let tempDir, dllPath = compileToTempDllWith compile source
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let _, loggerFactory = LoggerFactory.makeTest ()
 

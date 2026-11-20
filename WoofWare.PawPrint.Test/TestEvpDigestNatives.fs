@@ -215,7 +215,8 @@ public class Program
         use _loggerFactoryResource = loggerFactory
         use peImage = new MemoryStream (image)
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         match ExpectRun.ended (Program.run loggerFactory (Some name) peImage (HostConfig.Default dotnetRuntimes)) with
         | RunOutcome.NormalExit (terminalState, _, _) -> terminalState

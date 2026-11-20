@@ -118,7 +118,10 @@ class Program
             LoggerFactory.makeTestWithProperties [ "case", description ]
 
         use _loggerFactoryResource = loggerFactory
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirsFor platform
+
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor (GuestFramework.PinnedPackOf platform) GuestApplication.InMemory
+
         use peImage = new MemoryStream (image)
 
         BoundedRun.run

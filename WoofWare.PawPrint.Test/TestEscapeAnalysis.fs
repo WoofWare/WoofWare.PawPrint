@@ -1625,7 +1625,7 @@ public static class SR
         =
         analysisOf
             (hostCoreLib ())
-            (FrameworkUnderTest.runtimeDirs ())
+            (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
             (hostTarget ())
             profile
             Assumption.all
@@ -1654,7 +1654,7 @@ public static class SR
         let analysis =
             freshAnalysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -1671,7 +1671,7 @@ public static class SR
         let shared =
             coreLibAnalysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -1846,7 +1846,7 @@ public static class SR
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -1864,7 +1864,7 @@ public static class SR
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -1936,7 +1936,9 @@ public static class SR
             |> Seq.map (fun (KeyValue (handle, _)) -> MethodKey.make fixture handle)
             |> List.ofSeq
 
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+
         let target = hostTarget ()
         let profile = HardwareIntrinsicsProfile.ScalarOnly
 
@@ -2107,7 +2109,7 @@ public static class SR
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Set.empty
@@ -2153,7 +2155,7 @@ public static class SR
         let analysis =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.MembersAccessible Assumption.all)
@@ -2222,7 +2224,7 @@ public static class SR
         let analysis (assumptions : Set<Assumption>) : EscapeAnalysisState =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 assumptions
@@ -2351,7 +2353,7 @@ public static class SR
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -2419,7 +2421,7 @@ public static class SR
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -2456,7 +2458,7 @@ public static class SR
         let analysis (assumptions : Set<Assumption>) : EscapeAnalysisState =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 assumptions
@@ -2525,7 +2527,7 @@ public static class SR
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -2808,7 +2810,7 @@ public static class Cases
         let analysis (assumptions : Set<Assumption>) : EscapeAnalysisState =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 assumptions
@@ -2873,7 +2875,7 @@ public static class Cases
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -2919,7 +2921,7 @@ public static class Cases
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -2959,7 +2961,7 @@ public static class Cases
         let analysis (assumptions : Set<Assumption>) : EscapeAnalysisState =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 assumptions
@@ -4116,7 +4118,7 @@ public static class Cases
         let analysis =
             analysisOf
                 corelib
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 Assumption.all
@@ -4624,7 +4626,7 @@ public static class Cases
         let analysis =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.JitOptimises Assumption.all)
@@ -4710,7 +4712,9 @@ public static class Cases
             let analysis =
                 analysisOf
                     (hostCoreLib ())
-                    (Seq.append [ directory.FullName ] (FrameworkUnderTest.runtimeDirs ()))
+                    (FrameworkUnderTest.assembliesFor
+                        GuestFramework.Located
+                        (GuestApplication.DirectoryWithoutDepsJson directory.FullName))
                     (hostTarget ())
                     HardwareIntrinsicsProfile.ScalarOnly
                     Assumption.all
@@ -5003,7 +5007,7 @@ public static class Cases
         let analysis =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.JitOptimises Assumption.all)
@@ -5523,7 +5527,7 @@ public static class Cases
         let unassuming =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.JitOptimises Assumption.all)
@@ -5777,7 +5781,7 @@ public static class Cases
         let analysis =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.JitOptimises Assumption.all)
@@ -5928,7 +5932,7 @@ public static class Cases
         let analysis =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.JitOptimises Assumption.all)
@@ -6024,7 +6028,9 @@ public static class Cases
             let analysis =
                 analysisOf
                     (hostCoreLib ())
-                    (Seq.append [ directory.FullName ] (FrameworkUnderTest.runtimeDirs ()))
+                    (FrameworkUnderTest.assembliesFor
+                        GuestFramework.Located
+                        (GuestApplication.DirectoryWithoutDepsJson directory.FullName))
                     (hostTarget ())
                     HardwareIntrinsicsProfile.ScalarOnly
                     Assumption.all
@@ -6154,7 +6160,10 @@ public static class Cases
     /// JIT target it was built for.
     let private coreLibNamed (name : string) : DumpedAssembly * string list * JitTarget =
         match name with
-        | "host" -> hostCoreLib (), List.ofSeq (FrameworkUnderTest.runtimeDirs ()), hostTarget ()
+        | "host" ->
+            hostCoreLib (),
+            List.ofSeq (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory),
+            hostTarget ()
         | "linux-x64" ->
             let dir = FrameworkUnderTest.requireLinuxFrameworkDirectory ()
             let _, loggerFactory = LoggerFactory.makeTest ()
@@ -14092,7 +14101,7 @@ public static class Runners
         let analysisAllowed (assumptions : Set<Assumption>) : EscapeAnalysisState =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 assumptions
@@ -15647,7 +15656,7 @@ public static class Runners
         let unassumed =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 (Set.remove Assumption.JitOptimises Assumption.all)
@@ -20843,7 +20852,7 @@ public static class Runners
         let analysisAllowed (assumptions : Set<Assumption>) : EscapeAnalysisState =
             analysisOf
                 (hostCoreLib ())
-                (FrameworkUnderTest.runtimeDirs ())
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                 (hostTarget ())
                 HardwareIntrinsicsProfile.ScalarOnly
                 assumptions
@@ -23313,7 +23322,7 @@ public static class Cases
             let analysisAllowing (assumptions : Set<Assumption>) =
                 analysisOf
                     (hostCoreLib ())
-                    (FrameworkUnderTest.runtimeDirs ())
+                    (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
                     (hostTarget ())
                     HardwareIntrinsicsProfile.ScalarOnly
                     assumptions

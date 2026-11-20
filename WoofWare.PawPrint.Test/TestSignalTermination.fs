@@ -31,7 +31,8 @@ module TestSignalTermination =
 
         use _loggerFactoryResource = loggerFactory
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -94,7 +95,10 @@ class Program
             LoggerFactory.makeTestWithProperties [ "case", String.concat " " argv ]
 
         use _loggerFactoryResource = loggerFactory
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+
         use peImage = new MemoryStream (image)
         let host = HostConfig.Default dotnetRuntimes
 

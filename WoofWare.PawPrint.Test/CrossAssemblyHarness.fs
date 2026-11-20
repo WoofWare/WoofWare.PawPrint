@@ -119,11 +119,9 @@ module CrossAssemblyHarness =
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimeDirs =
-            seq {
-                yield Path.GetDirectoryName entryPath
-                yield! FrameworkUnderTest.runtimeDirs ()
-            }
-            |> ImmutableArray.CreateRange
+            FrameworkUnderTest.assembliesFor
+                GuestFramework.Located
+                (GuestApplication.DirectoryWithoutDepsJson (Path.GetDirectoryName entryPath))
 
         use peImage = new MemoryStream (entryBytes)
 

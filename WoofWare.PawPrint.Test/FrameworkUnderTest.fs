@@ -32,7 +32,7 @@ type FrameworkUnderTestError =
         found : Result<EmulatedRuntime, UnsupportedRuntime>
 
 /// The framework the suite runs its guests on, checked to be the one that was selected: the first
-/// CoreLib along `RuntimeDirs` classifies to `Runtime`. Only `FrameworkUnderTest.check` builds one.
+/// CoreLib along `FrameworkDirectories` classifies to `Runtime`. Only `FrameworkUnderTest.check` builds one.
 type SelectedFramework =
     private
         {
@@ -41,13 +41,14 @@ type SelectedFramework =
             coreLibPath : string
         }
 
-    /// The runtime that was selected, and that the CoreLib along `RuntimeDirs` serves.
+    /// The runtime that was selected, and that the CoreLib along `FrameworkDirectories` serves.
     member this.Runtime : EmulatedRuntime = this.runtime
 
-    /// The `DotnetRuntimeDirs` a guest runs along.
-    member this.RuntimeDirs : ImmutableArray<string> = this.runtimeDirs
+    /// The framework's directories. A guest runs along `FrameworkUnderTest.assembliesFor`, which
+    /// puts the guest's own directory, or a pinned pack, ahead of these.
+    member this.FrameworkDirectories : ImmutableArray<string> = this.runtimeDirs
 
-    /// The CoreLib a guest binds along `RuntimeDirs`: the first directory holding one.
+    /// The CoreLib a guest binds along `FrameworkDirectories`: the first directory holding one.
     member this.CoreLibPath : string = this.coreLibPath
 
     /// The shared framework directory (`<root>/shared/Microsoft.NETCore.App/<version>`) that holds
@@ -56,6 +57,33 @@ type SelectedFramework =
         match Path.GetDirectoryName this.coreLibPath with
         | null -> failwith $"logic error: CoreLib path %s{this.coreLibPath} has no directory"
         | dir -> dir
+
+/// Which `Microsoft.NETCore.App` a guest runs on, for `FrameworkUnderTest.assembliesFor`.
+[<RequireQualifiedAccess>]
+type GuestFramework =
+    /// The runtime under test's pinned runtime pack of `platform`'s CoreLib flavour, ahead of the
+    /// framework under test, which serves what the pack does not carry (ASP.NET Core). A guest
+    /// whose emulated kernel is `platform` runs on this, and `BoundedRun` holds it to the pack.
+    /// Outside the Nix devshell, which alone names the packs, this is the framework under test
+    /// alone, as `Located` is.
+    | PinnedPackOf of platform : SimulatedUnixPlatform
+    /// The framework under test as `FrameworkUnderTest` locates it. Its CoreLib is the host's
+    /// flavour, whatever the guest's kernel.
+    | Located
+
+/// Where a guest's own assemblies are, beside the framework, for `FrameworkUnderTest.assembliesFor`.
+[<RequireQualifiedAccess>]
+type GuestApplication =
+    /// An image held in memory, with no directory: `assembliesFor` adds no directory of the
+    /// guest's ahead of the framework's. The framework's directories can still hold more than the
+    /// framework: on .NET 10 `runtimeDirs ()` includes the test host's own `bin` directory, so a
+    /// guest can bind FSharp.Core or NUnit from it.
+    | InMemory
+    /// A directory with no `deps.json`, holding assemblies the guest references.
+    | DirectoryWithoutDepsJson of directory : string
+    /// A publish: a directory holding the guest, its `deps.json`, and the assemblies it depends on
+    /// beyond the shared framework.
+    | Publish of guest : PublishedGuest
 
 /// Which framework the suite's guests run on, under PawPrint and under the `RealRuntime` oracle.
 ///
@@ -359,13 +387,14 @@ module FrameworkUnderTest =
             (runtimeSourceVariable runtime)
             $"check against %s{name runtime}'s pinned upstream sources"
 
-    /// The `DotnetRuntimeDirs` to run a guest along. A caller may put directories ahead of these
-    /// (the guest's own siblings, say); if one of them holds a CoreLib, the guest runs on that
-    /// CoreLib instead, and `assertServes` is what checks it is still the runtime under test's.
-    let runtimeDirs () : ImmutableArray<string> = (selected ()).RuntimeDirs
+    /// The directories of the framework under test, as located. A guest runs along
+    /// `assembliesFor GuestFramework.Located`, which is these behind the guest's own directory.
+    let runtimeDirs () : ImmutableArray<string> = (selected ()).FrameworkDirectories
 
-    /// The `DotnetRuntimeDirs` to run a guest along whose emulated kernel is `platform`: the
+    /// The directories of the framework a guest whose emulated kernel is `platform` runs on: the
     /// runtime under test's pinned runtime pack of `platform`'s flavour, ahead of `runtimeDirs ()`.
+    /// A guest runs along `assembliesFor (GuestFramework.PinnedPackOf platform)`, which is these
+    /// behind the guest's own directory.
     ///
     /// CoreLib is compiled per target, so a process on a Linux kernel runs Linux's CoreLib and one
     /// on Darwin's runs Darwin's, and a guest has to as well: on a kernel of the other flavour, a
@@ -384,6 +413,23 @@ module FrameworkUnderTest =
         | Some pack -> (runtimeDirs ()).Insert (0, pack)
         | None -> runtimeDirs ()
 
+    /// The `DotnetRuntimeDirs` to run a guest of `application` along, on `framework`: the
+    /// application's directory, when it has one, ahead of the framework's directories
+    /// (`runtimeDirsFor` for a pinned pack, `runtimeDirs ()` as located). Binding takes the first
+    /// directory holding an assembly, so an assembly in the application's directory shadows the
+    /// framework's of the same name. If that directory holds a CoreLib, the guest runs on it, and
+    /// `assertServes` is what checks it is still the runtime under test's.
+    let assembliesFor (framework : GuestFramework) (application : GuestApplication) : ImmutableArray<string> =
+        let frameworkDirs =
+            match framework with
+            | GuestFramework.PinnedPackOf platform -> runtimeDirsFor platform
+            | GuestFramework.Located -> runtimeDirs ()
+
+        match application with
+        | GuestApplication.InMemory -> frameworkDirs
+        | GuestApplication.DirectoryWithoutDepsJson directory -> frameworkDirs.Insert (0, directory)
+        | GuestApplication.Publish guest -> frameworkDirs.Insert (0, guest.Directory)
+
     /// The shared framework directory the `RealRuntime` oracle runs guests on.
     let sharedFrameworkDirectory () : string = (selected ()).SharedFrameworkDirectory
 
@@ -396,12 +442,12 @@ module FrameworkUnderTest =
         let selected = selected ()
 
         let found =
-            selected.RuntimeDirs
+            selected.FrameworkDirectories
             |> Seq.tryFind (fun dir -> File.Exists (Path.Combine (dir, "Microsoft.AspNetCore.dll")))
 
         match found with
         | None ->
-            let dirs = selected.RuntimeDirs |> String.concat ", "
+            let dirs = selected.FrameworkDirectories |> String.concat ", "
 
             failwith
                 $"No directory on %s{name selected.Runtime}'s runtime-dir list holds Microsoft.AspNetCore.dll: [%s{dirs}]."
@@ -465,8 +511,9 @@ module FrameworkUnderTest =
         | Error error -> failwith $"The run did not serve the framework under test: %s{describe error}"
 
     /// Fails unless the CoreLib `state`'s run loaded is the runtime under test's pinned pack of
-    /// `platform`'s flavour, which `runtimeDirsFor platform` binds. Outside the Nix devshell, where
-    /// no pack is named and `runtimeDirsFor` binds the host's framework, this checks nothing.
+    /// `platform`'s flavour, which `assembliesFor (GuestFramework.PinnedPackOf platform)` binds.
+    /// Outside the Nix devshell, where no pack is named and that binds the host's framework, this
+    /// checks nothing.
     let assertFlavourServes (platform : SimulatedUnixPlatform) (state : IlMachineState) : unit =
         let flavour = SimulatedUnixPlatform.flavour platform
 
@@ -486,7 +533,7 @@ module FrameworkUnderTest =
 
         if not fromPack then
             failwith
-                $"The run's kernel is %A{flavour}, so its CoreLib must be the pinned pack at %s{pack}, but it loaded %A{path}. Run the guest along `FrameworkUnderTest.runtimeDirsFor`, which puts that pack first."
+                $"The run's kernel is %A{flavour}, so its CoreLib must be the pinned pack at %s{pack}, but it loaded %A{path}. Run the guest along `FrameworkUnderTest.assembliesFor (GuestFramework.PinnedPackOf platform)`, which puts that pack ahead of the rest of the framework, and check that the guest's own directory holds no System.Private.CoreLib.dll, since that directory comes ahead of the pack."
 
     /// `assertServes` on the final state of `runEnd`.
     let assertOutcomeServes (runEnd : RunEnd) : unit = assertServes (RunEnd.state runEnd)

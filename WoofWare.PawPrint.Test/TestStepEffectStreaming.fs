@@ -70,7 +70,8 @@ module TestStepEffectStreaming =
         use _loggerFactoryResource = loggerFactory
         let logger = loggerFactory.CreateLogger "TestStepEffectStreaming"
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -246,7 +247,8 @@ class Program
         use _loggerFactoryResource = loggerFactory
         let logger = loggerFactory.CreateLogger "TestStepEffectStreaming"
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

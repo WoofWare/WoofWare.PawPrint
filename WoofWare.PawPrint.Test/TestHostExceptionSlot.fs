@@ -18,7 +18,11 @@ module TestHostExceptionSlot =
 
         use peImage = new MemoryStream (image)
         let entry = Assembly.read NullLoggerFactory.Instance None peImage
-        IlMachineState.initial NullLoggerFactory.Instance (FrameworkUnderTest.runtimeDirs ()) entry
+
+        IlMachineState.initial
+            NullLoggerFactory.Instance
+            (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
+            entry
 
     let private store (slot : NativeReferenceCell) (value : CliType) (state : IlMachineState) : IlMachineState =
         let block =

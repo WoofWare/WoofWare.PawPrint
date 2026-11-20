@@ -70,7 +70,9 @@ public class Program
                                 (Some "EntryPointCallerTrace")
                                 peImage
                                 (HostConfig.Default (
-                                    FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+                                    FrameworkUnderTest.assembliesFor
+                                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                                        GuestApplication.InMemory
                                 ))
                         with _ ->
                             for message in messages () do

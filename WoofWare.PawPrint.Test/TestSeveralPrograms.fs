@@ -83,7 +83,7 @@ static class Out
         }
 
     let private launch (name : string) (image : byte[]) : ProgramLaunch =
-        launchOn (FrameworkUnderTest.runtimeDirs ()) name image
+        launchOn (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory) name image
 
     let private compile (source : string) : byte[] = Roslyn.compile [ prelude ; source ]
 
@@ -489,7 +489,7 @@ public static class Program
                 loggerFactory
                 (Some "Trivial.cs")
                 stream
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                (HostConfig.Default (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
             |> outcomeOf
 
         let actual =
@@ -664,7 +664,7 @@ public static class Program
 
     [<Test>]
     let ``a listener and a connector, as two processes on one machine, both exit 0`` () : unit =
-        listenerAndConnector (FrameworkUnderTest.runtimeDirs ())
+        listenerAndConnector (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
 
     [<Test>]
     let ``a listener and a connector on the linux-x64 CoreLib both exit 0`` () : unit =

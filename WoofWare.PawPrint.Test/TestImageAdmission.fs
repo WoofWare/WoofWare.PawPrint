@@ -744,7 +744,13 @@ class Program { static int Main() => 0; }
 
         let refusal =
             try
-                Program.run loggerFactory None stream (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                Program.run
+                    loggerFactory
+                    None
+                    stream
+                    (HostConfig.Default (
+                        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+                    ))
                 |> ignore<RunEnd>
 
                 None

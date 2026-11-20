@@ -276,7 +276,9 @@ module TestConsumerCases =
         let expected = (onRuntime (FrameworkUnderTest.runtime ())).Ending scenario
 
         let dotnetRuntimes =
-            (FrameworkUnderTest.runtimeDirsFor kernel.UnixPlatform).Insert (0, guest.Directory)
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf kernel.UnixPlatform)
+                (GuestApplication.Publish guest)
 
         let hostConfig =
             { HostConfig.Default dotnetRuntimes with

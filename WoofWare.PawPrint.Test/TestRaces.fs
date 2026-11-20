@@ -21,7 +21,7 @@ module TestRaces =
         Roslyn.compile [ source ]
 
     let private dotnetRuntimes : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirs ()
+        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
     /// Everything about the simulated process except which of its schedules we
     /// are exploring. Naming it separately from `HostConfig` is what lets the

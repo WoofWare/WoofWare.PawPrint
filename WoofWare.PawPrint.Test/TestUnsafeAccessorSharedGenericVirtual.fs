@@ -89,7 +89,9 @@ public static class Program
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         let run () : RunOutcome =
             use peImage = new MemoryStream (image)

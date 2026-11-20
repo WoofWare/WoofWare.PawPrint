@@ -22,8 +22,8 @@
     <Compile Include="TestCiSelectsEveryExplicitFixture.fs" />
     <Compile Include="TestPublishedXmlDocumentation.fs" />
     <Compile Include="Assembly.fs" />
-    <Compile Include="FrameworkUnderTest.fs" />
     <Compile Include="GuestPublish.fs" />
+    <Compile Include="FrameworkUnderTest.fs" />
     <Compile Include="HostImage.fs" />
     <Compile Include="ParkedOn.fs" />
     <Compile Include="Net11Frontier.fs" />

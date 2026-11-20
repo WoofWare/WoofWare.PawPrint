@@ -38,7 +38,9 @@ module TestSchedulerYieldFairness =
     /// CoreLib code path each thread takes (Darwin's `StartHelper.RunWorker` checks for an
     /// autorelease pool, Linux's does not), so a host's own flavour would measure something else.
     let private dotnetRuntimes : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+        FrameworkUnderTest.assembliesFor
+            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+            GuestApplication.InMemory
 
     /// Compiled once and reused across seeds: recompiling per seed would dominate the run
     /// without changing semantics.

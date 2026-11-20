@@ -35,7 +35,9 @@ public static class Holder
     [<Test>]
     let ``concretising a method does not load what only its locals name`` () : unit =
         let _, loggerFactory = LoggerFactory.makeTest ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let image =
             Roslyn.compileAssembly "Holder" OutputKind.DynamicallyLinkedLibrary [] [ holder ]

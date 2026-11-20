@@ -582,7 +582,7 @@ public static class Driver
 
         EscapeAnalysis.create
             loggerFactory
-            (FrameworkUnderTest.runtimeDirs ())
+            (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
             (hostTarget ())
             HardwareIntrinsicsProfile.ScalarOnly
             Assumption.all

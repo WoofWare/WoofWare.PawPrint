@@ -43,7 +43,9 @@ module TestClockJitterFindsBugs =
     let private assy = typeof<RunResult>.Assembly
 
     let private dotnetRuntimes () : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+        FrameworkUnderTest.assembliesFor
+            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+            GuestApplication.InMemory
 
     /// A compiled guest. Compilation is the expensive part of a sweep, so each
     /// of these is a module-level binding and so happens once.

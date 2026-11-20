@@ -402,7 +402,11 @@ public static class Program
                     fileName
                     (Some fileName)
                     peImage
-                    (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                    (HostConfig.Default (
+                        FrameworkUnderTest.assembliesFor
+                            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                            GuestApplication.InMemory
+                    ))
                 |> ignore<RunEnd>
             )
 
@@ -452,7 +456,9 @@ public static class Program
                                 (Some sourceName)
                                 peImage
                                 (HostConfig.Default (
-                                    FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+                                    FrameworkUnderTest.assembliesFor
+                                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                                        GuestApplication.InMemory
                                 ))
                         with _ ->
                             for message in messages () do

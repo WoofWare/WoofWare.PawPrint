@@ -315,7 +315,7 @@ unsafe class Program
                 loggerFactory
                 (Some "IntrinsicContracts.cs")
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                (HostConfig.Default (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
             |> ExpectRun.ended
         with
         | RunOutcome.NormalExit (state, _, _) ->
@@ -375,7 +375,7 @@ class Program
                 loggerFactory
                 (Some "PrimitiveFaultFrames.cs")
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                (HostConfig.Default (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
             |> ExpectRun.ended
         with
         | RunOutcome.NormalExit (state, _, _) -> state.LatchedExitCode |> shouldEqual 0

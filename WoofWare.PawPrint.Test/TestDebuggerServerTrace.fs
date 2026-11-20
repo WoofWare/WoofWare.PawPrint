@@ -184,7 +184,8 @@ class Program
         let dllPath = Path.Combine (tempDir, "DebuggerTraceTest.dll")
         File.WriteAllBytes (dllPath, compile [ source ])
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let _, loggerFactory = LoggerFactory.makeTest ()
 

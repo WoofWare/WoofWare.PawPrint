@@ -798,7 +798,10 @@ module TestMemberReferenceParentLoad =
         : unit
         =
         let frameworkDir = FrameworkUnderTest.sharedFrameworkDirectory ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+
         let _, loggerFactory = LoggerFactory.makeTest ()
 
         let corelib =
@@ -1342,7 +1345,10 @@ module TestMemberReferenceParentLoad =
         : unit
         =
         let frameworkDir = FrameworkUnderTest.sharedFrameworkDirectory ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+
         let _, loggerFactory = LoggerFactory.makeTest ()
 
         let corelib =

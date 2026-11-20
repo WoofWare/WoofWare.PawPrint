@@ -65,7 +65,9 @@ class BindsWithoutInvoking
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

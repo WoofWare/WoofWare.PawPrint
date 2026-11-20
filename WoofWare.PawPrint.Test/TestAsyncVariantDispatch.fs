@@ -95,7 +95,9 @@ public struct StaticStruct : IStatic
 
     let private fixture () : Fixture =
         let _, loggerFactory = LoggerFactory.makeTest ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let image =
             Roslyn.compileAssembly "Client" OutputKind.DynamicallyLinkedLibrary [] [ client ]

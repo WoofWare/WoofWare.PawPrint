@@ -116,7 +116,8 @@ module TestTraceSourceLocations =
             (let image = Roslyn.compileWithSymbols [ source ]
              let seen, loggerFactory = harvestingLoggerFactory ()
 
-             let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+             let dotnetRuntimes =
+                 FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
              use peImage = new MemoryStream (image)
 

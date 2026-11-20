@@ -43,7 +43,11 @@ module TestUnhandledExceptionReport =
             name
             None
             peImage
-            (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+            (HostConfig.Default (
+                FrameworkUnderTest.assembliesFor
+                    (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                    GuestApplication.InMemory
+            ))
         |> ExpectRun.ended
         |> reportOf
 
@@ -254,11 +258,9 @@ class Program
             File.WriteAllBytes (driverPath, driver)
 
             let dotnetRuntimeDirs =
-                seq {
-                    yield tempDir
-                    yield! FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
-                }
-                |> ImmutableArray.CreateRange
+                FrameworkUnderTest.assembliesFor
+                    (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                    (GuestApplication.DirectoryWithoutDepsJson tempDir)
 
             let _, loggerFactory = LoggerFactory.makeTest ()
             use _loggerFactoryResource = loggerFactory
@@ -380,7 +382,11 @@ class Program
                     "StoredException.cs"
                     None
                     peImage
-                    (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                    (HostConfig.Default (
+                        FrameworkUnderTest.assembliesFor
+                            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                            GuestApplication.InMemory
+                    ))
                 |> ExpectRun.ended
             with
             | RunOutcome.NormalExit (state, _, _) -> state

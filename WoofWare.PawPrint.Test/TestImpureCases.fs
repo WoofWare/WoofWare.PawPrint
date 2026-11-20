@@ -9374,7 +9374,11 @@ module TestImpureCases =
             reraise ()
 
     let runTest (case : EndToEndTestCase) : unit =
-        runTestOn (FrameworkUnderTest.runtimeDirsFor case.KernelConfig.UnixPlatform) case
+        runTestOn
+            (FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf case.KernelConfig.UnixPlatform)
+                GuestApplication.InMemory)
+            case
 
     [<Test>]
     let ``a Darwin guest whose File.Copy reaches fcopyfile stops, naming it`` () : unit =
@@ -9391,7 +9395,9 @@ module TestImpureCases =
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor SimulatedUnixPlatform.macOsArm64
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf SimulatedUnixPlatform.macOsArm64)
+                GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -9434,7 +9440,9 @@ module TestImpureCases =
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         let run (argv : string list) =
             use peImage = new MemoryStream (image)
@@ -9472,7 +9480,9 @@ module TestImpureCases =
         let image = Roslyn.compile [ source ]
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor SimulatedUnixPlatform.linuxX64
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf SimulatedUnixPlatform.linuxX64)
+                GuestApplication.InMemory
 
         let run (release : string) =
             let _messages, loggerFactory =

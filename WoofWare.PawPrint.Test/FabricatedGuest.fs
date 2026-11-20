@@ -62,11 +62,9 @@ module FabricatedGuest =
     /// PawPrint's runtime directories for a driver laid out in `tempDir`: that directory first, so
     /// the fabricated assembly resolves from it, then the framework under test.
     let private runtimeDirs (tempDir : string) : ImmutableArray<string> =
-        seq {
-            yield tempDir
-            yield! FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
-        }
-        |> ImmutableArray.CreateRange
+        FrameworkUnderTest.assembliesFor
+            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+            (GuestApplication.DirectoryWithoutDepsJson tempDir)
 
     /// PawPrint's final state for a run that exited, or the failure of one that did not, with the
     /// captured log written to stderr when there is one.

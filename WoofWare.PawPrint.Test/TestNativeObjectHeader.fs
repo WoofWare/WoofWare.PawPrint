@@ -40,7 +40,7 @@ public static class Entry
                 loggerFactory
                 (Some "ObjectHeaderTest.cs")
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                (HostConfig.Default (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
         with
         | Program.ProgramStartResult.Ready prepared -> prepared
 

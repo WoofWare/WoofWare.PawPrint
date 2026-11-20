@@ -83,9 +83,9 @@ module TestFrameworkUnderTest =
     [<Test>]
     let ``The selection this run was given is valid`` () : unit =
         let selected = FrameworkUnderTest.selected ()
-        selected.RuntimeDirs |> shouldEqual (FrameworkUnderTest.runtimeDirs ())
+        selected.FrameworkDirectories |> shouldEqual (FrameworkUnderTest.runtimeDirs ())
 
-        FrameworkUnderTest.check selected.Runtime selected.RuntimeDirs
+        FrameworkUnderTest.check selected.Runtime selected.FrameworkDirectories
         |> Result.map (fun checkedAgain -> checkedAgain.CoreLibPath)
         |> shouldEqual (Ok selected.CoreLibPath)
 
@@ -225,7 +225,11 @@ module TestFrameworkUnderTest =
                 "Trivial.cs"
                 (Some "Trivial.cs")
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                (HostConfig.Default (
+                    FrameworkUnderTest.assembliesFor
+                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                        GuestApplication.InMemory
+                ))
 
         FrameworkUnderTest.assertOutcomeServes outcome
 
@@ -303,7 +307,62 @@ module TestFrameworkUnderTest =
             let e =
                 Assert.Throws<Exception> (fun () -> runTrivialOn platform dirs |> ignore<RunEnd>)
 
-            e.Message |> shouldContainText "FrameworkUnderTest.runtimeDirsFor"
+            e.Message |> shouldContainText "FrameworkUnderTest.assembliesFor"
+
+    /// Every `GuestFramework`: the framework as located, and the pinned pack of each platform's
+    /// flavour.
+    let private guestFrameworks : GuestFramework list =
+        GuestFramework.Located
+        :: ([
+                SimulatedUnixPlatform.linuxX64
+                SimulatedUnixPlatform.linuxArm64
+                SimulatedUnixPlatform.macOsArm64
+            ]
+            |> List.map GuestFramework.PinnedPackOf)
+
+    /// Every `GuestApplication`, with directories that need not exist: `assembliesFor` reads no file.
+    let private guestApplications : GuestApplication list =
+        let root = Path.Combine (Path.GetTempPath (), "assembliesFor")
+
+        [
+            GuestApplication.InMemory
+            GuestApplication.DirectoryWithoutDepsJson (Path.Combine (root, "siblings"))
+            GuestApplication.Publish
+                {
+                    Directory = Path.Combine (root, "publish")
+                    Dll = Path.Combine (root, "publish", "Guest.dll")
+                }
+        ]
+
+    /// The directory list a guest of `application` runs along on `framework`, spelled from
+    /// `runtimeDirsFor` and `runtimeDirs ()` as the harness's guest runners spell it: an image in
+    /// memory runs along the framework's directories alone; a directory of siblings, or a publish,
+    /// is searched ahead of them.
+    let private expectedAssemblies (framework : GuestFramework) (application : GuestApplication) : string list =
+        let frameworkDirs =
+            match framework with
+            | GuestFramework.PinnedPackOf platform -> FrameworkUnderTest.runtimeDirsFor platform
+            | GuestFramework.Located -> FrameworkUnderTest.runtimeDirs ()
+
+        match application with
+        | GuestApplication.InMemory -> List.ofSeq frameworkDirs
+        | GuestApplication.DirectoryWithoutDepsJson directory ->
+            seq {
+                yield directory
+                yield! frameworkDirs
+            }
+            |> List.ofSeq
+        | GuestApplication.Publish guest -> List.ofSeq (frameworkDirs.Insert (0, guest.Directory))
+
+    [<Test>]
+    let ``assembliesFor is the directory list the harness runs each application along`` () : unit =
+        for framework in guestFrameworks do
+            for application in guestApplications do
+                let actual = FrameworkUnderTest.assembliesFor framework application |> List.ofSeq
+
+                if actual <> expectedAssemblies framework application then
+                    failwith
+                        $"assembliesFor %A{framework} %A{application} is %A{actual}, expected %A{expectedAssemblies framework application}"
 
     [<TestCase 9us>]
     [<TestCase 12us>]
@@ -328,7 +387,10 @@ module TestFrameworkUnderTest =
         let entry = Assembly.read NullLoggerFactory.Instance None peImage
 
         let state =
-            IlMachineState.initial NullLoggerFactory.Instance (FrameworkUnderTest.runtimeDirs ()) entry
+            IlMachineState.initial
+                NullLoggerFactory.Instance
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
+                entry
 
         match corelib with
         | Some corelib -> state.WithLoadedAssembly corelib
