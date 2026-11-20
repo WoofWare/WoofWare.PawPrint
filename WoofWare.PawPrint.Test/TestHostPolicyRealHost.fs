@@ -668,8 +668,7 @@ public static class Program
         hostFailedAs tpaRejected (ended 137 "Failed to create CoreCLR, HRESULT: 0x80070057\n")
         |> shouldEqual true
 
-    /// Codex, round 6: a guest which crashed before writing its report had passed as the host
-    /// failing.
+    /// A guest which crashes before writing its report must not pass as the host failing.
     [<Test>]
     let ``The oracle does not take a guest crash for a predicted host failure`` () =
         let crash =

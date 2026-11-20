@@ -2266,8 +2266,7 @@ module TestHostPolicy =
             )
         )
 
-    /// Codex, round 6: the overlap refusal does not cover an entry whose own framework lacks its
-    /// package. Framework A lists `X.dll` under the key `Q`, so the host looks for package `Q/Q`
+    /// The overlap refusal does not cover an entry whose own framework lacks its package. Framework A lists `X.dll` under the key `Q`, so the host looks for package `Q/Q`
     /// from A down; B and the lowest framework both have it. The answer depends on the order of A
     /// and B, which the function takes as given.
     [<Test>]
