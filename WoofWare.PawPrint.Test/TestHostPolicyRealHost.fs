@@ -110,9 +110,27 @@ public static class Program
             Stderr : string
         }
 
-    /// Whether `run` ended as the host does when it fails the launch as `failure` predicts.
+    /// Whether `run` ended as the host does when it fails the launch as `failure` predicts: the
+    /// guest wrote nothing, the process exited with the host's status for that failure (the low
+    /// byte of its `StatusCode`, `src/native/corehost/error_codes.h`), and stderr holds the host's
+    /// message for it.
     let private hostFailedAs (failure : HostPolicyFailure) (run : HostRun) : bool =
-        run.Output.IsNone && run.ExitCode <> 0
+        let status, message =
+            match failure with
+            // `ResolverInitFailure`, from `deps_resolver_t::valid`.
+            | HostPolicyFailure.FrameworkDepsJsonMissing _ -> 0x8B, "missing dependencies manifest"
+            | HostPolicyFailure.DepsJsonRejected _ -> 0x8B, "An error occurred while parsing"
+            // `ResolverResolveFailure`, from `resolve_tpa_list` and `resolve_probe_dirs`.
+            | HostPolicyFailure.DuplicateWithDifferentExtension _ ->
+                0x8C, "has already been found but with a different file extension"
+            | HostPolicyFailure.AssetNotFound _ ->
+                0x8C, "An assembly specified in the application dependencies manifest"
+            // `CoreClrResolveFailure`.
+            | HostPolicyFailure.CoreClrNotFound -> 0x87, "Could not resolve CoreCLR path"
+            // `CoreClrInitFailure`: `coreclr_initialize` returned `E_INVALIDARG`.
+            | HostPolicyFailure.RuntimeRejectsTpa _ -> 0x89, "Failed to create CoreCLR, HRESULT: 0x80070057"
+
+        run.Output.IsNone && run.ExitCode = status && run.Stderr.Contains message
 
     /// Run the guest in `appDir` on the real host with `runtimeConfig`, tracing the host.
     let private launch (scratch : string) (appDir : string) (runtimeConfig : string) (rollForward : bool) : HostRun =

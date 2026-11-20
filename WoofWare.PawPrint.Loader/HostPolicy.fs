@@ -173,7 +173,9 @@ type internal HostPolicyUnreproducible =
     /// depends on the order of its directory listing.
     | ListingNamesCollide of name : string * first : string * second : string
     /// Two frameworks list one runtime asset name, or both name the CoreCLR library, so the
-    /// answer depends on the order of the frameworks.
+    /// answer depends on the order of the frameworks. Not every answer that depends on the order
+    /// is refused: an entry whose own framework's `deps.json` lacks its package resolves into the
+    /// first framework below it which has the package.
     | FrameworksOverlap of name : string * higher : string * lower : string
     /// A framework-dependent application supplies the CoreCLR library, at `path`. The host loads
     /// it, and CoreLib, from wherever its links lead, which PawPrint cannot see.
@@ -456,7 +458,9 @@ module internal HostPolicy =
 
     /// Refuses frameworks of which two list one runtime name, or both name the CoreCLR library:
     /// the host's order of frameworks decides those, and that order is an input which PawPrint
-    /// has not tested.
+    /// has not tested. It does not look at package probes, whose answer the order can also decide
+    /// (an entry whose own framework lacks its package lands in the first lower framework which
+    /// has it).
     let private frameworkOverlap (coreClr : string) (frameworks : Manifest list) : Result<unit, HostPolicyRefusal> =
         let keysOf (manifest : Manifest) : (OverlapKey * string) list =
             [
