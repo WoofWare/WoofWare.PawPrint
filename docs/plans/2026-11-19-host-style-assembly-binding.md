@@ -1688,6 +1688,9 @@ Mutants of the real-host oracle's confirmation of a host failure (Codex, round 6
 | the message not checked | unit: a killed guest |
 | the exit status not checked | unit: a warning followed by a crash |
 
+Round 7 added a case to the "warning followed by a crash" test: the duplicate's message and status, predicted as a
+missing asset, must not be confirmed. It was red before the fix.
+
 ### For stage 5, and for the owner's questions
 
 * **Decision 1 (`GuestConfig` holds the TPA).** The TPA type is as the decision describes, with one addition: file
@@ -1753,3 +1756,15 @@ against `main`, after the rebase.
     so a path with a link followed by `..` would be compared wrongly. And `Path.Exists` counts a dangling link at the
     store or servicing path, where hostpolicy's `access(F_OK)` follows it and does not, which would make the test
     inconclusive rather than wrong.
+* **Round 7** (four), against `main`; the last round.
+  * *Fixed, tests first:* the oracle confirmed a predicted missing asset by text which the duplicate-extension
+    message, of the same exit status, also holds; it now matches the missing-asset message's own ending. And the
+    generated runtimeconfigs left `UseRidGraph` and `SetAppPaths` unset, so a framework's runtimeconfig could set them
+    (Codex measured both on .NET 10) while `gatherSettings` reported them off; the application's runtimeconfig now
+    sets both off, and hostfxr takes the application's properties first (read:
+    `runtime_config_t::combine_properties`).
+  * *Recorded, not done:* `HostPolicy.fs` has its own `join`, `fileNameOf` and `directoryOf`, beside stage 2's
+    `HostStrings` in `DepsJson.fs`, which is private there; both run in one resolution, so a change to the host's
+    separator handling would need making twice. Sharing them means making `HostStrings` internal; a candidate
+    follow-up. And two test docstrings name the review round that found their bug ("Codex, round 6"), which the
+    repository's `AGENTS.md` asks comments not to do; they should describe the regression alone.
