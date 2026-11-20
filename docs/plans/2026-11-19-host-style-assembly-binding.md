@@ -1585,13 +1585,17 @@ On the macOS arm64 host, real .NET 10.0.14 and 11.0.0-rc.3.26522.148, from scrat
     cases that makes the launch fail) or none, and `Microsoft.AspNetCore.App` is added in one case in four. Files are
     junk or missing. The function's input comes from the child: its RID list and its frameworks' directories, as its
     host trace names them. The comparison is with CoreCLR's map of the string (first path per name ignoring case), so
-    .NET 10's string and .NET 11's map rendering compare alike. A predicted host failure must fail the launch; a TPA
-    must match, its CoreLib must be the one the guest ran on, the caller's link check must hold, and the trace must
+    .NET 10's string and .NET 11's map rendering compare alike. A predicted host failure must end as the host ends
+    that failure: no report, the low byte of the host's `StatusCode` for it, and its message on stderr; a guest crash,
+    a killed process or another failure fails the test (Codex, round 6). A TPA must match, its CoreLib must be the one the guest ran on, the caller's link check must hold, and the trace must
     show no probe and no existence check the settings did not report. The child's environment loses the variables
     that turn on probing, and `DOTNET_STARTUP_HOOKS`; both trace spellings are set. Measured: 20 to 24 of 25 cases
     compare a TPA, the rest predict a host failure; about 2 to 3 s a run (25 launches), on both runtimes.
   * One self-contained case: the framework directory's files copied beside the guest, with a self-contained
     `deps.json`, launched through `dotnet exec` (about 1 s).
+  * Unit cases for the oracle's confirmation of a host failure: each predicted failure is confirmed by its status
+    and message as measured; a guest crash, a guest killed by SIGKILL (exit 137, CoreCLR's TPA-refusal status, with
+    no message), a missing-assembly warning followed by a crash, and another host failure are not.
 * `TestFrameworkLocatorRatchet` allows the real-host guest's one `.Location`.
 
 The default suite at the branch tip, on the macOS arm64 host with .NET 10 under test: 6147 tests, 6108 passed, 39 skipped, Test Run Successful (at e2d6cce5e). The change touches
@@ -1675,6 +1679,15 @@ mutants it kills it kills by the cases it happens to generate; each of those was
   version wins" does not kill it, since that entry replaces the framework's in either order; the transcription, the
   tie row and a unit case do.
 
+Mutants of the real-host oracle's confirmation of a host failure (Codex, round 6), each run against
+`TestHostPolicyRealHost`:
+
+| Mutant | Killed by |
+|---|---|
+| the old rule: any nonzero exit with no report confirms the failure | unit: a guest crash; a killed guest; a warning followed by a crash; another host failure |
+| the message not checked | unit: a killed guest |
+| the exit status not checked | unit: a warning followed by a crash |
+
 ### For stage 5, and for the owner's questions
 
 * **Decision 1 (`GuestConfig` holds the TPA).** The TPA type is as the decision describes, with one addition: file
@@ -1687,7 +1700,12 @@ mutants it kills it kills by the cases it happens to generate; each of those was
   and stage 2's parser.
 * **Decision 3 (abbreviation).** Not touched here.
 * **Decision 4 (the locator returns frameworks in `hostfxr`'s order).** The function takes the frameworks in order and
-  refuses an overlap, so a wrong order gives a refusal, not a wrong TPA, on today's disjoint frameworks. The real-host
+  refuses an overlap of runtime names or of the CoreCLR library, so on today's disjoint frameworks a wrong order gives
+  a refusal, not a wrong TPA. The overlap refusal does not cover package probes: an entry whose own framework's
+  `deps.json` lacks its package (a library keyed without `/`) lands in the first lower framework which has the
+  package, and that depends on the order (Codex, round 6). A unit case pins the example, accepted in both orders with
+  different answers, and the refusal's docstrings say what it does not cover. No shared framework has such a key
+  today. The real-host
   test takes the order and directories from the child's host trace; the App cannot.
 * **The App's gatherer** must: give the application directory with links resolved; answer the existence probe for
   libcoreclr with `stat`, not from the listing (a link to a device is omitted by the listing and found by the probe);
@@ -1700,7 +1718,8 @@ mutants it kills it kills by the cases it happens to generate; each of those was
 
 ### Codex review
 
-Five rounds, against `host-binding-2-deps-json`. Every finding was acted on, tests first.
+Seven rounds: five against `host-binding-2-deps-json`, every finding acted on, tests first; then rounds 6 and 7
+against `main`, after the rebase.
 
 * **Round 1** (nine findings): an application-local libcoreclr linking to the framework's loaded the framework's
   CoreLib; CoreCLR's fold reads dotless `ı` as `I` (in names, and in `.nı.dll`); `SetAppPaths`; a resource root holding
@@ -1719,4 +1738,18 @@ Five rounds, against `host-binding-2-deps-json`. Every finding was acted on, tes
   the check's statement and the test's checks.
 * **Round 5** (two): the real-host guest's `.Location` broke `TestFrameworkLocatorRatchet` (all 24 cases; reproduced);
   a regular file at the store path also sets up a store probe. Fixed: an allowance, and the gatherer's existence test.
-  No sixth round was run, as the brief allows five.
+* **Round 6** (five), against `main`.
+  * *Fixed, tests first:* the real-host oracle took any nonzero exit with no report for the predicted host failure, so
+    a guest crash before its report passed as the host refusing. It now requires the host's status and message for
+    the failure predicted (above).
+  * *Narrowed, not fixed:* the overlap refusal does not cover package probes (see decision 4 above). Its docstrings
+    now say so, and a unit case pins the order-sensitive example.
+  * *Declined:* a listing holding `X.dll`, `X.exe` and `X.EXE` is refused as `ListingNamesCollide`, though the host
+    always takes `X.dll` and skips both executables. The check starts afresh for each extension, where it need only
+    look at stems no earlier extension claimed. That is a refusal of a launch the host could make, on a contrived
+    listing, not a wrong answer. It is a candidate issue, or for stage 5.
+  * *Declined:* two edges of the real-host oracle, on layouts the generator does not produce.
+    `FrameworkUnderTest.resolveLinks` applies `..` before it follows links, where `realpath` follows the link first,
+    so a path with a link followed by `..` would be compared wrongly. And `Path.Exists` counts a dangling link at the
+    store or servicing path, where hostpolicy's `access(F_OK)` follows it and does not, which would make the test
+    inconclusive rather than wrong.
