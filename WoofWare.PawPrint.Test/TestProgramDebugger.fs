@@ -106,7 +106,8 @@ class Program
         let assertDebuggerMatchesNormalRun (source : string) : unit =
             let image = Roslyn.compile [ source ]
 
-            let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+            let dotnetRuntimes =
+                FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
             let _, normalLoggerFactory = LoggerFactory.makeTest ()
             use _normalLoggerFactoryResource = normalLoggerFactory

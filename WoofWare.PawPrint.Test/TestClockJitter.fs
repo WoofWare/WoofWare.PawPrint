@@ -695,7 +695,9 @@ public static class Entry
 """
 
     let private dotnetRuntimes () : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+        FrameworkUnderTest.assembliesFor
+            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+            GuestApplication.InMemory
 
     /// Run `joinTimeoutSource` under the given jitter strategy, returning the
     /// exit code and the state the guest left behind.

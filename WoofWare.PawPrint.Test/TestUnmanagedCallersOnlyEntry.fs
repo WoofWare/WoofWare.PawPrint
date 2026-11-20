@@ -37,7 +37,7 @@ module TestUnmanagedCallersOnlyEntry =
     let private assy = typeof<RunResult>.Assembly
 
     let private dotnetRuntimes : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirs ()
+        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
     /// The guests, each named by the interpreter path it arrives through.
     let private cases : string list =

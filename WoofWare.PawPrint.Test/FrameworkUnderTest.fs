@@ -508,8 +508,9 @@ module FrameworkUnderTest =
         | Error error -> failwith $"The run did not serve the framework under test: %s{describe error}"
 
     /// Fails unless the CoreLib `state`'s run loaded is the runtime under test's pinned pack of
-    /// `platform`'s flavour, which `assembliesFor (GuestFramework.PinnedPackOf platform)` binds. Outside the Nix devshell, where
-    /// no pack is named and that binds the host's framework, this checks nothing.
+    /// `platform`'s flavour, which `assembliesFor (GuestFramework.PinnedPackOf platform)` binds.
+    /// Outside the Nix devshell, where no pack is named and that binds the host's framework, this
+    /// checks nothing.
     let assertFlavourServes (platform : SimulatedUnixPlatform) (state : IlMachineState) : unit =
         let flavour = SimulatedUnixPlatform.flavour platform
 

@@ -343,7 +343,7 @@ public static class Program
         {
             Image = new MemoryStream (image.Force ())
             OriginalPath = Some $"%s{role}.cs"
-            DotnetRuntimeDirs = FrameworkUnderTest.runtimeDirs ()
+            DotnetRuntimeDirs = FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
             Process = snd (KernelConfig.split KernelConfig.Default)
             Argv =
                 [
@@ -548,7 +548,7 @@ public static class Program
             {
                 Image = new MemoryStream (spinner)
                 OriginalPath = Some name
-                DotnetRuntimeDirs = FrameworkUnderTest.runtimeDirs ()
+                DotnetRuntimeDirs = FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
                 Process = snd (KernelConfig.split KernelConfig.Default)
                 Argv = []
                 AssemblyPath = None

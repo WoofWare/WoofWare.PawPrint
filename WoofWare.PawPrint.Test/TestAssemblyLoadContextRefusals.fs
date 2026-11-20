@@ -45,7 +45,11 @@ public class Program
                 name
                 (Some name)
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                (HostConfig.Default (
+                    FrameworkUnderTest.assembliesFor
+                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                        GuestApplication.InMemory
+                ))
             |> ExpectRun.ended
             |> ignore<RunOutcome>
         )

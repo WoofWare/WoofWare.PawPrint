@@ -30,7 +30,7 @@ module TestSchedulerSleepFairness =
     let private testAssy = typeof<Marker>.Assembly
 
     let private dotnetRuntimes : ImmutableArray<string> =
-        FrameworkUnderTest.runtimeDirs ()
+        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
     /// Compiled once and reused across seeds: recompiling per seed would dominate the run
     /// without changing semantics.

@@ -10,11 +10,13 @@ open NUnit.Framework
 /// whatever that finds, whichever runtime was selected, and no check notices. A test that finds the
 /// host's CoreLib file for itself hides that it reads the host's image rather than the selected
 /// runtime's. A test that reads a devshell variable naming a runtime's pins (its source, its
-/// linux-x64 pack, its framework) can read one runtime's pins while another is under test. So the
-/// members that locate a framework, and those variables, may be named only in
-/// `FrameworkUnderTest.fs`, the members that locate an assembly's file only in `HostImage.fs`, and
-/// any of them elsewhere only where an allowance below says why the use there is not doing the
-/// owning module's job.
+/// linux-x64 pack, its framework) can read one runtime's pins while another is under test. A test
+/// that builds a guest's directory list from the framework's directories for itself hides that
+/// guest from the one helper which says what every guest binds (`FrameworkUnderTest.assembliesFor`).
+/// So the members that locate a framework, those variables, and the framework's own directory
+/// lists may be named only in `FrameworkUnderTest.fs`, the members that locate an assembly's file
+/// only in `HostImage.fs`, and any of them elsewhere only where an allowance below says why the use
+/// there is not doing the owning module's job.
 ///
 /// The scan is over the text of every file the test project compiles, embedded into the test
 /// assembly by the project file, comments included. It sees names, not values: it cannot see a
@@ -39,7 +41,17 @@ module TestFrameworkLocatorRatchet =
             Name = name
             Pattern = Regex (Regex.Escape name)
             Owner = "FrameworkUnderTest.fs"
-            Remedy = "run guests along FrameworkUnderTest.runtimeDirs ()"
+            Remedy = "run guests along FrameworkUnderTest.assembliesFor"
+        }
+
+    /// A member of `FrameworkUnderTest` that lists the framework's directories, from which only
+    /// `FrameworkUnderTest.assembliesFor` builds the list a guest runs along.
+    let private frameworkDirectories (name : string) : Locator =
+        {
+            Name = name
+            Pattern = Regex (@"\bFrameworkUnderTest\." + Regex.Escape name + @"\b")
+            Owner = "FrameworkUnderTest.fs"
+            Remedy = "run guests along FrameworkUnderTest.assembliesFor"
         }
 
     /// A property that reports an assembly's or a module's file. Any assembly's, since the ratchet
@@ -74,6 +86,8 @@ module TestFrameworkLocatorRatchet =
             devshellVariable "DOTNET_RUNTIME_SRC"
             devshellVariable "DOTNET_LINUX_FRAMEWORK_DIR"
             devshellVariable "DOTNET_FRAMEWORK_DIR"
+            frameworkDirectories "runtimeDirs"
+            frameworkDirectories "runtimeDirsFor"
         ]
 
     type private Allowance =
@@ -221,6 +235,55 @@ module TestFrameworkLocatorRatchet =
                 Count = 1
                 Reason = "locates the test assembly, whose types it renders"
             }
+            {
+                File = "TestFrameworkUnderTest.fs"
+                Locator = "runtimeDirs"
+                Count = 7
+                Reason =
+                    "tests the selection and runtimeDirs itself, and states what assembliesFor returns in terms of it"
+            }
+            {
+                File = "TestFrameworkUnderTest.fs"
+                Locator = "runtimeDirsFor"
+                Count = 3
+                Reason = "tests runtimeDirsFor itself, and states what assembliesFor returns in terms of it"
+            }
+            {
+                File = "TestRealRuntimeConcurrent.fs"
+                Locator = "runtimeDirs"
+                Count = 1
+                Reason = "checks that the oracle's ASP.NET Core directory is one of the framework's own"
+            }
+            {
+                File = "TestConsumerCases.fs"
+                Locator = "runtimeDirs"
+                Count = 1
+                Reason = "finds the pinned pack's directory, to check that the publish holds no file of the pack's"
+            }
+            {
+                File = "TestConsumerCases.fs"
+                Locator = "runtimeDirsFor"
+                Count = 1
+                Reason = "finds the pinned pack's directory, to check that the publish holds no file of the pack's"
+            }
+            {
+                File = "TestImageAdmission.fs"
+                Locator = "runtimeDirs"
+                Count = 1
+                Reason = "sweeps the images in the framework's directories, and runs no guest along them"
+            }
+            {
+                File = "TestGenericParamOwnerOracle.fs"
+                Locator = "runtimeDirs"
+                Count = 1
+                Reason = "sweeps the images in the framework's directories, and runs no guest along them"
+            }
+            {
+                File = "TestGenericParamOwnerOracle.fs"
+                Locator = "runtimeDirsFor"
+                Count = 1
+                Reason = "sweeps the images in the framework's directories, and runs no guest along them"
+            }
         ]
 
     /// Every way `sources` (file name, text) departs from the rule: a file other than a locator's
@@ -329,6 +392,10 @@ module TestFrameworkLocatorRatchet =
     [<TestCase("let v = \"DOTNET_LINUX_FRAMEWORK_DIR_NET11\"", "DOTNET_LINUX_FRAMEWORK_DIR")>]
     [<TestCase("Environment.GetEnvironmentVariable \"DOTNET_FRAMEWORK_DIR_NET11\"", "DOTNET_FRAMEWORK_DIR")>]
     [<TestCase("// read it from $DOTNET_RUNTIME_SRC", "DOTNET_RUNTIME_SRC")>]
+    [<TestCase("HostConfig.Default (FrameworkUnderTest.runtimeDirs ())", "runtimeDirs")>]
+    [<TestCase("yield! FrameworkUnderTest.runtimeDirsFor platform", "runtimeDirsFor")>]
+    [<TestCase("// along FrameworkUnderTest.runtimeDirs () and FrameworkUnderTest.runtimeDirsFor",
+               "runtimeDirs runtimeDirsFor")>]
     let ``a planted locator is caught`` (planted : string, expected : string) : unit =
         violations allowances (plantedIn "TestPureCases.fs" planted)
         |> reportedIn "TestPureCases.fs"
@@ -337,7 +404,7 @@ module TestFrameworkLocatorRatchet =
     [<Test>]
     let ``a name that only contains a locator is not caught`` () : unit =
         let planted =
-            "let a = StorageLocation.Heap\nlet b = x.Locations\nlet c = y.LocationOf\nlet d = HostImage.coreLibPath"
+            "let a = StorageLocation.Heap\nlet b = x.Locations\nlet c = y.LocationOf\nlet d = HostImage.coreLibPath\nlet e = runtimeDirs tempDir\nlet f = FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory"
 
         violations allowances (plantedIn "TestPureCases.fs" planted) |> shouldBeEmpty
 

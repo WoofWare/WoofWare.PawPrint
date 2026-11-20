@@ -54,7 +54,8 @@ public static class Program
 
         use _loggerFactoryResource = loggerFactory
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

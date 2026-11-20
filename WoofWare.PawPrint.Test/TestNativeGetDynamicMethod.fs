@@ -81,7 +81,8 @@ public abstract class Shape
         (image : byte[])
         : Program.PreparedProgram
         =
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

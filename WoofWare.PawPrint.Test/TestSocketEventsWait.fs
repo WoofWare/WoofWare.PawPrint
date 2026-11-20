@@ -82,7 +82,8 @@ class WaitsOnADuplicatedPort
         use _loggerFactoryResource = loggerFactory
         let logger = loggerFactory.CreateLogger "TestSocketEventsWait"
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -403,7 +404,9 @@ class TwoWaitersOnOnePort
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -571,7 +574,8 @@ class TwoPortsOneEdge
         use _loggerFactoryResource = loggerFactory
         let logger = loggerFactory.CreateLogger "TestSocketEventsWait"
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -703,7 +707,9 @@ class ClosesAParkedPort
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 
@@ -839,7 +845,9 @@ class QuietParkedWaiter
         use _loggerFactoryResource = loggerFactory
 
         let dotnetRuntimes =
-            FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform
+            FrameworkUnderTest.assembliesFor
+                (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

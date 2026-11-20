@@ -753,7 +753,9 @@ public static class LayoutClassSweep
                                 loggerFactory
                                 (Some sourceName)
                                 peImage
-                                (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                                (HostConfig.Default (
+                                    FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+                                ))
                         with _ ->
                             for message in messages () do
                                 Console.Error.WriteLine $"{message}"

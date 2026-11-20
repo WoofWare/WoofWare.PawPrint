@@ -142,7 +142,11 @@ public static class Program
 
         let config =
             let config =
-                HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform)
+                HostConfig.Default (
+                    FrameworkUnderTest.assembliesFor
+                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                        GuestApplication.InMemory
+                )
 
             { config with
                 Guest =

@@ -100,7 +100,9 @@ public static class Program
 
     [<Test>]
     let ``The CoreLib the suite resolves is the build EmulatedRuntime pins for the runtime under test`` () =
-        assertMatchesPin (resolvedCoreLib (FrameworkUnderTest.runtimeDirs ()))
+        assertMatchesPin (
+            resolvedCoreLib (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
+        )
 
     [<Test>]
     let ``The pinned linux-x64 CoreLib is the build EmulatedRuntime pins for the runtime under test`` () =
@@ -172,11 +174,7 @@ public static class Program
             let patched = PatchedCoreLib.write major dir
 
             let runtimeDirs =
-                seq {
-                    yield dir
-                    yield! FrameworkUnderTest.runtimeDirs ()
-                }
-                |> ImmutableArray.CreateRange
+                FrameworkUnderTest.assembliesFor GuestFramework.Located (GuestApplication.DirectoryWithoutDepsJson dir)
 
             let image = Roslyn.compile [ trivialGuest ]
             let _, loggerFactory = LoggerFactory.makeTest ()

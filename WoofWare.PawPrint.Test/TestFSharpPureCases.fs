@@ -17,9 +17,9 @@ open WoofWare.PawPrint.Test
 [<Explicit>]
 module TestFSharpPureCases =
 
-    /// The cases' publish. Checked against the shared framework only, not the whole of
-    /// `FrameworkUnderTest.runtimeDirs ()`: that list also holds the test assembly's own directory,
-    /// whose FSharp.Core the publish's is meant to shadow.
+    /// The cases' publish. Checked against the shared framework only, not against every directory
+    /// the guest runs along: that list also holds the test assembly's own directory, whose
+    /// FSharp.Core the publish's is meant to shadow.
     let private published : Lazy<PublishedGuest> =
         lazy
             GuestPublish.publish
@@ -100,11 +100,7 @@ module TestFSharpPureCases =
         let ending = (onRuntime (FrameworkUnderTest.runtime ())).Ending testCaseName
 
         let dotnetRuntimes =
-            seq {
-                yield guest.Directory
-                yield! FrameworkUnderTest.runtimeDirs ()
-            }
-            |> ImmutableArray.CreateRange
+            FrameworkUnderTest.assembliesFor GuestFramework.Located (GuestApplication.Publish guest)
 
         use peImage = new MemoryStream (image)
 

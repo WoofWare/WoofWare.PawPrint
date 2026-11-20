@@ -263,7 +263,11 @@ public static unsafe class Program
                     name
                     None
                     peImage
-                    (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                    (HostConfig.Default (
+                        FrameworkUnderTest.assembliesFor
+                            (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                            GuestApplication.InMemory
+                    ))
                 |> ExpectRun.ended
             with
             | RunOutcome.NormalExit (state, _, _) -> state

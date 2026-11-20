@@ -96,7 +96,9 @@ public sealed class DerivedGone : BaseRuns
         : unit
         =
         let _, loggerFactory = LoggerFactory.makeTest ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let compile (name : string) (references : byte[] list) (text : string) : byte[] =
             Roslyn.compileAssembly

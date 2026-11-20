@@ -85,7 +85,8 @@ class Program
         let logger = loggerFactory.CreateLogger "TestFlockPark"
         ignore<Microsoft.Extensions.Logging.ILogger> logger
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

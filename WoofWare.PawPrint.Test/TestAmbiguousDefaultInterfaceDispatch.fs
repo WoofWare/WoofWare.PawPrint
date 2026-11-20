@@ -124,7 +124,9 @@ module TestAmbiguousDefaultInterfaceDispatch =
         let image = fabricate variant
 
         let _, loggerFactory = LoggerFactory.makeTest ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let corelib =
             Assembly.readFile
@@ -281,7 +283,9 @@ public static class Run
                 context.Unload ()
 
         let _, loggerFactory = LoggerFactory.makeTest ()
-        let runtimeDirs = FrameworkUnderTest.runtimeDirs ()
+
+        let runtimeDirs =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let corelib =
             Assembly.readFile

@@ -148,11 +148,9 @@ public static class Driver
             use _loggerFactoryResource = loggerFactory
 
             let dotnetRuntimeDirs =
-                seq {
-                    yield tempDir
-                    yield! FrameworkUnderTest.runtimeDirs ()
-                }
-                |> ImmutableArray.CreateRange
+                FrameworkUnderTest.assembliesFor
+                    GuestFramework.Located
+                    (GuestApplication.DirectoryWithoutDepsJson tempDir)
 
             use peImage = new MemoryStream (driver)
 

@@ -225,7 +225,11 @@ module TestFrameworkUnderTest =
                 "Trivial.cs"
                 (Some "Trivial.cs")
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                (HostConfig.Default (
+                    FrameworkUnderTest.assembliesFor
+                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                        GuestApplication.InMemory
+                ))
 
         FrameworkUnderTest.assertOutcomeServes outcome
 
@@ -354,8 +358,7 @@ module TestFrameworkUnderTest =
     let ``assembliesFor is the directory list the harness runs each application along`` () : unit =
         for framework in guestFrameworks do
             for application in guestApplications do
-                let actual =
-                    FrameworkUnderTest.assembliesFor framework application |> List.ofSeq
+                let actual = FrameworkUnderTest.assembliesFor framework application |> List.ofSeq
 
                 if actual <> expectedAssemblies framework application then
                     failwith
@@ -384,7 +387,10 @@ module TestFrameworkUnderTest =
         let entry = Assembly.read NullLoggerFactory.Instance None peImage
 
         let state =
-            IlMachineState.initial NullLoggerFactory.Instance (FrameworkUnderTest.runtimeDirs ()) entry
+            IlMachineState.initial
+                NullLoggerFactory.Instance
+                (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory)
+                entry
 
         match corelib with
         | Some corelib -> state.WithLoadedAssembly corelib

@@ -111,7 +111,8 @@ class CommandLineArgsWithArguments
         // nothing. See the guest's own return codes for which assertion failed.
         realExitCode |> shouldEqual 0
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let _logs, loggerFactory = LoggerFactory.makeTest ()
         use loggerFactory = loggerFactory
@@ -152,7 +153,8 @@ class EchoArgv0
     /// Run `image` under PawPrint with `assemblyPath` as the host's name for it, and return
     /// what the guest wrote to stdout.
     let private argv0Reported (assemblyPath : string option) (image : byte[]) : string =
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let _, loggerFactory = LoggerFactory.makeTest ()
         use loggerFactory = loggerFactory
@@ -208,7 +210,8 @@ class EchoArgv0
     /// Run `image` under PawPrint with the given command-line configuration, returning the
     /// message it refused with. Fails the test if the run is *accepted*.
     let private refusalFor (assemblyPath : string option) (argv : string list) (image : byte[]) : string =
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let _, loggerFactory = LoggerFactory.makeTest ()
         use loggerFactory = loggerFactory

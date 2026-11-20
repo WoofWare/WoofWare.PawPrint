@@ -138,11 +138,24 @@ static unsafe class Futex
                 let real, journey =
                     DifferentialOracle.alongsideInterpreted
                         (fun () -> RealRuntime.executeWithRealRuntime [||] image)
-                        (fun () -> journey name (HostConfig.Default (FrameworkUnderTest.runtimeDirs ())) image)
+                        (fun () ->
+                            journey
+                                name
+                                (HostConfig.Default (
+                                    FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+                                ))
+                                image
+                        )
 
                 Some real, journey
             else
-                None, journey name (HostConfig.Default (FrameworkUnderTest.runtimeDirs ())) image
+                None,
+                journey
+                    name
+                    (HostConfig.Default (
+                        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+                    ))
+                    image
 
         match realResult with
         | Some real -> DifferentialOracle.compareOutcomes name 0 false real (RunEnd.Ended journey.Outcome)
@@ -293,7 +306,10 @@ unsafe class Program
         let name = "LowLevelFutexOneWaiterPerWake.cs"
 
         let journey =
-            journey name (HostConfig.Default (FrameworkUnderTest.runtimeDirs ())) (Roslyn.compile [ prelude + source ])
+            journey
+                name
+                (HostConfig.Default (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
+                (Roslyn.compile [ prelude + source ])
 
         exitCode name journey |> shouldEqual 0
         journey.MostFutexParked |> shouldEqual 2
@@ -433,7 +449,12 @@ unsafe class Program
 
         let exn =
             Assert.Catch (fun () ->
-                journey "LowLevelFutexManagedWord.cs" (HostConfig.Default (FrameworkUnderTest.runtimeDirs ())) image
+                journey
+                    "LowLevelFutexManagedWord.cs"
+                    (HostConfig.Default (
+                        FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
+                    ))
+                    image
                 |> ignore
             )
 
@@ -476,7 +497,10 @@ unsafe class Program
 
             let exn =
                 Assert.Catch (fun () ->
-                    journey $"LowLevelFutexDarwin.%s{entryPoint}.cs" (darwin (FrameworkUnderTest.runtimeDirs ())) image
+                    journey
+                        $"LowLevelFutexDarwin.%s{entryPoint}.cs"
+                        (darwin (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
+                        image
                     |> ignore
                 )
 

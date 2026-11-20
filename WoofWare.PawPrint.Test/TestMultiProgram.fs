@@ -47,7 +47,7 @@ public static class Program
             {
                 Image = new MemoryStream (image)
                 OriginalPath = Some "MultiProgramRefusal.cs"
-                DotnetRuntimeDirs = FrameworkUnderTest.runtimeDirs ()
+                DotnetRuntimeDirs = FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
                 Process = config
                 Argv = []
                 AssemblyPath = None
@@ -129,7 +129,7 @@ public static class Program
                 loggerFactory
                 (Some sourceName)
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirs ()))
+                (HostConfig.Default (FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory))
         with
         | Program.ProgramStartResult.Ready prepared ->
 

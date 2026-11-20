@@ -39,7 +39,7 @@ module TestHardwareIntrinsicsProfile =
 
     let private runtimeDirs (flavour : string) : ImmutableArray<string> =
         match flavour with
-        | "framework under test" -> FrameworkUnderTest.runtimeDirs ()
+        | "framework under test" -> FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
         | "linux-x64" ->
             FrameworkUnderTest.requireLinuxFrameworkDirectory ()
             |> LinuxCoreLibFlavour.runtimeDirsPreferringLinux

@@ -162,7 +162,8 @@ class LockAndPortWaiters
         use _loggerFactoryResource = loggerFactory
         let logger = loggerFactory.CreateLogger "TestSyscallPark"
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

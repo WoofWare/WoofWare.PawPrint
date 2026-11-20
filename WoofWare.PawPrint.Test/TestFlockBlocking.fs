@@ -88,7 +88,8 @@ class Program
 
         use _loggerFactoryResource = loggerFactory
 
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirsFor kernel.UnixPlatform
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor (GuestFramework.PinnedPackOf kernel.UnixPlatform) GuestApplication.InMemory
 
         use peImage = new MemoryStream (image)
 

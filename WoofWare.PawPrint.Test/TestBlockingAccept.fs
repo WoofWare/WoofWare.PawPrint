@@ -103,7 +103,11 @@ static class Sys
             fileName
             (Some fileName)
             peImage
-            (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+            (HostConfig.Default (
+                FrameworkUnderTest.assembliesFor
+                    (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                    GuestApplication.InMemory
+            ))
         |> ExpectRun.ended
 
     let private exitCodeOf (outcome : RunOutcome) : int =
@@ -158,7 +162,11 @@ class NeverConnected
                 loggerFactory
                 (Some "NeverConnected.cs")
                 peImage
-                (HostConfig.Default (FrameworkUnderTest.runtimeDirsFor KernelConfig.Default.UnixPlatform))
+                (HostConfig.Default (
+                    FrameworkUnderTest.assembliesFor
+                        (GuestFramework.PinnedPackOf KernelConfig.Default.UnixPlatform)
+                        GuestApplication.InMemory
+                ))
         with
         | Program.ProgramStartResult.Ready prepared ->
 

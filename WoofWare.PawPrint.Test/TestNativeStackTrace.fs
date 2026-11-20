@@ -37,7 +37,8 @@ public static class Entry
 """
 
     let private prepareGuest (loggerFactory : Microsoft.Extensions.Logging.ILoggerFactory) : Program.PreparedProgram =
-        let dotnetRuntimes = FrameworkUnderTest.runtimeDirs ()
+        let dotnetRuntimes =
+            FrameworkUnderTest.assembliesFor GuestFramework.Located GuestApplication.InMemory
 
         let image = Roslyn.compile [ guestSource ]
 
