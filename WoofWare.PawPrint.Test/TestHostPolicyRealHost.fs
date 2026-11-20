@@ -123,8 +123,8 @@ public static class Program
             // `ResolverResolveFailure`, from `resolve_tpa_list` and `resolve_probe_dirs`.
             | HostPolicyFailure.DuplicateWithDifferentExtension _ ->
                 0x8C, "has already been found but with a different file extension"
-            | HostPolicyFailure.AssetNotFound _ ->
-                0x8C, "An assembly specified in the application dependencies manifest"
+            // The duplicate's message begins the same way; this one ends so.
+            | HostPolicyFailure.AssetNotFound _ -> 0x8C, ") was not found:"
             // `CoreClrResolveFailure`.
             | HostPolicyFailure.CoreClrNotFound -> 0x87, "Could not resolve CoreCLR path"
             // `CoreClrInitFailure`: `coreclr_initialize` returned `E_INVALIDARG`.
@@ -409,7 +409,16 @@ public static class Program
 
             Compared.SameTpa
 
-    /// A runtimeconfig naming `frameworks` (name and version), with roll-forward disabled.
+    /// The host switches `gatherSettings` reports as off, set off in the application's
+    /// runtimeconfig, whose properties the host prefers to its frameworks'.
+    let private pinnedSwitches () : JsonObject =
+        let o = JsonObject ()
+        o.Add ("System.Runtime.Loader.UseRidGraph", JsonValue.Create false)
+        o.Add ("Microsoft.NETCore.DotNetHostPolicy.SetAppPaths", JsonValue.Create false)
+        o
+
+    /// A runtimeconfig naming `frameworks` (name and version), with roll-forward disabled, and
+    /// `pinnedSwitches`.
     let private frameworkDependentConfig (frameworks : (string * string) list) : string =
         let version = snd (List.head frameworks)
         let tfm = "net" + version.Substring (0, version.IndexOf '.') + ".0"
@@ -425,6 +434,7 @@ public static class Program
         options.Add ("tfm", JsonValue.Create tfm)
         options.Add ("rollForward", JsonValue.Create "Disable")
         options.Add ("frameworks", array)
+        options.Add ("configProperties", pinnedSwitches ())
         let root = JsonObject ()
         root.Add ("runtimeOptions", options)
         root.ToJsonString ()
@@ -848,7 +858,7 @@ public static class Program
             let tfm = "net" + version.Substring (0, version.IndexOf '.') + ".0"
 
             let config =
-                $"""{{"runtimeOptions":{{"tfm":"%s{tfm}","includedFrameworks":[{{"name":"Microsoft.NETCore.App","version":"%s{version}"}}]}}}}"""
+                $"""{{"runtimeOptions":{{"tfm":"%s{tfm}","includedFrameworks":[{{"name":"Microsoft.NETCore.App","version":"%s{version}"}}],"configProperties":%s{(pinnedSwitches ()).ToJsonString ()}}}}}"""
 
             let run = launch scratch appDir config false
 
