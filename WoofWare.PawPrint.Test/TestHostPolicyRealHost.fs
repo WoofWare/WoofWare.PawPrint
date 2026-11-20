@@ -693,6 +693,10 @@ public static class Program
 
         hostFailedAs missing warnedThenCrashed |> shouldEqual false
 
+        // The duplicate's message begins as the missing-assembly one does, and exits with the
+        // same status.
+        hostFailedAs missing (ended 140 duplicateMessage) |> shouldEqual false
+
     [<Test>]
     let ``The oracle does not take one host failure for another`` () =
         hostFailedAs tpaRejected (ended 140 duplicateMessage) |> shouldEqual false
