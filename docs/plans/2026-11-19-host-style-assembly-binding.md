@@ -1771,7 +1771,8 @@ against `main`, after the rebase.
 
 ## As built (stage 4a)
 
-Branch `host-binding-4a-assemblies-for`, cut from `origin/main` at `da87e8582`. Test code only. The test came first,
+Branch `host-binding-4a-assemblies-for`, cut from `origin/main` at `da87e8582` and rebased onto #2359 (stage 3). Test
+code only. The test came first,
 in a commit of its own.
 
 ### The helper
@@ -1894,3 +1895,16 @@ The suites above ran before round 1's fixes. Those fixes rename a member and cha
 the default suite was run again, at `9f078b675`: 6060 tests, 6021 passed, 39 skipped, `Test Run Successful`. The
 one test more than before is round 1's planted case. `fantomas` is clean, `scripts/footprint.py generate` changes
 nothing, and `scripts/check-docstring-attachment-branch.sh` passes.
+
+### The rebase onto stage 3
+
+The branch was rebased onto `a4135a335`, which merged #2359. Git merged `TestFrameworkLocatorRatchet.fs` and the test
+project file by itself; in this plan, stage 3's "As built" comes before this one. Stage 3's new test files read no
+framework through `runtimeDirs`, `runtimeDirsFor` or `FrameworkDirectories`, so none moved and none needed an
+allowance. `TestHostPolicyRealHost` reads `sharedFrameworkDirectory ()` and `aspNetCoreFrameworkDirectory ()` for the
+real child process, which runs no guest under PawPrint; the ratchet does not cover those members.
+
+After the rebase the whole solution builds with no warnings, and the ratchet, `TestFrameworkUnderTest` and stage 3's
+fixtures pass (158 tests, 157 passed, 1 skipped). The default suite passes at `118db0a6e`: 6158 tests, 6119 passed, 39
+skipped, `Test Run Successful`. That is #2359's reported 6153 plus this branch's five cases. Stage 3 changes no guest
+run, so the guest suites were not run again.
