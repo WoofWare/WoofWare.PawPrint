@@ -74,8 +74,10 @@ type GuestFramework =
 /// Where a guest's own assemblies are, beside the framework, for `FrameworkUnderTest.assembliesFor`.
 [<RequireQualifiedAccess>]
 type GuestApplication =
-    /// An image held in memory, with no directory: every assembly it references comes from the
-    /// framework.
+    /// An image held in memory, with no directory: `assembliesFor` adds no directory of the
+    /// guest's ahead of the framework's. The framework's directories can still hold more than the
+    /// framework: on .NET 10 `runtimeDirs ()` includes the test host's own `bin` directory, so a
+    /// guest can bind FSharp.Core or NUnit from it.
     | InMemory
     /// A directory with no `deps.json`, holding assemblies the guest references.
     | DirectoryWithoutDepsJson of directory : string

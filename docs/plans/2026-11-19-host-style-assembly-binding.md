@@ -1908,3 +1908,8 @@ After the rebase the whole solution builds with no warnings, and the ratchet, `T
 fixtures pass (158 tests, 157 passed, 1 skipped). The default suite passes at `118db0a6e`: 6158 tests, 6119 passed, 39
 skipped, `Test Run Successful`. That is #2359's reported 6153 plus this branch's five cases. Stage 3 changes no guest
 run, so the guest suites were not run again.
+
+**Codex, round 3** (after the rebase). One finding, fixed. *`GuestApplication.InMemory`'s docstring said every
+assembly the guest references comes from the framework.* But on .NET 10 `runtimeDirs ()` includes the test host's
+`bin` directory, so a guest can bind FSharp.Core from it. The docstring now says only that `assembliesFor` adds no
+directory of the guest's. Only a docstring changed, so no suite was run again.
