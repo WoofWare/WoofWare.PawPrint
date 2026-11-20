@@ -88,6 +88,10 @@
     <Compile Include="TestAssemblyProbe.fs" />
     <Compile Include="TestDepsVersion.fs" />
     <Compile Include="TestDepsJson.fs" />
+    <Compile Include="HostPolicyModel.fs" />
+    <Compile Include="TestTrustedPlatformAssemblies.fs" />
+    <Compile Include="TestHostPolicy.fs" />
+    <Compile Include="TestHostPolicyRealHost.fs" />
     <Compile Include="ParamTableReplay.fs" />
     <Compile Include="EmitScopeGen.fs" />
     <Compile Include="TestAssemblyBinding.fs" />
